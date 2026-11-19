@@ -631,9 +631,14 @@ poller never acts on cannot stall the feeder). A ticket whose feed failed
 midway resumes first, but takes room like a new one: it waits while the
 harness has none. Tickets are fed by priority tier first (issue #258): the
 project's `intake.priority_labels` is an ordered label list, a ticket's tier
-is the first one it carries, and a ticket with none sorts after every tier
-(a Linear project may set `priority_from_linear: true` to use Linear
-priority Urgent..Low as tiers 0-3). Inside a tier: urgent (an `urgent`
+is the first one it carries (a Linear project may set
+`priority_from_linear: true` to use Linear priority Urgent..Low as tiers
+0-3), an urgent ticket with neither is tier 0, and any other ticket with
+none sorts after every tier. The rank uses the effective tier (issue #1050,
+[`docs/decisions/1050-global-rank-v2.md`](docs/decisions/1050-global-rank-v2.md)):
+the best tier among the ticket's own and every candidate it unblocks through
+`Blocked by:` or `Depends on:`, transitively, so a p1 blocker of a p0 ticket
+ranks as p0. Inside a tier: urgent (an `urgent`
 label or Linear priority Urgent), then `bug`, then the ticket that unblocks
 the most open intake tickets (through `Blocked by:` lines, plus the
 unstarted tickets that share a `Touches:` path with it; `critical_path_order:
@@ -646,7 +651,8 @@ shares lib/x.py with #1`. The feeder also records those marks in
 `ticket_priority`, refreshed every poll (a label added after the feed still
 moves the queued job), which the queue's claim order reads (tier, then
 urgent, then a resumed paused step, then bug, then unblocks, then oldest).
-`orch status` and the dashboard show a ticket's tier (`tier 0`). The live
+`orch status` and the dashboard show a ticket's tier (`tier 0`), with its
+own tier when the effective tier is better (`tier 0 (own 1)`). The live
 clients are in [`lib/intake_live.py`](lib/intake_live.py): GitHub through the
 same `env -u GH_TOKEN ... gh api` seam, Linear through the poller's own
 Linear request path and budget (every page of the intake state, read with
