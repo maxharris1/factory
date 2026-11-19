@@ -51,6 +51,9 @@ BRIEF = "# Factory job brief: review\n\nReview PR #7 at its head.\n"
 # job environment.
 HARNESS = """#!{python}
 import json, os, subprocess, sys
+if sys.argv[1:] == ["--version"]:
+    print("fake-harness 1.0.0")
+    sys.exit(0)
 def git(*args):
     return subprocess.run(["git", *args], capture_output=True, text=True).stdout.strip()
 keys = ("ORCH_JOB_ID", "ORCH_JOB_BOT", "ORCH_JOB_DEVICE", "ORCH_JOB_WORKDIR",

@@ -1,4 +1,5 @@
 import fcntl
+import hashlib
 import json
 import os
 import resource
@@ -12,7 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from lib import job_run
+from lib import exposure, job_run
+from lib.brief.skills import Router, resolve, section
 from lib.job_state import JobStateConfig
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
 from tests.fake_docker import Docker
@@ -462,19 +464,26 @@ def _queue(tmp_path: Path) -> SQLiteJobQueue:
     return SQLiteJobQueue(tmp_path / "orch.db", clock=time.time)
 
 
-def _running_job(queue: SQLiteJobQueue, *, timeout: int = 60, recipient: str = "codex"):
+def _running_job(
+    queue: SQLiteJobQueue,
+    *,
+    timeout: int = 60,
+    recipient: str = "codex",
+    action: str = "review",
+    machines: Path | None = None,
+):
     queue.enqueue(
         JobRequest(
             repo="acme/widgets",
             ticket_id="12",
-            action="review",
+            action=action,
             recipient=recipient,
             source_comment_id="1",
             timeout_seconds=timeout,
         ),
         dedupe_key=f"k-{time.monotonic_ns()}",
     )
-    return pool_claim(queue, recipient)
+    return pool_claim(queue, recipient, machines)
 
 
 def _last_activity(queue: SQLiteJobQueue, job_id: str) -> float:
@@ -1094,3 +1103,134 @@ def test_the_keeper_does_not_search_the_command_path(tmp_path: Path) -> None:
     )
     assert (tmp_path / "code").read_text() == "0", runner.stdout + runner.stderr
     assert (tmp_path / "ran").exists(), "the command ran"
+
+
+# --- what the job ran under (F-01a) -------------------------------------------
+
+
+def _box_only(tmp_path: Path, factory_root: Path) -> Path:
+    machines = tmp_path / "machines.yml"
+    machines.write_text(
+        "devices:\n"
+        "  - name: box\n"
+        "    local: true\n"
+        "    slot_max: 3\n"
+        "    harnesses:\n"
+        "      claude: claude-bot\n"
+        "      codex: codex-bot\n"
+        f"    factory_root: {factory_root}\n",
+        encoding="utf-8",
+    )
+    return machines
+
+
+def _fake_harness(tmp_path: Path, version: str) -> Path:
+    path = tmp_path / "fake-harness"
+    path.write_text(f'#!/bin/sh\nif [ "$1" = --version ]; then {version}; fi\nexit 0\n', encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def _brief_file(tmp_path: Path, action: str, factory_root: Path) -> tuple[Path, Router]:
+    router = resolve("reviewer" if action == "review" else "builder", "codex-bot", str(factory_root))
+    assert isinstance(router, Router), router
+    path = tmp_path / "brief.md"
+    path.write_text(f"# Job\n\n{section(router)}\n\n## Task\nDo the {action}.\n", encoding="utf-8")
+    return path, router
+
+
+@pytest.mark.parametrize("telemetry", ["on", "off"])
+@pytest.mark.parametrize("action", ["plan", "build", "fix", "review"])
+def test_cli_job_run_records_what_the_job_ran_under(tmp_path: Path, action: str, telemetry: str) -> None:
+    factory = tmp_path / "factory"
+    factory.mkdir()
+    _git("init", "-q", str(factory))
+    _git("commit", "-q", "--allow-empty", "-m", "factory", cwd=factory)
+    revision = _git("rev-parse", "HEAD", cwd=factory)
+    machines = _box_only(tmp_path, factory)
+    queue = _queue(tmp_path)
+    job = _running_job(queue, action=action, machines=machines)
+    brief, router = _brief_file(tmp_path, action, factory)
+    with brief.open("rb") as stdin:
+        proc = _orch(
+            "job", "run", "codex-bot", job.id, "--machines", str(machines), "--db", str(tmp_path / "orch.db"),
+            "--", str(_fake_harness(tmp_path, "echo fake-cli 9.9.9")), "--model", "test-model-1",
+            env={"ORCH_JOB_BRIEF": str(brief), "ORCH_TELEMETRY": telemetry},
+            stdin=stdin,
+        )
+        _, stderr = proc.communicate(timeout=30)
+
+    assert proc.returncode == 0, stderr
+    with queue.connect() as connection:
+        recorded = exposure.read(connection, job.id)
+    assert recorded == exposure.Exposure(
+        model="test-model-1",
+        cli_version="fake-cli 9.9.9",
+        brief_sha256=hashlib.sha256(brief.read_bytes()).hexdigest(),
+        skill_paths=router.paths,
+        host="box",
+        factory_revision=revision,
+    )
+    assert stderr.count("exposure: recorded (") == 1
+
+
+def test_cli_job_run_records_unknown_and_still_runs_when_it_cannot_tell(tmp_path: Path) -> None:
+    factory = tmp_path / "factory"
+    factory.mkdir()
+    machines = _box_only(tmp_path, factory)
+    queue = _queue(tmp_path)
+    job = _running_job(queue, action="build", machines=machines)
+    ran = tmp_path / "ran"
+    harness = tmp_path / "fake-harness"
+    harness.write_text(f'#!/bin/sh\n[ "$1" = --version ] && exit 3\ntouch {ran}\n', encoding="utf-8")
+    harness.chmod(0o755)
+    proc = _orch(
+        "job", "run", "codex-bot", job.id, "--machines", str(machines), "--db", str(tmp_path / "orch.db"),
+        "--", str(harness),
+        env={"ORCH_JOB_BRIEF": str(tmp_path / "no-brief.md"), "GIT_CEILING_DIRECTORIES": str(tmp_path),
+             "CODEX_HOME": str(tmp_path / "no-codex-home")},
+        stdin=subprocess.DEVNULL,
+    )
+    _, stderr = proc.communicate(timeout=30)
+
+    assert proc.returncode == 0, stderr
+    assert ran.exists(), "the command ran"
+    with queue.connect() as connection:
+        recorded = exposure.read(connection, job.id)
+    assert recorded == exposure.Exposure(
+        exposure.UNKNOWN, exposure.UNKNOWN, exposure.UNKNOWN, None, "box", exposure.UNKNOWN
+    )
+
+
+def test_cli_job_run_records_the_harness_and_project_config_of_the_job_worktree(tmp_path: Path) -> None:
+    template, _head = _origin(tmp_path)
+    seed = tmp_path / "seed"
+    _fake_harness(seed, "echo harness-cli 2.0.0").rename(seed / "harness")
+    (seed / ".codex").mkdir()
+    (seed / ".codex" / "config.toml").write_text('model = "project-model"\n', encoding="utf-8")
+    _git("add", ".", cwd=seed)
+    _git("commit", "-q", "-m", "harness", cwd=seed)
+    _git("push", "-q", "origin", "HEAD:main", cwd=seed)
+    waiter = tmp_path / "waiter"
+    waiter.mkdir()
+    _fake_harness(waiter, "echo harness-cli 1.0.0").rename(waiter / "harness")
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    (home / "config.toml").write_text('model = "default-model"\n', encoding="utf-8")
+    queue = _queue(tmp_path)
+    job = _running_job(queue, action="build")
+    proc = _orch(
+        "job", "run", "codex-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--db", str(tmp_path / "orch.db"),
+        "--worktree", "--work-root", str(tmp_path / "work"), "--git-url-template", template,
+        "--", "./harness", "exec",
+        env={**GIT_ENV, "CODEX_HOME": str(home)},
+        cwd=waiter,
+        stdin=subprocess.DEVNULL,
+    )
+    _, stderr = proc.communicate(timeout=60)
+
+    assert proc.returncode == 0, stderr
+    with queue.connect() as connection:
+        recorded = exposure.read(connection, job.id)
+    assert recorded is not None, stderr
+    assert (recorded.model, recorded.cli_version) == (exposure.UNKNOWN, "harness-cli 2.0.0")
