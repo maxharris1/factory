@@ -625,7 +625,9 @@ again. A retry on a PR already recorded first checks that PR is still open;
 one closed or merged meanwhile ends the feed (`closed`) with nothing posted. Only a brief or go whose author orch.yml trusts as `grok-bot` counts as
 already posted, so a forged one never stands in for the real go. A fed
 ticket is never fed again. Room for a harness is the free slots on every
-schedulable device that lists it, minus its queued jobs, minus tickets fed
+schedulable device that lists it, minus the queued jobs of every harness
+listed on such a device (a queued codex review takes a slot claude could
+use on a shared device), minus tickets fed
 for it in the last 10 minutes whose job is not queued yet (so a go the
 poller never acts on cannot stall the feeder). A ticket whose feed failed
 midway resumes first, but takes room like a new one: it waits while the
@@ -638,7 +640,7 @@ none sorts after every tier. The rank uses the effective tier (issue #1050,
 [`docs/decisions/1050-global-rank-v2.md`](docs/decisions/1050-global-rank-v2.md)):
 the best tier among the ticket's own and every candidate it unblocks through
 `Blocked by:` or `Depends on:`, transitively, so a p1 blocker of a p0 ticket
-ranks as p0. Inside a tier: urgent (an `urgent`
+ranks as p0. A fed ticket passes its tier on too. Inside a tier: urgent (an `urgent`
 label or Linear priority Urgent), then `bug`, then the ticket that unblocks
 the most open intake tickets (through `Blocked by:` lines, plus the
 unstarted tickets that share a `Touches:` path with it; `critical_path_order:
@@ -649,10 +651,20 @@ of its `Touches:` paths, naming them (`waiting on file lib/x.py held by #1,
 one holder, and a ticket fed onto a held path logs `feeder: owner/app#3
 shares lib/x.py with #1`. The feeder also records those marks in
 `ticket_priority`, refreshed every poll (a label added after the feed still
-moves the queued job), which the queue's claim order reads (tier, then
-urgent, then a resumed paused step, then bug, then unblocks, then oldest).
-`orch status` and the dashboard show a ticket's tier (`tier 0`), with its
-own tier when the effective tier is better (`tier 0 (own 1)`). The live
+moves the queued job), which the queue's claim order reads (effective tier,
+then a finishing job (`review`, `fix`, `update-from-main`, `qa`) before a
+starting one (`plan`, `build`), then urgent, then a resumed paused step, then
+bug, then unblocks, then oldest). `orch status` and the dashboard show a
+ticket's tier (`tier 0`), with its own tier when the effective tier is better
+(`tier 0 (own 1)`, or `tier 0 (own none)` for a ticket with no tier of its
+own). A project may set `intake.capacity_share` (0 to 1; all shares sum to
+at most 1): while it holds fewer in-flight tickets than that share of its
+builder's schedulable slots, its best eligible ticket is fed before any other
+project's. With no share set the order is unchanged. An open issue in a
+tracked repo that a candidate is `Blocked by:` but that is not a candidate
+itself raises one `critical-path-blocker` attention flag (`gates 2
+candidates, best tier 0`), listed in `orch status` under `Critical-path
+blockers` and cleared when it closes. The live
 clients are in [`lib/intake_live.py`](lib/intake_live.py): GitHub through the
 same `env -u GH_TOKEN ... gh api` seam, Linear through the poller's own
 Linear request path and budget (every page of the intake state, read with
