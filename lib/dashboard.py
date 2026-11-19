@@ -175,7 +175,12 @@ from lib.dashboard_telemetry import attach as attach_telemetry
 from lib.dashboard_telemetry import _number as _telemetry_time
 from lib.dashboard_telemetry import read_telemetry, ticket_totals
 from lib.dashboard_usage import read_usage
-from lib.dispatch.constants import CI_INFRA_BLOCKED_REASON, CI_WAIT_REASONS, HANDED_OFF_EXTERNALLY
+from lib.dispatch.constants import (
+    CI_INFRA_BLOCKED_REASON,
+    CI_RERUN_REFUSED,
+    CI_WAIT_REASONS,
+    HANDED_OFF_EXTERNALLY,
+)
 from lib.ci_lane import ci_lane
 from lib.dispatch.types import CHECK_FAILED
 from lib.dashboard_page import PAGES, render_pages
@@ -253,7 +258,8 @@ HARNESSES = ("claude", "codex", "cursor")
 TRACKERS = ("github", "linear")
 ATTENTION_REASONS = (
     "ship-failed", "dedupe-dropped", "edited-comment", "base-mismatch", "deploy-conflict",
-    SLOW_CYCLE, LOCK_ERRORS, CI_INFRA_BLOCKED_REASON, *FEEDER_ATTENTION_REASONS,
+    SLOW_CYCLE, LOCK_ERRORS, CI_INFRA_BLOCKED_REASON, CI_RERUN_REFUSED,
+    *FEEDER_ATTENTION_REASONS,
 )
 
 HANDOFF_SAVINGS_DEFINITION = (

@@ -80,6 +80,7 @@ from lib.dispatch.types import (
     CheckRow,
     CIJobStatus,
     PoolRunner,
+    RerunOutcome,
     RunJob,
     RunnerKind,
 )
@@ -164,9 +165,18 @@ class GitHubAdapterError(ShipError):
     """safe_detail defaults to the message, so a message must never hold
     gh's stdout or stderr; a wrapper passes on the inner safe_detail."""
 
-    def __init__(self, message: str, *, safe_detail: str | None = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        safe_detail: str | None = None,
+        http_status: int | None = None,
+        api_message: str | None = None,
+    ):
         super().__init__(message)
         self.safe_detail = message if safe_detail is None else safe_detail
+        self.http_status = http_status
+        self.api_message = api_message
 
 
 class NotFastForwardError(GitHubAdapterError):
@@ -894,10 +904,37 @@ class GitHubReviewActions:
             f"{_repo_path(repo)}/actions/jobs/{job_id}/logs", "--allow-escape-sequences"
         )
 
-    def rerun_failed_jobs(self, repo: str, run_id: str) -> None:
-        if not run_id.isdigit():
+    def rerun_failed_jobs(self, repo: str, run_ids: Sequence[str]) -> RerunOutcome:
+        """GitHub refuses a rerun while any workflow run of the commit is in
+        progress, so "running" asks the caller to try again on a later poll."""
+        if not all(run_id.isdigit() for run_id in run_ids):
             raise GitHubAdapterError("Actions run id is not a number")
-        self._call("-X", "POST", f"{_repo_path(repo)}/actions/runs/{run_id}/rerun-failed-jobs")
+        if not all(self._run_completed(repo, run_id) for run_id in run_ids):
+            return "running"
+        for run_id in run_ids:
+            try:
+                self._call(
+                    "-X", "POST", f"{_repo_path(repo)}/actions/runs/{run_id}/rerun-failed-jobs"
+                )
+            except GitHubAdapterError as exc:
+                if exc.http_status == 403 and "already running" in (exc.api_message or "").lower():
+                    return "running"
+                if not self._run_completed(repo, run_id):
+                    return "running"
+                raise
+        return "requested"
+
+    def _run_completed(self, repo: str, run_id: str) -> bool:
+        endpoint = f"{_repo_path(repo)}/actions/runs/{run_id}"
+        text = self._gh(("api", endpoint), route=f"gh api {_route((endpoint,))}")
+        try:
+            run = _object(json.loads(text))
+        except json.JSONDecodeError as exc:
+            raise GitHubAdapterError(
+                f"gh returned malformed JSON: {exc}",
+                safe_detail=f"gh api {_route((endpoint,))} returned malformed JSON",
+            ) from exc
+        return run.get("status") == "completed"
 
     def _call(
         self, *args: str, cache_ttl: str | None = None, partial_graphql: bool = False
@@ -943,6 +980,8 @@ class GitHubReviewActions:
             raise GitHubAdapterError(
                 f"gh exited {result.returncode}: {detail or 'no output'}",
                 safe_detail=safe,
+                http_status=int(status.group(1)) if status is not None else None,
+                api_message=_api_message(result.stdout),
             )
         return result.stdout
 
@@ -1430,6 +1469,15 @@ def _transient(exc: GitHubAdapterError) -> bool:
     """A failure a later try may pass: a 5xx, a timeout, or no HTTP status at all."""
     status = _status(exc)
     return status is None or status >= 500
+
+
+def _api_message(stdout: str) -> str | None:
+    try:
+        body = json.loads(stdout)
+    except json.JSONDecodeError:
+        return None
+    message = body.get("message") if isinstance(body, dict) else None
+    return message[:200] if isinstance(message, str) else None
 
 
 def _status(exc: GitHubAdapterError) -> int | None:

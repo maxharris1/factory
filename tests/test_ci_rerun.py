@@ -10,7 +10,7 @@ import pytest
 from lib.dispatch.constants import CI_RERUN_SETTLE_SECONDS, STOPPED_POLL_SECONDS
 from lib.dispatcher import CIResult, Dispatcher, FailedCheck
 from lib.factory_md import HoldConfig
-from lib.github_actions import GitHubAdapterError, GitHubReviewActions, GhResult
+from lib.github_actions import GitHubAdapterError, GitHubReviewActions, GhResult, RerunOutcome
 from lib.queue import SQLiteJobQueue
 from tests.merge_queue_support import PR, Board, sha
 from tests.test_dispatcher import TRUSTED_LOGINS, FakeGrokDelivery, FakeReviewActions
@@ -26,12 +26,17 @@ class RerunBoard(Board):
         self.results: dict[str, CIResult] = {}
         self.reruns: list[tuple[str, str]] = []
         self.refusal: BaseException | None = None
+        self.run_status = "completed"
         self.dispatcher.ci_rerun = self.rerun
 
-    def rerun(self, repo: str, run_id: str) -> None:
-        self.reruns.append((repo, run_id))
-        if self.refusal is not None:
-            raise self.refusal
+    def rerun(self, repo: str, run_ids) -> RerunOutcome:
+        if self.run_status != "completed":
+            return "running"
+        for run_id in run_ids:
+            self.reruns.append((repo, run_id))
+            if self.refusal is not None:
+                raise self.refusal
+        return "requested"
 
     def snapshot(self, pr: PR, *, fresh: bool = False):
         ticket = super().snapshot(pr, fresh=fresh)
@@ -71,6 +76,15 @@ class RerunBoard(Board):
     def ci_wait(self) -> list[str]:
         with self.queue.connect() as connection:
             return [str(row["reason"]) for row in connection.execute("SELECT reason FROM ci_waits")]
+
+    def attention(self, reason: str) -> list[str]:
+        with self.queue.connect() as connection:
+            return [
+                row["detail"]
+                for row in connection.execute(
+                    "SELECT detail FROM needs_attention WHERE reason = ?", (reason,)
+                )
+            ]
 
 
 def built(tmp_path: Path, **options) -> tuple[RerunBoard, PR]:
@@ -226,15 +240,64 @@ def test_a_green_rerun_reviews_and_never_charges(tmp_path: Path) -> None:
     assert board.reruns == [("owner/repo", RUN)]
 
 
+def test_a_red_whose_run_is_still_in_progress_waits_without_a_rerun_or_a_charge(
+    tmp_path: Path,
+) -> None:
+    board, pr = built(tmp_path)
+    reads: list[str] = []
+    board.dispatcher.ci_logs = lambda repo, run_id: reads.append(run_id) or {}
+    board.run_status = "in_progress"
+    board.red(pr, pr.head, "11", "12")
+    ready = board.ready(pr, pr.head)
+    board.poll()
+    board.poll()
+
+    assert board.outcome(ready) is None
+    assert board.ci_wait() == ["ci-rerun"]
+    assert board.reruns == []
+    assert board.reruns_table() == []
+    assert board.state("42")["gate_count"] == 0
+    assert board.ci_events() == []
+    assert board.jobs("fix") == []
+    assert reads == []
+
+
+def test_a_run_that_completes_after_a_wait_gets_one_rerun(tmp_path: Path) -> None:
+    board, pr = built(tmp_path)
+    board.run_status = "in_progress"
+    board.red(pr, pr.head, "11", "12")
+    ready = board.ready(pr, pr.head)
+    board.poll()
+    assert board.reruns == []
+
+    board.run_status = "completed"
+    board.poll()
+    board.poll()
+
+    assert board.outcome(ready) is None
+    assert board.reruns == [("owner/repo", RUN)]
+    assert board.reruns_table() == [(pr.head, "requested", ["11", "12"], None)]
+    assert board.ci_wait() == ["ci-rerun"]
+    assert board.state("42")["gate_count"] == 0
+    assert board.ci_events() == []
+    assert board.jobs("fix") == []
+
+
 @pytest.mark.parametrize(
-    ("refusal", "detail"),
+    ("refusal", "detail", "why"),
     [
-        (GitHubAdapterError("HTTP 403"), "GitHubAdapterError HTTP 403"),
-        (RuntimeError("gh printed a token here"), "RuntimeError"),
+        (
+            GitHubAdapterError(
+                "gh exited 1", http_status=403, api_message="Resource not accessible by integration"
+            ),
+            "GitHubAdapterError HTTP 403 Resource not accessible by integration",
+            "refused (HTTP 403): Resource not accessible by integration",
+        ),
+        (RuntimeError("gh printed a token here"), "RuntimeError", "refused: RuntimeError"),
     ],
 )
 def test_a_refused_rerun_charges_in_the_same_poll_and_is_never_retried(
-    tmp_path: Path, refusal: BaseException, detail: str
+    tmp_path: Path, refusal: BaseException, detail: str, why: str
 ) -> None:
     board, pr = built(tmp_path)
     board.refusal = refusal
@@ -248,11 +311,18 @@ def test_a_refused_rerun_charges_in_the_same_poll_and_is_never_retried(
     assert board.reruns_table() == [(pr.head, "refused", ["11"], detail)]
     assert any("refused" in line for line in board.log)
     assert not any("token" in line for line in board.log)
+    [flagged] = board.attention("ci-rerun-refused")
+    assert flagged == f"owner/repo#42 head {pr.head[:12]}: rerun-failed-jobs for run {RUN} {why}"
+    assert "token" not in flagged
+    [wake] = board.jobs("ci-rerun-refused")
+    assert (wake["recipient"], wake["head"]) == ("grok", pr.head)
 
     board.poll()
     board.poll()
     assert board.reruns == [("owner/repo", RUN)]
     assert len(board.jobs("fix")) == 1
+    assert len(board.attention("ci-rerun-refused")) == 1
+    assert len(board.jobs("ci-rerun-refused")) == 1
 
 
 def test_a_green_rerun_after_a_refusal_still_clears_the_recorded_failure(tmp_path: Path) -> None:
@@ -558,21 +628,77 @@ def test_the_schema_adds_the_reruns_table_to_new_and_existing_databases(tmp_path
     assert "ci_reruns" in tables(existing)
 
 
-def test_the_adapter_reruns_only_the_failed_jobs_of_a_run() -> None:
+RUN_PATH = f"repos/owner/repo/actions/runs/{RUN}"
+ALREADY_RUNNING = GhResult(
+    1,
+    json.dumps({"message": "This workflow is already running", "status": "403"}),
+    "gh: This workflow is already running (HTTP 403)",
+)
+FORBIDDEN = GhResult(
+    1,
+    json.dumps({"message": "Resource not accessible by integration", "status": "403"}),
+    "gh: Resource not accessible by integration (HTTP 403)",
+)
+
+
+def rerun_adapter(
+    *statuses: str, post: GhResult = GhResult(0, "", "")
+) -> tuple[GitHubReviewActions, list[list[str]]]:
     calls: list[list[str]] = []
+    reads = iter(statuses)
 
     def gh(argv, timeout: float) -> GhResult:
-        calls.append(list(argv))
-        return GhResult(0, "", "")
+        api = list(argv)[list(argv).index("api") :]
+        calls.append(api)
+        if "POST" in api:
+            return post
+        return GhResult(0, json.dumps({"id": int(RUN), "status": next(reads)}), "")
 
-    GitHubReviewActions(gh).rerun_failed_jobs("owner/repo", RUN)
+    return GitHubReviewActions(gh, cache_ttl="20s"), calls
 
-    assert calls[0][calls[0].index("api") :] == [
-        "api",
-        "-X",
-        "POST",
-        f"repos/owner/repo/actions/runs/{RUN}/rerun-failed-jobs",
-    ]
+
+def posts(calls: list[list[str]]) -> list[list[str]]:
+    return [call for call in calls if "POST" in call]
+
+
+def test_the_adapter_reruns_only_the_failed_jobs_of_a_completed_run() -> None:
+    adapter, calls = rerun_adapter("completed")
+
+    assert adapter.rerun_failed_jobs("owner/repo", [RUN]) == "requested"
+    assert calls == [["api", RUN_PATH], ["api", "-X", "POST", f"{RUN_PATH}/rerun-failed-jobs"]]
     with pytest.raises(GitHubAdapterError):
-        GitHubReviewActions(gh).rerun_failed_jobs("owner/repo", "../x")
-    assert len(calls) == 1
+        adapter.rerun_failed_jobs("owner/repo", ["../x"])
+    assert len(calls) == 2
+
+
+def test_the_adapter_posts_nothing_while_a_run_is_in_progress() -> None:
+    adapter, calls = rerun_adapter("in_progress")
+
+    assert adapter.rerun_failed_jobs("owner/repo", [RUN]) == "running"
+    assert calls == [["api", RUN_PATH]]
+
+
+@pytest.mark.parametrize(
+    ("post", "statuses"),
+    [(ALREADY_RUNNING, ("completed",)), (FORBIDDEN, ("completed", "in_progress"))],
+)
+def test_the_adapter_reads_a_refusal_of_a_running_workflow_as_running(
+    post: GhResult, statuses: tuple[str, ...]
+) -> None:
+    adapter, calls = rerun_adapter(*statuses, post=post)
+
+    assert adapter.rerun_failed_jobs("owner/repo", [RUN]) == "running"
+    assert len(posts(calls)) == 1
+    assert not any("--cache" in call for call in calls)
+
+
+def test_the_adapter_raises_a_refusal_of_a_completed_run() -> None:
+    adapter, calls = rerun_adapter("completed", "completed", post=FORBIDDEN)
+
+    with pytest.raises(GitHubAdapterError) as raised:
+        adapter.rerun_failed_jobs("owner/repo", [RUN])
+
+    assert raised.value.http_status == 403
+    assert raised.value.api_message == "Resource not accessible by integration"
+    assert "not accessible" not in raised.value.safe_detail
+    assert calls[-1] == ["api", RUN_PATH]

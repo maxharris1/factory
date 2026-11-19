@@ -11,6 +11,7 @@ from lib.dispatch.constants import (
     CI_INFRA_BLOCKED_REASON,
     CI_INFRA_WAIT,
     CI_INFRA_WAIT_SECONDS,
+    CI_RERUN_REFUSED,
     CI_RERUN_SETTLE_SECONDS,
     CI_SILENT_REASON,
     CI_SILENT_SECONDS,
@@ -462,34 +463,36 @@ class ReadyMixin:
                     return None
         from lib.evidence.ci import classify_logged
 
+        rerun = self.ci_rerun is not None and row is None
+        if rerun:
+            failed = failed_checks(result)
+            run_ids = list(
+                dict.fromkeys(check.run_id for check in failed if check.run_id is not None)
+            )
+            job_ids = [check.job_id for check in failed if check.job_id is not None]
+            outcome, detail, why = "unavailable", None, ""
+            if run_ids:
+                try:
+                    if self.ci_rerun(ticket.repo, run_ids) == "running":
+                        return None
+                    outcome = "requested"
+                except Exception as exc:
+                    outcome, detail, why = "refused", *_refusal(exc)
         logs = self._failed_job_logs(ticket.repo, result)
         result = classify_logged(result, logs, self._unlogged_job_steps(ticket.repo, result, logs))
-        if self.ci_rerun is None or row is not None:
+        if not rerun:
             return result
-        failed = failed_checks(result)
-        run_ids = list(dict.fromkeys(check.run_id for check in failed if check.run_id is not None))
-        job_ids = [check.job_id for check in failed if check.job_id is not None]
-        outcome, detail = "requested", None
-        if not run_ids:
-            outcome = "unavailable"
-        else:
-            try:
-                for run_id in run_ids:
-                    self.ci_rerun(ticket.repo, run_id)
-            except Exception as exc:
-                outcome = "refused"
-                detail = f"{type(exc).__name__} {getattr(exc, 'safe_detail', '')}".strip()
         with self._connect() as connection:
-            connection.execute(
+            inserted = connection.execute(
                 """
                 INSERT OR IGNORE INTO ci_reruns
                     (repo, ticket_id, head, outcome, job_ids, requested_at, detail)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (*key, head, outcome, json.dumps(job_ids), self.queue.now(), detail),
-            )
+            ).rowcount
+        runs = ", ".join(run_ids)
         if self.log is not None and outcome != "unavailable":
-            runs = ", ".join(run_ids)
             self.log(
                 f"ci rerun: {ticket.repo}#{ticket.ticket_id} at {head[:12]} "
                 + (
@@ -498,7 +501,21 @@ class ReadyMixin:
                     else f"rerun of run {runs} refused ({detail}); charging the failure"
                 )
             )
+        if outcome == "refused" and inserted:
+            self._flag_rerun_refused(ticket, head, runs, why)
         return None if outcome == "requested" else result
+
+    def _flag_rerun_refused(self, ticket: TrackedTicket, head: str, runs: str, why: str) -> None:
+        text = (
+            f"{ticket.repo}#{ticket.ticket_id} head {head[:12]}: "
+            f"rerun-failed-jobs for run {runs} refused{why}"
+        )
+        self.flag_attention(ticket.repo, ticket.ticket_id, CI_RERUN_REFUSED, text)
+        source = self._latest_trusted_comment(ticket)
+        if source is not None:
+            self.wake_grok_once(
+                ticket, reason=CI_RERUN_REFUSED, head=head, source_comment_id=source.id, detail=text
+            )
 
     def _charge_unannounced_red(self, ticket: TrackedTicket) -> None:
         key = (ticket.repo.lower(), ticket.ticket_id)
@@ -1319,3 +1336,14 @@ class ReadyMixin:
 
 def _at_base(ticket: TrackedTicket, head: str) -> bool:
     return ticket.pr_commits == 0 and _matching_head(head, ticket.current_head) is not None
+
+
+def _refusal(exc: Exception) -> tuple[str, str]:
+    """The ci_reruns detail and the needs-attention suffix for a refused
+    rerun. Only an adapter error's safe fields are kept: any other error's
+    message may hold whatever gh printed."""
+    status = getattr(exc, "http_status", None)
+    message = getattr(exc, "api_message", None) or getattr(exc, "safe_detail", None)
+    http = f"HTTP {status}" if status is not None else ""
+    detail = " ".join(part for part in (type(exc).__name__, http, message or "") if part)
+    return detail, (f" ({http})" if http else "") + f": {message or type(exc).__name__}"

@@ -128,6 +128,7 @@ One row per wake the dispatcher sends Grok Bot: each `action` in `lib.dispatch.c
 | `awaiting-ok` | `factory.md`'s `hold:` holds a `ship: merge` pull request. `detail` has `pr`, `head`, `approver`, `reasons` and `held_paths`. | Tell Max once that it waits on his `ok` or `/ok <sha>`. |
 | `qa-failed` | A primary QA `FAIL` with a `[blocking]` line at an approved head. `detail` has `finding` and `evidence_link`. | Tell Max once. Nothing waits on QA. |
 | `qa-env-failed` | Under `qa.gate: block`, QA at an approved head failed on its environment twice. | Tell Max once. |
+| `ci-rerun-refused` | GitHub refused the one rerun of a red head's failed jobs after its workflow runs completed. The failure was charged. `detail` names the head, the run, the HTTP status and GitHub's message. | Check the factory user's `gh` credential (it needs Actions write), then tell Max once. |
 | `qa-head-moved` | A QA run's head moved, so it posted nothing. | Nothing to post. |
 | `done` | The ticket finished. `detail.outcome` and `follow_up_owner` name what is left; `detail.followup_issue` names the parked follow-up issue. | Run Follow-up triage on `followup_issue`. Act by hand on a `detail.note`, such as an unmoved Linear issue. |
 
