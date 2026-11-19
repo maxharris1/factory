@@ -564,7 +564,7 @@ class MergeQueueMixin:
                 )
             return True
         settled = self._settled_red(ticket, head, ci)
-        if settled is None:
+        if isinstance(settled, str):
             return False
         _status, count = self._record_ci_result(ticket, head, settled.status)
         if self._mark_stuck_on_third_red(ticket, source, head, count):

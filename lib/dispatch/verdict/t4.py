@@ -317,8 +317,8 @@ class T4Mixin:
             ).fetchone()
         if queued is None:
             settled = self._settled_red(ticket, head, result)
-            if settled is None:
-                return False, "approve-ci-rerun"
+            if isinstance(settled, str):
+                return False, f"approve-{settled}"
             _status, count = self._record_ci_result(ticket, head, "failure")
             if self._mark_stuck_on_third_red(ticket, comment, head, count):
                 return True, "stuck-ci-red-3"
@@ -381,8 +381,8 @@ class T4Mixin:
         review_round: int,
     ) -> tuple[bool, str]:
         settled = self._settled_red(ticket, head, result)
-        if settled is None:
-            return False, "approve-ci-rerun"
+        if isinstance(settled, str):
+            return False, f"approve-{settled}"
         _status, count = self._record_ci_result(ticket, head, "failure")
         if self._mark_stuck_on_third_red(ticket, comment, head, count):
             return True, "stuck-ci-red-3"

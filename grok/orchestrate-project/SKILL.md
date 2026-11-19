@@ -129,6 +129,7 @@ One row per wake the dispatcher sends Grok Bot: each `action` in `lib.dispatch.c
 | `qa-failed` | A primary QA `FAIL` with a `[blocking]` line at an approved head. `detail` has `finding` and `evidence_link`. | Tell Max once. Nothing waits on QA. |
 | `qa-env-failed` | Under `qa.gate: block`, QA at an approved head failed on its environment twice. | Tell Max once. |
 | `qa-head-moved` | A QA run's head moved, so it posted nothing. | Nothing to post. |
+| `ci-stale` | A ticket has sat in one CI state (`ci-red-3`, `ci-infra-wait`, `ci-base-red` or `ci-failed`, in `detail.detail`) at one head for two hours with no progress. | Run Stalled ticket. A `ci-base-red` hold clears itself once the base goes green, so tell Max once only if the base stays red. |
 | `done` | The ticket finished. `detail.outcome` and `follow_up_owner` name what is left; `detail.followup_issue` names the parked follow-up issue. | Run Follow-up triage on `followup_issue`. Act by hand on a `detail.note`, such as an unmoved Linear issue. |
 
 ## Stalled ticket

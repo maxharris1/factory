@@ -11,7 +11,7 @@ GOLDEN = {
     "lanes.CSS": "f4a39fb9ca6ddd3c65fa300cf3a99a1d1b0be53e7fc969997b9a0ead0e14ee07",
     "lanes.SCRIPT": "bbebe57e2c71d7a8920e42781dd39c8c2c3e7cd25b5b14e310f863ca6821b480",
     "ci.CSS": "544cfa203943aaabe9f99f5e42e54dfed2fb9d9d4a505db18a8b125e2b12c883",
-    "ci.SCRIPT": "94fe221acc3882029823674caee3d0dc683131ff004952d87977c0103ba9d91f",
+    "ci.SCRIPT": "b911e0070f5debca7d894695d5484929f5abc168b05e1665bc793351c463bc34",
     "__LANES__": "0a070c5626c19ae07dc2fd8adfb927643b397d9899d61f93f67b20ee6f76e617",
     "seeded/main": "abe3aa634faae48b94196a9c3078f2f47ed827b85aefc18d4e49a032f18366e3",
     "seeded/chrome": "ac469d192b196070d55c009485a59051383052b9daaf5f935f8246bca96ebf63",
