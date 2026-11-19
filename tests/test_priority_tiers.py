@@ -586,6 +586,46 @@ def test_an_open_blocker_that_is_not_a_candidate_raises_one_flag_until_it_closes
     assert _critical_flags(queue) == []
 
 
+TWO_REPOS = _with(GITHUB_ORCH, TIERS) + """  - repo: owner/aut
+    factory_ref: main
+    intake:
+      label: factory:ready
+"""
+OUTSIDE = ("owner/aut", "9", "gates 1 candidates, best tier 0")
+
+
+def _flag_outside_blocker(tmp_path: Path):
+    feeder, queue, github, _ = make_feeder(tmp_path, orch=TWO_REPOS, box=2)
+    github.issues[HOME] = [issue(2, labels=(READY, "priority:p0"), body="Depends on: owner/aut#9")]
+    github.statuses = {ref(9, "owner/aut"): OPEN}
+    feeder.feed_once()
+    assert _critical_flags(queue) == [OUTSIDE]
+    return feeder, queue, github
+
+
+def test_a_failed_dependent_read_keeps_the_open_blockers_flag(tmp_path: Path) -> None:
+    feeder, queue, github = _flag_outside_blocker(tmp_path)
+    github.fail[f"intake:{HOME}"] = 1
+    assert feeder.feed_once().errors == 1
+    assert _critical_flags(queue) == [OUTSIDE]
+    feeder.feed_once()
+    assert _critical_flags(queue) == [OUTSIDE]
+
+
+def test_a_fed_dependent_keeps_its_open_blockers_flag_until_the_blocker_closes(tmp_path: Path) -> None:
+    from tests.test_feeder_gates import DONE
+
+    feeder, queue, github = _flag_outside_blocker(tmp_path)
+    with queue.connect() as connection:
+        connection.execute("UPDATE feeder_items SET state = 'fed' WHERE issue = '2'")
+    feeder.feed_once()
+    assert states(tmp_path)["2"][0] == "fed"
+    assert _critical_flags(queue) == [OUTSIDE]
+    github.statuses = {ref(9, "owner/aut"): DONE}
+    feeder.feed_once()
+    assert _critical_flags(queue) == []
+
+
 def test_blockers_off_the_critical_path_raise_no_flag(tmp_path: Path) -> None:
     feeder, queue, github, _ = make_feeder(tmp_path, box=1)
     github.issues[HOME] = [issue(1)]

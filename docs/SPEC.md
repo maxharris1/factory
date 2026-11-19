@@ -1073,7 +1073,9 @@ does not exist are flagged needs-attention (`blocker-cycle`,
 candidate names in `Blocked by` or `Depends on` but that is not itself a
 candidate (an operator ticket with no intake label) raises one
 needs-attention flag per blocker, `critical-path-blocker` with the detail
-`gates N candidates, best tier T`, cleared when it closes; `orch status`
+`gates N candidates, best tier T`. A fed or failed candidate still counts.
+The flag clears when a poll reads the blocker closed or no candidate names
+it; a failed status read or a failed intake read keeps it. `orch status`
 lists them under `Critical-path blockers`. `orch status` and the dashboard show
 the feeder's last poll, even an empty one: eligible, fed, waiting for
 capacity and waiting on blockers or files. With no `intake` anywhere the

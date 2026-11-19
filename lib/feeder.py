@@ -809,7 +809,7 @@ class Feeder:
             candidate.effective_tier = tiers[candidate.ref]
         self._record_priority(candidates, now)
         if gate_read:
-            self._sync_attention(waits, critical, read_repos, now)
+            self._sync_attention(waits, critical, read_repos, read_errors == 0, now)
         room = self._room({candidate.harness for candidate in candidates}, now)
         share_room = self._share_room(candidates, now)
         fed: list[TicketRef] = []
@@ -1031,15 +1031,23 @@ class Feeder:
             for ref, row in rows.items()
             if not row.released and (row.lines or ref in conflicts or row.pull in conflicts)
         }
+        tracked = {project.repo.lower() for project in self.config.projects}
         blockers = {ref for lines in gated.values() for ref in lines.blocked_by}
+        flaggable = {ref: lines for ref, lines in lines_of.items() if ref not in refused}
+        outside = {
+            ref
+            for lines in flaggable.values()
+            for ref in lines.blocked_by
+            if ref not in known and ref.repo in tracked
+        }
         via = {ref: pull_of[ref] for ref in blockers if ref in pull_of}
         linear = {
             linear_ref(c.issue.repo, key): linear_status(state_type)
-            for c in unstarted
+            for c in candidates
             for key, state_type in c.issue.blocked_by
         }
         external = {ref for ref in conflicts if ref not in known}
-        needed = {ref for ref in blockers if ref.tracker == "github"}
+        needed = {ref for ref in blockers | outside if ref.tracker == "github"}
         needed |= set(via.values()) | external
         needed |= {row.pull for row in holders.values() if row.pull is not None}
         statuses: dict[Ref, RefStatus] = {}
@@ -1088,20 +1096,16 @@ class Feeder:
         shared = {repo: policy.shared for repo, policy in holds.policies.items()}
         blocks = _dependents_by_blocker(candidates, gated, pull_of)
         unblocks = critical_path_counts(candidates, blocks, {c.ref for c in unstarted}, shared)
-        tiers = effective_tiers(candidates, _dependents_by_blocker(candidates, lines_of, pull_of))
-        tracked = {project.repo.lower() for project in self.config.projects}
-        outside: dict[Ref, set[Ref]] = {}
-        for dependent, lines in gated.items():
-            for blocker in lines.blocked_by:
-                if (
-                    blocker not in known
-                    and blocker.repo in tracked
-                    and _progress(statuses, blocker) is Progress.OPEN
-                ):
-                    outside.setdefault(blocker, set()).add(dependent)
+        inherits = _dependents_by_blocker(candidates, lines_of, pull_of)
+        tiers = effective_tiers(candidates, inherits)
+        gates: dict[Ref, set[Ref]] = {}
+        for dependent, lines in flaggable.items():
+            for blocker in lines.blocked_by & outside:
+                if _progress(statuses, blocker) is Progress.OPEN:
+                    gates.setdefault(blocker, set()).add(dependent)
         critical: dict[tuple[str, str, str], str] = {}
-        for blocker, dependents in outside.items():
-            found = _with_dependents(blocks, dependents)
+        for blocker, dependents in gates.items():
+            found = _with_dependents(inherits, dependents)
             best = min((tier for ref in found if (tier := tiers[ref]) is not None), default=None)
             critical[(blocker.repo, blocker.key, ATTENTION_CRITICAL_PATH)] = (
                 f"gates {len(found)} candidates, best tier {'none' if best is None else best}"
@@ -1213,6 +1217,7 @@ class Feeder:
         waits: Mapping[Ref, Wait],
         critical: Mapping[tuple[str, str, str], str],
         repos: set[str],
+        every_repo_read: bool,
         now: float,
     ) -> None:
         flags = {
@@ -1220,7 +1225,7 @@ class Feeder:
             for ref, wait in waits.items()
             if wait.attention is not None
         }
-        tracked = {project.repo.lower() for project in self.config.projects}
+        tracked = {project.repo.lower() for project in self.config.projects} if every_repo_read else set()
         with self.queue.connect() as connection:
             attention.sync(connection, WAIT_REASONS, repos, flags, now)
             attention.sync(connection, (ATTENTION_CRITICAL_PATH,), tracked, critical, now)

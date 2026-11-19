@@ -664,7 +664,8 @@ project's. With no share set the order is unchanged. An open issue in a
 tracked repo that a candidate is `Blocked by:` but that is not a candidate
 itself raises one `critical-path-blocker` attention flag (`gates 2
 candidates, best tier 0`), listed in `orch status` under `Critical-path
-blockers` and cleared when it closes. The live
+blockers` and cleared once a poll reads it closed (a failed read keeps
+it). The live
 clients are in [`lib/intake_live.py`](lib/intake_live.py): GitHub through the
 same `env -u GH_TOKEN ... gh api` seam, Linear through the poller's own
 Linear request path and budget (every page of the intake state, read with

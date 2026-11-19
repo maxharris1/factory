@@ -160,6 +160,7 @@ class FakeGitHub:
     # intake reads
     def github_intake(self, repo: str, label: str) -> list[IntakeIssue]:
         self.calls.append(f"intake:{repo}:{label}")
+        self._maybe_fail(f"intake:{repo}")
         return list(self.issues.get(repo, []))
 
     # writes

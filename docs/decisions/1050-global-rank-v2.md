@@ -32,7 +32,7 @@ Feeder room and the project share decide whether, and for which project, the fee
 - **When:** 2026-11-19, by Factory decided (technical), on Max's go for the split
 - **Source:** https://github.com/maxharris1/factory/pull/1059#issuecomment-7016852764
 
-- **Decision:** An open issue in a tracked repo that a candidate names in `Blocked by` or `Depends on`, and that is neither a candidate nor a fed ticket, is a critical-path blocker. The feeder raises one needs-attention flag per blocker, reason `critical-path-blocker`, detail `gates N candidates, best tier T`, from the statuses the gate read already makes. The flag clears when the blocker closes. A failed status read keeps it. `orch status` lists the flags under `Critical-path blockers`.
+- **Decision:** An open issue in a tracked repo that a candidate names in `Blocked by` or `Depends on`, and that is neither a candidate nor a fed ticket, is a critical-path blocker. The feeder raises one needs-attention flag per blocker, reason `critical-path-blocker`, detail `gates N candidates, best tier T`, from the statuses the gate read already makes. Every candidate counts, fed and failed ones included. The flag clears when a poll reads the blocker closed or no candidate names it. A failed status read, or a failed intake read of any project, keeps it. `orch status` lists the flags under `Critical-path blockers`.
 - **When:** 2026-11-19, by Factory decided (technical), on Max's go for the split
 - **Source:** https://github.com/maxharris1/factory/pull/1059#issuecomment-7016852764
 
