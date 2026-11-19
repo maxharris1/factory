@@ -439,3 +439,27 @@ def test_a_closed_ref_skips_the_budget_only_on_its_first_read_after_closure() ->
 
     assert read_ids(source, (closed("9"),)) == ["9"]
     assert read_ids(source, (active("1"), active("2"), closed("9"))) == ["1"]
+
+
+def test_a_linear_ticket_held_after_a_full_read_is_probed_by_that_reads_pr(tmp_path: Path) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    with queue.connect() as connection:
+        connection.execute("INSERT INTO tracked_tickets VALUES ('acme/widgets', 'AUT-42', 'linear', 0)")
+    gh = linear_gh("open")
+    source = live_source(dispatcher, gh, now)
+    dispatcher.poll_once(source)
+    with queue.connect() as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO ticket_state (repo, ticket_id, workflow_state) "
+            "VALUES ('acme/widgets', 'AUT-42', 'blocked')"
+        )
+        connection.execute("UPDATE ticket_reads SET read_at = 160 WHERE ticket_id = 'AUT-42'")
+    now[0] = 160.0
+    gh.pull = {**gh.pull, "state": "closed"}
+
+    dispatcher.poll_once(source)
+
+    assert outcome(queue, "AUT-42")[0] == "abandoned"
+    assert len(state_probes(gh)) == 1
+    assert gh.calls.index(state_probes(gh)[0]) < gh.calls.index(branch_lookups(gh)[1])

@@ -2041,13 +2041,13 @@ class LivePollSource:
         )
         ci: dict[str, CIResult] = {}
         pr_title: str | None = None
-        self._linear_branch_pulls.pop(identifier, None)
         pr_number = self._factory_pr_number(
             project.repo,
             identifier,
             issue,
             fresh=fresh or uncached,
         )
+        self._linear_branch_pulls[identifier] = pr_number
         pull_facts: dict[str, Any] = {"merged": False}
         pull: Mapping[str, Any] = {}
         if pr_number is not None:
