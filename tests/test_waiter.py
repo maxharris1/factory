@@ -968,6 +968,9 @@ FAKE_HARNESS = f"#!{sys.executable}\n" + """# Stands in for the bot's harness: r
 import json, os, subprocess, sys, time
 from pathlib import Path
 
+if sys.argv[1:] == ["--version"]:
+    print("fake-harness 1.0.0")
+    sys.exit(0)
 RECORDED_ENV = ("ORCH_JOB_PROOF", "ORCH_JOB_ID", "ORCH_JOB_BOT", "ORCH_DB",
                 "ORCH_JOB_BRIEF", "ORCH_JOB_WORKTREE")
 out = Path(os.environ["FAKE_HARNESS_DIR"])
