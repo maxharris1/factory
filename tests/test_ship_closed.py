@@ -332,8 +332,6 @@ def test_a_held_linear_ticket_with_an_open_pr_keeps_its_cadence(tmp_path: Path) 
 
 
 class StaleCacheGh(FakeGh):
-    """gh's on-disk --cache still holds the bodies from before the PR closed."""
-
     def __call__(self, argv, timeout):
         if "--cache" not in argv:
             return super().__call__(argv, timeout)
