@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import secrets
 import shlex
 import sqlite3
 import subprocess
@@ -140,44 +141,133 @@ def _toml_model(value: str) -> str:
     return parsed if isinstance(parsed, str) else value.strip("\"'")
 
 
-def _argv_model(argv: Sequence[str], harness: str | None) -> str | None:
+@dataclass(frozen=True)
+class _Selected:
+    """What a harness command line says about its model."""
+
+    model: str | None = None
+    profile: str | None = None
+    cd: str | None = None
+    profile_overridden: bool = False
+
+
+def _selected(argv: Sequence[str], harness: str | None) -> _Selected:
     options = list(argv[1:])
     if "--" in options:
         options = options[: options.index("--")]
-    flag = config = None
+    codex = harness == "codex"
+    short = {"-m": "--model"} | ({"-c": "--config", "-p": "--profile", "-C": "--cd"} if codex else {})
+    names = {"--model"} | ({"--config", "--profile", "--cd"} if codex else set())
+    flag = config = profile = cd = None
+    overridden = False
     words = iter(options)
     for word in words:
-        if word in ("--model", "-m"):
-            flag = next(words, None) or flag
-        elif word.startswith("--model="):
-            flag = word.removeprefix("--model=") or flag
-        elif harness == "codex" and word in ("-c", "--config"):
-            setting = next(words, "")
-            if setting.startswith("model="):
-                config = _toml_model(setting.removeprefix("model=")) or config
-        elif harness == "codex" and word.startswith("--config=model="):
-            config = _toml_model(word.removeprefix("--config=model=")) or config
-    return flag or config
+        value: str | None
+        if word.startswith("--") and "=" in word:
+            name, _, value = word.partition("=")
+        elif word[:2] in short and len(word) > 2:
+            name, value = short[word[:2]], word[2:].removeprefix("=")
+        else:
+            name, value = short.get(word, word), None
+        if name not in names:
+            continue
+        value = next(words, None) if value is None else value
+        if name == "--model":
+            flag = value or flag
+        elif name == "--profile":
+            profile = value
+        elif name == "--cd":
+            cd = value
+        elif value is not None:
+            key, _, setting = value.partition("=")
+            key = key.strip()
+            if key == "model":
+                config = _toml_model(setting) or config
+            # `profile` and `[profiles.<name>]` select a model only in some codex versions.
+            overridden = overridden or key == "profile" or key.startswith("profiles.")
+    return _Selected(flag or config, profile, cd, overridden)
 
 
-def model(argv: Sequence[str], harness: str | None, shell: Shell) -> str:
-    found = _argv_model(argv, harness)
-    if found:
-        return found
-    if harness != "codex":
-        return UNKNOWN
-    text = shell('exec cat -- "${CODEX_HOME:-$HOME/.codex}/config.toml"', ())
+_PROFILE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*")
+# $1 marker, $2 launch directory (empty: the shell's own), $3 codex -C, $4 profile.
+# A launch directory not made yet has no .codex: its nearest existing ancestor is walked.
+_CODEX_CONFIGS = r"""
+m=$1 home=${CODEX_HOME:-$HOME/.codex} d=${2:-.}
+if [ -n "$3" ]; then
+  case $3 in /*) d=$3 ;; *) d=$d/$3 ;; esac
+  [ -d "$d" ] || exit 1
+else
+  until [ -d "$d" ]; do d=$(dirname -- "$d"); done
+fi
+cd -- "$d" && d=$(pwd -P) || exit 1
+show() { [ -e "$2" ] || return 0; printf '%s %s\n' "$m" "$1"; cat -- "$2" || exit 1; echo; }
+show base "$home/config.toml"
+[ -z "$4" ] || show profile "$home/$4.config.toml"
+while :; do
+  [ "$d/.codex/config.toml" -ef "$home/config.toml" ] || show project "$d/.codex/config.toml"
+  [ "$d" = / ] && break
+  d=$(dirname -- "$d")
+done
+"""
+
+
+def _codex_configs(text: str | None, marker: str) -> list[tuple[str, dict]] | None:
+    """Each (kind, parsed file) the script showed; None if it failed or a file is not TOML."""
     if text is None:
-        return UNKNOWN
+        return None
+    shown: list[tuple[str, list[str]]] = []
+    for line in text.split("\n"):
+        if line.startswith(f"{marker} "):
+            shown.append((line.removeprefix(f"{marker} "), []))
+        elif shown:
+            shown[-1][1].append(line)
     try:
-        configured = tomllib.loads(text).get("model")
+        return [(kind, tomllib.loads("\n".join(lines))) for kind, lines in shown]
     except tomllib.TOMLDecodeError:
+        return None
+
+
+def model(argv: Sequence[str], harness: str | None, shell: Shell, workdir: str | None = None) -> str:
+    """The model the harness runs; codex's from its config files as seen from workdir."""
+    chosen = _selected(argv, harness)
+    if chosen.model:
+        return chosen.model
+    if harness != "codex" or chosen.profile_overridden:
         return UNKNOWN
-    return configured if isinstance(configured, str) and configured else UNKNOWN
+    if chosen.profile is not None and not _PROFILE.fullmatch(chosen.profile):
+        return UNKNOWN
+    marker = f"{SHELL_NAME}-{secrets.token_hex(16)}"
+    configs = _codex_configs(
+        shell(_CODEX_CONFIGS, (marker, workdir or "", chosen.cd or "", chosen.profile or "")), marker
+    )
+    if configs is None:
+        return UNKNOWN
+    # Codex reads a project's config only in a trusted project, which is not knowable here.
+    if any({"model", "profile", "profiles"} & parsed.keys() for kind, parsed in configs if kind == "project"):
+        return UNKNOWN
+    files = dict(configs)
+    base = files.get("base", {})
+    found = base.get("model")
+    if chosen.profile is None:
+        if "profile" in base:
+            return UNKNOWN
+    else:
+        if "profile" not in files:
+            return UNKNOWN
+        found = files["profile"].get("model", found)
+        tables = base.get("profiles")
+        legacy = tables.get(chosen.profile) if isinstance(tables, dict) else None
+        if isinstance(legacy, dict) and legacy.get("model", found) != found:
+            return UNKNOWN
+    return found if isinstance(found, str) and found else UNKNOWN
 
 
-def cli_version(binary: str, shell: Shell) -> str:
-    out = shell('exec "$1" --version', (binary,))
+def cli_version(binary: str, shell: Shell, workdir: str | None = None) -> str:
+    """The first line of `binary --version`, a relative path run from workdir."""
+    out = shell(
+        'case $1 in /*) ;; */*) [ -z "$2" ] || cd -- "$2" || exit 1 ;; esac; exec "$1" --version',
+        (binary, workdir or ""),
+    )
     lines = [line.strip() for line in (out or "").splitlines() if line.strip()]
     first = lines[0][:VERSION_LIMIT].rstrip() if lines else ""
     return first if _VERSION.fullmatch(first) else UNKNOWN
@@ -213,13 +303,15 @@ def gather(
     host: str,
     factory_root: str | None,
     shell: Shell,
+    workdir: str | None,
 ) -> Exposure:
+    """workdir: the directory the harness is launched in; None, the shell's own."""
     # lib.brief imports lib.queue, which imports this module.
     from lib.brief.skills import pinned_paths
 
     return Exposure(
-        model=model(argv, harness, shell),
-        cli_version=cli_version(binary, shell),
+        model=model(argv, harness, shell, workdir),
+        cli_version=cli_version(binary, shell, workdir),
         brief_sha256=brief_sha256(brief),
         skill_paths=None if brief is None else pinned_paths(brief.decode("utf-8", "replace")),
         host=host or UNKNOWN,

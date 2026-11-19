@@ -133,7 +133,7 @@ def test_a_codex_job_without_a_model_flag_reads_its_config_toml(tmp_path: Path) 
     home.mkdir()
     (home / "config.toml").write_text('model = "gpt-5.5-codex"\n[profiles.x]\nmodel = "other"\n', encoding="utf-8")
     shell = exposure.local_shell({"PATH": "/usr/bin:/bin", "CODEX_HOME": str(home)})
-    assert exposure.model(["codex", "exec", "--json"], "codex", shell) == "gpt-5.5-codex"
+    assert exposure.model(["codex", "exec", "--json"], "codex", shell, str(tmp_path)) == "gpt-5.5-codex"
 
 
 def test_no_model_anywhere_is_unknown(tmp_path: Path) -> None:
@@ -142,6 +142,97 @@ def test_no_model_anywhere_is_unknown(tmp_path: Path) -> None:
     assert exposure.model(["claude", "-p"], "claude", _shell({"config.toml": 'model = "x"'})) == exposure.UNKNOWN
     assert exposure.model(["codex", "exec"], "codex", _shell({"config.toml": "model = 3"})) == exposure.UNKNOWN
     assert exposure.model(["codex", "exec"], "codex", _shell({"config.toml": "not toml ["})) == exposure.UNKNOWN
+
+
+BASE = 'model = "default-model"\n'
+REVIEW = 'model = "review-model"\n'
+
+
+def _codex_home(tmp_path: Path, files: dict[str, str]) -> Path:
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    for name, text in files.items():
+        (home / name).write_text(text, encoding="utf-8")
+    return home
+
+
+@pytest.mark.parametrize(
+    ("argv", "files", "expected"),
+    [
+        (["codex", "--profile", "review", "exec"], {"config.toml": BASE, "review.config.toml": REVIEW}, "review-model"),
+        (["codex", "exec", "--profile=review"], {"config.toml": BASE, "review.config.toml": REVIEW}, "review-model"),
+        (["codex", "-p", "review", "exec"], {"config.toml": BASE, "review.config.toml": REVIEW}, "review-model"),
+        (["codex", "-preview", "exec"], {"config.toml": BASE, "review.config.toml": REVIEW}, "review-model"),
+        (["codex", "-p", "review", "exec"], {"review.config.toml": REVIEW}, "review-model"),
+        (["codex", "-p", "review", "exec", "-m", "flag"], {"config.toml": BASE, "review.config.toml": REVIEW}, "flag"),
+        (["codex", "-p", "review", "exec"], {"config.toml": BASE, "review.config.toml": "approval_policy = 'never'\n"},
+         "default-model"),
+        (["codex", "-p", "review", "exec"], {"config.toml": BASE}, exposure.UNKNOWN),
+        (["codex", "-p", "review", "exec"], {"config.toml": BASE, "review.config.toml": "model = ["}, exposure.UNKNOWN),
+        (["codex", "-p", "review", "exec"], {"config.toml": BASE, "review.config.toml": "model = 3"}, exposure.UNKNOWN),
+        (["codex", "-p", "../review", "exec"], {"config.toml": BASE, "review.config.toml": REVIEW}, exposure.UNKNOWN),
+        (["codex", "exec"], {"config.toml": 'profile = "review"\n' + BASE, "review.config.toml": REVIEW},
+         exposure.UNKNOWN),
+        (["codex", "exec", "-c", "profile=review"], {"config.toml": BASE, "review.config.toml": REVIEW},
+         exposure.UNKNOWN),
+        (["codex", "-p", "review", "exec"],
+         {"config.toml": BASE + '[profiles.review]\nmodel = "old-review"\n', "review.config.toml": REVIEW},
+         exposure.UNKNOWN),
+        (["claude", "-p", "review"], {"config.toml": BASE, "review.config.toml": REVIEW}, exposure.UNKNOWN),
+    ],
+)
+def test_a_codex_profile_selects_its_own_model_or_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, argv: list[str], files: dict[str, str], expected: str
+) -> None:
+    home = _codex_home(tmp_path, files)
+    monkeypatch.chdir(tmp_path)
+    shell = exposure.local_shell({"PATH": "/usr/bin:/bin", "CODEX_HOME": str(home)})
+    assert exposure.model(argv, argv[0], shell) == expected
+
+
+def test_a_profile_file_that_cannot_be_read_is_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = _codex_home(tmp_path, {"config.toml": BASE})
+    (home / "review.config.toml").mkdir()
+    monkeypatch.chdir(tmp_path)
+    shell = exposure.local_shell({"PATH": "/usr/bin:/bin", "CODEX_HOME": str(home)})
+    assert exposure.model(["codex", "-p", "review", "exec"], "codex", shell) == exposure.UNKNOWN
+
+
+def test_a_project_codex_config_above_the_launch_directory_that_sets_the_model_is_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _codex_home(tmp_path, {"config.toml": BASE, "review.config.toml": REVIEW})
+    project = tmp_path / "project"
+    (project / "sub" / ".codex").mkdir(parents=True)
+    (project / ".codex").mkdir()
+    shell = exposure.local_shell({"PATH": "/usr/bin:/bin", "CODEX_HOME": str(home)})
+    monkeypatch.chdir(project / "sub")
+
+    (project / ".codex" / "config.toml").write_text("approval_policy = 'never'\n", encoding="utf-8")
+    assert exposure.model(["codex", "exec"], "codex", shell) == "default-model"
+    (project / ".codex" / "config.toml").write_text('model = "project-model"\n', encoding="utf-8")
+    assert exposure.model(["codex", "exec"], "codex", shell) == exposure.UNKNOWN
+    assert exposure.model(["codex", "-p", "review", "exec"], "codex", shell) == exposure.UNKNOWN
+    assert exposure.model(["codex", "-m", "flag", "exec"], "codex", shell) == "flag"
+
+    (project / ".codex" / "config.toml").write_text("model = [", encoding="utf-8")
+    assert exposure.model(["codex", "exec"], "codex", shell) == exposure.UNKNOWN
+    (project / ".codex" / "config.toml").unlink()
+    (project / "sub" / ".codex" / "config.toml").write_text('model = "nested"\n', encoding="utf-8")
+    monkeypatch.chdir(project)
+    assert exposure.model(["codex", "exec"], "codex", shell) == "default-model"
+    assert exposure.model(["codex", "-C", "sub", "exec"], "codex", shell) == exposure.UNKNOWN
+
+
+def test_the_user_config_is_not_read_as_a_project_config_from_under_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "config.toml").write_text(BASE, encoding="utf-8")
+    (tmp_path / "work").mkdir()
+    monkeypatch.chdir(tmp_path / "work")
+    shell = exposure.local_shell({"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)})
+    assert exposure.model(["codex", "exec"], "codex", shell) == "default-model"
 
 
 # --- the CLI version -------------------------------------------------------------
@@ -175,6 +266,62 @@ def test_a_version_that_exits_non_zero_or_is_missing_is_unknown(tmp_path: Path) 
     shell = exposure.local_shell({"PATH": "/usr/bin:/bin"})
     assert exposure.cli_version(str(binary), shell) == exposure.UNKNOWN
     assert exposure.cli_version(str(tmp_path / "missing"), shell) == exposure.UNKNOWN
+
+
+def _two_harnesses(tmp_path: Path) -> tuple[Path, Path]:
+    waiter, job = tmp_path / "waiter", tmp_path / "job"
+    for directory, version in ((waiter, "1.0.0"), (job, "2.0.0")):
+        directory.mkdir()
+        _script(directory, "harness", f"echo harness-cli {version}")
+    return waiter, job
+
+
+def test_a_relative_binary_is_versioned_in_the_launch_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    waiter, job = _two_harnesses(tmp_path)
+    monkeypatch.chdir(waiter)
+    shell = exposure.local_shell({"PATH": "/usr/bin:/bin"})
+    assert exposure.cli_version("./harness", shell, str(job)) == "harness-cli 2.0.0"
+    assert exposure.cli_version("./harness", shell, None) == "harness-cli 1.0.0"
+    assert exposure.cli_version("./harness", shell, str(tmp_path / "gone")) == exposure.UNKNOWN
+    assert exposure.cli_version(str(waiter / "harness"), shell, str(tmp_path / "gone")) == "harness-cli 1.0.0"
+
+
+def test_gather_reads_the_version_and_the_project_config_in_the_launch_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    waiter, job = _two_harnesses(tmp_path)
+    (job / ".codex").mkdir()
+    (job / ".codex" / "config.toml").write_text('model = "project-model"\n', encoding="utf-8")
+    home = _codex_home(tmp_path, {"config.toml": BASE})
+    monkeypatch.chdir(waiter)
+    shell = exposure.local_shell({"PATH": "/usr/bin:/bin", "CODEX_HOME": str(home)})
+
+    def gather(workdir: str | None) -> exposure.Exposure:
+        return exposure.gather(argv=["./harness", "exec"], binary="./harness", harness="codex", brief=None,
+                               host="box", factory_root=None, shell=shell, workdir=workdir)
+
+    assert gather(str(job)) == exposure.Exposure(
+        exposure.UNKNOWN, "harness-cli 2.0.0", exposure.UNKNOWN, None, "box", exposure.UNKNOWN
+    )
+    assert gather(None) == exposure.Exposure(
+        "default-model", "harness-cli 1.0.0", exposure.UNKNOWN, None, "box", exposure.UNKNOWN
+    )
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_the_remote_shell_reads_a_relative_binary_in_the_job_directory_it_may_not_have_yet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    waiter, job = _two_harnesses(tmp_path)
+    monkeypatch.chdir(waiter)
+    target = RemoteTarget("pc", "pc-codex-bot", "codex-bot", str(tmp_path / "work"), "job1")
+    shell = exposure.remote_shell(_Transport(), target)
+    assert exposure.cli_version("./harness", shell, target.job_dir) == exposure.UNKNOWN
+    Path(target.job_dir).parent.mkdir(parents=True)
+    job.rename(target.job_dir)
+    assert exposure.cli_version("./harness", shell, target.job_dir) == "harness-cli 2.0.0"
 
 
 def test_the_local_shell_drops_the_proof_and_worker_tag(tmp_path: Path) -> None:
@@ -226,14 +373,14 @@ def test_gather_fills_every_field_and_says_unknown_where_it_cannot() -> None:
     shell = _shell({"--version": "codex-cli 1.2.3", "rev-parse": SHA})
     found = exposure.gather(
         argv=["codex", "exec", "-m", "gpt-5.5"], binary="codex", harness="codex",
-        brief=brief, host="box", factory_root="/f", shell=shell,
+        brief=brief, host="box", factory_root="/f", shell=shell, workdir=None,
     )
     assert found == exposure.Exposure(
         "gpt-5.5", "codex-cli 1.2.3", hashlib.sha256(brief).hexdigest(), router.paths, "box", SHA
     )
     nothing = exposure.gather(
         argv=["claude", "-p"], binary="claude", harness="claude",
-        brief=b"# Brief\n## Task\n", host="", factory_root=None, shell=_shell({}),
+        brief=b"# Brief\n## Task\n", host="", factory_root=None, shell=_shell({}), workdir=None,
     )
     assert nothing == exposure.Exposure(
         exposure.UNKNOWN, exposure.UNKNOWN, hashlib.sha256(b"# Brief\n## Task\n").hexdigest(),

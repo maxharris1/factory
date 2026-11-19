@@ -1200,3 +1200,37 @@ def test_cli_job_run_records_unknown_and_still_runs_when_it_cannot_tell(tmp_path
     assert recorded == exposure.Exposure(
         exposure.UNKNOWN, exposure.UNKNOWN, exposure.UNKNOWN, None, "box", exposure.UNKNOWN
     )
+
+
+def test_cli_job_run_records_the_harness_and_project_config_of_the_job_worktree(tmp_path: Path) -> None:
+    template, _head = _origin(tmp_path)
+    seed = tmp_path / "seed"
+    _fake_harness(seed, "echo harness-cli 2.0.0").rename(seed / "harness")
+    (seed / ".codex").mkdir()
+    (seed / ".codex" / "config.toml").write_text('model = "project-model"\n', encoding="utf-8")
+    _git("add", ".", cwd=seed)
+    _git("commit", "-q", "-m", "harness", cwd=seed)
+    _git("push", "-q", "origin", "HEAD:main", cwd=seed)
+    waiter = tmp_path / "waiter"
+    waiter.mkdir()
+    _fake_harness(waiter, "echo harness-cli 1.0.0").rename(waiter / "harness")
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    (home / "config.toml").write_text('model = "default-model"\n', encoding="utf-8")
+    queue = _queue(tmp_path)
+    job = _running_job(queue, action="build")
+    proc = _orch(
+        "job", "run", "codex-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--db", str(tmp_path / "orch.db"),
+        "--worktree", "--work-root", str(tmp_path / "work"), "--git-url-template", template,
+        "--", "./harness", "exec",
+        env={**GIT_ENV, "CODEX_HOME": str(home)},
+        cwd=waiter,
+        stdin=subprocess.DEVNULL,
+    )
+    _, stderr = proc.communicate(timeout=60)
+
+    assert proc.returncode == 0, stderr
+    with queue.connect() as connection:
+        recorded = exposure.read(connection, job.id)
+    assert recorded is not None, stderr
+    assert (recorded.model, recorded.cli_version) == (exposure.UNKNOWN, "harness-cli 2.0.0")
