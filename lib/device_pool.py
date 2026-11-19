@@ -940,7 +940,7 @@ def placement_blocked(
     harness whose account is usage-limited."""
     rows = device_sync.read(connection)
     blocked = device_sync.blocked_by(rows)
-    stale = device_sync.behind(rows, head, orch_host(config))
+    stale = device_sync.remotes_behind(rows, head, orch_host(config))
     limited = lane_limit.account_limits(connection, now)
     pairs = {
         (device.name, harness)

@@ -11,8 +11,6 @@ lands on a device while its checkout is being updated.
 States:
 
 * synced: HEAD is the target, on main, and every pinned skill file matches.
-  A synced remote row whose sha is not the box HEAD blocks its harness
-  like lagging until the deploy pass moves it (#1018).
 * lagging: not synced, until the next deploy pass moves it. The lagging
   bot's harness is not placed on the device.
 * deploying: a deploy runs now. No harness is placed on the device.
@@ -166,12 +164,8 @@ def blocked(connection: sqlite3.Connection) -> Blocked:
     return blocked_by(read(connection))
 
 
-def behind(rows: Iterable[Row], head: str | None, box: str) -> Blocked:
-    """Synced remote checkouts at a sha other than the box HEAD.
-
-    Box rows are left out because the box's waiter syncs its own checkout
-    to the box HEAD before each start.
-    """
+def remotes_behind(rows: Iterable[Row], head: str | None, box: str) -> Blocked:
+    """Synced remote checkouts at a sha other than the box HEAD."""
     if head is None:
         return NOTHING_BLOCKED
     return Blocked(frozenset(

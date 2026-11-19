@@ -1,5 +1,3 @@
-"""#1018: a claim never places a job on a remote checkout behind the box HEAD."""
-
 from __future__ import annotations
 
 from pathlib import Path
