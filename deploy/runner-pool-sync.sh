@@ -4,8 +4,25 @@
 # when every online pool runner has been busy (or none is online) for 2 checks in a row.
 # Workflows read it as:
 #   runs-on: ${{ fromJSON(vars.FACTORY_LINUX_RUNNER || '["self-hosted","Linux","X64","factory-linux"]') }}
-# Runs on the box as the orch login (needs repo admin to read runners). Hold: touch ~/.config/factory/runner-pool-sync-hold
+# Runs on the orch host (the PC) as the `factory` user, from the deployed checkout, reading runners
+# with that user's own gh (repo admin). `runner-pool-sync.sh ensure` from that user's crontab starts
+# the loop unless a running loop holds the lock. Hold: touch ~/.config/factory/runner-pool-sync-hold
 set -uo pipefail
+usage() {
+  cat <<'EOF'
+usage: runner-pool-sync.sh ensure|loop
+Points FACTORY_LINUX_RUNNER at the factory-linux pool, or at ubuntu-latest while the pool is full.
+Runs on the orch host (the PC) as the `factory` user, started by `ensure` from that user's crontab.
+  ensure  start the loop in its own session unless a running loop holds the lock
+  loop    check the runners every $EVERY seconds (default 30) until the hold file exists
+Hold: touch ~/.config/factory/runner-pool-sync-hold
+EOF
+}
+case ${1:-} in
+  ensure | loop) ;;
+  -h | --help) usage; exit 0 ;;
+  *) usage >&2; exit 2 ;;
+esac
 REPO=${REPO:-maxharris1/factory}
 VAR=FACTORY_LINUX_RUNNER
 POOL='["self-hosted","Linux","X64","factory-linux"]'
