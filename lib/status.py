@@ -36,6 +36,7 @@ from lib.worktrees import pid_alive
 ROOT = Path(__file__).resolve().parent.parent
 
 MERGE_QUEUE_STATES = ("merge-queue", "updating")
+CRITICAL_PATH_BLOCKER = "critical-path-blocker"
 PAUSED_STATES = frozenset(
     {"waiting-max", "waiting-external", "awaiting-ok", "stuck", "blocked", "capped"}
 )
@@ -771,9 +772,14 @@ def render(status: Status) -> str:
                 f"  {row.repo}#{row.ticket_id} {row.state}{_retried(row, status.observed_at)} "
                 f"{positions[key]} of {sizes[key]} [{row.tracker}]"
             )
-    if status.attention:
-        lines.extend(("", f"Needs attention ({len(status.attention)})"))
-        for flag in status.attention:
+    blockers = [flag for flag in status.attention if flag.reason == CRITICAL_PATH_BLOCKER]
+    flags = [flag for flag in status.attention if flag.reason != CRITICAL_PATH_BLOCKER]
+    if blockers:
+        lines.extend(("", f"Critical-path blockers ({len(blockers)})"))
+        lines.extend(f"  {_label(flag)} {flag.detail or ''}".rstrip() for flag in blockers)
+    if flags:
+        lines.extend(("", f"Needs attention ({len(flags)})"))
+        for flag in flags:
             detail = f": {flag.detail}" if flag.detail else ""
             lines.append(f"  {_label(flag)} {flag.reason}{detail}")
     if status.feeder is not None:
