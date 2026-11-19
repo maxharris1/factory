@@ -467,6 +467,28 @@ class ReadyMixin:
                 return None
         return "ci-failed"
 
+    def _clear_recovered_base_red(self, ticket: TrackedTicket) -> None:
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        ticket = self._polled.get(key, ticket)
+        current = ticket.current_head
+        if current is None:
+            return
+        with self._connect() as connection:
+            wait = connection.execute(
+                "SELECT head FROM ci_waits WHERE repo = ? AND ticket_id = ? AND reason = ?",
+                (*key, CI_BASE_RED),
+            ).fetchone()
+            if wait is None:
+                return
+            result = ticket.ci.get(current)
+            if _matching_head(str(wait["head"]), current) is None or (
+                result is not None and result.clears
+            ):
+                connection.execute(
+                    "DELETE FROM ci_waits WHERE repo = ? AND ticket_id = ? AND reason = ?",
+                    (*key, CI_BASE_RED),
+                )
+
     def _watch_ci_stale(self, ticket: TrackedTicket) -> None:
         key = (ticket.repo.lower(), ticket.ticket_id)
         ticket = self._polled.get(key, ticket)
