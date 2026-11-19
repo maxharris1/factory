@@ -223,7 +223,7 @@ def test_the_rollout_reader_returns_only_the_last_rate_limit_and_token_numbers(t
             "primary": {"used_percent": 12.5, "window_minutes": 300, "resets_at": FIVE_HOUR_RESET},
             "secondary": {"used_percent": 34.5, "window_minutes": 10080, "resets_in_seconds": 531270},
         },
-        "tokens": {"input_tokens": 2200, "cached_input_tokens": 1300, "output_tokens": 60, "total_tokens": 2260},
+        "totals": {THREAD: LAST_TOTAL},
         "timestamp": "2026-11-14T16:25:30.000Z",
     }
     assert "TEST VALUE" not in json.dumps(found)
@@ -272,7 +272,7 @@ def test_a_last_token_count_without_rate_limits_is_no_reading_but_keeps_the_last
     found = codex_rollout.latest(str(codex_home(tmp_path, ROLLOUT + last)), THREAD)
     assert found == {
         "rate_limits": None,
-        "tokens": LAST_TOTAL,
+        "totals": {THREAD: LAST_TOTAL},
         "timestamp": "2026-11-14T16:26:00.000Z",
     }
     assert parse_codex(found, CAPTURED + 60) == [
@@ -295,7 +295,7 @@ def test_the_reader_keeps_only_numeric_session_totals(tmp_path: Path, info: obje
     line = {"timestamp": "2026-11-14T16:26:00.000Z", "type": "event_msg",
             "payload": {"type": "token_count", "info": info, "rate_limits": None}}
     found = codex_rollout.latest(str(codex_home(tmp_path, ROLLOUT + json.dumps(line).encode() + b"\n")), THREAD)
-    assert found is not None and found["tokens"] == tokens
+    assert found is not None and found["totals"] == {THREAD: tokens}
 
 
 def test_the_reader_opens_only_the_jobs_own_regular_rollout(tmp_path: Path) -> None:

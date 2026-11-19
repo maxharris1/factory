@@ -9,12 +9,14 @@ id (from the `thread.started` event of `codex exec --json`), reads at most
 MAX_BYTES from its end, and returns the last `token_count` event's
 `rate_limits` with only the numeric fields in KEPT, plus that event's
 timestamp (`rate_limits` None when that event's is null or missing: no
-reading, never an older event's). `tokens` is the last `total_token_usage`
-that holds a number, kept to the numeric fields in TOKEN_KEYS, summed with
-the same total of every helper agent the thread spawned. A helper is a
-rollout no older than the job's whose first line, its `session_meta`,
-names the job's thread, or another helper's, as its parent. Of any other
-rollout no older than the job's, only that first line is decoded. Every
+reading, never an older event's). `totals` maps the job's thread id, and
+that of every helper agent the thread spawned, to its rollout's last
+`total_token_usage` that holds a number, kept to the numeric fields in
+TOKEN_KEYS; a rollout whose tail holds no such total, or that cannot be
+read, is left out. A helper is a rollout no older than the job's whose
+first line, its `session_meta`, names the job's thread, or another
+helper's, as its parent. Of any other rollout no older than the job's,
+only that first line is decoded. Every
 other key and line is dropped unread: a tail line is decoded only when it
 holds `"token_count"`. A symlink, a non-regular file or a path outside
 `sessions/` is never opened, and no other file is.
@@ -145,7 +147,7 @@ def _parent(line: bytes) -> tuple[str, str] | None:
     return thread, parent
 
 
-def _helpers(home: str, path: str, thread_id: str) -> list[str]:
+def _helpers(home: str, path: str, thread_id: str) -> list[tuple[str, str]]:
     sessions = os.path.realpath(os.path.join(home, "sessions"))
     day = os.path.relpath(os.path.realpath(os.path.dirname(path)), sessions).split(os.sep)
     oldest = os.path.basename(path)[: -len(f"-{thread_id}.jsonl")]
@@ -170,7 +172,7 @@ def _helpers(home: str, path: str, thread_id: str) -> list[str]:
             if child not in seen:
                 seen.add(child)
                 queue.append(child)
-                helpers.append(candidate)
+                helpers.append((child, candidate))
     return helpers
 
 
@@ -183,7 +185,7 @@ def _tokens(data: bytes) -> dict | None:
 
 
 def latest(home: str, thread_id: str) -> dict | None:
-    """The thread's last `token_count` rate limits and its session token total, helpers included, or None."""
+    """The thread's last `token_count` rate limits and each rollout's session token total, helpers included, or None."""
     path = rollout_path(home, thread_id)
     if path is None:
         return None
@@ -194,18 +196,14 @@ def latest(home: str, thread_id: str) -> dict | None:
     found = next(filter(None, map(_reading, reversed(data.splitlines()))), None)
     if found is None:
         return None
-    totals = [_tokens(data)]
-    for helper in _helpers(home, path, thread_id):
+    totals = {thread_id: _tokens(data)}
+    for thread, helper in _helpers(home, path, thread_id):
         try:
-            totals.append(_tokens(_read(helper, tail=True)))
+            totals[thread] = _tokens(_read(helper, tail=True))
         except OSError:
             continue
-    present = [total for total in totals if total is not None]
-    found["tokens"] = {
-        key: sum(total[key] for total in present if key in total)
-        for key in TOKEN_KEYS
-        if any(key in total for total in present)
-    } or None
+    del found["tokens"]
+    found["totals"] = {thread: total for thread, total in totals.items() if total is not None}
     return found
 
 

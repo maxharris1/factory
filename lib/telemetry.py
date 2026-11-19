@@ -71,10 +71,10 @@ stdout on a pipe and hands the pipe to a `Session` here:
   agents included (#1015); the first source present wins. Claude: the sum
   over every model in the `result` event's `modelUsage`, else that event's
   `usage`, else the sum of each assistant message's usage until a result
-  comes. Codex: the same rollout read's last `total_token_usage`, summed
-  with each helper agent's rollout, else the sum of each `turn.completed`
-  usage; once a rollout total is in, a later turn or a read with no total
-  no longer changes the count.
+  comes. Codex: the sum of the last `total_token_usage` of the job's own
+  rollout and of each helper agent's, else the sum of each
+  `turn.completed` usage; once a rollout total is in, a later turn no
+  longer changes the count.
 
 Secrets: the only free text that goes into the table is the harness's tool
 names (as tool call counts and step labels) and the live run's texts (each
@@ -1273,6 +1273,7 @@ class Summary:
         self._seen_items: set[str] = set()
         self._messages: dict[str, tuple[int, int, int]] = {}
         self._totals = False
+        self._last_total_by_thread: dict[str, dict] = {}
         self.thread_id: str | None = None
 
     # -- shared --
@@ -1469,14 +1470,20 @@ class Summary:
             if isinstance(item, dict):
                 self._codex_item(item, now, done=kind == "item.completed")
 
-    def codex_total(self, tokens: object) -> None:
-        if not isinstance(tokens, dict):
+    def codex_total(self, totals: object) -> None:
+        if not isinstance(totals, dict):
+            return
+        for thread, total in totals.items():
+            if isinstance(thread, str) and isinstance(total, dict):
+                self._last_total_by_thread[thread] = total
+        if not self._last_total_by_thread:
             return
         self._totals = True
         self.usage_seen = True
-        self.tokens_in = _int(tokens.get("input_tokens"))
-        self.tokens_cached = _int(tokens.get("cached_input_tokens"))
-        self.tokens_out = _int(tokens.get("output_tokens"))
+        kept = self._last_total_by_thread.values()
+        self.tokens_in = sum(_int(total.get("input_tokens")) for total in kept)
+        self.tokens_cached = sum(_int(total.get("cached_input_tokens")) for total in kept)
+        self.tokens_out = sum(_int(total.get("output_tokens")) for total in kept)
 
     def _codex_item(self, item: dict, now: float, *, done: bool) -> None:
         item_type = item.get("type")
@@ -1830,11 +1837,11 @@ class Session:
 
     def add_rollout(self, found: object) -> None:
         """One Codex rollout read (lib/codex_rollout.py `latest`): its rate
-        limits as readings and its session token total; the next flush stores both."""
+        limits as readings and each rollout's session token total; the next flush stores both."""
         try:
             self.add_usage(parse_codex(found, self.clock()))
             with self._lock:
-                self.summary.codex_total(found.get("tokens") if isinstance(found, dict) else None)
+                self.summary.codex_total(found.get("totals") if isinstance(found, dict) else None)
         except Exception as exc:
             self._warn("rollout", f"telemetry: rollout not read ({type(exc).__name__})")
 
