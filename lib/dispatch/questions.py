@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import re
 import sqlite3
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from lib.dispatch.constants import FINISHED_STATES, HANDED_OFF_EXTERNALLY
 from lib.dispatch.helpers import (
@@ -38,6 +40,82 @@ _REFUSED_VERDICT_OUTCOMES = (
     "refused-",
     "woke-grok-unparsed",
 )
+# lib/orchestrate.py answers_comment and answers_for write these blocks.
+_QUESTION_ANSWER = re.compile(
+    r"^\*\*Question\*\*\n(.+?)\n+\*\*Answer\*\*\n(.*?)(?=^\*\*Question\*\*$|\Z)",
+    re.M | re.S,
+)
+_LIST_ITEM = re.compile(r"^(\s*)(?:[-*]|[0-9]+[.)])\s+(\S.*?)\s*$")
+# The dashboard's words_block (deploy/factory-dashboard-http.py).
+_MAX_WORDS = "**Max's words**"
+
+
+@dataclass(frozen=True)
+class Decision:
+    question: str
+    options: tuple[str, ...]
+    choice: str
+    answerer: str
+    answered_at: float
+    url: str | None
+    answer_id: str
+    position: int
+
+
+def decisions_of(question: Comment | None, answer: Comment) -> list[Decision]:
+    """The operator's decisions in one answers comment to the paused question."""
+    body = parse_comment(answer.body).body
+    asked = _handoff_body(question)
+    pairs = [(text.strip(), choice.strip()) for text, choice in _QUESTION_ANSWER.findall(body)]
+    entries = (
+        [(text, _options(asked, text), choice) for text, choice in pairs]
+        if pairs
+        else [(asked.strip(), _options(asked, None), _unquoted(body))]
+    )
+    return [
+        Decision(text, options, choice, answer.author, answer.created_at, answer.url, answer.id, position)
+        for position, (text, options, choice) in enumerate(entries)
+    ]
+
+
+def _handoff_body(comment: Comment | None) -> str:
+    if comment is None:
+        return ""
+    try:
+        return parse_comment(comment.body).body
+    except HandoffError:
+        return ""
+
+
+def _options(text: str, question: str | None) -> tuple[str, ...]:
+    """The list items under the line that asks question, else every list item."""
+    lines = text.splitlines()
+    every = tuple(item.group(2) for line in lines if (item := _LIST_ITEM.match(line)))
+    if question is None:
+        return every
+    for index, line in enumerate(lines):
+        asked = _LIST_ITEM.match(line)
+        if (asked.group(2) if asked else line.strip()) != question:
+            continue
+        depth = len(asked.group(1)) if asked else -1
+        under: list[str] = []
+        for later in lines[index + 1 :]:
+            item = _LIST_ITEM.match(later)
+            if item is None and later.strip():
+                break
+            if item is not None:
+                if len(item.group(1)) <= depth:
+                    break
+                under.append(item.group(2))
+        return tuple(under) or every
+    return every
+
+
+def _unquoted(body: str) -> str:
+    first, _, rest = body.strip().partition("\n")
+    if not first.startswith(_MAX_WORDS):
+        return body.strip()
+    return "\n".join(line.removeprefix(">").removeprefix(" ") for line in rest.splitlines()).strip()
 
 
 class QuestionsMixin:
@@ -235,6 +313,31 @@ class QuestionsMixin:
             (item for item in ticket.comments if item.id == paused["paused_question_id"]),
             None,
         )
+        with self._connect() as connection:
+            connection.executemany(
+                """
+                INSERT OR IGNORE INTO decisions (
+                    repo, ticket_id, answer_id, position, question_id, question,
+                    options, choice, answerer, answered_at, url
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        ticket.repo.lower(),
+                        ticket.ticket_id,
+                        decision.answer_id,
+                        decision.position,
+                        paused["paused_question_id"],
+                        decision.question,
+                        json.dumps(list(decision.options)),
+                        decision.choice,
+                        decision.answerer,
+                        decision.answered_at,
+                        decision.url,
+                    )
+                    for decision in decisions_of(question, comment)
+                ],
+            )
         paused_plan = gap_of(question) if question is not None else None
         if action == "build" and paused["paused_plan_text"] is not None:
             plan_text = paused["paused_plan_text"]
@@ -306,6 +409,20 @@ class QuestionsMixin:
             )
         self._write_state_label(ticket, resumed_state)
         return True, f"resumed-{action}"
+
+    def _decisions(self, ticket: TrackedTicket) -> list[dict[str, object]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT question, options, choice, answerer, answered_at, url,
+                       answer_id, position
+                FROM decisions
+                WHERE repo = ? AND ticket_id = ?
+                ORDER BY answered_at, answer_id, position
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchall()
+        return [{**dict(row), "options": json.loads(row["options"])} for row in rows]
 
     def _answered_by(
         self,

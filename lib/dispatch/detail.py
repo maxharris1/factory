@@ -691,6 +691,8 @@ class DetailMixin:
             context["plan_text"] = plan_text
         if action in ("plan", "build") and (answers := self._answers(ticket)):
             context["answers"] = answers
+        if action in ("plan", "build", "fix", "review") and (decisions := self._decisions(ticket)):
+            context["decisions"] = decisions
         if ticket.factory_md is not None:
             context["routing"] = {
                 "builder": ticket.factory.builder_harness,

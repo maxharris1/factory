@@ -52,6 +52,7 @@ from lib.brief.common import (
     TEXT_LIMIT,
     BriefError,
     data_section,
+    decided_section,
     detail_of,
     facts_of,
     handoff_section,
@@ -129,6 +130,11 @@ def render_brief(
         if kind == "merge-only"
         else skills.resolve(role, bot, factory_root, pin_root)
     )
+    decided = (
+        decided_section(detail, reviewer=kind == "review")
+        if kind != "merge-only" and not isinstance(router, str)
+        else None
+    )
     if isinstance(router, str):
         middle = [
             "## What to do\n" + "\n".join(skills.blocked_task_lines(router)),
@@ -140,6 +146,7 @@ def render_brief(
             *(review.evidence_sections(detail, facts) if kind == "review" else []),
             "## What to do\n" + "\n".join(_task_lines(job, kind, facts)),
             *_quoted_sections(facts),
+            *([decided] if decided is not None else []),
             _handoff(job, bot, kind, facts),
         ]
     parts = [
@@ -153,6 +160,7 @@ def render_brief(
             job, detail, facts, findings_quoted=(
                 kind == "fix" and not isinstance(router, str) and bool(fix.quoted_findings(detail, facts))
             ),
+            decided=decided is not None,
         ),
         context_section(facts, context, context_ref, context_note, kind),
     ]
