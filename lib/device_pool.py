@@ -119,6 +119,9 @@ _SLOT_COLUMNS = (
     # (lib/process_tree.py), so a lost run is found after its parents exit.
     ("run_tag", "TEXT"),
     ("run_scope", "TEXT"),
+    # #1077: the account the job runs as. NULL on a row placed before it,
+    # read as the device's login account (placed_account).
+    ("account", "TEXT"),
 )
 
 
@@ -138,6 +141,7 @@ class Placement:
     autostart_pid: int | None = None
     autostart_start: str | None = None
     run_scope: str | None = None
+    account: str | None = None
 
     @property
     def autostarted(self) -> bool:
@@ -169,6 +173,15 @@ class Orphan:
     run_tag: str | None = None
     members: Mapping[int, str] = field(default_factory=dict)
     run_scope: str | None = None
+
+
+def placed_account(config: MachinesConfig, placement: Placement) -> str | None:
+    """The account the slot recorded, else (a row from before #1077) the
+    placed device's login account for the harness as config lists it now."""
+    if placement.account is not None:
+        return placement.account
+    device = config.device(placement.device)
+    return None if device is None else device.account_for(placement.harness)
 
 
 def choose_device(
@@ -365,16 +378,17 @@ class DevicePool:
             if changed != 1:
                 raise QueueError(f"job {row['id']} changed during claim")
             os_user = device.harnesses[harness]
+            account = device.account_for(harness)
             claimer_pid, claimer_start = autostart if autostart is not None else (None, None)
             connection.execute(
                 f"""
                 INSERT INTO {SLOTS_TABLE} (
                     job_id, device, harness, os_user, placed_at,
-                    autostart_pid, autostart_start
+                    autostart_pid, autostart_start, account
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (row["id"], device.name, harness, os_user, now, claimer_pid, claimer_start),
+                (row["id"], device.name, harness, os_user, now, claimer_pid, claimer_start, account),
             )
             updated = connection.execute(
                 "SELECT * FROM jobs WHERE id = ?",
@@ -390,6 +404,7 @@ class DevicePool:
             placed_at=now,
             autostart_pid=claimer_pid,
             autostart_start=claimer_start,
+            account=account,
         )
 
     def release(self, job_id: str, *, owner: str, proof: Proof | None = None) -> bool:
@@ -849,6 +864,7 @@ def _placement(row: sqlite3.Row) -> Placement:
         autostart_pid=_int(row["autostart_pid"]),
         autostart_start=_text(row["autostart_start"]),
         run_scope=_text(row["run_scope"]),
+        account=_text(row["account"]),
     )
 
 
