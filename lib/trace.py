@@ -1,11 +1,3 @@
-"""Every job attempt on one ticket and how the dispatcher judged its handoff (issue #1016).
-
-`orch trace` reads jobs, job_events and device_slots, plus the dispatcher's
-handled_comments, handled_times and comment_links, all from orch.db. A table a
-young database lacks reads as empty. The database is opened with mode=ro and
-nothing calls GitHub or starts a subprocess, so it is safe beside a live poller.
-"""
-
 from __future__ import annotations
 
 import re
@@ -161,7 +153,6 @@ def _verdict(
 ) -> tuple[str, str]:
     if outcome is not None and outcome.startswith(_REJECTED_OUTCOMES + _UPDATE_NO_HANDOFF_OUTCOMES):
         return "rejected", outcome
-    # A failed check means the ready settles no job, whatever outcome the comment got.
     if failed is not None:
         return "rejected", failed
     if outcome is not None:
