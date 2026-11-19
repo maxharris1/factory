@@ -1817,6 +1817,21 @@ def test_failed_run_logs_reads_the_run_once_and_splits_it_by_job() -> None:
         actions.failed_run_logs("owner/repo", "../secrets")
 
 
+def test_failed_run_logs_keeps_a_job_whose_name_starts_like_a_status_line() -> None:
+    actions, gh = adapter()
+    gh.route(RUN_LOG, GhResult(0, "HTTP/2 compatibility\tRun tests\tFAILED x\n", ""))
+
+    assert actions.failed_run_logs("owner/repo", "123456") == {"HTTP/2 compatibility": "FAILED x"}
+
+
+def test_job_log_keeps_a_log_that_starts_like_a_status_line() -> None:
+    actions, gh = adapter()
+    text = "HTTP/1.1 200 OK\n\nFAILED tests/test_a.py::test_b\n"
+    gh.route(JOB_LOG, GhResult(0, text, ""))
+
+    assert actions.job_log("owner/repo", "31000000004") == text
+
+
 def draft_pull() -> GhResult:
     pull = served("pull-42-open.json")
     return GhResult(0, pull.stdout.replace('"draft": false', '"draft": true'), "")

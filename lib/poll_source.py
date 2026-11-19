@@ -65,6 +65,7 @@ from lib.github_actions import (
     Runner,
     _is_read,
     _route,
+    rate_limited,
     run_gh,
 )
 from lib.handoff import HandoffError, parse_comment
@@ -2348,7 +2349,7 @@ class LivePollSource:
                 if included is not None
                 else _status_code(result.stderr)
             )
-            if _is_rate_limited(status, result.stdout, result.stderr):
+            if rate_limited(status, result.stdout, result.stderr):
                 self._backoff_until = now + BACKOFF_SECONDS
             route = f"gh api {_route(args)}"
             if status is not None:
@@ -2681,18 +2682,6 @@ def _retry_after_seconds(headers: Mapping[str, str]) -> float:
 def _status_code(value: str) -> int | None:
     found = _HTTP_STATUS.search(value)
     return int(found.group(1)) if found is not None else None
-
-
-def _is_rate_limited(status: int | None, stdout: str, stderr: str) -> bool:
-    if status == 429:
-        return True
-    if status != 403:
-        return False
-    text = f"{stdout}\n{stderr}".lower()
-    return "rate limit" in text or re.search(
-        r"(?im)^x-ratelimit-remaining:\s*0\s*$",
-        stdout,
-    ) is not None
 
 
 def _cycle_error_detail(repo: str, ticket_id: str, reason: str) -> str:

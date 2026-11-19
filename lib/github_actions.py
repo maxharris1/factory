@@ -174,11 +174,13 @@ class GitHubAdapterError(ShipError):
         safe_detail: str | None = None,
         http_status: int | None = None,
         api_message: str | None = None,
+        rate_limited: bool = False,
     ):
         super().__init__(message)
         self.safe_detail = message if safe_detail is None else safe_detail
         self.http_status = http_status
         self.api_message = api_message
+        self.rate_limited = rate_limited
 
 
 class NotFastForwardError(GitHubAdapterError):
@@ -982,12 +984,12 @@ class GitHubReviewActions:
     def _run_completed(self, repo: str, run_id: str) -> bool:
         endpoint = f"{_repo_path(repo)}/actions/runs/{run_id}"
         try:
-            text = self._gh(("api", endpoint), route=f"gh api {_route((endpoint,))}")
+            text = self._gh(("api", "--include", endpoint), route=f"gh api {_route((endpoint,))}")
             run = _object(json.loads(text))
         except json.JSONDecodeError:
             return False
         except GitHubAdapterError as exc:
-            if _transient(exc):
+            if _transient(exc) or exc.rate_limited:
                 return False
             raise
         return run.get("status") == "completed"
@@ -1024,22 +1026,25 @@ class GitHubReviewActions:
             ) from exc
         if result.returncode != 0 and partial_graphql and _has_graphql_data(result.stdout):
             return result.stdout
+        body = _without_headers(result.stdout) if "--include" in args else result.stdout
         if result.returncode != 0:
-            detail = " ".join(f"{result.stderr} {result.stdout}".split())[:500]
+            detail = " ".join(f"{result.stderr} {body}".split())[:500]
             safe = f"{route} exited {result.returncode}"
-            status = _HTTP_STATUS.search(result.stderr)
+            found = _HTTP_STATUS.search(result.stderr)
+            status = int(found.group(1)) if found is not None else None
             if status is not None:
-                safe += f" (HTTP {status.group(1)})"
-            graphql = _graphql_detail(result.stdout)
+                safe += f" (HTTP {status})"
+            graphql = _graphql_detail(body)
             if graphql:
                 safe += f" {graphql}"
             raise GitHubAdapterError(
                 f"gh exited {result.returncode}: {detail or 'no output'}",
                 safe_detail=safe,
-                http_status=int(status.group(1)) if status is not None else None,
-                api_message=_api_message(result.stdout),
+                http_status=status,
+                api_message=_api_message(body),
+                rate_limited=rate_limited(status, result.stdout, result.stderr),
             )
-        return result.stdout
+        return body
 
     def _json(
         self, *args: str, cache_ttl: str | None = None, partial_graphql: bool = False
@@ -1525,6 +1530,26 @@ def _transient(exc: GitHubAdapterError) -> bool:
     """A failure a later try may pass: a 5xx, a timeout, or no HTTP status at all."""
     status = _status(exc)
     return status is None or status >= 500
+
+
+def rate_limited(status: int | None, stdout: str, stderr: str) -> bool:
+    if status == 429:
+        return True
+    if status != 403:
+        return False
+    text = f"{stdout}\n{stderr}".lower()
+    return (
+        "rate limit" in text
+        or re.search(r"(?im)^x-ratelimit-remaining:\s*0\s*$", stdout) is not None
+        or re.search(r"(?im)^retry-after:", stdout) is not None
+    )
+
+
+def _without_headers(stdout: str) -> str:
+    if not stdout.startswith("HTTP/"):
+        return stdout
+    found = re.search(r"\r?\n\r?\n", stdout)
+    return stdout[found.end() :] if found is not None else ""
 
 
 def _api_message(stdout: str) -> str | None:
