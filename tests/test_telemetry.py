@@ -301,6 +301,59 @@ def test_a_codex_job_total_includes_every_helper_agent_it_spawned(tmp_path: Path
     assert (row["tokens_in"], row["tokens_cached"], row["tokens_out"]) == (15_600_000, 14_700_000, 120_000)
 
 
+HELPER_155 = "00000000-0000-4000-8000-000000000155"
+BIG_TOOL_OUTPUT = (json.dumps({"timestamp": "2026-11-14T16:48:00.000Z", "type": "response_item",
+                               "payload": {"type": "function_call_output", "call_id": "call-1",
+                                           "output": "x" * 200_000}}) + "\n").encode()
+SMALLER_TOKEN_COUNT = (b'{"timestamp":"2026-11-14T16:50:00.000Z","type":"event_msg","payload":'
+                       b'{"type":"token_count","info":{"total_token_usage":{"input_tokens":2600000,'
+                       b'"cached_input_tokens":2400000,"output_tokens":21000,"total_tokens":2621000}},'
+                       b'"rate_limits":null}}\n')
+
+
+def _parent_and_helper(tmp_path: Path) -> tuple[Session, Path, dict[str, Path]]:
+    home = tmp_path / "codex-home"
+    shutil.copytree(CODEX_154, home)
+    [parent] = (home / "sessions").rglob("rollout-*.jsonl")
+    helper = _helper_rollout(parent, HELPER_155, {"parent_thread_id": CODEX_154_THREAD})
+    session, db = _codex_session(tmp_path, home)
+    session.consume(io.BytesIO((CODEX_154 / "exec.jsonl").read_bytes()))
+    session.flush()
+    assert _stored_tokens(db) == (10_400_000, 9_800_000, 80_000, 0)
+    return session, db, {"parent": parent, "helper": helper}
+
+
+def _stored_tokens(db: Path) -> tuple:
+    row = _row(db, "job-154")
+    return row["tokens_in"], row["tokens_cached"], row["tokens_out"], row["tokens_unknown"]
+
+
+@pytest.mark.parametrize("rollout", ["helper", "parent"])
+def test_a_rollout_total_pushed_out_of_the_read_window_keeps_its_share_of_the_job_total(
+    tmp_path: Path, rollout: str
+) -> None:
+    session, db, rollouts = _parent_and_helper(tmp_path)
+    with rollouts[rollout].open("ab") as out:
+        out.write(BIG_TOOL_OUTPUT * 22 + NULL_TOKEN_COUNT)
+    session.finish(0)
+    assert _stored_tokens(db) == (10_400_000, 9_800_000, 80_000, 0)
+
+
+def test_a_helper_rollout_that_cannot_be_read_keeps_its_share_of_the_job_total(tmp_path: Path) -> None:
+    session, db, rollouts = _parent_and_helper(tmp_path)
+    rollouts["helper"].unlink()
+    session.finish(0)
+    assert _stored_tokens(db) == (10_400_000, 9_800_000, 80_000, 0)
+
+
+def test_a_newer_smaller_total_for_the_same_rollout_replaces_its_share(tmp_path: Path) -> None:
+    session, db, rollouts = _parent_and_helper(tmp_path)
+    with rollouts["helper"].open("ab") as out:
+        out.write(SMALLER_TOKEN_COUNT)
+    session.finish(0)
+    assert _stored_tokens(db) == (5_200_000 + 2_600_000, 4_900_000 + 2_400_000, 40_000 + 21_000, 0)
+
+
 def test_codex_turn_failures_and_errors_become_the_exit_reason() -> None:
     summary = Summary("codex", Scrubber({}))
     summary.feed({"type": "turn.started"}, 1.0)
