@@ -1220,7 +1220,7 @@ class Feeder:
             for ref, wait in waits.items()
             if wait.attention is not None
         }
-        tracked = {project.repo for project in self.config.projects}
+        tracked = {project.repo.lower() for project in self.config.projects}
         with self.queue.connect() as connection:
             attention.sync(connection, WAIT_REASONS, repos, flags, now)
             attention.sync(connection, (ATTENTION_CRITICAL_PATH,), tracked, critical, now)
