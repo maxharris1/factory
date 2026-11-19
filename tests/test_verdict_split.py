@@ -11,6 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 VERDICT = ROOT / "lib" / "dispatch" / "verdict"
 VERDICT_FILES = sorted(VERDICT.glob("*.py"))
 RULE_FILES = [path for path in VERDICT_FILES if path.name != "__init__.py"]
+PURE_MODULES = {"convergence"}
+MIXIN_FILES = [path for path in RULE_FILES if path.stem not in PURE_MODULES]
 
 NAMES_BEFORE_SPLIT = (
     "AlreadyMergedShip", "CIResult", "Comment", "HandoffError", "JobRequest",
@@ -107,7 +109,7 @@ def test_the_package_init_only_imports_and_composes() -> None:
 
 
 def test_no_rule_module_imports_another_mixin_or_the_dispatcher() -> None:
-    own_rules = {f"lib.dispatch.verdict.{path.stem}" for path in RULE_FILES}
+    own_rules = {f"lib.dispatch.verdict.{path.stem}" for path in MIXIN_FILES}
     for path in RULE_FILES:
         imports = _runtime_imports(path)
         assert "lib.dispatcher" not in imports, path
@@ -119,6 +121,18 @@ def test_no_rule_module_imports_another_mixin_or_the_dispatcher() -> None:
     assert {
         name for name in init_imports if name.startswith("lib.dispatch.verdict")
     } == own_rules
+
+
+def test_a_pure_verdict_module_imports_no_lib_code_and_defines_no_mixin() -> None:
+    assert PURE_MODULES <= {path.stem for path in RULE_FILES}
+    for name in PURE_MODULES:
+        path = VERDICT / f"{name}.py"
+        assert not {module for module in _runtime_imports(path) if module.split(".")[0] == "lib"}, path
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        assert not [
+            node.name for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name.endswith("Mixin")
+        ], path
 
 
 def test_the_package_keeps_the_dispatcher_invariants() -> None:
