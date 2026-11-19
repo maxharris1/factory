@@ -24,6 +24,7 @@ from types import FrameType
 from typing import Any
 
 from lib import (
+    account_doctor,
     account_home,
     codex_sandbox,
     containers,
@@ -193,7 +194,7 @@ commands:
   retry            ask the dispatcher to restart a stuck ticket (kind=retry)
   trace            read-only: every job attempt on a ticket and its handoff verdict
   usage            per-account usage readings: migrate orch.db, record an external reading (#772)
-  accounts         prepare a bot's account folders (issue #1065)
+  accounts         prepare a bot's account folders, check every sign-in (issue #1065)
 
 check-config [--orch PATH] [--machines PATH] [--factory [owner/name=]PATH ...]
              [--allow-placeholders] [--digest]
@@ -566,6 +567,17 @@ accounts prepare --device NAME [--account ID] [--machines PATH]
   agents, docs, rules and settings.json to ~/.claude. Never replaces an
   existing file or link and never reads the folder. Exits 2 when refused
   (another user, unknown device or account, home mismatch), 1 on a conflict.
+
+accounts doctor [--db PATH] [--machines PATH] [--json]
+  Ask every device, over ssh as each bot, whether each account machines.yml
+  signs in there is signed in: `claude auth status` or `codex login status`
+  under the login shell, with token variables unset. Never reads a token
+  or credential file and never signs in. Replaces the account_signins rows
+  and prints one line per pair, <account>@<device> <status> <auth method
+  or -> <detail>; --json prints the rows as a JSON list. --db defaults to
+  $ORCH_DB, --machines to the checkout's machines.yml. Exits 0 after a
+  pass whatever the statuses, 2 on a config error, 1 when the database
+  cannot be written.
 """
 
 
@@ -2858,8 +2870,17 @@ def _accounts(argv: list[str]) -> int:
     prepare.add_argument("--device", required=True)
     prepare.add_argument("--account")
     prepare.add_argument("--machines", type=Path)
+    prepare.set_defaults(run=_accounts_prepare)
+    doctor = commands.add_parser("doctor", allow_abbrev=False)
+    doctor.add_argument("--db", type=Path)
+    doctor.add_argument("--machines", type=Path)
+    doctor.add_argument("--json", action="store_true")
+    doctor.set_defaults(run=_accounts_doctor)
     args = parser.parse_args(argv)
-    prog = f"orch accounts {args.command}"
+    return args.run(args, f"orch accounts {args.command}")
+
+
+def _accounts_prepare(args: argparse.Namespace, prog: str) -> int:
     try:
         machines = _machines_config(args.machines, required=True)
         assert machines is not None
@@ -2877,6 +2898,27 @@ def _accounts(argv: list[str]) -> int:
     if not changes:
         print("ok: nothing to change")
     return 1 if any(change.action == "conflict" for change in changes) else 0
+
+
+def _accounts_doctor(args: argparse.Namespace, prog: str) -> int:
+    try:
+        path = _db_path(args.db)
+        machines = _machines_config(args.machines, required=True)
+        assert machines is not None
+        with contextlib.closing(sqlite3.connect(path, timeout=30, isolation_level=None)) as connection:
+            rows = account_doctor.run(connection, machines, SshTransport(), time.time())
+    except (ValueError, WaitError) as exc:
+        print(f"{prog}: refused: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 2
+    except (sqlite3.Error, OSError) as exc:
+        print(f"{prog}: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps([asdict(row) for row in rows]))
+        return 0
+    for row in rows:
+        print(f"{row.account}@{row.device} {row.status} {row.auth_method or '-'} {row.detail}".rstrip())
+    return 0
 
 
 def _db_path(path: Path | None) -> Path:
