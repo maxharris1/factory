@@ -1042,7 +1042,18 @@ elif sys.argv[1:3] == ["heal", "--health-json"]:
 def test_export_drains_while_the_self_heal_loop_runs(tmp_path: Path) -> None:
     box = Host(tmp_path, "box")
     for name in ("self-heal.sh", "host-pidns.sh"):
-        shutil.copy(ROOT / "deploy" / name, box.checkout / "deploy" / name)
+        _executable(box.checkout / "real-deploy" / name,
+                    (ROOT / "deploy" / name).read_text(encoding="utf-8"))
+    real_heal = box.checkout / "real-deploy/self-heal.sh"
+    idle_returned = box.home / "idle-returned"
+    _executable(box.checkout / "deploy/self-heal.sh", f"""#!/bin/sh
+if [ "$1" = wait-idle ] && [ ! -e "$HOME/.config/factory/orch-retired" ]; then
+    bash {str(real_heal)!r} "$@" || exit $?
+    touch {str(idle_returned)!r}
+    exit 0
+fi
+exec bash {str(real_heal)!r} "$@"
+""")
     cleanup_orch = tmp_path / "cleanup-orch"
     _executable(cleanup_orch, FAKE_CLEANUP_ORCH)
     _, seed = setup(tmp_path / "seed")
@@ -1060,7 +1071,7 @@ def test_export_drains_while_the_self_heal_loop_runs(tmp_path: Path) -> None:
                        **{TAG: os.environ.get(TAG, "")})
 
     def self_heal(command: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(["bash", str(box.checkout / "deploy/self-heal.sh"), command],
+        return subprocess.run(["bash", str(real_heal), command],
                               env=heal_env, text=True, capture_output=True, timeout=60,
                               check=False)
 
@@ -1077,7 +1088,7 @@ def test_export_drains_while_the_self_heal_loop_runs(tmp_path: Path) -> None:
         queue = SQLiteJobQueue(box.db, clock=time.time)
         seen = False
         while not stop.is_set():
-            if _drains_are(box, "orch-move\n"):
+            if idle_returned.exists() and _drains_are(box, "orch-move\n"):
                 seen = True
             elif seen:
                 gaps.append(time.strftime("%H:%M:%S"))
@@ -1093,7 +1104,9 @@ def test_export_drains_while_the_self_heal_loop_runs(tmp_path: Path) -> None:
     try:
         move = box.start_move("export", "--to", "pc", "--dir", str(export),
                               ORCH_BIN=str(cleanup_orch))
-        _until(lambda: skips() >= 3 or gaps, "self-heal never ran a pass during the drain")
+        _until(lambda: idle_returned.exists(), "the idle wait never returned")
+        armed = skips()
+        _until(lambda: skips() >= armed + 3 or gaps, "self-heal never ran a pass during the drain")
         assert gaps == [], "a self-heal pass removed the drain files"
         assert move.poll() is None, "export went on while a job was running"
         _finish_jobs(box.db)
