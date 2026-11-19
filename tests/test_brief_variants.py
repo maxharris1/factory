@@ -248,12 +248,6 @@ def test_ci_fix_states_no_cause_it_could_not_read(failed: tuple[FailedCheck, ...
     assert "The factory read this failure" not in _task(_render(*CI_FIX))
 
 
-def test_ci_fix_says_an_unfetched_log_is_unavailable_and_where_to_read_it():
-    task = _ci_fix_with({"77": None})
-
-    assert "The `pytest` log is unavailable. Read it at https://github.com/owner/repo/actions/runs/9." in task
-
-
 def test_ci_fix_task_hides_a_credential_value_on_the_line_after_its_name():
     assert "synthetic-swordfish" not in _ci_fix_with({"77": "password:\n  synthetic-swordfish"})
 

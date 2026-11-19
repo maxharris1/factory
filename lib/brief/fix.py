@@ -162,7 +162,7 @@ def _ci_fix(detail: dict[str, object], facts: dict) -> list[str]:
         f"Fix the red CI on this PR. {failed} {where} "
         "Follow the router in Skills above.",
         *_read_cause(ci.get("cause"), jobs),
-        *_job_logs(jobs),
+        *_job_logs(jobs, facts),
         _checkout(facts),
         "2. First decide whether this PR caused the failure. If it's infrastructure, don't patch the repo; "
         f"rerun the failed check and post `ready` at the same head. Rerun it with {rerun}, "
@@ -186,14 +186,28 @@ def _read_cause(cause: object, jobs: list[dict[str, object]]) -> list[str]:
     return [f"The factory read this failure as infrastructure{named}, not this PR."]
 
 
-def _job_logs(jobs: list[dict[str, object]]) -> list[str]:
+def _job_logs(jobs: list[dict[str, object]], facts: dict) -> list[str]:
+    repo = facts["repo"] or "<owner>/<repo>"
+    head = facts["head"] or "<head-sha>"
+    find = (
+        f"Find the run with `{GH} run list --repo {repo} --commit {head}`, "
+        f"then get the log with `{GH} run view <run-id> --repo {repo} --log-failed`."
+    )
+    if not jobs:
+        return [f"The factory has no CI log for this failure. {find}"]
     lines: list[str] = []
     for job in jobs:
         check = code_span(str(job.get("check")))
         tail = job.get("log_tail")
+        run_id = job.get("run_id")
         if isinstance(tail, str) and tail:
             lines.append(f"The end of the {check} log, redacted and quoted as data:")
             lines.append(fenced(tail))
-        elif isinstance(job.get("run_url"), str):
-            lines.append(f"The {check} log is unavailable. Read it at {job['run_url']}.")
+        elif isinstance(run_id, str) and run_id.isdigit():
+            lines.append(
+                f"The factory could not fetch the {check} log. "
+                f"Get it with `{GH} run view {run_id} --repo {repo} --log-failed`."
+            )
+        else:
+            lines.append(f"No Actions run is linked to {check}, so the factory has no log for it. {find}")
     return lines
