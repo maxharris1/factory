@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 
-from lib.dashboard_flow import PHASE_OVERRIDES, PHASES, PIPELINE, ticket_phase, ticket_phases
+from lib.dashboard_flow import NOT_FACTORY_STEPS, PHASE_OVERRIDES, PHASES, PIPELINE, ticket_phase, ticket_phases
 from lib.dispatch.constants import HANDED_OFF_EXTERNALLY
 from lib.dashboard_pages.activity import _VERDICT
 from lib.dashboard_pages.lanes import TILE_STATE
@@ -156,7 +156,7 @@ SCRIPT_TICKETS = r"""
       var legend = {}, groups = {}, next = {};
       chart.legend.forEach(function (k) { legend[k.group] = k.name; });
       chart.states.forEach(function (st) { groups[st.name] = st.group; next[st.name] = []; });
-      chart.edges.forEach(function (e) { next[e.from].push(e.to); });
+      chart.edges.forEach(function (e) { if (BOARD.not_factory_steps.indexOf(e.label) < 0) next[e.from].push(e.to); });
       order = [chart.start];
       for (var i = 0; i < order.length; i++) {
         next[order[i]].forEach(function (n) { if (order.indexOf(n) < 0) order.push(n); });
@@ -721,6 +721,7 @@ def _phase_glyph(phase: str) -> dict:
 def board_constants() -> dict:
     return {
         "columns": COLUMNS, "names": COLUMN_NAMES, "phases": PHASES, "overrides": PHASE_OVERRIDES,
+        "not_factory_steps": sorted(NOT_FACTORY_STEPS),
         "chips": JOB_CHIPS, "kinds": CARD_KINDS, "cap": CAP, "shelf_newest": SHELF_NEWEST, "shelf_page": SHELF_PAGE,
         "shelf_phone": SHELF_PHONE, "find_max": FIND_MAX,
         "qa_tones": QA_TONES,

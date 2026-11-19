@@ -731,6 +731,7 @@ GO_HEADER = "<!-- orch:v1 kind=go from=grok-bot role=orchestrator state=building
 ANSWERS_HEADER = "<!-- orch:v1 kind=answers from=grok-bot role=orchestrator -->"
 CLOSE_HEADER = "<!-- orch:v1 kind=answers from=grok-bot role=orchestrator state=abandoned -->"
 RETRY_HEADER = "<!-- orch:v1 kind=retry from=grok-bot role=orchestrator -->"
+HANDOFF_HEADER = "<!-- orch:v1 kind=answers from=grok-bot role=orchestrator state=handed-off -->"
 
 
 def clock() -> datetime:
@@ -791,6 +792,7 @@ ACTIONS: dict[str, ActionSpec] = {
     "retry": ActionSpec(False, lambda facts: f"{RETRY_HEADER}\n\n{facts.words}"),
     "resume": ActionSpec(False, lambda facts: f"{GO_HEADER}\n\n{facts.words}"),
     "close": ActionSpec(False, lambda facts: f"{CLOSE_HEADER}\n\n{facts.words}"),
+    "hand-off": ActionSpec(False, lambda facts: f"{HANDOFF_HEADER}\n\n{facts.words}"),
 }
 
 
