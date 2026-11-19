@@ -18,12 +18,11 @@ host reads orch.db again and confirms only the ids still finished, so a
 job requeued and claimed since the first read is moved back. The device
 empties each confirmed folder, keeping only its `.orch-worker*` records,
 and moves it back. A device that cannot scan for such processes removes
-nothing. A process whose cwd and files the scan cannot read (a non-dumpable
-one: ssh, an agent, a sandboxed shell) is skipped and does not stop the scan.
-Its folder stays held while a readable process, usually the parent whose cwd
-it started in, still has that folder as its cwd or an open file. A hidden
-process left in a folder after every readable process there has moved away
-or exited is the case the scan misses.
+nothing. A process of this user whose cwd or open files the scan cannot
+read (a non-dumpable one: ssh, an agent, a sandboxed shell) could be in any
+job folder. So while one lives, every folder is kept as held-open. Processes
+started by another user and dropped to this one (sshd's session process,
+`systemd --user`, `(sd-pam)`) are not counted.
 
 The runner's checkout and start claim the job first under `flock` on
 `jobs/<job-id>.lock`: they touch `jobs/<job-id>.claimed` and move a
@@ -204,25 +203,71 @@ def disk_bytes(paths: Iterable[Path]) -> int:
     return total
 
 
-def _process_paths(process: Path) -> list[str]:
+def _mine(process: Path) -> bool | None:
+    try:
+        status = (process / "status").read_text().splitlines()
+    except OSError:
+        return None
+    if not any(line.startswith("VmSize:") for line in status):
+        return None
+    uids = next((line.split()[1:] for line in status if line.startswith("Uid:")), [])
+    return str(os.getuid()) in uids
+
+
+def _parent(process: Path) -> Path | None:
+    try:
+        stat = (process / "stat").read_text()
+    except OSError:
+        return None
+    return process.with_name(stat.rsplit(")", 1)[1].split()[1])
+
+
+def _started_by_another_user(process: Path) -> bool:
+    """Root starts sshd's session process, `systemd --user` and `(sd-pam)` and
+    then drops them to this user, which leaves them non-dumpable, so their
+    cwd cannot be read."""
+    seen = {process.name}
+    while (parent := _parent(process)) is not None and parent.name not in seen:
+        seen.add(parent.name)
+        if parent.name == "0":
+            return True
+        mine = _mine(parent)
+        if mine is None:
+            return False
+        if not mine:
+            return True
+        if _process_paths(parent) is not None:
+            return False
+        process = parent
+    return _mine(process) is None
+
+
+def _process_paths(process: Path) -> list[str] | None:
     try:
         links = [process / "cwd", *(process / "fd").iterdir()]
-    except OSError:
+    except (FileNotFoundError, ProcessLookupError):
         return []
+    except OSError:
+        return None
     paths = []
     for link in links:
         try:
             paths.append(os.readlink(link).removesuffix(" (deleted)"))
-        except OSError:
+        except (FileNotFoundError, ProcessLookupError):
             continue
+        except OSError:
+            return None
     return paths
 
 
 def jobs_held_open(jobs: Path) -> set[str] | None:
     prefix = f"{os.path.realpath(jobs)}/"
     if (PROC / "self" / "cwd").exists():
-        paths = [path for process in PROC.iterdir() if process.name.isdigit()
-                 for path in _process_paths(process)]
+        paths_of = {process: _process_paths(process) for process in PROC.iterdir()
+                    if process.name.isdigit()}
+        paths = [path for listed in paths_of.values() if listed for path in listed]
+        blind = any(listed is None and _mine(process) and not _started_by_another_user(process)
+                    for process, listed in paths_of.items())
     else:
         try:
             found = subprocess.run(
@@ -234,7 +279,11 @@ def jobs_held_open(jobs: Path) -> set[str] | None:
         if found.returncode != 0:
             return None
         paths = [line[1:] for line in found.stdout.splitlines() if line.startswith("n")]
-    return {path[len(prefix):].split("/", 1)[0] for path in paths if path.startswith(prefix)}
+        blind = False
+    held = {path[len(prefix):].split("/", 1)[0] for path in paths if path.startswith(prefix)}
+    if blind and jobs.is_dir():
+        held |= {entry.name for entry in jobs.iterdir()}
+    return held
 
 
 def _newer(path: Path, cutoff: float) -> bool:
