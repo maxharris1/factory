@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from lib.dispatch.types import BaseCheck
+from lib.evidence.ci import main_red
 from lib.feeder import FEEDER_TABLE, Feeder, ensure_tables, feeder_counts, feeder_items
 from lib.feeder_gates import (
     GateLines,
@@ -19,13 +21,16 @@ from lib.feeder_gates import (
     Progress,
     Ref,
     RefStatus,
+    Wait,
     blocker_waits,
     github_ref,
+    line_stop,
     linear_status,
     parse_gate_lines,
     paths_collide,
 )
 from tests.test_feeder import (
+    FACTORY_MD,
     GITHUB_ORCH,
     LINEAR_FACTORY_MD,
     LINEAR_ORCH,
@@ -839,3 +844,134 @@ def test_a_resumed_feed_whose_pr_closed_releases_its_hold_this_poll(tmp_path: Pa
     github.statuses = {ref(501): CLOSED_PULL}
     github.issues[HOME].append(issue(2, created_at=2000, body="Touches: lib/a.py"))
     assert fed_heads(github, feeder.feed_once()) == ["factory/issue-2"]
+
+
+RED_SHA = "c0ffee12" + "0" * 32
+REQUIRED_MD = FACTORY_MD.replace("feeder:\n", "feeder:\n  required_checks: [\"test (*)\"]\n")
+MAIN = (HOME, "main")
+
+
+def check(name: str, conclusion: str | None, run_id: str = "900", head: str = RED_SHA) -> BaseCheck:
+    return BaseCheck(name, conclusion, run_id, "1", head)
+
+
+def test_a_red_required_check_stops_the_line_at_the_newest_red_head() -> None:
+    red = main_red(
+        {
+            "test (2/3)": check("test (2/3)", "failure", "901"),
+            "test (1/3)": check("test (1/3)", "cancelled", "900", "f" * 40),
+            "test (3/3)": check("test (3/3)", "success"),
+            "lint": check("lint", "failure"),
+        },
+        ("test (*)",),
+    )
+    assert red is not None
+    assert line_stop(red.wait, ("factory:ready",)) == Wait(
+        "main is red at c0ffee12: test (1/3), test (2/3)"
+    )
+
+
+@pytest.mark.parametrize(
+    ("checks", "required"),
+    [
+        ({"lint": check("lint", "failure")}, ("test (*)",)),
+        ({"test (1/3)": check("test (1/3)", "success")}, ("test (*)",)),
+        ({"test (1/3)": check("test (1/3)", None)}, ("test (*)",)),
+        ({"test (1/3)": check("test (1/3)", "failure")}, ()),
+        ({}, ("test (*)",)),
+    ],
+)
+def test_main_is_not_red_without_a_red_required_check(checks, required) -> None:
+    assert main_red(checks, required) is None
+
+
+def test_a_main_fix_ticket_passes_a_stopped_line() -> None:
+    red = main_red({"test (1/3)": check("test (1/3)", "failure")}, ("test (*)",))
+    assert red is not None
+    assert line_stop(red.wait, ("factory:ready", "Factory:Main-Fix")) is None
+
+
+def test_a_red_main_starts_no_new_ticket_but_finishes_one_in_flight(tmp_path: Path) -> None:
+    feeder, _, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD)
+    github.issues[HOME] = [issue(1, created_at=1000)]
+    github.fail["pull"] = 1
+    assert feeder.feed_once().fed == ()
+    assert states(tmp_path)["1"][0] == "error"
+    github.main_checks[MAIN] = {"test (2/3)": check("test (2/3)", "failure")}
+    github.issues[HOME] += [issue(2, created_at=2000), issue(3, created_at=3000)]
+    github.check_reads.clear()
+
+    report = feeder.feed_once()
+
+    assert fed_heads(github, report) == ["factory/issue-1"]
+    assert report.blocked == 2
+    stopped = ("waiting-blocked", "main is red at c0ffee12: test (2/3)")
+    assert [states(tmp_path)[key] for key in ("2", "3")] == [stopped, stopped]
+    assert github.check_reads == [MAIN]
+    github.main_checks[MAIN] = {"test (2/3)": check("test (2/3)", "success", "902")}
+    assert fed_heads(github, feeder.feed_once()) == ["factory/issue-2", "factory/issue-3"]
+
+
+def test_a_main_fix_ticket_is_fed_while_main_is_red(tmp_path: Path) -> None:
+    feeder, _, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD)
+    github.main_checks[MAIN] = {"test (1/3)": check("test (1/3)", "failure")}
+    github.issues[HOME] = [issue(1), issue(2, labels=("factory:ready", "factory:main-fix"))]
+    assert fed_heads(github, feeder.feed_once()) == ["factory/issue-2"]
+
+
+def test_an_unreadable_main_ci_keeps_the_line_stopped(tmp_path: Path) -> None:
+    feeder, _, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD)
+    github.issues[HOME] = [issue(1)]
+    github.fail["base_checks"] = 1
+    report = feeder.feed_once()
+    assert (report.fed, report.errors) == ((), 1)
+    assert states(tmp_path)["1"] == ("waiting-blocked", "main CI unreadable for main")
+    assert fed_heads(github, feeder.feed_once()) == ["factory/issue-1"]
+
+
+def test_a_project_without_required_checks_never_reads_main_ci(tmp_path: Path) -> None:
+    feeder, _, github, _ = make_feeder(tmp_path)
+    github.main_checks[MAIN] = {"test (1/3)": check("test (1/3)", "failure")}
+    github.issues[HOME] = [issue(1)]
+    assert fed_heads(github, feeder.feed_once()) == ["factory/issue-1"]
+    assert github.check_reads == []
+
+
+def test_a_red_main_stops_a_ticket_whose_failed_feed_never_began(tmp_path: Path) -> None:
+    feeder, _, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD)
+    github.issues[HOME] = [issue(1)]
+    github.fail["branch_sha"] = 1
+    assert feeder.feed_once().errors == 1
+    row = rows(tmp_path / "orch.db")["1"]
+    assert (row["state"], row["branch"], row["pr_number"]) == ("error", None, None)
+    github.main_checks[MAIN] = {"test (1/3)": check("test (1/3)", "failure")}
+    github.check_reads.clear()
+
+    report = feeder.feed_once()
+
+    assert (report.fed, report.blocked) == ((), 1)
+    assert github.check_reads == [MAIN]
+    assert states(tmp_path)["1"] == ("waiting-blocked", "main is red at c0ffee12: test (1/3)")
+
+
+def test_a_red_main_lets_a_begun_feed_finish_after_a_stack_hold(tmp_path: Path) -> None:
+    feeder, _, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD)
+    github.issues[HOME] = [issue(1)]
+    github.fail["labels"] = 1
+    assert feeder.feed_once().errors == 1
+    assert rows(tmp_path / "orch.db")["1"]["pr_number"] == "501"
+    shared = "a" * 40
+    github.branch_commits[(HOME, "factory/issue-1")] = (shared, "c" * 40)
+    github.branches[(HOME, "factory/issue-108")] = shared
+    github.branch_commits[(HOME, "factory/issue-108")] = (shared,)
+    github.pulls[(HOME, 113)] = {"head": "factory/issue-108", "base": "main", "title": "t",
+                                 "body": "", "draft": True}
+    feeder.feed_once()
+    assert states(tmp_path)["1"][0] == "waiting-blocked"
+    github.pulls[(HOME, 113)]["state"] = "closed"
+    github.main_checks[MAIN] = {"test (1/3)": check("test (1/3)", "failure")}
+
+    report = feeder.feed_once()
+
+    assert [ref.ticket_id for ref in report.fed] == ["501"]
+    assert rows(tmp_path / "orch.db")["1"]["state"] == "fed"

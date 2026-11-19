@@ -76,6 +76,7 @@ class BaseCheck:
     conclusion: str | None
     run_id: str
     job_id: str
+    head_sha: str
 
 
 CIJobStatus = Literal["queued", "in_progress", "completed"]

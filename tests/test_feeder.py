@@ -18,6 +18,7 @@ from lib import device_sync
 from lib.branch_stack import OpenPull
 from lib.device_monitor import DeviceMonitor
 from lib.device_pool import DevicePool
+from lib.dispatch.types import BaseCheck
 from lib.dispatcher import Comment, Dispatcher, TicketRef, TrackedTicket
 from lib.factory_md import parse_factory_context
 from lib.feeder import (
@@ -148,6 +149,8 @@ class FakeGitHub:
         self.fail: dict[str, int] = {}
         self.statuses: dict[Ref, RefStatus] = {}
         self.status_reads: list[frozenset[Ref]] = []
+        self.main_checks: dict[tuple[str, str], dict[str, BaseCheck]] = {}
+        self.check_reads: list[tuple[str, str]] = []
         self._next_pr = 500
         self._next_comment = 9000
 
@@ -164,6 +167,7 @@ class FakeGitHub:
 
     # writes
     def branch_sha(self, repo: str, branch: str) -> str | None:
+        self._maybe_fail("branch_sha")
         if branch == "main" or branch == "dev":
             return BASE_SHA
         return self.branches.get((repo, branch))
@@ -252,6 +256,11 @@ class FakeGitHub:
         self._maybe_fail("statuses")
         self.status_reads.append(frozenset(refs))
         return {ref: self.statuses.get(ref, RefStatus(Progress.MISSING)) for ref in refs}
+
+    def base_checks(self, repo: str, branch: str) -> dict[str, BaseCheck]:
+        self.check_reads.append((repo, branch))
+        self._maybe_fail("base_checks")
+        return dict(self.main_checks.get((repo, branch), {}))
 
     def post_comment(self, repo: str, number: int, body: str) -> str:
         self._maybe_fail("comment")

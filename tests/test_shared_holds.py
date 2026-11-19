@@ -50,6 +50,14 @@ def test_feeder_settings_parse() -> None:
     assert config.exclusive_paths == ("model/", "lib/*.sql")
 
 
+def test_required_checks_parse_and_default_to_none() -> None:
+    config, findings = parse_factory_md(feeder_md("feeder:\n  required_checks: [test (*), lint]\n"))
+    assert config is not None, findings
+    assert config.required_checks == ("test (*)", "lint")
+    default, _ = parse_factory_md(DEFAULT_MD)
+    assert default is not None and default.required_checks == ()
+
+
 def test_this_repos_factory_md_sets_four_holders_and_its_exclusive_paths() -> None:
     config, findings = load_factory_md(ROOT / "factory.md")
     assert config is not None, findings
@@ -57,6 +65,7 @@ def test_this_repos_factory_md_sets_four_holders_and_its_exclusive_paths() -> No
         4,
         ("model/", "lib/dispatch/qa.py", "lib/brief/review.py"),
     )
+    assert config.required_checks == ("test (*)",)
 
 
 @pytest.mark.parametrize(
@@ -73,6 +82,11 @@ def test_this_repos_factory_md_sets_four_holders_and_its_exclusive_paths() -> No
         ("feeder:\n  exclusive_paths: model/\n", "feeder.exclusive_paths must be a list"),
         ("feeder:\n  exclusive_paths: [../x]\n",
          "feeder.exclusive_paths[0] must be a repo-relative path or glob"),
+        ("feeder:\n  required_checks: test\n", "feeder.required_checks must be a list"),
+        ("feeder:\n  required_checks: ['']\n",
+         "feeder.required_checks[0] must be a non-empty job name glob"),
+        ("feeder:\n  required_checks: [3]\n",
+         "feeder.required_checks[0] must be a non-empty job name glob"),
         ("feeder:\n  max_holder_per_path: 2\n", "unknown field 'feeder.max_holder_per_path'"),
         ("feeder: 2\n", "feeder must be a mapping"),
     ],

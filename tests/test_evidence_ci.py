@@ -389,7 +389,7 @@ def test_a_log_naming_a_failing_test_stays_code_whatever_the_step_count():
 
 
 def _base(name: str, conclusion: str, job_id: str) -> BaseCheck:
-    return BaseCheck(name, conclusion, "900", job_id)
+    return BaseCheck(name, conclusion, "900", job_id, "base")
 
 
 def _failed(*tests: str) -> str:
