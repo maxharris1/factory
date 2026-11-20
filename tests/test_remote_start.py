@@ -1791,6 +1791,71 @@ def test_a_box_jobs_slot_records_its_scope_or_says_the_run_is_uncontained(
         assert len(uncontained) == 1, lines
 
 
+NAMESPACED_RUN = """\
+import json, os, sys
+from pathlib import Path
+from lib.job_run import run
+
+here = Path(sys.argv[1])
+
+def started(pid):
+    (here / "worker.pid").write_text(str(pid))
+
+code = run(["sh", "-c", f"echo $$ > {here / 'command.pid'}"], beat=lambda: None, interval=60,
+    log=lambda line: print(line, file=sys.stderr), started=started)
+(here / "code").write_text(str(code))
+"""
+
+LOGGING_CALL = f"""#!{sys.executable}
+import json, os, sys
+with open(os.environ["FAKE_CALLS"], "a") as log:
+    log.write(json.dumps([os.path.basename(sys.argv[0]), os.getpid(), *sys.argv[1:]]) + "\\n")
+args = sys.argv[1:]
+if "--help" in args:
+    print("  --expand-environment=BOOL    Control expansion of environment variables")
+if os.path.basename(sys.argv[0]) == "systemd-run" and "--" in args:
+    command = args[args.index("--") + 1:]
+    os.execvp(command[0], command)
+"""
+
+
+def test_a_run_inside_a_pid_namespace_never_hands_the_user_manager_its_namespace_pid(
+    tmp_path: Path,
+) -> None:
+    """#1140: a pid read inside a PID namespace names another process to the
+    user manager, so the run is contained by the worker's own systemd-run."""
+    if not sys.platform.startswith("linux"):
+        pytest.skip("systemd scopes are Linux only")
+    unshare = ["unshare", "--user", "--map-current-user", "--pid", "--fork", "--mount-proc"]
+    try:
+        usable = subprocess.run([*unshare, "true"], capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        pytest.skip(f"cannot make a PID namespace: {exc}")
+    if usable.returncode != 0:
+        pytest.skip(f"cannot make a PID namespace: {usable.stderr.decode().strip()}")
+    path = fake_linger(tmp_path, "yes")
+    for name in ("busctl", "systemd-run"):
+        (tmp_path / "fake-bin" / name).write_text(LOGGING_CALL)
+        (tmp_path / "fake-bin" / name).chmod(0o755)
+    calls = tmp_path / "calls"
+    script = tmp_path / "namespaced_run.py"
+    script.write_text(NAMESPACED_RUN)
+    result = subprocess.run(
+        [*unshare, sys.executable, str(script), str(tmp_path)],
+        cwd=ROOT, capture_output=True, text=True, timeout=60,
+        env={**os.environ, "PYTHONPATH": str(ROOT), "PATH": path, "FAKE_CALLS": str(calls)},
+    )
+    assert (tmp_path / "code").read_text() == "0", result.stderr
+    worker = int((tmp_path / "worker.pid").read_text())
+    assert int((tmp_path / "command.pid").read_text()) == worker, "the command runs as the worker"
+    logged = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert [call for call in logged if call[0] == "busctl"] == [], (
+        "no pid from inside the namespace reaches the user manager"
+    )
+    scoped = [call for call in logged if call[0] == "systemd-run" and "--" in call]
+    assert [call[1] for call in scoped] == [worker], "the worker itself asks for its scope"
+
+
 def test_an_enabled_box_keeps_its_running_job(tmp_path: Path) -> None:
     now, queue, pool, dispatcher, job, kills = box_job_setup(tmp_path, alive={11: True})
     for at in (0.0, 60.0, 120.0):
