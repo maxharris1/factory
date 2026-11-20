@@ -1,17 +1,29 @@
 from __future__ import annotations
 
+import contextlib
+import functools
 import hashlib
 import json
 import logging
 import sqlite3
+import subprocess
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
 from lib import account_doctor
 from lib.account_doctor import Probe, SignIn
+from lib.device_monitor import DeviceMonitor
+from lib.device_pool import DevicePool
+from lib.dispatcher import Dispatcher
+from lib.machines_yml import MachinesConfig
 from lib.queue import JobRequest, SQLiteJobQueue
+from lib.remote import Exchanged
+from tests.test_dispatcher import TRUSTED_LOGINS, FakeGrokDelivery, FakeReviewActions
+from tests.test_remote_start import config_of, enqueue, poll_at, poll_errors, stamp, state
 
 NOW = 1_800_000_000.0
 ORG = "4b0c6c5e-0000-4000-8000-00000000a001"
@@ -191,6 +203,15 @@ def connect(path: Path) -> sqlite3.Connection:
     return connection
 
 
+def attention_rows(connection: sqlite3.Connection) -> list[tuple[object, ...]]:
+    if connection.execute("SELECT name FROM sqlite_master WHERE name = 'needs_attention'").fetchone() is None:
+        return []
+    return [tuple(row) for row in connection.execute(
+        "SELECT repo, ticket_id, reason, detail, raised_at FROM needs_attention "
+        "ORDER BY repo, ticket_id, reason"
+    )]
+
+
 def stored(connection: sqlite3.Connection) -> list[tuple[object, ...]]:
     return connection.execute(
         "SELECT account, device, status, auth_method, subscription_type, fingerprint, checked_at, detail "
@@ -215,12 +236,12 @@ def test_write_replaces_every_row(tmp_path: Path) -> None:
     connection = connect(tmp_path / "orch.db")
     first = account_doctor.judge([claude_probe(account="gone"), claude_probe(account="kept", device="mac",
                                   reply=claude_reply(email="kept@example.com"))], NOW)
-    account_doctor.write(connection, first)
+    account_doctor.write(connection, first, None, {}, NOW)
     assert [row[:3] for row in stored(connection)] == [("gone", "box", "ok"), ("kept", "mac", "ok")]
 
     second = account_doctor.judge([claude_probe(account="kept", device="mac", code=1, reply=SIGNED_OUT_CLAUDE)],
                                   NOW + 60)
-    account_doctor.write(connection, second)
+    account_doctor.write(connection, second, None, {}, NOW + 60)
     assert [row[:3] + (row[6],) for row in stored(connection)] == [("kept", "mac", "signed-out", NOW + 60)]
     assert not connection.in_transaction
 
@@ -228,11 +249,14 @@ def test_write_replaces_every_row(tmp_path: Path) -> None:
 def test_write_rolls_back_whole_on_a_bad_row(tmp_path: Path) -> None:
     connection = connect(tmp_path / "orch.db")
     good = account_doctor.judge([claude_probe()], NOW)
-    account_doctor.write(connection, good)
+    raised = {("owner/factory", "acct@box", account_doctor.REASON): "signed-out: before"}
+    account_doctor.write(connection, good, "owner/factory", raised, NOW)
     bad = replace(good[0], status="fine")
     with pytest.raises(sqlite3.IntegrityError):
-        account_doctor.write(connection, [good[0], bad])
+        account_doctor.write(connection, [good[0], bad], "owner/factory", {}, NOW + 60)
     assert [row[:3] for row in stored(connection)] == [("acct", "box", "ok")]
+    assert attention_rows(connection) == [
+        ("owner/factory", "acct@box", "account-signin", "signed-out: before", NOW)]
     assert not connection.in_transaction
 
 
@@ -262,13 +286,36 @@ def leaky_probes() -> list[Probe]:
     ]
 
 
+LEAKY_MACHINES = """\
+accounts:
+{accounts}
+devices:
+  - name: box
+    local: true
+    slot_max: 1
+    harnesses: {{claude: claude-bot, codex: codex-bot}}
+    home: /home/{{bot}}
+"""
+
+
+def leaky_config(tmp_path: Path, probes: list[Probe]) -> MachinesConfig:
+    path = tmp_path / "leaky-machines.yml"
+    path.write_text(LEAKY_MACHINES.format(accounts="\n".join(
+        f"  - {{id: {probe.account}, harness: {probe.harness}, signed_in_on: [box]}}" for probe in probes
+    )), encoding="utf-8")
+    return config_of(path)
+
+
 def test_canaries_reach_neither_rows_details_nor_database(tmp_path: Path) -> None:
     probes = leaky_probes()
     rows = account_doctor.judge(probes, NOW)
+    flagged = account_doctor.flags(rows, leaky_config(tmp_path, probes), "owner/factory")
     database = tmp_path / "orch.db"
     connection = connect(database)
-    account_doctor.write(connection, rows)
+    account_doctor.write(connection, rows, "owner/factory", flagged, NOW)
     stored_rows = stored(connection)
+    raised = attention_rows(connection)
+    assert len(raised) == len([row for row in rows if row.status != "ok"]) > 0
 
     expected = fingerprint(CANARY_ORG, CANARY_EMAIL)
     assert (expected,) in connection.execute("SELECT fingerprint FROM account_signins WHERE account = 'seen'")
@@ -280,6 +327,8 @@ def test_canaries_reach_neither_rows_details_nor_database(tmp_path: Path) -> Non
         "rows": repr(rows).encode(),
         "details": "\n".join(row.detail for row in rows).encode(),
         "stored": repr(stored_rows).encode(),
+        "flags": repr(flagged).encode(),
+        "needs_attention": repr(raised).encode(),
         "orch.db": database.read_bytes(),
         "orch.db-wal": (tmp_path / "orch.db-wal").read_bytes() if (tmp_path / "orch.db-wal").exists() else b"",
     }
@@ -611,3 +660,323 @@ def test_replies_ignore_a_forged_marker_inside_a_reply() -> None:
 def test_replies_without_a_frame_leave_it_out() -> None:
     assert account_doctor._replies(framed((0, 0, b"only")), 2) == {0: (0, b"only")}
     assert account_doctor._replies(b"no begin line\nORCH-ACCOUNT 0 0\n", 1) == {}
+
+
+DOCTOR_MACHINES = """\
+accounts:
+  - {id: claude-b, harness: claude, signed_in_on: [pc, mac]}
+devices:
+  - name: box
+    local: true
+    slot_max: 1
+    harnesses: {cursor: cursor-bot}
+  - name: pc
+    tailscale_name: pc.example.ts.net
+    slot_max: 2
+    harnesses: {claude: claude-bot, codex: codex-bot}
+    workdir_root: /home/{bot}/work
+    ssh_alias: pc-{bot}
+    factory_root: /srv/factory
+    home: /home/{bot}
+"""
+PLACEHOLDER_MAC = """\
+  - name: mac
+    tailscale_name: mac.example.ts.net
+    slot_max: 1
+    harnesses: {claude: claude-bot}
+    workdir_root: /Users/{bot}/work
+    ssh_alias: REPLACE_WITH_SSH_ALIAS
+    factory_root: /srv/factory
+    home: REPLACE_WITH_HOME
+"""
+POLLER_MACHINES = DOCTOR_MACHINES.replace("[pc, mac]", "[pc]")
+CLAUDE_B_HOME = "/home/claude-bot/.factory-accounts/claude-b"
+KEY = ("owner/factory", "claude-b@pc", "account-signin")
+
+
+class DoctorTransport:
+    def __init__(self) -> None:
+        self.replies = {
+            "pc-claude-bot": framed((0, 0, claude_reply()), (1, 0, claude_reply(org=ORG_B, email=EMAIL_B))),
+            "pc-codex-bot": framed((0, 0, b"Logged in using ChatGPT\n")),
+        }
+        self.exchanges: list[str] = []
+        self.error: Exception | None = None
+
+    def run(self, argv: Sequence[str], *, timeout: float) -> int:
+        return 0
+
+    def exchange(self, argv: Sequence[str], *, timeout: float, input: bytes = b"") -> Exchanged:
+        self.exchanges.append(argv[-2])
+        if self.error is not None:
+            raise self.error
+        return Exchanged(0, self.replies[argv[-2]], "")
+
+
+class Poller(NamedTuple):
+    now: list[float]
+    queue: SQLiteJobQueue
+    pool: DevicePool
+    transport: DoctorTransport
+    dispatcher: Dispatcher
+    machines: Path
+
+    def poll(self, at: float) -> None:
+        poll_at(self.now, self.dispatcher, at)
+
+    def flags(self) -> list[tuple[object, ...]]:
+        with contextlib.closing(self.queue.connect()) as connection:
+            return attention_rows(connection)
+
+
+def poller(tmp_path: Path, *, sign_ins: bool = True) -> Poller:
+    now = [0.0]
+    path = tmp_path / "d.db"
+    queue = SQLiteJobQueue(path, clock=lambda: now[0])
+    machines = tmp_path / "machines.yml"
+    machines.write_text(POLLER_MACHINES, encoding="utf-8")
+    config = config_of(machines)
+    pool = DevicePool(queue, config)
+    transport = DoctorTransport()
+    check = functools.partial(account_doctor.check, queue, transport, "Owner/Factory") if sign_ins else None
+    dispatcher = Dispatcher(
+        path,
+        queue,
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+        devices=DeviceMonitor(pool, config, transport, alive=lambda *_: False,
+                              machines_path=machines, sign_ins=check),
+    )
+    return Poller(now, queue, pool, transport, dispatcher, machines)
+
+
+def sign_out_claude_b(transport: DoctorTransport) -> None:
+    transport.replies["pc-claude-bot"] = framed((0, 0, claude_reply()), (1, 1, SIGNED_OUT_CLAUDE))
+
+
+def test_poller_runs_the_doctor_on_the_first_poll_then_every_30_minutes(tmp_path: Path) -> None:
+    world = poller(tmp_path)
+    world.poll(0.0)
+    assert sorted(world.transport.exchanges) == ["pc-claude-bot", "pc-codex-bot"]
+    world.poll(600.0)
+    assert len(world.transport.exchanges) == 2
+    world.poll(1800.0)
+    assert len(world.transport.exchanges) == 4
+
+
+def test_poller_runs_the_doctor_once_after_machines_yml_changes(tmp_path: Path) -> None:
+    world = poller(tmp_path)
+    world.poll(0.0)
+    world.machines.write_text(world.machines.read_text(encoding="utf-8") + "# edited\n", encoding="utf-8")
+    stamp(world.machines, 10**18)
+    world.poll(300.0)
+    assert len(world.transport.exchanges) == 4
+    world.poll(360.0)
+    assert len(world.transport.exchanges) == 4
+
+
+def test_doctor_error_is_recorded_and_the_poll_goes_on(tmp_path: Path) -> None:
+    world = poller(tmp_path)
+    world.transport.error = OSError("ssh blew up")
+    job_id = enqueue(world.queue, "claude", "1", timeout=86_400)
+    world.pool.claim("claude")
+    world.poll(400.0)
+    errors = poll_errors(world.queue)
+    assert [repo for repo, _ in errors] == ["devices"]
+    assert errors[0][1].startswith("account doctor:")
+    assert state(world.queue, job_id) == "queued"
+    probed = len(world.transport.exchanges)
+    world.poll(500.0)
+    assert len(world.transport.exchanges) == probed
+
+
+def test_a_signed_out_pair_raises_one_flag_naming_the_operator_step(tmp_path: Path) -> None:
+    world = poller(tmp_path)
+    sign_out_claude_b(world.transport)
+    world.poll(0.0)
+    (flag,) = world.flags()
+    assert flag[:3] == KEY
+    assert "claude auth login" in str(flag[3])
+    assert f"CLAUDE_CONFIG_DIR={CLAUDE_B_HOME}" in str(flag[3])
+
+
+def test_a_flag_keeps_its_raised_at_while_failing_and_clears_once_ok(tmp_path: Path) -> None:
+    world = poller(tmp_path)
+    sign_out_claude_b(world.transport)
+    world.poll(0.0)
+    world.poll(1800.0)
+    assert len(world.transport.exchanges) == 4
+    assert [(flag[:3], flag[4]) for flag in world.flags()] == [(KEY, 0.0)]
+    world.transport.replies = DoctorTransport().replies
+    world.poll(3600.0)
+    assert world.flags() == []
+
+
+def test_two_failing_pairs_raise_two_flags(tmp_path: Path) -> None:
+    world = poller(tmp_path)
+    sign_out_claude_b(world.transport)
+    world.transport.replies["pc-codex-bot"] = framed((0, 1, b"Not logged in\n"))
+    world.poll(0.0)
+    assert [flag[1] for flag in world.flags()] == ["claude-b@pc", "codex-default@pc"]
+
+
+def test_a_monitor_without_sign_ins_never_runs_the_doctor(tmp_path: Path) -> None:
+    world = poller(tmp_path, sign_ins=False)
+    world.poll(0.0)
+    world.poll(1800.0)
+    assert world.transport.exchanges == []
+    with contextlib.closing(world.queue.connect()) as connection:
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE name = ?", (account_doctor.TABLE,)
+        ).fetchone() is None
+
+
+def flag_config(tmp_path: Path) -> MachinesConfig:
+    path = tmp_path / "flag-machines.yml"
+    path.write_text(DOCTOR_MACHINES + PLACEHOLDER_MAC, encoding="utf-8")
+    return config_of(path)
+
+
+def sign_in(account: str, status: str, detail: str, device: str = "pc") -> SignIn:
+    return SignIn(account, device, status, None, None, None, NOW, detail)
+
+
+@pytest.mark.parametrize("row, expected", [
+    (sign_in("claude-b", "signed-out", account_doctor.NOT_LOGGED_IN),
+     f"signed-out; run: sign in as claude-bot on pc: CLAUDE_CONFIG_DIR={CLAUDE_B_HOME} "
+     "claude auth login, then orch accounts doctor; not logged in"),
+    (sign_in("codex-default", "signed-out", account_doctor.NOT_LOGGED_IN),
+     "signed-out; run: sign in as codex-bot on pc: env -u CODEX_HOME codex login, "
+     "then orch accounts doctor; not logged in"),
+    (sign_in("claude-default", "signed-out", account_doctor.TOKEN_AUTH),
+     "signed-out; run: remove the token export from claude-bot's login profile on pc, "
+     f"then orch accounts doctor; {account_doctor.TOKEN_AUTH}"),
+    (sign_in("claude-b", "mismatch", "same sign-in as account claude-default"),
+     "mismatch; run: sign claude-b in to its own account as claude-bot on pc: "
+     f"CLAUDE_CONFIG_DIR={CLAUDE_B_HOME} claude auth login, then orch accounts doctor; "
+     "same sign-in as account claude-default"),
+    (sign_in("codex-default", "unreachable", account_doctor.SSH_DOWN),
+     "unreachable; run: fix ssh to pc for codex, then orch accounts doctor; device unreachable over ssh"),
+    (sign_in("claude-b", "unreachable", account_doctor.PLACEHOLDER_DEVICE, device="mac"),
+     "unreachable; run: fix ssh to mac for claude, then orch accounts doctor; device has install placeholders"),
+    (sign_in("claude-default", "ok", ""), None),
+], ids=["signed-out", "signed-out-default", "token-auth", "mismatch", "unreachable", "placeholder", "ok"])
+def test_flags_name_the_operator_step_for_each_failing_status(
+    tmp_path: Path, row: SignIn, expected: str | None
+) -> None:
+    flagged = account_doctor.flags([row], flag_config(tmp_path), "Owner/Factory")
+    key = ("owner/factory", f"{row.account}@{row.device}", "account-signin")
+    assert flagged == ({} if expected is None else {key: expected})
+
+
+def test_a_default_account_flag_names_no_account_folder(tmp_path: Path) -> None:
+    rows = [sign_in("claude-default", "signed-out", account_doctor.NOT_LOGGED_IN),
+            sign_in("claude-default", "mismatch", "another sign-in on device mac")]
+    for row in rows:
+        (detail,) = account_doctor.flags([row], flag_config(tmp_path), "owner/factory").values()
+        assert "CLAUDE_CONFIG_DIR=" not in detail
+
+
+SPACED_MACHINES = DOCTOR_MACHINES.replace(
+    "  - {id: claude-b, harness: claude, signed_in_on: [pc, mac]}",
+    "  - {id: claude-b, harness: claude, signed_in_on: [pc]}\n"
+    "  - {id: codex-b, harness: codex, signed_in_on: [pc]}",
+).replace("home: /home/{bot}", "home: /home/{bot}/Bot Home")
+FAKE_LOGIN = "#!/bin/sh\nprintf 'login %s %s\\n' \"$0\" \"${CLAUDE_CONFIG_DIR-${CODEX_HOME-unset}}\"\n"
+
+
+def run_step(tmp_path: Path, detail: str, environ: dict[str, str]) -> str:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    for name in ("claude", "codex"):
+        (bin_dir / name).write_text(FAKE_LOGIN, encoding="utf-8")
+        (bin_dir / name).chmod(0o755)
+    command = detail.split(" on pc: ", 1)[1].split(", then orch accounts doctor", 1)[0]
+    done = subprocess.run(
+        ["bash", "-c", command], env={"PATH": f"{bin_dir}:/usr/bin:/bin", **environ},
+        capture_output=True, text=True, check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    return done.stdout.strip()
+
+
+@pytest.mark.parametrize("account, variable, expected", [
+    ("claude-default", "CLAUDE_CONFIG_DIR", "claude unset"),
+    ("codex-default", "CODEX_HOME", "codex unset"),
+    ("claude-b", "CLAUDE_CONFIG_DIR", "claude /home/claude-bot/Bot Home/.factory-accounts/claude-b"),
+    ("codex-b", "CODEX_HOME", "codex /home/codex-bot/Bot Home/.factory-accounts/codex-b"),
+], ids=["claude-default", "codex-default", "claude-named", "codex-named"])
+@pytest.mark.parametrize("status", ["signed-out", "mismatch"])
+def test_the_flagged_login_command_signs_in_the_home_the_doctor_probes(
+    tmp_path: Path, account: str, variable: str, expected: str, status: str
+) -> None:
+    path = tmp_path / "spaced.yml"
+    path.write_text(SPACED_MACHINES, encoding="utf-8")
+    (detail,) = account_doctor.flags([sign_in(account, status, "x")], config_of(path), "owner/factory").values()
+    ran = run_step(tmp_path, detail, {variable: "/synthetic/other-account"})
+    program, home = expected.split(" ", 1)
+    assert ran == f"login {tmp_path / 'bin' / program} {home}"
+
+
+def test_a_stored_flag_keeps_its_operator_step_however_long_the_explanation(tmp_path: Path) -> None:
+    accounts = [f"claude-{index}-" + "x" * 45 for index in range(10)]
+    path = tmp_path / "long.yml"
+    path.write_text(POLLER_MACHINES.replace(
+        "  - {id: claude-b, harness: claude, signed_in_on: [pc]}",
+        "\n".join(f"  - {{id: {account}, harness: claude, signed_in_on: [pc]}}" for account in accounts),
+    ), encoding="utf-8")
+    config = config_of(path)
+    probes = [account_doctor.parse_claude(account, "pc", 0, claude_reply())
+              for account in config.accounts_on("pc", "claude")]
+    rows = account_doctor.judge(probes, NOW)
+    connection = connect(tmp_path / "orch.db")
+    account_doctor.write(connection, rows, "owner/factory", account_doctor.flags(rows, config, "owner/factory"), NOW)
+    details = {str(row[1]): str(row[3]) for row in attention_rows(connection)}
+    assert len(details) == 11
+    for detail in details.values():
+        assert "claude auth login, then orch accounts doctor" in detail
+    assert "run: sign claude-default in to its own account" in details["claude-default@pc"]
+
+
+def test_run_without_a_repo_writes_the_table_and_raises_no_flag(tmp_path: Path) -> None:
+    connection = connect(tmp_path / "orch.db")
+    transport = DoctorTransport()
+    sign_out_claude_b(transport)
+    path = tmp_path / "machines.yml"
+    path.write_text(POLLER_MACHINES, encoding="utf-8")
+    rows = account_doctor.run(connection, config_of(path), transport, NOW, None)
+    assert {(row.account, row.status) for row in rows} == {
+        ("claude-default", "ok"), ("claude-b", "signed-out"), ("codex-default", "ok")}
+    assert [row[:3] for row in stored(connection)] == [
+        ("claude-b", "pc", "signed-out"), ("claude-default", "pc", "ok"), ("codex-default", "pc", "ok")]
+    assert attention_rows(connection) == []
+
+
+def test_doctor_cli_raises_and_clears_the_flag_for_the_factory_repo(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("lib.self_deploy.own_repo", lambda *_: "owner/factory")
+    assert world.doctor() == 0
+    with contextlib.closing(sqlite3.connect(world.db)) as connection:
+        raised = [row[:3] for row in attention_rows(connection)]
+    assert ("owner/factory", "claude-c@pc", "account-signin") in raised
+    replies = world.tmp / "replies" / "claude"
+    (replies / "claude-c").write_bytes(claude_reply(org=ORG_B, email="bot-three@example.com"))
+    (replies / "claude-c.code").write_text("0", encoding="utf-8")
+    assert world.doctor() == 0
+    with contextlib.closing(sqlite3.connect(world.db)) as connection:
+        assert "claude-c@pc" not in [row[1] for row in attention_rows(connection)]
+
+
+def test_the_dashboard_lists_an_account_signin_flag_by_its_reason(tmp_path: Path) -> None:
+    from lib.dashboard import collect_snapshot
+    from tests.test_dashboard import NOW as DASHBOARD_NOW, seeded
+
+    db, log = seeded(tmp_path)
+    with contextlib.closing(sqlite3.connect(db)) as connection:
+        account_doctor.write(connection, [], "owner/factory",
+                             {KEY: "signed-out: not logged in; run: claude auth login"}, DASHBOARD_NOW)
+    items = collect_snapshot(db, log, now=DASHBOARD_NOW)["attention"]["items"]
+    assert [item["detail"] for item in items if item.get("ticket_id") == "claude-b@pc"] == [
+        "account-signin: signed-out: not logged in; run: claude auth login"]

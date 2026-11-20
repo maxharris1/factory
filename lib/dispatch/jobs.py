@@ -463,8 +463,9 @@ class JobsMixin:
         device unreachable for job_states.unreachable_lost_seconds.
 
         Runs before T6 looks at timeouts, so T6 sees a lost job as a link
-        drop in the same poll. #679: machines.yml is reloaded first, and a
-        failure of either step is recorded and never stops the poll.
+        drop in the same poll. #679: machines.yml is reloaded first. #1101:
+        the account doctor runs last when due. A failure of any step is
+        recorded and never stops the poll.
         """
         if self.devices is None:
             return
@@ -480,6 +481,12 @@ class JobsMixin:
             )
         except Exception as exc:
             self.record_poll_error("devices", "-", exc)
+        check = getattr(self.devices, "check_sign_ins", None)
+        if check is not None:
+            try:
+                check(self.queue.now())
+            except Exception as exc:
+                self.record_poll_error("devices", "-", exc, prefix="account doctor:")
 
     def _check_job_states(self) -> None:
         """#75: requeue jobs claimed but never started; fail dead jobs.

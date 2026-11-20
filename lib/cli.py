@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import functools
 import getpass
 import json
 import os
@@ -1363,11 +1364,16 @@ def _runtime(
     if not create:
         machines = _machines_config(machines_path, required=False)
         if machines is not None:
+            from lib import self_deploy
+
             devices = DeviceMonitor(
                 _device_pool(queue, machines, machines_path),
                 machines,
                 SshTransport(),
                 machines_path=_machines_path(machines_path),
+                sign_ins=functools.partial(
+                    account_doctor.check, queue, SshTransport(), self_deploy.own_repo(ROOT)
+                ),
             )
     feeder = None
     if not create and any(project.intake is not None for project in config.projects):
@@ -2901,12 +2907,16 @@ def _accounts_prepare(args: argparse.Namespace, prog: str) -> int:
 
 
 def _accounts_doctor(args: argparse.Namespace, prog: str) -> int:
+    from lib import self_deploy
+
     try:
         path = _db_path(args.db)
         machines = _machines_config(args.machines, required=True)
         assert machines is not None
         with contextlib.closing(sqlite3.connect(path, timeout=30, isolation_level=None)) as connection:
-            rows = account_doctor.run(connection, machines, SshTransport(), time.time())
+            rows = account_doctor.run(
+                connection, machines, SshTransport(), time.time(), self_deploy.own_repo(ROOT)
+            )
     except (ValueError, WaitError) as exc:
         print(f"{prog}: refused: {' '.join(str(exc).split())}", file=sys.stderr)
         return 2
