@@ -34,8 +34,9 @@ same process that runs the command:
   so a descendant orphaned between two looks, even one that dropped the tag
   and left the session, is reparented to run rather than to init, and is
   killed with the rest;
-* on Linux, a gated command is moved into its own systemd user scope
-  (lib/process_tree.py contain) before `started` records it, so every
+* on Linux, a gated command is spawned by `systemd-run --scope` into its
+  own systemd user scope (lib/process_tree.py scope_prefix), and run waits
+  for it to enter the scope before `started` records it, so every
   descendant, even one that left the session and dropped the tag, stays
   findable by the scope; a user with no usable user manager or Linger off
   gets a log line saying the run is uncontained, and the command still runs;
@@ -73,8 +74,9 @@ from lib.process_tree import (
     Tree,
     _one_line,
     _responsible_pid,
-    contain,
+    await_scope,
     processes,
+    scope_prefix,
 )
 from lib.queue import QueueError
 from lib.remote import KEEPER
@@ -372,11 +374,13 @@ def run(
         spawn = list(argv)
         read_end = write_end = report_read = report_write = -1
         gated = started is not None or sys.platform == "darwin"
+        prefix = scope_prefix(tag, tagged, log) if started is not None else []
         if gated:
             read_end, write_end = os.pipe()
             report_read, report_write = os.pipe()
             spawn = [
-                sys.executable, "-I", "-S", "-c", _GATE, str(read_end), str(report_write), *spawn
+                *prefix, sys.executable, "-I", "-S", "-c", _GATE, str(read_end),
+                str(report_write), *spawn,
             ]
         at_gate = gated
         try:
@@ -402,7 +406,12 @@ def run(
                 target=output, args=(child.stdout,), name="orch-output", daemon=True
             )
             reader.start()
-        scope = contain(child.pid, tag, log) if started is not None else None
+        scope = await_scope(child, tag, log) if prefix else None
+        if prefix and child.poll() is not None:
+            os.close(write_end)
+            os.close(report_read)
+            log(f"not starting {argv[0]}: systemd-run exited {child.returncode}")
+            return 127
         if gated:
             gate = write_end
 

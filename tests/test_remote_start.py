@@ -1563,13 +1563,15 @@ os.execvp(args[0], args)
 
 
 def fake_linger(
-    tmp_path: Path, linger: str, *, busctl_fails: bool = False, systemd_run: bool = False
+    tmp_path: Path, linger: str, *, systemd_run_fails: bool = False, systemd_run: bool = False
 ) -> str:
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir(exist_ok=True)
     fakes = {"loginctl": f"#!/bin/sh\necho {linger}\n"}
-    if busctl_fails:
-        fakes["busctl"] = "#!/bin/sh\necho 'no user bus' >&2\nexit 1\n"
+    if systemd_run_fails:
+        fakes["systemd-run"] = (
+            "#!/bin/sh\necho 'Failed to connect to bus: No such file or directory' >&2\nexit 1\n"
+        )
     if systemd_run:
         fakes["systemd-run"] = FAKE_SYSTEMD_RUN
     for name, body in fakes.items():
@@ -1724,21 +1726,21 @@ def test_a_box_jobs_slot_records_the_run_tag_its_command_carries(tmp_path: Path)
 
 
 @pytest.mark.parametrize(
-    ("linger", "busctl_fails"),
+    ("linger", "systemd_run_fails"),
     [("yes", False), ("no", False), ("yes", True)],
     ids=["contained", "linger-off", "no-user-bus"],
 )
 def test_a_box_jobs_slot_records_its_scope_or_says_the_run_is_uncontained(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, linger: str, busctl_fails: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, linger: str, systemd_run_fails: bool
 ) -> None:
     from lib import placed_run
 
-    contained = linger == "yes" and not busctl_fails
+    contained = linger == "yes" and not systemd_run_fails
     if contained and (refusal := scope_refusal()):
         pytest.skip(refusal)
     if not sys.platform.startswith("linux"):
         pytest.skip("systemd scopes are Linux only")
-    monkeypatch.setenv("PATH", fake_linger(tmp_path, linger, busctl_fails=busctl_fails))
+    monkeypatch.setenv("PATH", fake_linger(tmp_path, linger, systemd_run_fails=systemd_run_fails))
     _, queue, pool, dispatcher, job, _ = box_job_setup(tmp_path, alive={})
     with queue.connect() as connection:
         connection.execute(

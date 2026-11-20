@@ -103,34 +103,54 @@ def scope_unit(tag: str) -> str:
     return f"orch-run-{tag}.scope"
 
 
-def contain(pid: int, tag: str, log: Log) -> str | None:
-    """Move pid into a new systemd user scope named for the run; its name, or None.
+def scope_prefix(tag: str, env: Mapping[str, str], log: Log) -> list[str]:
+    """The systemd-run words that exec a run in a new user scope named for it.
 
-    Only on Linux, and only while the user has Linger on, so the user
-    manager outlives every login. Anything else leaves the run uncontained:
-    one log line says why and the caller keeps today's tracking.
+    Only on Linux, only while the user has Linger on, so the user manager
+    outlives every login, and only once a probe scope with the same options
+    starts; otherwise no words, and one log line says why. systemd-run names
+    its own process to the user manager, so a run inside a PID namespace is
+    contained too (#1140). systemd-run 254+ expands `${VAR}` in a scope's
+    argv unless given `--expand-environment=no`, a flag older releases lack.
     """
     if not sys.platform.startswith("linux"):
-        return None
-    unit = scope_unit(tag)
+        return []
     try:
-        linger = _output(["loginctl", "show-user", str(os.getuid()), "-p", "Linger", "--value"])
+        linger = _output(
+            ["loginctl", "show-user", str(os.getuid()), "-p", "Linger", "--value"], env
+        )
         if linger.strip() != "yes":
             raise _Uncontained(f"Linger is {linger.strip() or 'unset'} for this user")
-        _output([
-            "busctl", "--user", "call", "org.freedesktop.systemd1",
-            "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager",
-            "StartTransientUnit", "ssa(sv)a(sa(sv))", unit, "fail",
-            "2", "PIDs", "au", "1", str(pid), "CollectMode", "s", "inactive-or-failed", "0",
-        ])
-        deadline = time.monotonic() + CONTAIN_SECONDS
-        while scope_of(pid) != unit:
-            if time.monotonic() >= deadline:
-                raise _Uncontained(f"pid {pid} did not enter {unit}")
-            time.sleep(0.01)
+        try:
+            noexpand = "--expand-environment" in _output(["systemd-run", "--help"], env)
+        except _Uncontained:
+            noexpand = True
+        scope = [
+            "systemd-run", "--user", "--scope", "--quiet", "--collect",
+            *(["--expand-environment=no"] if noexpand else []),
+        ]
+        _output([*scope, "true"], env)
     except (_Uncontained, OSError, subprocess.SubprocessError) as exc:
         log(f"the run is uncontained (no systemd scope): {_one_line(exc)}")
-        return None
+        return []
+    return [*scope, f"--unit={scope_unit(tag)}", "--"]
+
+
+def await_scope(child: subprocess.Popen[bytes], tag: str, log: Log) -> str | None:
+    """The scope unit once child, spawned behind scope_prefix, is in it; else None.
+
+    None with no log line when child exits first (systemd-run failed), or
+    with the uncontained line when it is not in the scope in time.
+    """
+    unit = scope_unit(tag)
+    deadline = time.monotonic() + CONTAIN_SECONDS
+    while scope_of(child.pid) != unit:
+        if child.poll() is not None:
+            return None
+        if time.monotonic() >= deadline:
+            log(f"the run is uncontained (no systemd scope): pid {child.pid} did not enter {unit}")
+            return None
+        time.sleep(0.01)
     return unit
 
 
@@ -138,9 +158,10 @@ class _Uncontained(Exception):
     pass
 
 
-def _output(argv: list[str]) -> str:
+def _output(argv: list[str], env: Mapping[str, str]) -> str:
     done = subprocess.run(
-        argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=CONTAIN_SECONDS
+        argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=CONTAIN_SECONDS,
+        env=env,
     )
     if done.returncode != 0:
         detail = " ".join(done.stderr.split())
