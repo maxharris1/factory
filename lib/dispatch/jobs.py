@@ -581,9 +581,9 @@ class JobsMixin:
                     placement is not None
                     and facts.runner_alive is False
                     and facts.worker_gone is False
-                    and isinstance(handoff := self._posted_handoff(job, None), Comment)
+                    and (handoff := self._handoff_candidate(job, skip_unread=True)) is not None
                 ):
-                    self._fail_with_leftovers(job, placement.runner_pid, handoff, now)
+                    self._fail_with_leftovers(job, placement.runner_pid, handoff.comment, now)
                 elif state == DEAD:
                     assert placement is not None
                     self._fail_dead(job, placement.runner_pid, now)
@@ -1298,7 +1298,7 @@ class JobsMixin:
         return _HANDOFF_UNREAD if candidate.unread else candidate.comment
 
     def _handoff_candidate(
-        self, job: Job, ticket: TrackedTicket | None = None
+        self, job: Job, ticket: TrackedTicket | None = None, *, skip_unread: bool = False
     ) -> HandoffCandidate | None:
         if ticket is None:
             ticket = self._polled.get((job.request.repo.lower(), job.request.ticket_id))
@@ -1386,6 +1386,8 @@ class JobsMixin:
                 and outcome is None
                 and _matching_head(head, ticket.current_head) is None
             )
+            if unread and skip_unread:
+                continue
             return HandoffCandidate(item, unread)
         return None
 

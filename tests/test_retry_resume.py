@@ -10,7 +10,7 @@ from lib.device_pool import DevicePool
 from lib.dispatch.constants import STOPPED_POLL_SECONDS
 from lib.dispatch.types import Comment
 from lib.hook_t7 import T7Hook
-from lib.queue import Job
+from lib.queue import PRE_READY_FAILED, Job
 from tests.merge_queue_support import PR, REPO, Board, sha
 from tests.test_dispatcher import PLAN, RETRY, VERDICT
 from tests.test_remote_start import FakeTransport, config_of, machines_file
@@ -664,3 +664,55 @@ def test_a_ready_from_an_earlier_generation_does_not_settle_a_dead_runner_with_l
     assert not {"dead", "done-from-ready"} & set(_events(b, fix.id))
     assert pool.placement(fix.id) is not None
     assert _orphans(b) == []
+
+
+@pytest.mark.job_bound
+def test_a_ready_at_a_superseded_head_does_not_hide_the_current_ready_from_a_dead_runner(
+    tmp_path: Path,
+) -> None:
+    b = Board(tmp_path)
+    p = b.open("42", sha(1))
+    b.go(p, "go")
+    b.poll()
+    pool, _transport, build = _running_with_leftovers(b, tmp_path, "claude")
+    p.push(sha(2))
+    superseded = b.ready(p, p.head)
+    p.push(sha(3))
+    ready = b.ready(p, p.head)
+    for _ in range(4):
+        b.poll()
+
+    assert _job_state(b, build.id) == "done"
+    assert _handoff(b, build.id) == ready
+    assert pool.placement(build.id) is None
+    assert b.outcome(superseded) == "stale-ready-head"
+    assert b.outcome(ready) == "queued-review"
+    assert [(r["state"], r["head"]) for r in b.jobs("review")] == [("queued", sha(3))]
+    assert _events(b, build.id).count("dead") == 1
+
+
+@pytest.mark.job_bound
+def test_a_ready_its_pre_ready_check_refused_does_not_settle_a_dead_runner_with_leftovers(
+    tmp_path: Path,
+) -> None:
+    b = Board(tmp_path)
+    p = b.open("42", sha(1))
+    b.go(p, "go")
+    b.poll()
+    pool, _transport, build = _running_with_leftovers(b, tmp_path, "claude")
+    p.push(sha(2))
+    ready = b.ready(p, p.head)
+    b.queue.record_invalid_handoff(
+        build.id,
+        owner="claude",
+        comment_id=ready,
+        detail="pre_ready failed: exit 1",
+        event=PRE_READY_FAILED,
+    )
+    b.poll()
+    b.poll()
+
+    assert _job_state(b, build.id) == "running"
+    assert not {"dead", "done-from-ready"} & set(_events(b, build.id))
+    assert pool.placement(build.id) is not None
+    assert b.jobs("review") == []
