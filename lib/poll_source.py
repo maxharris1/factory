@@ -2658,7 +2658,6 @@ class LivePollSource:
             )
 
     def _defer(self, reason: str) -> None:
-        """A budget or page-limit cutoff is expected load shedding, not an error."""
         self._cycle_deferrals[reason] = self._cycle_deferrals.get(reason, 0) + 1
         if self.cycle_clock is not None:
             self.cycle_clock.add_deferral(reason)
