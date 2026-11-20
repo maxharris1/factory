@@ -22,7 +22,7 @@ from datetime import datetime
 from email.utils import parsedate_to_datetime
 from http.client import HTTPConnection, HTTPException, HTTPSConnection
 from pathlib import Path
-from typing import Any, NamedTuple, Protocol
+from typing import Any, Literal, NamedTuple, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import (
     HTTPHandler,
@@ -152,6 +152,10 @@ mutation FactoryReadyForReview($issue: String!, $state: String!) {
 """.strip()
 BACKOFF_SECONDS = 300.0
 RATE_RESET_GRACE_SECONDS = 5.0
+RATE_SHED_FRACTION = 0.20
+RATE_PAUSE_REMAINING = 50
+MAX_POLL_INTERVAL_SECONDS = 120.0
+LOW_PRIORITY_PHASES = frozenset({"feed", "github-candidates", "ci-board", "factory-reads"})
 GH_CALL_TIMEOUT_SECONDS = 20.0
 GH_CALL_ATTEMPTS = 3
 GH_RETRY_BACKOFF_SECONDS = 2.0
@@ -237,6 +241,45 @@ class RateWindow:
     limit: int
     remaining: int
     reset_epoch: float
+
+
+PacingReason = Literal["normal", "stretch", "shed", "pause"]
+QuotaState = Literal["normal", "shed", "pause"]
+
+
+@dataclass(frozen=True)
+class Pacing:
+    interval_seconds: float
+    shed_low_priority: bool
+    reason: PacingReason
+
+
+def quota_state(window: RateWindow | None, wall_now: float) -> QuotaState:
+    if window is None or window.reset_epoch <= wall_now:
+        return "normal"
+    if window.remaining <= RATE_PAUSE_REMAINING:
+        return "pause"
+    return "shed" if window.remaining < RATE_SHED_FRACTION * window.limit else "normal"
+
+
+def pace(
+    window: RateWindow | None,
+    wall_now: float,
+    base_interval: float,
+    recent_billed: int,
+    cycle_seconds: float,
+) -> Pacing:
+    state = quota_state(window, wall_now)
+    if state == "pause":
+        return Pacing(MAX_POLL_INTERVAL_SECONDS, True, "pause")
+    if window is None or window.reset_epoch <= wall_now:
+        return Pacing(base_interval, False, "normal")
+    spendable = window.remaining - RATE_PAUSE_REMAINING
+    needed = (window.reset_epoch - wall_now) * max(recent_billed, 1) / spendable - cycle_seconds
+    interval = min(max(needed, base_interval), MAX_POLL_INTERVAL_SECONDS)
+    if state == "shed":
+        return Pacing(interval, True, "shed")
+    return Pacing(interval, False, "stretch" if interval > base_interval else "normal")
 
 
 @dataclass(frozen=True)
@@ -2502,6 +2545,25 @@ class LivePollSource:
         left = self._backoff_until - self.clock()
         if left > 0:
             raise QuotaDeferred(f"GitHub rate-limit backoff is active ({left:.0f}s left)")
+        window = self._rate_window
+        state = quota_state(window, self.wall())
+        if state == "pause":
+            if not self._throttled:
+                self._throttled = True
+                if self.warning_sink is not None:
+                    self.warning_sink(
+                        f"github throttle: core {window.remaining}/{window.limit} left; "
+                        + self._reads_paused(window.reset_epoch - self.wall(), "reset")
+                    )
+            raise QuotaDeferred(
+                f"GitHub core quota at the floor ({window.remaining}/{window.limit} left)"
+            )
+        clock = self.cycle_clock
+        if state == "shed" and clock is not None and clock.open_phase in LOW_PRIORITY_PHASES:
+            raise QuotaDeferred(
+                f"shedding {clock.open_phase} reads: GitHub core "
+                f"{window.remaining}/{window.limit} left"
+            )
         self._check_hangs("github")
         route = f"gh api {_route(argv[argv.index('api') + 1 :])}" if "api" in argv else "gh"
         with self._timed(_gh_source(argv)):
@@ -2574,14 +2636,17 @@ class LivePollSource:
         window = self._live_window()
         core = "" if window is None else f"; core {window.remaining}/{window.limit} left"
         http = "" if status is None else f"HTTP {status} "
+        self.warning_sink(
+            f"github throttle: {http}rate limit on {route}{core}; "
+            + self._reads_paused(seconds, basis)
+        )
+
+    def _reads_paused(self, seconds: float, basis: str) -> str:
         minutes, secs = divmod(round(seconds), 60)
         until = datetime.fromtimestamp(
             self.wall() + seconds, ZoneInfo("America/New_York")
         ).strftime("%H:%M:%S")
-        self.warning_sink(
-            f"github throttle: {http}rate limit on {route}{core}; "
-            f"github reads paused {minutes}m{secs:02d}s until {until} ET ({basis})"
-        )
+        return f"github reads paused {minutes}m{secs:02d}s until {until} ET ({basis})"
 
     def _refetch_from_gh_cache(
         self, argv: Sequence[str], cacheable: bool, started_wall: float
@@ -2612,6 +2677,9 @@ class LivePollSource:
         if window is None:
             return BACKOFF_SECONDS, "default"
         return window.reset_epoch - self.wall() + RATE_RESET_GRACE_SECONDS, basis
+
+    def pacing(self, base_interval: float, recent_billed: int, cycle_seconds: float) -> Pacing:
+        return pace(self._rate_window, self.wall(), base_interval, recent_billed, cycle_seconds)
 
     def _live_window(self) -> RateWindow | None:
         window = self._rate_window

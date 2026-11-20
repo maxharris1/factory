@@ -17,6 +17,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from lib.dispatch.cycle_clock import CycleClock
 from lib.dispatcher import POLL_SECONDS, Dispatcher, PollLoop, TicketRef
 from lib.orch_yml import (
     LINEAR_POLL_SECONDS,
@@ -33,6 +34,7 @@ from lib.poll_source import (
     LINEAR_SHARE,
     HTTPResult,
     LivePollSource,
+    Pacing,
 )
 from lib.queue import SQLiteJobQueue
 from tests.test_live_poll import (
@@ -139,6 +141,40 @@ def test_poll_loop_without_a_config_keeps_60_seconds() -> None:
     sleeps: list[float] = []
     PollLoop(_Dispatcher(), object(), sleep=sleeps.append).run(max_polls=2)
     assert sleeps == [60]
+
+
+class _PacedSource(_Source):
+    def __init__(self) -> None:
+        super().__init__(30)
+        self.asked: list[tuple[float, int, float]] = []
+
+    def pacing(self, base_interval: float, recent_billed: int, cycle_seconds: float) -> Pacing:
+        self.asked.append((base_interval, recent_billed, cycle_seconds))
+        return Pacing(90.0, False, "stretch")
+
+
+class _BetweenClock(CycleClock):
+    def __init__(self) -> None:
+        super().__init__()
+        self.asked: list[float] = []
+
+    def between(self, asked: float) -> str | None:
+        self.asked.append(asked)
+        return super().between(asked)
+
+
+def test_poll_loop_sleeps_the_paced_interval_and_tells_between(capsys) -> None:
+    source = _PacedSource()
+    sleeps: list[float] = []
+    loop = PollLoop(_Dispatcher(), source, sleep=sleeps.append)
+    loop.clock = _BetweenClock()
+
+    loop.run(max_polls=2)
+
+    assert sleeps == [90.0]
+    assert loop.clock.asked == [30, 90.0]
+    assert [(base, billed) for base, billed, _ in source.asked] == [(30, 0)]
+    assert "orch poll: pacing stretch, next cycle in 90s" in capsys.readouterr().out
 
 
 # --- GitHub polls every 30-second cycle ---------------------------------------

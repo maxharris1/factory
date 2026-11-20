@@ -3,13 +3,19 @@ import json
 
 import pytest
 
+from lib.dispatch.cycle_clock import CycleClock
 from lib.github_actions import GhResult
 from lib.poll_source import (
     BACKOFF_SECONDS,
+    MAX_POLL_INTERVAL_SECONDS,
+    RATE_PAUSE_REMAINING,
     LivePollSource,
+    Pacing,
     PollSourceError,
     QuotaDeferred,
     RATE_RESET_GRACE_SECONDS,
+    RateWindow,
+    pace,
 )
 from tests.test_live_poll import FACTORY, config
 
@@ -99,6 +105,7 @@ def test_rate_limit_pauses_every_read_until_the_reset_not_300s(status) -> None:
     assert quota.reads() == reads
 
     quota.mono = 1_000.0 + 900 + RATE_RESET_GRACE_SECONDS
+    quota.wall = WALL + 900 + RATE_RESET_GRACE_SECONDS
     quota.comments()
     assert quota.reads() == reads + 1
 
@@ -115,7 +122,9 @@ def test_wall_clock_jump_does_not_lift_the_pause() -> None:
 
 def test_retry_after_wins_over_the_reset_header() -> None:
     quota = Quota()
-    quota.hit_limit(limited(X_RateLimit_Reset=int(WALL + 900), Retry_After=120))
+    quota.hit_limit(
+        limited(X_RateLimit_Remaining=1000, X_RateLimit_Reset=int(WALL + 900), Retry_After=120)
+    )
 
     quota.mono += 119
     with pytest.raises(QuotaDeferred):
@@ -151,6 +160,7 @@ def test_probe_supplies_the_reset_when_the_response_has_none() -> None:
     with pytest.raises(QuotaDeferred):
         quota.comments()
     quota.mono += 1
+    quota.wall += 600 + RATE_RESET_GRACE_SECONDS
     quota.comments()
     assert "core 0/5000 left" in quota.lines[0]
 
@@ -198,7 +208,7 @@ def test_replayed_headers_do_not_overwrite_a_newer_window() -> None:
             200,
             FACTORY_BODY,
             X_RateLimit_Limit=5000,
-            X_RateLimit_Remaining=7,
+            X_RateLimit_Remaining=70,
             X_RateLimit_Reset=reset,
         )
     )
@@ -229,7 +239,7 @@ def test_replayed_headers_do_not_overwrite_a_newer_window() -> None:
 
     quota.hit_limit(response(403, '{"message": "API rate limit exceeded"}'))
 
-    assert "core 7/5000 left" in quota.lines[0]
+    assert "core 70/5000 left" in quota.lines[0]
     quota.mono += 600 + RATE_RESET_GRACE_SECONDS - 1
     with pytest.raises(QuotaDeferred):
         quota.comments()
@@ -259,6 +269,7 @@ def test_replayed_rate_limit_response_cannot_shorten_the_pause() -> None:
     with pytest.raises(QuotaDeferred):
         quota.comments()
     quota.mono = 1_000.0 + 900 + RATE_RESET_GRACE_SECONDS
+    quota.wall = WALL + 900 + RATE_RESET_GRACE_SECONDS
     quota.comments()
 
 
@@ -277,3 +288,88 @@ def test_quota_pause_is_a_deferral_not_a_cycle_error() -> None:
 
     assert errors == []
     assert any("github quota" in line for line in deferrals)
+
+
+def window(remaining: int, reset_in: float) -> RateWindow:
+    return RateWindow(5000, remaining, WALL + reset_in)
+
+
+@pytest.mark.parametrize(
+    ("window", "billed", "expected"),
+    [
+        pytest.param(window(4000, 1800), 30, Pacing(30.0, False, "normal"), id="normal"),
+        pytest.param(
+            window(1500, 1800), 60, Pacing(1800 * 60 / 1450 - 5, False, "stretch"), id="stretch"
+        ),
+        pytest.param(
+            window(900, 1800), 30, Pacing(1800 * 30 / 850 - 5, True, "shed"), id="shed"
+        ),
+        pytest.param(
+            window(RATE_PAUSE_REMAINING, 1800), 30, Pacing(120.0, True, "pause"), id="pause"
+        ),
+        pytest.param(window(10, -1), 30, Pacing(30.0, False, "normal"), id="reset-past"),
+        pytest.param(window(200, 3000), 200, Pacing(120.0, True, "shed"), id="clamp"),
+        pytest.param(None, 30, Pacing(30.0, False, "normal"), id="no-window"),
+    ],
+)
+def test_pace(window: RateWindow | None, billed: int, expected: Pacing) -> None:
+    got = pace(window, WALL, 30.0, billed, 5.0)
+
+    assert got.interval_seconds == pytest.approx(expected.interval_seconds)
+    assert (got.shed_low_priority, got.reason) == (expected.shed_low_priority, expected.reason)
+    assert 30.0 <= got.interval_seconds <= MAX_POLL_INTERVAL_SECONDS
+
+
+def seen(quota: Quota, remaining: int, reset_in: float = 900) -> None:
+    quota.factory.append(
+        response(
+            200,
+            FACTORY_BODY,
+            X_RateLimit_Limit=5000,
+            X_RateLimit_Remaining=remaining,
+            X_RateLimit_Reset=int(WALL + reset_in),
+        )
+    )
+    quota.read_factory()
+
+
+def test_reads_pause_at_the_floor_until_the_reset() -> None:
+    quota = Quota()
+    seen(quota, RATE_PAUSE_REMAINING)
+    reads = quota.reads()
+
+    for _ in range(3):
+        with pytest.raises(QuotaDeferred):
+            quota.comments()
+
+    assert quota.reads() == reads
+    assert len(quota.lines) == 1
+    assert quota.lines[0].startswith(f"github throttle: core {RATE_PAUSE_REMAINING}/5000 left;")
+    assert "paused 15m00s" in quota.lines[0]
+    quota.wall += 900
+    quota.comments()
+    assert quota.reads() == reads + 1
+
+
+def test_shedding_skips_low_priority_reads_and_keeps_tracked_reads() -> None:
+    quota = Quota()
+    seen(quota, 900)
+    clock = CycleClock()
+    quota.source.cycle_clock = clock
+    clock.start()
+    reads = quota.reads()
+
+    with clock.phase("github-candidates"), pytest.raises(QuotaDeferred):
+        quota.comments()
+    assert quota.reads() == reads
+
+    with clock.phase("tracked-read"):
+        quota.comments()
+    assert quota.reads() == reads + 1
+
+
+def test_pacing_reads_the_live_window() -> None:
+    quota = Quota()
+    seen(quota, 1500, reset_in=1800)
+
+    assert quota.source.pacing(30.0, 60, 5.0) == pace(window(1500, 1800), WALL, 30.0, 60, 5.0)
