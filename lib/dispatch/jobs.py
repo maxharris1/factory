@@ -759,12 +759,8 @@ class JobsMixin:
         self, job: Job, runner_pid: int | None, handoff: Comment, now: float
     ) -> None:
         """#1209: fail a job whose runner is gone and whose handoff is posted,
-        while tagged leftovers keep its worker check RUNNING.
-
-        Guarded like `_fail_dead`. Its slot moves to device_orphans, so the
-        orphan sweep stops what is left of its scope, and T6 marks it done
-        from the posted handoff in this same poll.
-        """
+        while leftovers keep its worker check RUNNING, so T6 settles it from
+        that handoff and the orphan sweep stops its scope."""
         kind = parse_comment(handoff.body).as_dict()["kind"]
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -785,7 +781,7 @@ class JobsMixin:
                 return
             detail = (
                 f"runner pid {runner_pid} is gone and its {kind} comment {handoff.id} "
-                "is posted, but tagged leftovers still run; slot orphaned, failed for T6"
+                "is posted, but its worker check still says running; slot orphaned, failed for T6"
             )
             self._record_job_event(connection, job, "dead", detail, now)
             orphan_slot(connection, job.id, now)

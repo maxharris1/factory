@@ -476,8 +476,6 @@ LEFTOVER_TAG = "e" * 32
 def _running_with_leftovers(
     b: Board, tmp_path: Path, recipient: str
 ) -> tuple[DevicePool, FakeTransport, Job]:
-    """A job on the pc whose `orch job run` is gone while a leaked process
-    still carries its worker tag, so the device reports the worker running."""
     config = config_of(machines_file(tmp_path))
     pool = DevicePool(b.queue, config)
     transport = FakeTransport(check=1)
