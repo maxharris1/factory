@@ -10,8 +10,8 @@ from lib.dispatch.constants import HANDED_OFF_EXTERNALLY
 from lib.dashboard_pages.activity import _VERDICT
 from lib.dashboard_pages.lanes import TILE_STATE
 from lib.dashboard_pages.common import (
-    _bot, checks_link, checks_named, _chip, duration, _e, github_links, _panel, _short, _span, _td, _ticket,
-    ticket_page_href,
+    _JOB_STATE, _bot, checks_link, checks_named, _chip, duration, _e, github_links, _panel, _short, _span, _td,
+    _ticket, ticket_page_href,
 )
 
 
@@ -288,7 +288,7 @@ SCRIPT_TICKETS = r"""
 
   function tkChips(parent, live) {
     if (!live) return;
-    var chips = BOARD.chips[live.job_state];
+    var chips = BOARD.chips[live.stale_cause || live.job_state];
     if (chips) add(parent, chip(chips[0], chips[1]));
     if (live.overdue) add(parent, chip(BOARD.chips.overdue[0], BOARD.chips.overdue[1]));
   }
@@ -707,6 +707,7 @@ FIND = (
 )
 JOB_CHIPS = {
     **{name: TILE_STATE[name]["chip"] for name in ("claimed", "stale", "dead")},
+    "runner-gone": list(_JOB_STATE["runner-gone"]),
     "overdue": ["overdue", "bad"],
 }
 _WAIT_TINT = "#ff9e64"
@@ -874,7 +875,8 @@ def _round(ticket: dict, job: dict | None) -> str:
 def _chips(live: dict | None) -> str:
     if not live:
         return ""
-    chips = [JOB_CHIPS.get(str(live.get("job_state")))] + [JOB_CHIPS["overdue"] if live.get("overdue") else None]
+    state = live.get("stale_cause") or live.get("job_state")
+    chips = [JOB_CHIPS.get(str(state))] + [JOB_CHIPS["overdue"] if live.get("overdue") else None]
     return "".join(_chip(text, tone) for text, tone in filter(None, chips))
 
 

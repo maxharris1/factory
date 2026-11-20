@@ -214,12 +214,14 @@ from lib.heal import POLLER_SERVICE
 from lib.job_state import (
     DEAD,
     JOB_STATES,
+    RUNNER_GONE,
     STALE,
     Alive,
     JobStateConfig,
     derive,
     liveness,
     read_placements,
+    stale_cause,
 )
 from lib.linear_webhook import read_health
 from lib.load import load_yaml
@@ -1410,10 +1412,9 @@ def _attention(
         job_state = row.get("job_state")
         if job_state == DEAD:
             kind, what = "dead", "runner gone"
-        elif row.get("timed_out", True):
-            kind, what = "overdue", row["state"]
         else:
-            kind, what = "stale", row["state"]
+            kind = "overdue" if row.get("timed_out", True) else "stale"
+            what = "runner gone, worker alive" if row.get("stale_cause") == RUNNER_GONE else row["state"]
         items.append({
             "kind": kind,
             **_same_ref(row),
@@ -1784,6 +1785,7 @@ def _read_db(
             }
             timeout = int(row["timeout_seconds"])
             job_state: str | None = None
+            cause: str | None = None
             if row["state"] == "running":
                 age = _age(now, row["last_activity_at"]) or 0
                 # The lane: a device-pool placement, else a box slot (grok
@@ -1802,19 +1804,22 @@ def _read_db(
                     started = row["created_at"]
                     elapsed_from = "queued"
                 slot = slots.get(str(row["id"]))
+                facts = liveness(slot, alive)
                 job_state = _enum(
                     derive(
                         last_activity_at=float(row["last_activity_at"]),
                         now=now,
                         placement=slot,
                         stale_seconds=job_states.stale_seconds,
-                        liveness=liveness(slot, alive),
+                        liveness=facts,
                     ),
                     JOB_STATES,
                 )
+                cause = stale_cause(job_state, facts)
                 item = {
                     **base,
                     "job_state": job_state,
+                    "stale_cause": cause,
                     "round": _detail_round(row["detail"]),
                     "heartbeat_age_seconds": age,
                     "heartbeat_at": float(row["last_activity_at"]),
@@ -1847,6 +1852,7 @@ def _read_db(
                     **base,
                     "state": _enum(row["state"], STATES),
                     "job_state": job_state,
+                    "stale_cause": cause,
                     "timed_out": age > timeout,
                     "age_seconds": age,
                 })

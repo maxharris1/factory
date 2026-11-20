@@ -1119,6 +1119,11 @@ A running job is in one of four states, derived in one place,
   carries the start's worker tag (`check_worker`). A worker that may still
   run is stale, not dead.
 
+On the dashboard, a stale job whose recorded runner is gone while its worker
+is not confirmed gone shows `runner gone, worker alive` in place of `stale
+heartbeat`; the state, and what the poller does with it, stay `stale` (issue
+#1211).
+
 The poller requeues a job that stays claimed for more than
 `job_states.release_claimed_minutes` (default 5): the same job row goes back
 to `queued`, so its review round and T6 attempt are reused, not charged; its

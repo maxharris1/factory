@@ -843,6 +843,23 @@ def test_troubled_jobs_show_their_lanes_chip_beside_the_state(snapshot: dict) ->
         assert _state_chips(_card(board, key)) == chips, key
 
 
+def _runner_gone(snapshot: dict) -> tuple[dict, str]:
+    found, expect = _troubled(snapshot)
+    key = next(key for key, chips in expect.items() if chips == [("stale", "warn")])
+    for row in found["running"]:
+        if row["job_state"] == "stale":
+            row["stale_cause"] = "runner-gone"
+    return found, key
+
+
+def test_a_stale_job_whose_runner_is_gone_says_so_on_its_card(tmp_path: Path, snapshot: dict) -> None:
+    found, key = _runner_gone(snapshot)
+    board = _server(found)["pipeline"]
+    assert _state_chips(_card(board, key)) == [("runner gone, worker alive", "warn")]
+    if layout.NODE:
+        assert _script(tmp_path, found)["html"]["pipeline"] == board
+
+
 @layout.needs_node
 def test_script_troubled_chips_match_the_server(tmp_path: Path, snapshot: dict) -> None:
     found, expect = _troubled(snapshot)

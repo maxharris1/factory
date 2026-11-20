@@ -365,7 +365,22 @@ def test_a_failed_beat_logs_once_and_never_raises(tmp_path: Path) -> None:
     beater = health.Beater(db, "poller", devices=["box"], store=Broken(db, devices=DEVICES), log=lines.append)
     beater.beat_now()
     beater.beat_now()
-    assert lines == ["health: poller heartbeat failed: OperationalError"]
+    assert lines == ["health: poller heartbeat failed: OperationalError: database is locked"]
+
+
+def test_a_failed_beat_with_no_message_logs_the_class_alone(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    lines: list[str] = []
+    errors = iter([sqlite3.OperationalError(""), sqlite3.OperationalError("disk I/O\n  error")])
+
+    class Broken(health.HealthStore):
+        def beat(self, *args, **kwargs):
+            raise next(errors)
+
+    health.Beater(db, "poller", devices=["box"], store=Broken(db, devices=DEVICES), log=lines.append).beat_now()
+    health.Beater(db, "poller", devices=["box"], store=Broken(db, devices=DEVICES), log=lines.append).beat_now()
+    assert lines == ["health: poller heartbeat failed: OperationalError",
+                     "health: poller heartbeat failed: OperationalError: disk I/O error"]
 
 
 def test_the_beat_thread_runs_and_stops(tmp_path: Path) -> None:
@@ -1175,7 +1190,7 @@ def test_every_writer_refuses_a_device_outside_machines_yml(tmp_path: Path, devi
                            store=health.HealthStore(db, devices={"box"}), log=lines.append)
     beater.devices = (device,)
     beater.beat_now()
-    assert lines == ["health: waiter heartbeat failed: HealthError"]
+    assert lines == ["health: waiter heartbeat failed: HealthError: device must be a device machines.yml lists"]
     assert cli_main(["health", "beat", "tunnel", "--db", str(db), "--device", device,
                      "--pid", str(os.getpid())]) == 2
     assert health.read_heartbeats(db) in (None, ())
@@ -1214,7 +1229,9 @@ def test_a_locked_health_db_never_stalls_the_dashboard_push(tmp_path: Path, monk
         holder.close()
     assert code == 0
     assert sent and sent[0] - started < 4 * health.BUSY_SECONDS + 1
-    assert "health: dashboard heartbeat failed: OperationalError" in capsys.readouterr().err
+    failed = [line for line in capsys.readouterr().err.splitlines() if "heartbeat failed" in line]
+    assert len(failed) == 1 and failed[0].startswith("health: dashboard heartbeat failed: OperationalError: ")
+    assert "locked" in failed[0]
     status = json.loads((tmp_path / "out" / "status.json").read_text())
     assert [i for i in status["attention"]["items"] if i["kind"] == "health"] == []
     assert "poller" in [c["component"] for c in status["health"]["components"]]
