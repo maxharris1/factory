@@ -26,7 +26,7 @@ The brief names one playbook, picked by the ticket's `Type:` line. No line means
    - Rebase on the current base and push the ticket branch with `--force-with-lease` only. The ticket branch has one writer, so it is not a shared branch. Never rewrite the base.
    - Run the repo's checks for the touched paths on the committed head.
    - Prove the change with `<pstack>/skills/principle-prove-it-works/SKILL.md`, and paste the run in the handoff.
-3. Post `ready` with the head you pushed. The handoff lists every SKILL.md you read, by path, under "Skills read:".
+3. Post `ready` with the head you pushed. Its `## Proof` section has one entry for each criterion id the brief lists. A `review` entry gives the command you ran, in backticks, and its output in a fenced block. A `qa` entry gives the verify skill's command for the criterion's feature-map journeys and its output, and names each journey. Run the verify skill's doctor before any `qa` entry. If the doctor fails, write that entry as `unverified` with the doctor command and its output. Never leave an entry out.
 
 ## Factory facts
 

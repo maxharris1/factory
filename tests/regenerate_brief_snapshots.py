@@ -140,9 +140,11 @@ Squash-merge after APPROVE.
 PLAN_TEXT = """## Plan for #41: Add a Start free button to the pricing page
 
 - ac-1: `app/pricing/page.tsx` renders `<StartFree />` above the plan grid. Proof: `tests/pricing.test.tsx`.
-- ac-2: `StartFree` links to `/signup?plan=free`. Proof: `e2e/start-free.spec.ts`.
-
-Skills read: /home/claude-bot/factory/skills/factory/factory-builder/SKILL.md"""
+- ac-2: `StartFree` links to `/signup?plan=free`. Proof: `e2e/start-free.spec.ts`."""
+PROOF = [
+    {"id": "ac-1", "kind": "review", "journeys": []},
+    {"id": "ac-2", "kind": "qa", "journeys": ["start-free"]},
+]
 FIRST_PLAN_TEXT = """## Plan for #41: Add a Start free button to the pricing page
 
 - ac-1: `app/pricing/page.tsx` renders `<StartFree />` above the plan grid. Proof: `tests/pricing.test.tsx`.
@@ -237,7 +239,7 @@ CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
         "gitBranchName": "factory/issue-42",
         "instruction": "https://github.com/owner/repo/pull/42#issuecomment-5",
     }),
-    "build-qa": ("build", "claude", 1, None, {"gitBranchName": "factory/issue-42"}),
+    "build-qa": ("build", "claude", 1, None, {"gitBranchName": "factory/issue-42", "proof": PROOF}),
     "resume": ("build", "claude", 1, HEAD, {
         "gitBranchName": "factory/issue-42",
         "instruction": ANSWERS_URL,
@@ -262,6 +264,7 @@ CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
     "fix": ("fix", "claude", 1, HEAD, {
         "instruction": "https://github.com/owner/repo/pull/42#issuecomment-7",
         "round": "2/3",
+        "proof": PROOF,
     }),
     "build-pre-ready": ("build", "claude", 1, None, {
         "gitBranchName": "factory/issue-42",

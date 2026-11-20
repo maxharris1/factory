@@ -218,6 +218,118 @@ def test_a_brief_with_no_type_line_sets_no_ticket_type(tmp_path) -> None:
         assert "ticket_type" not in json.loads(dispatcher._job_detail(polled, action=action))
 
 
+def _criteria_feeder_comment() -> str:
+    context, findings = parse_factory_context(FACTORY_MD)
+    assert context is not None, findings
+    body = (
+        "Ship it.\nFeatures: upload-file, search\nRisk: low\nPlan first: no\nDepends on: none\n\n"
+        "## Acceptance criteria\n- The export stops failing.\n- ops: restart the daemon.\n"
+        "- qa(search): Search finds the export.\n"
+    )
+    issue = IntakeIssue(
+        repo="acme/widgets", tracker="github", key="41", title="Fix the export", body=body, labels=(),
+        created_at=0.0, applied_by="max", url="https://github.com/acme/widgets/issues/41",
+    )
+    return feeder_brief(issue, context, number=12, branch="factory/issue-41", base="main", risk="low",
+                        state="building", visible=False, template=parse_intake(body, ()))
+
+
+@pytest.mark.parametrize("action", ["build", "fix"])
+def test_a_builder_job_carries_the_proof_its_ready_owes(tmp_path, action: str) -> None:
+    polled = _polled(("grok-login", _criteria_feeder_comment()))
+    dispatcher, _ = setup(tmp_path)
+    detail = json.loads(dispatcher._job_detail(polled, action=action))
+    assert detail["proof"] == [
+        {"id": "ac-1", "kind": "review", "journeys": []},
+        {"id": "ac-2", "kind": "qa", "journeys": ["search"]},
+    ]
+
+
+def test_a_review_job_carries_no_proof(tmp_path) -> None:
+    polled = _polled(("grok-login", _criteria_feeder_comment()))
+    dispatcher, _ = setup(tmp_path)
+    assert "proof" not in json.loads(dispatcher._job_detail(polled, action="review"))
+
+
+@pytest.mark.parametrize("action", ["build", "fix"])
+def test_a_builder_job_whose_ticket_quote_was_cut_still_owes_every_criterion(tmp_path, action: str) -> None:
+    context, findings = parse_factory_context(FACTORY_MD)
+    assert context is not None, findings
+    body = (
+        "Features: search\nRisk: low\nPlan first: no\nDepends on: none\n\n"
+        + "Background. " * 1800
+        + "\n\n## Acceptance criteria\n- Parser accepts the field.\n- qa(search): Search finds the export.\n"
+    )
+    issue = IntakeIssue(
+        repo="acme/widgets", tracker="github", key="41", title="Export works", body=body, labels=(),
+        created_at=0.0, applied_by="max", url="https://github.com/acme/widgets/issues/41",
+    )
+    brief = feeder_brief(issue, context, number=12, branch="factory/issue-41", base="main", risk="low",
+                         state="building", visible=False, template=parse_intake(body, ()))
+    dispatcher, _ = setup(tmp_path)
+    detail = json.loads(dispatcher._job_detail(_polled(("grok-login", brief)), action=action))
+    assert detail["proof"] == [
+        {"id": "ac-1", "kind": "review", "journeys": []},
+        {"id": "ac-2", "kind": "qa", "journeys": ["search"]},
+    ]
+
+
+def test_a_qa_criterion_whose_features_line_was_cut_is_refused_without_every_journey(tmp_path) -> None:
+    from tests.test_handoff_check import HEADER, _check, _job
+
+    context, findings = parse_factory_context(FACTORY_MD)
+    assert context is not None, findings
+    body = (
+        "Risk: low\nPlan first: no\nDepends on: none\n\n## Acceptance criteria\n- qa: Upload then search.\n\n"
+        + "Background. " * 1800
+        + "\n\nFeatures: upload-file, search\n"
+    )
+    template = parse_intake(body, ())
+    assert template.defects == ()
+    issue = IntakeIssue(
+        repo="acme/widgets", tracker="github", key="41", title="Export works", body=body, labels=(),
+        created_at=0.0, applied_by="max", url="https://github.com/acme/widgets/issues/41",
+    )
+    brief = feeder_brief(issue, context, number=12, branch="factory/issue-41", base="main", risk="low",
+                         state="building", visible=False, template=template)
+    dispatcher, _ = setup(tmp_path)
+    detail = json.loads(dispatcher._job_detail(_polled(("grok-login", brief)), action="build"))
+    ran_one = "- ac-1 (qa): `verify run upload-file`\n  ```\n  upload-file PASS\n  ```\n"
+    found = _check(_job(proof=detail["proof"]), f"{HEADER}\nDone.\n\n## Proof\n{ran_one}")
+    assert any(problem.startswith("Proof entry ac-1 (qa)") for problem in found), found
+    text = render_brief(job("fix", head=None, raw_detail=json.dumps(detail)), bot="claude-bot",
+                        factory_root=FACTORY_ROOT, context=None)
+    assert "- ac-1 (qa): journeys unknown" in text
+
+
+def test_a_qa_criterion_whose_features_line_was_cut_binds_the_source_issue_journeys(tmp_path) -> None:
+    from dataclasses import replace
+
+    from tests.test_handoff_check import HEADER, _check, _job
+
+    context, findings = parse_factory_context(FACTORY_MD)
+    assert context is not None, findings
+    body = (
+        "Risk: low\nPlan first: no\nDepends on: none\n\n## Acceptance criteria\n- qa: Upload then search.\n\n"
+        + "Background. " * 1800
+        + "\n\nFeatures: upload-file, search\n"
+    )
+    template = parse_intake(body, ())
+    issue = IntakeIssue(
+        repo="acme/widgets", tracker="github", key="41", title="Export works", body=body, labels=(),
+        created_at=0.0, applied_by="max", url="https://github.com/acme/widgets/issues/41",
+    )
+    brief = feeder_brief(issue, context, number=12, branch="factory/issue-41", base="main", risk="low",
+                         state="building", visible=False, template=template)
+    dispatcher, _ = setup(tmp_path)
+    polled = replace(_polled(("grok-login", brief)), issue_body=body)
+    detail = json.loads(dispatcher._job_detail(polled, action="fix"))
+    assert detail["proof"] == [{"id": "ac-1", "kind": "qa", "journeys": ["upload-file", "search"]}]
+    ran_one = "- ac-1 (qa): `verify run upload-file`\n  ```\n  upload-file PASS\n  ```\n"
+    found = _check(_job(proof=detail["proof"]), f"{HEADER}\nDone.\n\n## Proof\n{ran_one}")
+    assert found == ["Proof entry ac-1 (qa) does not name journey search"], found
+
+
 def _linear_polled(brief: str):
     issue = linear_issue()
     issue["comments"]["nodes"].insert(0, {

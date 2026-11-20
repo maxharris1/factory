@@ -110,7 +110,7 @@ def criteria_evidence(
     if section is not None and _items(_trim(section), False):
         candidates.append(("issue", issue_url, issue_body))
     if brief is not None:
-        candidates.append(("brief", brief.url, _quoted_ticket(parse_comment(brief.body).body)))
+        candidates.append(("brief", brief.url, quoted_ticket(parse_comment(brief.body).body)))
     candidates.append(("issue", issue_url, issue_body))
     if ready_starts_review:
         candidates.append(("pr", pr_url, pr_body))
@@ -185,7 +185,7 @@ def _headings(tokens: list[Token]) -> list[tuple[int, int, int, str]]:
     ]
 
 
-def _quoted_ticket(body: str) -> str:
+def quoted_ticket(body: str) -> str:
     tokens = _parse(body.splitlines())
     for index, line, _, title in _headings(tokens):
         quote = tokens[index + 3] if index + 3 < len(tokens) else None

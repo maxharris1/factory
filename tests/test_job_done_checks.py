@@ -156,6 +156,23 @@ def test_a_handoff_completes_with_or_without_a_skills_read_line(
     assert flags(db) == []
 
 
+def test_a_ready_without_a_proof_entry_per_criterion_is_submitted_invalid(
+    tmp_path: Path, store: Path, capsys
+) -> None:
+    proof = [{"id": f"ac-{n}", "kind": "review", "journeys": []} for n in (1, 2, 3)]
+    db, _, job = running_job(tmp_path, proof=proof)
+    entry = "- ac-1 (review): `pytest -q`\n  ```\n  3 passed\n  ```\n"
+    body = format_header(fitting_fields(job, "claude-bot")) + f"\nWhat changed.\n\n## Proof\n{entry}"
+    serve_handoff(store, job, "1004", body=body)
+
+    assert done(db, job, "1004") == 1
+
+    assert row(db, job.id)["state"] == "running"
+    (reason,) = invalid_events(db, job.id)
+    assert "ready has no Proof entry for ac-2, ac-3" in reason
+    assert "ready has no Proof entry for ac-2, ac-3" in capsys.readouterr().err
+
+
 def test_a_questions_handoff_completes_any_job(tmp_path: Path, store: Path) -> None:
     db, _, job = running_job(tmp_path, action="review", recipient="codex")
     serve_handoff(

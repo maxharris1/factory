@@ -11,14 +11,29 @@ from lib.brief.common import (
     answers_lines,
     comment_url,
     detail_of,
+    fenced,
     live_lines,
     local_checks,
     read_ticket_line,
     resume_lines,
     title_line,
 )
+from lib.proof import from_detail
 from lib.queue import Job
 
+PROOF_EXAMPLE = """## Proof
+- ac-1 (review): `<command>`
+  ```
+  <its output>
+  ```
+- ac-2 (qa): `<verify-skill command for journey upload-file>`
+  ```
+  <its output>
+  ```
+- ac-3 (qa): unverified. The verify skill's doctor failed: `<doctor command>`
+  ```
+  <doctor output>
+  ```"""
 _PRINT_MODE = {"claude-bot": " Print mode stops background tasks after your last turn, and unpushed work is lost."}
 
 
@@ -81,6 +96,7 @@ def builder_notes(job: Job, facts: dict) -> list[str]:
             "pushed head. Run it yourself before you post."
         )
     detail = detail_of(job)
+    notes.extend(_proof_lines(detail))
     notes.extend(resume_lines(detail))
     if job.request.attempt > 1:
         notes.append(
@@ -89,6 +105,30 @@ def builder_notes(job: Job, facts: dict) -> list[str]:
             "before you start, and build on it rather than redo it."
         )
     return notes
+
+
+def _proof_lines(detail: dict[str, object]) -> list[str]:
+    items = from_detail(detail.get("proof"))
+    if not items:
+        return []
+    return [
+        "The ready's `## Proof` section has one entry for each criterion id below. A `review` entry "
+        "gives the command you ran, in backticks, and its output in a fenced block. A `qa` entry gives "
+        "the verify skill's command for the criterion's journeys and its output, and names each journey.",
+        *(
+            f"- {item.id} ({item.kind})"
+            + (
+                ": journeys unknown, because neither the brief's ticket quote nor the source issue "
+                "shows a Features line, so write it as `unverified` with the doctor command and its output" if item.journeys is None
+                else f": journeys {', '.join(item.journeys)}" if item.journeys else ""
+            )
+            for item in items
+        ),
+        "Its shape, with placeholders:",
+        fenced(PROOF_EXAMPLE),
+        "Run the verify skill's doctor before any qa entry. If it fails, write that entry as "
+        "`unverified` with the doctor command and its output. Never leave an entry out.",
+    ]
 
 
 def _retry_why(detail: dict[str, object], facts: dict) -> str:
