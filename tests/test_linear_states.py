@@ -197,6 +197,53 @@ def test_linear_move(state, stuck, paused, linear, processed, move) -> None:
     assert linear_move(state, stuck, paused, linear, processed) == move
 
 
+@pytest.mark.parametrize(
+    ("state", "linear", "hold", "move"),
+    [
+        ("fixing", RFR, "Ready for Review", None),
+        ("capped", IN_REVIEW, "Ready for Review", None),
+        ("fixing", DONE, "Ready for Review", "done"),
+        ("fixing", CANCELED, "Ready for Review", "canceled"),
+        ("fixing", RFR, None, "hand-off"),
+    ],
+)
+def test_a_reopen_hold_keeps_the_ticket_from_an_external_handoff(
+    state, linear, hold, move
+) -> None:
+    assert linear_move(state, False, None, linear, True, hold=hold) == move
+
+
+@pytest.mark.parametrize(
+    ("hold", "state", "job", "cancelled"),
+    [
+        ("Ready for Review", "fixing", "queued", {}),
+        (None, "handed-off-externally", "cancelled", {"fix-9": "handed-off-externally"}),
+    ],
+    ids=["held", "not-held"],
+)
+def test_a_held_ticket_keeps_its_queued_fix_through_a_poll_in_ready_for_review(
+    tmp_path: Path, hold: str | None, state: str, job: str, cancelled: dict[str, str]
+) -> None:
+    now = [1000.0]
+    dispatcher, queue = setup(tmp_path, now)
+    seed(queue, "AUT-9", "fixing", reopen_hold=hold)
+    enqueue(queue, "AUT-9", "fix", "claude", "fix-9")
+    source = LinearSource(ticket(tickets="linear", ticket_id="AUT-9"))
+    source.states = {"AUT-9": RFR}
+
+    for _ in range(2):
+        dispatcher.poll_once(source)
+        now[0] += 60
+
+    assert state_of(queue, "AUT-9")["workflow_state"] == state
+    assert job_states(queue, "AUT-9") == {"fix-9": job}
+    assert cancel_reasons(queue, "AUT-9") == cancelled
+    handed_off = ("fixing", "handed-off-externally", "linear-handoff") in transitions(
+        queue, "AUT-9"
+    )
+    assert handed_off is (hold is None)
+
+
 def test_each_poll_stores_every_open_linear_tickets_state(tmp_path: Path) -> None:
     now = [1000.0]
     dispatcher, queue = setup(tmp_path, now)

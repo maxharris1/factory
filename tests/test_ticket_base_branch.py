@@ -485,6 +485,7 @@ def test_a_linear_handoff_whose_fresh_read_shows_another_base_writes_nothing() -
     actions = LinearReviewActions(
         move_ready_for_review=True,
         linear_ready=lambda ticket: linear_writes.append(ticket.ticket_id),
+        linear_reopen=lambda ticket: None,
         fresh_ticket=lambda ref: replace(linked, pr_base="dev"),
         runner=gh,
     )

@@ -207,6 +207,7 @@ class SchemaMixin:
                     "external_from_stuck": "INTEGER",
                     "external_at": "REAL",
                     "closed_at": "REAL",
+                    "reopen_hold": "TEXT",
                 },
             )
             connection.execute(

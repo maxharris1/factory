@@ -7,7 +7,13 @@ from typing import Literal
 
 from lib.dispatch.constants import HANDED_OFF_EXTERNALLY, SETTLE_CLEARS, TERMINAL_STATES
 from lib.dispatch.transitions import write_workflow_state
-from lib.dispatch.types import LinearState, LinearStateRead, PollSource, TicketRef
+from lib.dispatch.types import (
+    LinearState,
+    LinearStateRead,
+    PollSource,
+    TicketRef,
+    TrackedTicket,
+)
 from lib.max_actions import past_go
 
 LinearMove = Literal["hand-off", "resume", "done", "canceled"]
@@ -40,6 +46,7 @@ def linear_move(
     paused_action: str | None,
     linear: LinearState,
     processed: bool,
+    hold: str | None = None,
 ) -> LinearMove | None:
     if not past_go(workflow_state, paused_action) or workflow_state in TERMINAL_STATES:
         return None
@@ -49,7 +56,7 @@ def linear_move(
         return "done"
     if workflow_state == HANDED_OFF_EXTERNALLY:
         return "resume" if linear.type == "started" and not linear.handoff else None
-    if not linear.handoff or workflow_state not in HANDOFF_SOURCES:
+    if hold is not None or not linear.handoff or workflow_state not in HANDOFF_SOURCES:
         return None
     if workflow_state == "building" and not stuck and not processed:
         return None
@@ -151,7 +158,7 @@ class LinearStatesMixin:
             with self._connect() as connection:
                 row = connection.execute(
                     """
-                    SELECT workflow_state, stuck, paused_action FROM ticket_state
+                    SELECT workflow_state, stuck, paused_action, reopen_hold FROM ticket_state
                     WHERE repo = ? AND ticket_id = ?
                     """,
                     (repo, ticket_id),
@@ -165,6 +172,7 @@ class LinearStatesMixin:
                 row["paused_action"],
                 linear,
                 (repo, ticket_id) in self._polled,
+                row["reopen_hold"],
             )
             if move is None:
                 continue
@@ -175,6 +183,23 @@ class LinearStatesMixin:
                 continue
             if moved and self.log is not None:
                 self.log(f"linear {move}: {repo}#{ticket_id} ({linear.name})")
+
+    def _reopen_linear(self, ticket: TrackedTicket) -> None:
+        try:
+            note = self._review_actions(ticket).reopen_linear(ticket)
+        except Exception as exc:
+            self.record_poll_exception(
+                ticket.repo, ticket.ticket_id, exc, prefix="linear-reopen:"
+            )
+            self.flag_attention(
+                ticket.repo,
+                ticket.ticket_id,
+                "linear-reopen-failed",
+                f"{type(exc).__name__}: {exc}",
+            )
+            return
+        if note is not None:
+            self.flag_attention(ticket.repo, ticket.ticket_id, "linear-not-reopened", note)
 
     def _hand_off_externally(
         self, repo: str, ticket_id: str, state: str, stuck: bool

@@ -206,6 +206,7 @@ class TrackedTicket:
     grok_bot: str = "grok-bot"
     linear_issue_id: str | None = None
     linear_ready_state_id: str | None = None
+    linear_reopen_state_id: str | None = None
     linear_ready_for_review: bool = False
     linear_state_phase: str | None = None
     ready_starts_review: bool = False
@@ -360,6 +361,13 @@ class ReviewActions(Protocol):
 
     def handoff(self, ticket: TrackedTicket, head: str) -> str | None:
         """Hand the PR off. A returned note is reported in the done wake."""
+        ...
+
+    def reopen_linear(self, ticket: TrackedTicket) -> str | None:
+        """Move a reopened ticket's tracker issue out of its handoff state.
+
+        A returned note means the issue was not moved.
+        """
         ...
 
     def await_approver(

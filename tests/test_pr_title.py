@@ -221,7 +221,7 @@ def test_the_github_adapter_renames_the_pr_with_one_patch() -> None:
     actions.set_title(pr(), "#7: Fix it")
     linear = replace(pr(tickets="linear", ticket_id="AUT-7"), pr_number="42")
     LinearReviewActions(move_ready_for_review=False, linear_ready=lambda _: None,
-                        runner=gh).set_title(linear, "#7: Fix it")
+                        linear_reopen=lambda _: None, runner=gh).set_title(linear, "#7: Fix it")
 
     assert gh.keys() == [patch, patch]
     with pytest.raises(GitHubAdapterError):

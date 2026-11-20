@@ -76,6 +76,7 @@ from lib.intake_risk import INTAKE_RISK_SCHEMA, INTAKE_RISK_TABLE, stored_risk
 from lib.linear_webhook import DirtyRow, missed_delivery
 from lib.orch_yml import (
     DEFAULT_LINEAR_HANDOFF_STATES,
+    DEFAULT_LINEAR_REOPEN_STATE,
     LINEAR_POLL_SECONDS,
     OrchConfig,
     Project,
@@ -700,6 +701,7 @@ class LivePollSource:
                 action = LinearReviewActions(
                     move_ready_for_review=project.linear_ready_for_review,
                     linear_ready=self._move_linear_ready,
+                    linear_reopen=self._move_linear_reopen,
                     fresh_ticket=self.fresh_ticket,
                     runner=self._write_runner,
                     timeout_seconds=self.timeout_seconds,
@@ -1726,19 +1728,24 @@ class LivePollSource:
         )
 
     def _move_linear_ready(self, ticket: TrackedTicket) -> None:
+        self._move_linear_issue(ticket, ticket.linear_ready_state_id, "Ready for Review")
+
+    def _move_linear_reopen(self, ticket: TrackedTicket) -> None:
+        self._move_linear_issue(ticket, ticket.linear_reopen_state_id, "reopen")
+
+    def _move_linear_issue(
+        self, ticket: TrackedTicket, state_id: str | None, move: str
+    ) -> None:
         if (
             not ticket.linear_ready_for_review
             or ticket.linear_issue_id is None
-            or ticket.linear_ready_state_id is None
+            or state_id is None
         ):
-            raise PollSourceError("Linear Ready for Review metadata is unavailable")
+            raise PollSourceError(f"Linear {move} metadata is unavailable")
         document = self._linear_request(
             {
                 "query": LINEAR_READY_MUTATION,
-                "variables": {
-                    "issue": ticket.linear_issue_id,
-                    "state": ticket.linear_ready_state_id,
-                },
+                "variables": {"issue": ticket.linear_issue_id, "state": state_id},
             }
         )
         updated = _object(
@@ -1746,7 +1753,7 @@ class LivePollSource:
             "Linear issueUpdate",
         )
         if updated.get("success") is not True:
-            raise PollSourceError("Linear Ready for Review update was not confirmed")
+            raise PollSourceError(f"Linear {move} update was not confirmed")
 
     def _linear_key(self) -> str:
         if self.config.linear is None:
@@ -2260,6 +2267,11 @@ class LivePollSource:
             linear_issue_id=_optional_string(issue.get("id")),
             linear_ready_state_id=_linear_ready_state_id(
                 issue, project.linear_handoff_states[0]
+            ),
+            linear_reopen_state_id=_linear_reopen_state_id(
+                issue,
+                project.linear_handoff_states[0],
+                frozenset(project.linear_handoff_states),
             ),
             linear_ready_for_review=project.linear_ready_for_review,
             linear_state_phase=_linear_state_phase(
@@ -3146,16 +3158,17 @@ def _optional_string(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _linear_team_state(issue: Mapping[str, Any], key: str, value: object) -> dict[str, Any] | None:
+def _linear_team_states(issue: Mapping[str, Any]) -> list[dict[str, Any]]:
     team = issue.get("team")
     if team is None:
-        return None
+        return []
     states = _object(_object(team, "Linear team").get("states"), "Linear states")
-    for raw in _array(states.get("nodes"), "Linear state nodes"):
-        state = _object(raw, "Linear state")
-        if state.get(key) == value:
-            return state
-    return None
+    nodes = _array(states.get("nodes"), "Linear state nodes")
+    return [_object(raw, "Linear state") for raw in nodes]
+
+
+def _linear_team_state(issue: Mapping[str, Any], key: str, value: object) -> dict[str, Any] | None:
+    return next((state for state in _linear_team_states(issue) if state.get(key) == value), None)
 
 
 def _linear_ready_state(
@@ -3169,6 +3182,31 @@ def _linear_ready_state_id(
 ) -> str | None:
     state = _linear_ready_state(issue, name)
     return _optional_string(state.get("id")) if state is not None else None
+
+
+def _linear_reopen_state_id(
+    issue: Mapping[str, Any],
+    ready_name: str = DEFAULT_LINEAR_HANDOFF_STATES[0],
+    handoff_names: frozenset[str] = frozenset(DEFAULT_LINEAR_HANDOFF_STATES),
+) -> str | None:
+    if DEFAULT_LINEAR_REOPEN_STATE not in handoff_names:
+        named = _linear_team_state(issue, "name", DEFAULT_LINEAR_REOPEN_STATE)
+        if named is not None:
+            return _optional_string(named.get("id"))
+    ready = _linear_ready_state(issue, ready_name)
+    if ready is None or not _is_position(ready.get("position")):
+        return None
+    before = [
+        state
+        for state in _linear_team_states(issue)
+        if state.get("type") == "started"
+        and state.get("name") not in handoff_names
+        and _is_position(state.get("position"))
+        and state["position"] < ready["position"]
+    ]
+    if not before:
+        return None
+    return _optional_string(min(before, key=lambda state: state["position"]).get("id"))
 
 
 def _linear_state_phase(

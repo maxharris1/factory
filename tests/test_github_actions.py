@@ -683,6 +683,7 @@ def test_linear_tickets_are_never_merged_through_github_numbers() -> None:
     actions = LinearReviewActions(
         move_ready_for_review=True,
         linear_ready=lambda ticket: None,
+        linear_reopen=lambda ticket: None,
         runner=gh,
     )
     linked = replace(
@@ -985,6 +986,7 @@ def test_linear_handoff_only_marks_pr_ready_and_optionally_moves_rfr(
         linear_ready=lambda ticket: linear_writes.append(
             (ticket.ticket_id, "Ready for Review")
         ),
+        linear_reopen=lambda ticket: None,
         fresh_ticket=lambda ref: fresh_reads.append(ref) or linked,
         runner=gh,
     )
@@ -1020,6 +1022,7 @@ def test_linear_handoff_refuses_changed_linked_pr_before_any_write() -> None:
     actions = LinearReviewActions(
         move_ready_for_review=True,
         linear_ready=lambda ticket: linear_writes.append(ticket.ticket_id),
+        linear_reopen=lambda ticket: None,
         fresh_ticket=lambda ref: replace(linked, pr_number="43"),
         runner=gh,
     )
@@ -1048,6 +1051,7 @@ def test_linear_handoff_retries_only_before_external_writes() -> None:
     before_write = LinearReviewActions(
         move_ready_for_review=True,
         linear_ready=lambda ticket: None,
+        linear_reopen=lambda ticket: None,
         fresh_ticket=fail,
         runner=RecordedGh(),
     )
@@ -1070,6 +1074,7 @@ def test_linear_handoff_retries_only_before_external_writes() -> None:
     after_write = LinearReviewActions(
         move_ready_for_review=True,
         linear_ready=fail,
+        linear_reopen=lambda ticket: None,
         fresh_ticket=lambda ref: linked,
         runner=gh,
     )
@@ -1968,6 +1973,7 @@ def test_an_unconfirmed_linear_move_reports_whether_the_pr_write_landed(
     actions = LinearReviewActions(
         move_ready_for_review=True,
         linear_ready=fail,
+        linear_reopen=lambda ticket: None,
         runner=gh,
     )
 
@@ -2039,6 +2045,7 @@ def test_linear_handoff_moves_only_an_issue_still_before_review(
     actions = LinearReviewActions(
         move_ready_for_review=True,
         linear_ready=lambda ticket: linear_writes.append(ticket.ticket_id),
+        linear_reopen=lambda ticket: None,
         fresh_ticket=lambda ref: replace(snapshot, linear_state_phase=phase),
         runner=gh,
     )
@@ -2065,6 +2072,7 @@ def test_linear_handoff_with_an_unknown_issue_state_fails_closed_before_any_writ
     actions = LinearReviewActions(
         move_ready_for_review=True,
         linear_ready=lambda ticket: linear_writes.append(ticket.ticket_id),
+        linear_reopen=lambda ticket: None,
         fresh_ticket=lambda ref: linked,
         runner=gh,
     )

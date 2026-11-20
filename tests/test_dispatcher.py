@@ -91,6 +91,7 @@ class FakeReviewActions:
         self.crash_after_handoff = False
         self.crash_after_approval = False
         self.handoffs: list[str] = []
+        self.linear_reopens: list[str] = []
         self.approvals: list[tuple[str, str]] = []
         self.states: list[str] = []
         self.state_failures: set[tuple[str, str]] = set()
@@ -160,6 +161,9 @@ class FakeReviewActions:
         self.handoffs.append(head)
         if self.crash_after_handoff:
             raise SystemExit("simulated handoff crash")
+
+    def reopen_linear(self, ticket: TrackedTicket) -> None:
+        self.linear_reopens.append(ticket.ticket_id)
 
     def await_approver(
         self,

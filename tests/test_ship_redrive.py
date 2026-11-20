@@ -326,6 +326,7 @@ def test_no_re_drive_after_the_pr_ready_write_was_confirmed(tmp_path: Path) -> N
     actions = LinearReviewActions(
         move_ready_for_review=True,
         linear_ready=linear_fails,
+        linear_reopen=lambda ticket: None,
         runner=gh,
     )
     dispatcher, queue = linear_setup(tmp_path, gh, actions)
@@ -355,6 +356,7 @@ def test_unconfirmed_linear_move_on_a_ready_pr_is_re_driven(tmp_path: Path) -> N
     actions = LinearReviewActions(
         move_ready_for_review=True,
         linear_ready=linear_fails_once,
+        linear_reopen=lambda ticket: None,
         runner=gh,
     )
     dispatcher, queue = linear_setup(tmp_path, gh, actions)
@@ -385,6 +387,7 @@ def test_a_retryable_error_during_the_re_drive_hands_the_claim_back(
     actions = LinearReviewActions(
         move_ready_for_review=False,
         linear_ready=lambda ticket: None,
+        linear_reopen=lambda ticket: None,
         fresh_ticket=fresh,
         runner=gh,
     )
@@ -495,6 +498,7 @@ def test_aut_2286_legacy_failed_intent_completes_after_the_fix_is_installed(
             AUT0: LinearReviewActions(
                 move_ready_for_review=True,
                 linear_ready=lambda ticket: moved.append(ticket.ticket_id),
+                linear_reopen=lambda ticket: None,
                 fresh_ticket=fresh,
                 runner=gh,
             )
@@ -669,6 +673,7 @@ def aut0_dispatcher(
             AUT0: LinearReviewActions(
                 move_ready_for_review=True,
                 linear_ready=lambda ticket: moved.append(ticket.ticket_id),
+                linear_reopen=lambda ticket: None,
                 fresh_ticket=fresh,
                 runner=gh,
             )
