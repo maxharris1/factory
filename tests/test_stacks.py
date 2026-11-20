@@ -503,3 +503,23 @@ def test_a_supabase_project_is_kept_when_a_project_sharing_its_containers_is_kep
     assert docker.volumes() == [f"{NAME}_db"]
     assert f"kept supabase project {NAME} on pc: a project sharing its containers is kept ({reason})" in lines
     assert not any(line.startswith("removed") for line in lines)
+
+
+def test_a_compose_only_member_of_a_removed_supabase_stack_is_removed_in_the_same_sweep(tmp_path, monkeypatch):
+    docker = Docker(tmp_path)
+    monkeypatch.setenv("PATH", docker.path())
+    database = docker.start_stack(NAME, "supabase")
+    helper = docker.start(**{KINDS["compose"]: NAME})
+    docker.start(app="web")
+    unrelated = docker.ids() - {database, helper}
+    finished = ledger({OWNER: facts(last=epoch(2027, 1, 1))}, {})
+
+    lines = sweep(containers.local_runner(), lambda: finished, "pc", ROOTS)
+
+    assert docker.ids() == unrelated
+    assert docker.networks() == []
+    assert docker.volumes() == []
+    assert lines == [
+        f"removed supabase project {NAME} on pc (ticket {OWNER[1]} finished)",
+        f"removed compose project {NAME} on pc (ticket {OWNER[1]} finished)",
+    ]

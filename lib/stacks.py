@@ -6,7 +6,7 @@ import re
 import shlex
 import sqlite3
 from collections.abc import Callable, Collection, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from lib.containers import _CONTAINER_ID, _NO_DOCKER, FINISHED_STATES, LABEL, Runner, failure
@@ -271,19 +271,19 @@ def sweep(
     kept = {group: verdict for group, verdict in zip(groups, verdicts) if isinstance(verdict, Keep)}
     seen: set[str] = set()
     # The Supabase CLI also puts the compose label on everything it starts, so its stacks
-    # are listed by their own label first and skipped when the compose listing repeats them.
+    # are listed by their own label first and the compose listing removes only what is left.
     for project, verdict, group in zip(projects, verdicts, groups):
-        own = {container.id for container in project.containers}
-        if own & seen:
+        left = tuple(container for container in project.containers if container.id not in seen)
+        if not left:
             continue
-        seen |= own
+        seen |= {container.id for container in left}
         name = project.name if _NAME.fullmatch(project.name) else repr(project.name)
         where = f"{project.kind} project {name} on {device}"
         if isinstance(verdict, Remove) and group in kept:
             verdict = Keep(f"a project sharing its containers is kept ({kept[group].reason})")
         match verdict:
             case Remove(owner):
-                removed = runner(remove_script(project))
+                removed = runner(remove_script(replace(project, containers=left)))
                 if removed.code == NEW_CONTAINER:
                     lines.append(f"kept {where}: a container started after the listing")
                 elif (failed := failure(removed)) is not None:
