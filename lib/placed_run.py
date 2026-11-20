@@ -81,6 +81,7 @@ from typing import IO, BinaryIO
 from lib.codex_sandbox import for_device
 from lib.device_monitor import remote_target
 from lib.device_pool import DevicePool, Placement, link_drop_detail, placed_account, read_autostart
+from lib.harness_env import account_tokens
 from lib.job_run import OUTPUT_GRACE_SECONDS, Budget
 from lib.job_state import (
     LINK_DROP,
@@ -279,6 +280,7 @@ class PlacedRun:
             cd=device.cd,
             report_env=report_env,
             env_file=run_file(self.target, ENV_FILE) if report_env else None,
+            unset=account_tokens(self.owner, self.account_home),
         )
         limits = (
             {"budget": max(1, math.ceil(budget.remaining())), "grace": math.ceil(budget.grace)}

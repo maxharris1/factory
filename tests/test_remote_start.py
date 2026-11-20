@@ -484,6 +484,55 @@ def test_remote_job_starts_over_the_bots_own_alias_as_that_bot(tmp_path: Path, b
     assert state(queue, job_id) == "running"  # job run never finishes the job
 
 
+@pytest.mark.parametrize("account", ["placed", "default"])
+@pytest.mark.parametrize("recipient", ["claude", "codex"])
+def test_a_remote_job_runs_as_its_slots_account(tmp_path: Path, recipient: str, account: str) -> None:
+    bot = f"{recipient}-bot"
+    placed = f"{recipient}-max-2"
+    machines = machines_file(tmp_path, box_enabled=False)
+    machines.write_text(
+        "accounts:\n"
+        "  - {id: claude-max-2, harness: claude, signed_in_on: [pc]}\n"
+        "  - {id: codex-max-2, harness: codex, signed_in_on: [pc]}\n"
+        + machines.read_text(encoding="utf-8").replace(
+            "    ssh_alias: fakepc-{bot}\n", f"    ssh_alias: fakepc-{{bot}}\n    home: {tmp_path}/homes/{{bot}}\n"
+        ),
+        encoding="utf-8",
+    )
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=time.time)
+    job_id = enqueue(queue, recipient, "1")
+    assert DevicePool(queue, config_of(machines)).claim(recipient) is not None
+    if account == "placed":
+        with queue.connect() as connection:
+            connection.execute("UPDATE device_slots SET account = ? WHERE job_id = ?", (placed, job_id))
+    ssh = Ssh(tmp_path)
+    home = tmp_path / "homes" / bot
+    home.mkdir(parents=True)
+    sentinel = f"sk_SYNTHETIC_{uuid.uuid4().hex}"
+    (home / ".bash_profile").write_text(
+        "".join(f"export {name}={sentinel}\n" for name in ACCOUNT_TOKENS[recipient]), encoding="utf-8"
+    )
+    report = tmp_path / "report.json"
+    dump = f"import json, os\njson.dump(dict(os.environ), open({str(report)!r}, 'w'))\n"
+
+    proc = orch(
+        "job", "run", bot, job_id, "--db", str(tmp_path / "orch.db"), "--machines", str(machines),
+        "--", sys.executable, "-c", dump,
+        env={**ssh.env(), "FAKE_SSH_HOME": str(home)},
+    )
+    _, err = proc.communicate(timeout=30)
+
+    assert proc.returncode == 0, err
+    seen = json.loads(report.read_text(encoding="utf-8"))
+    if account == "placed":
+        assert seen[ACCOUNT_HOME_VARIABLE[recipient]] == f"{home}/.factory-accounts/{placed}"
+        assert not set(ACCOUNT_TOKENS[recipient]) & set(seen)
+    else:
+        assert ACCOUNT_HOME_VARIABLE[recipient] not in seen
+        assert {seen[name] for name in ACCOUNT_TOKENS[recipient]} == {sentinel}
+    assert sentinel not in err
+
+
 def test_a_remote_claude_runs_reported_model_lands_in_the_boxs_job_exposure(tmp_path: Path) -> None:
     machines, queue, _pool, job_id, ssh = remote_setup(tmp_path, "claude")
     init = '{"type":"system","subtype":"init","model":"claude-opus-5-5"}'
