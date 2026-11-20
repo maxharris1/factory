@@ -226,6 +226,30 @@ def test_a_job_that_starts_and_ends_between_polls_ends_the_stall(tmp_path: Path)
     assert len(_wakes(queue)) == 2
 
 
+def test_a_job_that_ends_during_the_first_alerting_poll_does_not_end_the_stall(
+    tmp_path: Path,
+) -> None:
+    clock = [9_990.0]
+    feeder, queue, github = _blocked_on_90(tmp_path, clock)
+    build = _job(queue, "work", state="running")
+    read = github.github_intake
+
+    def finish_during_read(repo: str, label: str):
+        clock[0] = 10_010.0
+        queue.finish(build, owner="claude", handoff_comment_id="done")
+        return read(repo, label)
+
+    github.github_intake = finish_during_read
+    clock[0] = 10_000.0
+    feeder.feed_once()
+    github.github_intake = read
+    assert len(_wakes(queue)) == 1
+    clock[0] = 10_060.0
+    feeder.feed_once()
+    assert list(_attention(tmp_path, IDLE)) == [(HOME, "1")]
+    assert len(_wakes(queue)) == 1
+
+
 def test_an_open_factory_branch_pr_the_feeder_never_opened_keeps_the_flag_down(
     tmp_path: Path,
 ) -> None:

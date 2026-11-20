@@ -98,10 +98,12 @@ needs-attention (`idle-blocked-ready`, `waiting on #18`) on each such ticket.
 An open PR is factory work when the feeder recorded it, its branch starts
 with `factory/`, or `ticket_state` tracks it in a non-terminal state.
 A `feeder_idle_stalls` row names each project's stall by when it began, and
-the project's one Grok `blocked` wake is keyed on it. The stall ends when the
-project stops stalling, and a new one begins (flags re-raised, a new wake)
-when a non-Grok job was created or finished since the stall began, so a job
-that ran between polls counts. A failed open-PR read keeps that project's
+the project's one Grok `blocked` wake is keyed on it. The row also records the
+latest non-Grok job activity (created or finished) the stall has seen, read in
+the same statement as the in-flight check. The stall ends when the project
+stops stalling, and a new one begins (flags re-raised, a new wake) when a
+non-Grok job was created or finished after that mark, so a job that ran
+between polls counts and one that finished before the first alert does not. A failed open-PR read keeps that project's
 row and flags as they were and wakes nothing.
 
 Stop the line (#1025): for a project whose factory.md sets
@@ -893,7 +895,7 @@ def ensure_tables(connection: sqlite3.Connection) -> None:
     )
     ensure_priority_table(connection)
     connection.execute(
-        f"CREATE TABLE IF NOT EXISTS {IDLE_TABLE} (repo TEXT PRIMARY KEY, since REAL NOT NULL)"
+        f"CREATE TABLE IF NOT EXISTS {IDLE_TABLE} (repo TEXT PRIMARY KEY, since REAL NOT NULL, seen REAL NOT NULL)"
     )
     connection.execute(
         f"""
@@ -1888,13 +1890,15 @@ class Feeder:
             if candidate.ref.repo not in busy:
                 stalls.setdefault(candidate.ref.repo, []).append((candidate, wait))
         scope = set(repos)
+        seen: dict[str, float] = {}
         with self.queue.connect() as connection:
             for repo in sorted(stalls):
-                running = connection.execute(
-                    "SELECT COUNT(*) FROM jobs WHERE lower(repo) = ?"
-                    " AND state IN ('queued', 'running') AND recipient != 'grok'",
+                running, seen[repo] = connection.execute(
+                    "SELECT COALESCE(SUM(state IN ('queued', 'running')), 0),"
+                    " COALESCE(MAX(MAX(created_at, COALESCE(finished_at, created_at))), 0)"
+                    " FROM jobs WHERE lower(repo) = ? AND recipient != 'grok'",
                     (repo,),
-                ).fetchone()[0]
+                ).fetchone()
                 pending = connection.execute(
                     f"{_FED_WITHOUT_JOB} AND item.repo = ?", (now - FED_PENDING_SECONDS, repo)
                 ).fetchone()[0]
@@ -1917,17 +1921,13 @@ class Feeder:
                     connection.execute(f"DELETE FROM {IDLE_TABLE} WHERE repo = ?", (repo,))
                     continue
                 row = connection.execute(
-                    f"SELECT since FROM {IDLE_TABLE} WHERE repo = ?", (repo,)
+                    f"SELECT since, seen FROM {IDLE_TABLE} WHERE repo = ?", (repo,)
                 ).fetchone()
-                if row is None or connection.execute(
-                    "SELECT 1 FROM jobs WHERE lower(repo) = ? AND recipient != 'grok'"
-                    " AND (created_at >= ? OR finished_at >= ?) LIMIT 1",
-                    (repo, row[0], row[0]),
-                ).fetchone():
+                if row is None or seen[repo] > row[1]:
                     connection.execute(
-                        f"INSERT INTO {IDLE_TABLE} (repo, since) VALUES (?, ?)"
-                        " ON CONFLICT(repo) DO UPDATE SET since = excluded.since",
-                        (repo, now),
+                        f"INSERT INTO {IDLE_TABLE} (repo, since, seen) VALUES (?, ?, ?)"
+                        " ON CONFLICT(repo) DO UPDATE SET since = excluded.since, seen = excluded.seen",
+                        (repo, now, seen[repo]),
                     )
                     connection.execute(
                         "DELETE FROM needs_attention WHERE repo = ? AND reason = ?",
