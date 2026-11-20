@@ -19,6 +19,7 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from http.client import HTTPConnection, HTTPException, HTTPSConnection
 from pathlib import Path
 from typing import Any, NamedTuple, Protocol
@@ -46,7 +47,7 @@ from lib.dispatch.types import LinearState, LinearStateRead, ci_on_base, no_ci_b
 from lib.brief_comment import before_factory_md
 from lib.dispatch.constants import STOPPED_POLL_SECONDS
 from lib.dispatch.errors_text import kept_name, redacted_fragment
-from lib.dispatch.cycle_clock import CycleClock
+from lib.dispatch.cycle_clock import CallKind, CycleClock
 from lib.feeder import FEEDER_TABLE
 from lib.factory_md import (
     FactoryConfig,
@@ -154,6 +155,7 @@ RATE_RESET_GRACE_SECONDS = 5.0
 GH_CALL_TIMEOUT_SECONDS = 20.0
 GH_CALL_ATTEMPTS = 3
 GH_RETRY_BACKOFF_SECONDS = 2.0
+CACHE_REPLAY_SLACK_SECONDS = 2.0
 READ_DEADLINE_SECONDS = 30.0
 TRACKED_READ_BUDGET_SECONDS = 120.0
 CYCLE_ERROR_DETAILS = 5
@@ -274,6 +276,7 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
+_NUMBERED_PART = re.compile(r"[^/ ]*[0-9][^/ ]*")
 _REPO_ROUTE = re.compile(r"repos/([^/?]+/[^/?]+)")
 _TICKET_ROUTE = re.compile(r"repos/[^/?]+/[^/?]+/(?:issues|pulls)/([0-9]+)")
 _GH_READ_SUBCOMMANDS = (("run", "view"),)
@@ -2405,13 +2408,17 @@ class LivePollSource:
         name = _gh_source(call)
         began = self.clock()
         try:
-            return self.gh_runner(call, timeout)
+            result = self.gh_runner(call, timeout)
         except subprocess.TimeoutExpired:
             name = self._write_ticket or _gh_ticket(call)
             raise
         finally:
             if self.cycle_clock is not None:
                 self.cycle_clock.add_source(name, self.clock() - began)
+        if self.cycle_clock is not None:
+            route = _call_route(call)
+            self.cycle_clock.add_call(route, "graphql" if route.endswith(" graphql") else "billed")
+        return result
 
     def _run_gh_read(self, argv: list[str]) -> GhResult:
         left = self._backoff_until - self.clock()
@@ -2425,6 +2432,7 @@ class LivePollSource:
             while True:
                 left = deadline - self.clock()
                 timeout = min(self.gh_call_timeout_seconds, left, self._require_budget())
+                started_wall = self.wall()
                 try:
                     result = self.gh_runner(argv, timeout)
                 except subprocess.TimeoutExpired:
@@ -2441,12 +2449,12 @@ class LivePollSource:
                         f"{route} could not run: {type(exc).__name__}"
                     ) from exc
                 else:
-                    self._observe_quota(route.removeprefix("gh api "), result)
+                    self._observe_quota(_call_route(argv), result, started_wall)
                     return result
                 self.sleep(pause)
                 attempt += 1
 
-    def _observe_quota(self, route: str, result: GhResult) -> None:
+    def _observe_quota(self, route: str, result: GhResult, started_wall: float) -> None:
         status = _status_code(result.stderr)
         headers: dict[str, str] = {}
         if result.stdout.startswith("HTTP/"):
@@ -2461,6 +2469,11 @@ class LivePollSource:
         )
         if own is not None:
             self._rate_window = _merged_window(self._rate_window, own)
+        if self.cycle_clock is not None:
+            self.cycle_clock.add_call(route, _call_kind(route, headers, status, started_wall))
+            if own is not None:
+                window = self._rate_window
+                self.cycle_clock.note_core(window.remaining, window.limit, window.reset_epoch)
         if result.returncode == 0 or not rate_limited(status, result.stdout, result.stderr):
             self._throttled = False
             return
@@ -2624,6 +2637,27 @@ def _gh_source(argv: Sequence[str]) -> str:
         if part == "--repo" and index + 1 < len(argv):
             return argv[index + 1].lower()
     return "github"
+
+
+def _call_route(argv: Sequence[str]) -> str:
+    if "api" in argv:
+        return _NUMBERED_PART.sub("<value>", _route(argv[argv.index("api") + 1 :]))
+    at = argv.index("gh") if "gh" in argv else -1
+    return " ".join(["gh", *argv[at + 1 : at + 3]])
+
+
+def _call_kind(
+    route: str, headers: Mapping[str, str], status: int | None, started_wall: float
+) -> CallKind:
+    if route.endswith(" graphql"):
+        return "graphql"
+    try:
+        sent = parsedate_to_datetime(headers.get("date", "")).timestamp()
+    except (TypeError, ValueError):
+        sent = started_wall
+    if sent < started_wall - CACHE_REPLAY_SLACK_SECONDS:
+        return "cached"
+    return "304" if status == 304 else "billed"
 
 
 def _gh_ticket(argv: Sequence[str]) -> str:
