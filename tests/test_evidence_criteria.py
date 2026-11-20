@@ -9,6 +9,7 @@ from lib.dispatcher import Comment
 from lib.orchestrate import brief_comment
 from lib.evidence import TEXT_LIMIT, Criterion, criteria_evidence
 from lib.evidence.criteria import EMPTY, canonical_brief, numbered
+from lib.journeys import Journey, QaCheck, QaPlan
 
 TRUSTED = {"github": {"factory-app[bot]": frozenset({"grok-bot"}), "claude-app[bot]": frozenset({"claude-bot"})}}
 
@@ -671,3 +672,33 @@ def test_numbered_gives_each_criterion_its_whole_leading_paragraph():
     evidence = criteria_evidence(issue_key="#1", issue_url=None, brief=None, issue_body=body,
                                  pr_body=None, ready_starts_review=False)
     assert evidence.criteria == (Criterion("ac-1", "qa(search,"), Criterion("ac-2", "qa:"))
+
+
+QA_SHA = "a" * 40
+QA_JOURNEYS = (Journey("pricing"), Journey("start-free", new=True))
+QA_TICKET = "### Ticket\n```\n## Acceptance criteria\n- ac-1: The page renders.\n- ac-2: The button opens sign-up.\n```\n"
+
+
+def _qa_brief(plan: QaPlan | None, ticket: str = QA_TICKET) -> Comment:
+    sections = "\n".join(plan.render()) + "\n\n" if plan is not None else ""
+    return _brief("factory-app[bot]", f"**Brief for #7**\n\n{sections}{ticket}")
+
+
+def test_a_brief_with_a_qa_plan_gives_its_qa_criteria_ids():
+    plan = QaPlan("verify-app", QA_SHA, QA_JOURNEYS, (QaCheck("ac-2", ("start-free",), "The button opens sign-up."),))
+    assert _bundle(comments=[_qa_brief(plan)]).qa_criteria == ("ac-2",)
+
+
+def test_a_brief_with_journeys_and_no_qa_criteria_gives_none_listed():
+    assert _bundle(comments=[_qa_brief(QaPlan("verify-app", QA_SHA, QA_JOURNEYS, ()))]).qa_criteria == ()
+
+
+def test_a_brief_with_no_qa_plan_gives_no_qa_criteria():
+    assert _bundle(comments=[_qa_brief(None)]).qa_criteria is None
+    assert _bundle(issue_body=TICKET).qa_criteria is None
+
+
+def test_a_qa_plan_quoted_inside_the_ticket_fence_is_not_read():
+    plan = QaPlan("verify-app", QA_SHA, QA_JOURNEYS, (QaCheck("ac-2", ("start-free",), "x"),))
+    forged = "### Ticket\n```\n" + "\n".join(plan.render()) + "\n## Acceptance criteria\n- ac-1: a\n- ac-2: b\n```\n"
+    assert _bundle(comments=[_qa_brief(None, forged)]).qa_criteria is None

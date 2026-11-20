@@ -16,7 +16,9 @@ from lib.evidence.ci import ci_evidence
 from lib.evidence.scenarios import qa_scenarios
 from lib.github_actions import GhResult, GitHubReviewActions
 from lib.factory_md import parse_factory_context
-from tests.regenerate_brief_snapshots import FACTORY_MD, HEAD, QA_FACTORY_MD, _job
+from lib.brief.common import journey_lines
+from lib.journeys import Journey, QaCheck, QaPlan
+from tests.regenerate_brief_snapshots import FACTORY_MD, HEAD, QA_FACTORY_MD, _job, with_qa
 from tests.test_dispatcher import (
     ANSWERS,
     QUESTIONS,
@@ -725,3 +727,103 @@ def test_the_example_the_plan_brief_shows_parses_to_its_two_scenarios():
     assert [scenario.id for scenario in found.scenarios] == ["qa-1", "qa-2"]
     assert found.regression == ("qa-1",)
     assert [item.criterion for item in found.not_live] == ["ac-3", "ac-4"]
+
+
+QA_PLAN = QaPlan(
+    "verify-cleffy",
+    "a" * 40,
+    (Journey("pricing"), Journey("start-free", new=True)),
+    (QaCheck("ac-2", ("pricing", "start-free"), "The button opens the sign-up form."),),
+)
+JOURNEYS_BRIEF = "**Brief for #41**\n\n" + "\n".join(QA_PLAN.render()) + "\n"
+FEATURE_FILE = "`.claude/skills/verify-cleffy/features/start-free.md`"
+FEATURE_ROW = "`.claude/skills/verify-cleffy/features/README.md`"
+QA_RUNS = "QA runs the brief's `### QA journeys` with `verify-cleffy` against its `### QA criteria`."
+
+
+def test_journey_lines_name_each_new_journeys_file_and_readme_row():
+    lines = "\n".join(journey_lines("ready", QA_PLAN, [".claude/skills/verify-cleffy/SKILL.md"]))
+    assert QA_RUNS in lines
+    assert "Write no `## Verify, live` section." in lines
+    assert f"- `new:start-free`: add {FEATURE_FILE}" in lines
+    assert f"and its row in {FEATURE_ROW}" in lines
+    assert "pricing" not in lines
+    assert "Map each as work" not in lines
+    assert "Map each as work" in "\n".join(journey_lines("plan", QA_PLAN, [".claude/skills/verify-cleffy/SKILL.md"]))
+
+
+def test_journey_lines_without_a_skill_path_name_the_verify_skills_folder():
+    lines = "\n".join(journey_lines("ready", QA_PLAN, []))
+    assert "`features/start-free.md` in the `verify-cleffy` skill's folder" in lines
+
+
+def test_journey_lines_with_no_new_journeys_ask_for_no_file():
+    plain = replace(QA_PLAN, journeys=(Journey("pricing"),))
+    lines = journey_lines("plan", plain, [".claude/skills/verify-cleffy/SKILL.md"])
+    assert QA_RUNS in lines[0]
+    assert "features/" not in "\n".join(lines)
+
+
+@pytest.mark.parametrize(
+    "action, extra",
+    [("plan", {}), ("build", {}), ("build", {"instruction": PLAN_URL})],
+    ids=["plan", "build", "build-with-plan"],
+)
+def test_a_journeys_brief_asks_for_the_journeys_and_no_live_section(action: str, extra: dict[str, object]):
+    task = _task_under(QA_FACTORY_MD, action, {"brief_text": JOURNEYS_BRIEF, **extra})
+    assert QA_RUNS in task
+    assert FEATURE_FILE in task
+    assert "## Verify, live" not in task
+
+
+def test_a_journeys_brief_asks_for_the_journeys_with_no_factory_md():
+    task = _task(_render("build", 1, None, {"brief_text": JOURNEYS_BRIEF}, remote=True))
+    assert QA_RUNS in task
+    assert "## Verify, live" not in task
+
+
+def test_a_malformed_qa_block_falls_back_to_the_live_section():
+    broken = JOURNEYS_BRIEF.replace("- Base: `", "- Base: not-a-sha `")
+    task = _task_under(QA_FACTORY_MD, "plan", {"brief_text": broken})
+    assert "## Verify, live" in task
+    assert QA_RUNS not in task
+
+
+def _review_under(factory_md: str, qa_criteria: list[str] | None) -> str:
+    context, findings = parse_factory_context(factory_md)
+    assert context is not None, findings
+    criteria = {
+        "issue_key": "#42",
+        "issue_url": "https://github.com/owner/repo/issues/42",
+        "source": "brief",
+        "source_url": "https://github.com/owner/repo/pull/42#issuecomment-1",
+        "text": "- ac-1: The page renders.\n- ac-2: The button opens sign-up.",
+        "criteria": [{"id": "ac-1", "text": "The page renders."}, {"id": "ac-2", "text": "The button opens sign-up."}],
+        "cut": None,
+        "qa_criteria": qa_criteria,
+    }
+    job = _job("review", "codex", 1, HEAD, {"round": "1/3", "evidence": _evidence(criteria=criteria)})
+    return _task(render_brief(job, bot="codex-bot", context=context, factory_root="/srv/orch/factory"))
+
+
+OWNER = "The brief lists `ac-2` under `### QA criteria`. Each such criterion is `qa`-tagged and owned by QA"
+
+
+def test_a_review_of_a_journeys_brief_gives_qa_criteria_to_qa_and_gates_on_them():
+    task = _review_under(with_qa("block"), ["ac-2"])
+    assert OWNER in task
+    assert "that is not under the brief's `### QA criteria` is a `[blocking]` finding" in task
+    assert "live QA scenario in the plan" not in task
+
+
+def test_a_review_without_a_qa_plan_keeps_the_live_scenario_gate():
+    task = _review_under(with_qa("block"), None)
+    assert "owned by QA" not in task
+    assert "that has no live QA scenario in the plan is a `[blocking]` finding" in task
+    assert "### QA criteria" not in task
+
+
+def test_a_review_of_a_journeys_brief_with_no_qa_criteria_names_no_owner():
+    task = _review_under(with_qa("report"), [])
+    assert "owned by QA" not in task
+    assert "that is not under the brief's `### QA criteria` is a note in the verdict" in task
