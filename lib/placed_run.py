@@ -80,7 +80,7 @@ from typing import IO, BinaryIO
 
 from lib.codex_sandbox import for_device
 from lib.device_monitor import remote_target
-from lib.device_pool import DevicePool, Placement, link_drop_detail, read_autostart
+from lib.device_pool import DevicePool, Placement, link_drop_detail, placed_account, read_autostart
 from lib.job_run import OUTPUT_GRACE_SECONDS, Budget
 from lib.job_state import (
     LINK_DROP,
@@ -91,7 +91,7 @@ from lib.job_state import (
     record_job_event,
     requeue_unstarted,
 )
-from lib.machines_yml import Device, MachinesConfig
+from lib.machines_yml import Device, MachinesConfig, default_account
 from lib.process_tree import run_tag, scope_of, scope_unit
 from lib.queue import SLOTS_TABLE, Proof, QueueError, SQLiteJobQueue, require_proof
 from lib.remote import (
@@ -148,6 +148,8 @@ class PlacedRun:
     owner: str
     log: Log
     transport: Transport
+    account: str
+    account_home: str | None
     target: RemoteTarget | None = None
     autostart: bool = False
     proof: Proof | None = None
@@ -672,6 +674,11 @@ def prepare(
         mapped = device.harnesses.get(placement.harness)
         if mapped != bot:
             raise PlacementError(f"device {device.name} maps {owner} to {mapped}, not {bot}")
+    account = placed_account(config, placement) or default_account(owner)
+    try:
+        account_home = config.account_home(device.name, owner, account)
+    except ValueError as exc:
+        raise PlacementError(f"job {job_id}: {exc}") from None
     runner = os.getpid() if pid is None else pid
     try:
         placement = retry_locked(
@@ -707,6 +714,8 @@ def prepare(
         owner=owner,
         log=log,
         transport=transport,
+        account=account,
+        account_home=account_home,
         target=target,
         autostart=placement.autostarted,
         proof=proof,

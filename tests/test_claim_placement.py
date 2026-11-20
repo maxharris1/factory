@@ -321,3 +321,66 @@ def test_attach_worker_refuses_to_overwrite_another_worker(tmp_path: Path) -> No
     slot = pool.placement(job_id)
     assert slot is not None
     assert (slot.worker_pid, slot.remote_started) == (WORKER_W, False)
+
+
+def _signed_in_box(tmp_path: Path) -> tuple[SQLiteJobQueue, DevicePool]:
+    path = tmp_path / "machines.yml"
+    path.write_text(
+        "accounts:\n"
+        "  - {id: claude-max-2, harness: claude, signed_in_on: [box]}\n"
+        "  - {id: claude-max-3, harness: claude}\n"
+        "devices:\n"
+        "  - name: box\n    local: true\n    slot_max: 3\n"
+        "    home: /home/{bot}\n"
+        "    harnesses: {claude: {bot: claude-bot, account: claude-max-3}, codex: codex-bot, cursor: cursor-bot}\n",
+        encoding="utf-8",
+    )
+    config, findings = load_machines_yml(path)
+    assert config is not None, findings
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=time.time)
+    return queue, DevicePool(queue, config)
+
+
+@pytest.mark.parametrize(
+    ("owner", "slot_account", "account", "home"),
+    [
+        ("claude", None, "claude-max-3", None),
+        ("claude", "claude-max-3", "claude-max-3", None),
+        ("claude", "claude-max-2", "claude-max-2", "/home/claude-bot/.factory-accounts/claude-max-2"),
+        ("cursor", None, "cursor-default", None),
+    ],
+)
+def test_prepare_resolves_the_slots_account_and_the_home_it_runs_from(
+    tmp_path: Path, owner: str, slot_account: str | None, account: str, home: str | None
+) -> None:
+    from lib import placed_run
+
+    queue, pool = _signed_in_box(tmp_path)
+    job_id = enqueue(queue, "a", recipient=owner)
+    assert pool.claim(owner) is not None
+    with queue.connect() as connection:
+        connection.execute("UPDATE device_slots SET account = ? WHERE job_id = ?", (slot_account, job_id))
+
+    placed = placed_run.prepare(
+        pool, pool.config, job_id=job_id, bot=f"{owner}-bot", owner=owner, worktree=False,
+        log=[].append, transport=object(), alive=lambda *_: False, pid=RUNNER_A,
+    )
+
+    assert (placed.account, placed.account_home) == (account, home)
+
+
+def test_prepare_refuses_an_account_not_signed_in_on_the_slots_device(tmp_path: Path) -> None:
+    from lib import placed_run
+
+    queue, pool = _signed_in_box(tmp_path)
+    job_id = enqueue(queue, "a")
+    assert pool.claim("claude") is not None
+    with queue.connect() as connection:
+        connection.execute("UPDATE device_slots SET account = 'claude-max-9' WHERE job_id = ?", (job_id,))
+
+    with pytest.raises(placed_run.PlacementError, match="'claude-max-9' is not signed in for claude on 'box'"):
+        placed_run.prepare(
+            pool, pool.config, job_id=job_id, bot="claude-bot", owner="claude", worktree=False,
+            log=[].append, transport=object(), alive=lambda *_: False, pid=RUNNER_A,
+        )
+    assert pool.placement(job_id).runner_pid is None

@@ -1708,6 +1708,8 @@ def test_a_box_jobs_slot_records_the_run_tag_its_command_carries(tmp_path: Path)
         owner="claude",
         log=lambda _m: None,
         transport=FakeTransport(),
+        account="claude-default",
+        account_home=None,
         runner=11,
     )
     seen = tmp_path / "tag"
@@ -1756,6 +1758,8 @@ def test_a_box_jobs_slot_records_its_scope_or_says_the_run_is_uncontained(
         owner="claude",
         log=lambda _m: None,
         transport=FakeTransport(),
+        account="claude-default",
+        account_home=None,
         runner=11,
     )
     ran = tmp_path / "ran"
