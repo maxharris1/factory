@@ -121,7 +121,7 @@ OPEN_PULLS_MAX_PAGES = 20
 OPEN_PULL_COMMITS_QUERY = (
     "query($owner: String!, $name: String!, $after: String) "
     "{ repository(owner: $owner, name: $name) { pullRequests(states: OPEN, first: 50, after: $after) "
-    "{ nodes { number baseRefName headRefOid commits(first: 100) { totalCount nodes { commit { oid } } } } "
+    "{ nodes { number baseRefName headRefName headRefOid commits(first: 100) { totalCount nodes { commit { oid } } } } "
     "pageInfo { hasNextPage endCursor } } } }"
 )
 OPEN_PULLS_TTL = 60.0
@@ -650,8 +650,11 @@ def _open_pull(node: object) -> tuple[int, OpenPull]:
     number = node.get("number") if isinstance(node, dict) else None
     if not isinstance(number, int) or isinstance(number, bool):
         raise GitHubAdapterError("open pull request has no number")
-    base, head = node.get("baseRefName"), node.get("headRefOid")
-    if not _github_branch(base) or not isinstance(head, str) or not _SHA.fullmatch(head):
+    base, head, branch = node.get("baseRefName"), node.get("headRefOid"), node.get("headRefName")
+    if (
+        not _github_branch(base) or not isinstance(branch, str)
+        or not isinstance(head, str) or not _SHA.fullmatch(head)
+    ):
         raise GitHubAdapterError(f"open PR #{number} base or head is not readable")
     commits = node.get("commits")
     nodes = commits.get("nodes") if isinstance(commits, dict) else None
@@ -666,7 +669,7 @@ def _open_pull(node: object) -> tuple[int, OpenPull]:
     if any(not isinstance(sha, str) or not _SHA.fullmatch(sha) for sha in shas) or total < len(shas):
         raise GitHubAdapterError(f"open PR #{number} commits are not readable")
     return number, OpenPull(
-        commits=frozenset(shas), complete=total == len(shas), base=base, head=head
+        commits=frozenset(shas), complete=total == len(shas), base=base, head=head, branch=branch
     )
 
 

@@ -13,6 +13,7 @@ class OpenPull:
     complete: bool
     base: str
     head: str
+    branch: str
 
 
 class BranchReads(Protocol):

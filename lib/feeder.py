@@ -93,11 +93,16 @@ on the poll after the round resumes (#270).
 Idle and blocked (#1262): a GitHub-ticket project with ready tickets waiting
 on open blockers, and no ticket fed or waiting on capacity this poll, no
 queued or running non-Grok job, no ticket fed in the last
-FED_PENDING_SECONDS without a job and no open PR the feeder opened, raises
+FED_PENDING_SECONDS without a job and no open factory PR, raises
 needs-attention (`idle-blocked-ready`, `waiting on #18`) on each such ticket.
-The first poll of each stall queues one Grok `blocked` wake for the project,
-keyed on when the stall's flags were raised, so a later stall wakes again.
-A failed open-PR read keeps that project's flags as they were.
+An open PR is factory work when the feeder recorded it, its branch starts
+with `factory/`, or `ticket_state` tracks it in a non-terminal state.
+A `feeder_idle_stalls` row names each project's stall by when it began, and
+the project's one Grok `blocked` wake is keyed on it. The stall ends when the
+project stops stalling, and a new one begins (flags re-raised, a new wake)
+when a non-Grok job was created or finished since the stall began, so a job
+that ran between polls counts. A failed open-PR read keeps that project's
+row and flags as they were and wakes nothing.
 
 Stop the line (#1025): for a project whose factory.md sets
 `feeder.required_checks`, each poll reads its base branch's checks once
@@ -174,6 +179,7 @@ from lib.brief_comment import FACTORY_MD_HEADING
 from lib.device_pool import free_slots, placement_blocked, slots_in_use
 from lib.device_sync import Blocked
 from lib.dispatch.bookkeeping import LockLedger, bookkeeping_write, must_write
+from lib.dispatch.constants import TERMINAL_STATES
 from lib.dispatch.types import BaseCheck, FailedCheck
 from lib.dispatcher import Comment, TicketRef, TrackedTicket, safe_ship_error
 from lib.evidence.ci import CIEvidence, MainRed, ci_evidence, main_red
@@ -251,6 +257,7 @@ from lib.ticket_type import TICKET_TYPES
 
 FEEDER_TABLE = "feeder_items"
 POLL_TABLE = "feeder_poll"  # one row: when the feeder last read intake
+IDLE_TABLE = "feeder_idle_stalls"  # one row per project in an idle-blocked-ready stall
 # eligible: seen this poll, not fed yet; waiting-capacity: no room for its
 # harness this poll; feeding: some steps done; error: a step failed (retried
 # next poll); fed: brief and go posted; done: fed and its job is queued;
@@ -885,6 +892,9 @@ def ensure_tables(connection: sqlite3.Connection) -> None:
         "(id INTEGER PRIMARY KEY CHECK (id = 1), at REAL NOT NULL)"
     )
     ensure_priority_table(connection)
+    connection.execute(
+        f"CREATE TABLE IF NOT EXISTS {IDLE_TABLE} (repo TEXT PRIMARY KEY, since REAL NOT NULL)"
+    )
     connection.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {MAIN_FIX_TABLE} (
@@ -1891,15 +1901,6 @@ class Feeder:
                 if running or pending:
                     del stalls[repo]
                     continue
-                pulls = {
-                    int(number)
-                    for (number,) in connection.execute(
-                        f"SELECT pr_number FROM {FEEDER_TABLE} WHERE repo = ? AND pr_number IS NOT NULL",
-                        (repo,),
-                    )
-                }
-                if not pulls:
-                    continue
                 project = stalls[repo][0][0].project
                 try:
                     open_pulls = self.github.open_pull_commits(project.repo)
@@ -1908,29 +1909,50 @@ class Feeder:
                     scope.discard(repo)
                     del stalls[repo]
                     continue
-                if pulls & set(open_pulls):
+                if _factory_pull(connection, repo, open_pulls):
                     del stalls[repo]
+            since: dict[str, float] = {}
+            for repo in sorted(scope):
+                if repo not in stalls:
+                    connection.execute(f"DELETE FROM {IDLE_TABLE} WHERE repo = ?", (repo,))
+                    continue
+                row = connection.execute(
+                    f"SELECT since FROM {IDLE_TABLE} WHERE repo = ?", (repo,)
+                ).fetchone()
+                if row is None or connection.execute(
+                    "SELECT 1 FROM jobs WHERE lower(repo) = ? AND recipient != 'grok'"
+                    " AND (created_at >= ? OR finished_at >= ?) LIMIT 1",
+                    (repo, row[0], row[0]),
+                ).fetchone():
+                    connection.execute(
+                        f"INSERT INTO {IDLE_TABLE} (repo, since) VALUES (?, ?)"
+                        " ON CONFLICT(repo) DO UPDATE SET since = excluded.since",
+                        (repo, now),
+                    )
+                    connection.execute(
+                        "DELETE FROM needs_attention WHERE repo = ? AND reason = ?",
+                        (repo, ATTENTION_IDLE_BLOCKED),
+                    )
+                    since[repo] = now
+                else:
+                    since[repo] = row[0]
             flags = {
                 (repo, candidate.ref.key, ATTENTION_IDLE_BLOCKED): f"waiting on {_open_blockers(wait, repo)}"
                 for repo, waiting in stalls.items()
                 for candidate, wait in waiting
             }
             attention.sync(connection, (ATTENTION_IDLE_BLOCKED,), scope, flags, now)
-            for _repo, waiting in sorted(stalls.items()):
+            for repo, waiting in sorted(stalls.items()):
                 waiting.sort(key=lambda item: _key_order(item[0].issue.key))
-                self._wake_idle(connection, waiting)
+                self._wake_idle(connection, waiting, since[repo])
 
     def _wake_idle(
-        self, connection: sqlite3.Connection, waiting: Sequence[tuple[_Candidate, Wait]]
+        self, connection: sqlite3.Connection, waiting: Sequence[tuple[_Candidate, Wait]], stall: float
     ) -> None:
-        """Queue the stall's Grok wake, keyed on when its flags were raised."""
+        """Queue the stall's Grok wake, keyed on when the stall began."""
         first = waiting[0][0]
         project = first.project
         repo = project.repo
-        (stall,) = connection.execute(
-            "SELECT MIN(raised_at) FROM needs_attention WHERE repo = ? AND reason = ?",
-            (repo.lower(), ATTENTION_IDLE_BLOCKED),
-        ).fetchone()
         tickets = "; ".join(
             f"{candidate.ref.label(repo)} waits on {_open_blockers(wait, repo)}"
             for candidate, wait in waiting
@@ -2529,6 +2551,27 @@ def _progress(statuses: Mapping[Ref, RefStatus], ref: Ref) -> Progress | None:
 
 def _open_blockers(wait: Wait, home: str) -> str:
     return ", ".join(blocker.label(home) for blocker in wait.open_blockers)
+
+
+def _factory_pull(connection: sqlite3.Connection, repo: str, pulls: Mapping[int, OpenPull]) -> bool:
+    if any(pull.branch.startswith("factory/") for pull in pulls.values()):
+        return True
+    tracked = {
+        str(number)
+        for (number,) in connection.execute(
+            f"SELECT pr_number FROM {FEEDER_TABLE} WHERE repo = ? AND pr_number IS NOT NULL", (repo,)
+        )
+    }
+    if _has_table(connection, "ticket_state"):
+        tracked |= {
+            str(ticket)
+            for (ticket,) in connection.execute(
+                "SELECT ticket_id FROM ticket_state WHERE lower(repo) = ?"
+                f" AND COALESCE(workflow_state, '') NOT IN ({','.join('?' * len(TERMINAL_STATES))})",
+                (repo, *TERMINAL_STATES),
+            )
+        }
+    return not tracked.isdisjoint(str(number) for number in pulls)
 
 
 def _ticket_name(issue: IntakeIssue) -> str:

@@ -183,3 +183,112 @@ def test_a_failed_open_pr_read_keeps_the_flag_as_it_was(tmp_path: Path) -> None:
     feeder.feed_once()
     assert list(_attention(tmp_path, IDLE)) == [(HOME, "19")]
     assert len(_wakes(queue)) == 1
+
+
+def _blocked_on_90(tmp_path: Path, clock: list[float]):
+    feeder, queue, github, _ = make_feeder(tmp_path, now=clock)
+    github.statuses[ref(90)] = OPEN
+    github.issues[HOME] = [issue(1, body="Blocked by: #90")]
+    return feeder, queue, github
+
+
+def test_a_stall_keeps_one_wake_while_its_blocked_tickets_change(tmp_path: Path) -> None:
+    clock = [10_000.0]
+    feeder, queue, github = _blocked_on_90(tmp_path, clock)
+    feeder.feed_once()
+    clock[0] += 60
+    github.issues[HOME].append(issue(2, body="Blocked by: #90"))
+    feeder.feed_once()
+    clock[0] += 60
+    github.issues[HOME] = [issue(2, body="Blocked by: #90")]
+    feeder.feed_once()
+    assert list(_attention(tmp_path, IDLE)) == [(HOME, "2")]
+    assert len(_wakes(queue)) == 1
+
+
+def test_a_job_that_starts_and_ends_between_polls_ends_the_stall(tmp_path: Path) -> None:
+    clock = [10_000.0]
+    feeder, queue, _ = _blocked_on_90(tmp_path, clock)
+    feeder.feed_once()
+    wake = queue.claim("grok")
+    queue.finish(wake.id, owner="grok", handoff_comment_id="delivered")
+    clock[0] += 10
+    build = _job(queue, "other-work")
+    assert queue.claim("claude").id == build
+    clock[0] += 10
+    queue.finish(build, owner="claude", handoff_comment_id="finished")
+    clock[0] += 40
+    feeder.feed_once()
+    assert list(_attention(tmp_path, IDLE)) == [(HOME, "1")]
+    assert len(_wakes(queue)) == 2
+    clock[0] += 60
+    feeder.feed_once()
+    assert len(_wakes(queue)) == 2
+
+
+def test_an_open_factory_branch_pr_the_feeder_never_opened_keeps_the_flag_down(
+    tmp_path: Path,
+) -> None:
+    feeder, queue, github = _blocked_on_90(tmp_path, [10_000.0])
+    github.pulls[(HOME, 700)] = {"head": "factory/issue-18", "base": "main"}
+    feeder.feed_once()
+    assert _attention(tmp_path, IDLE) == {}
+    assert _wakes(queue) == []
+
+
+def _track(tmp_path: Path, number: int, state: str) -> None:
+    with sqlite3.connect(tmp_path / "orch.db") as connection:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS ticket_state"
+            " (repo TEXT NOT NULL, ticket_id TEXT NOT NULL, workflow_state TEXT)"
+        )
+        connection.execute("INSERT INTO ticket_state VALUES (?, ?, ?)", (HOME, str(number), state))
+
+
+def test_an_open_pr_the_dispatcher_tracks_keeps_the_flag_down(tmp_path: Path) -> None:
+    feeder, queue, github = _blocked_on_90(tmp_path, [10_000.0])
+    with queue.connect() as connection:
+        connection.execute(
+            "INSERT INTO feeder_items (repo, issue, tracker, title, harness, state, risk,"
+            " issue_created_at, pr_number, ticket_id, first_seen_at, seen_at, fed_at)"
+            " VALUES (?, '5', 'github', 't', 'claude', 'done', 'low', 1, '501', '501', 1, 1, 1)",
+            (HOME,),
+        )
+    github.pulls[(HOME, 501)] = {"head": "factory/issue-5", "base": "main", "state": "closed"}
+    github.pulls[(HOME, 700)] = {"head": "human-branch", "base": "main"}
+    _track(tmp_path, 700, "reviewing")
+    feeder.feed_once()
+    assert _attention(tmp_path, IDLE) == {}
+    assert _wakes(queue) == []
+
+
+def test_an_open_pr_neither_factory_nor_tracked_does_not_count(tmp_path: Path) -> None:
+    feeder, queue, github = _blocked_on_90(tmp_path, [10_000.0])
+    github.pulls[(HOME, 700)] = {"head": "human-branch", "base": "main"}
+    github.pulls[(HOME, 701)] = {"head": "other-branch", "base": "main"}
+    _track(tmp_path, 701, "merged")
+    feeder.feed_once()
+    assert list(_attention(tmp_path, IDLE)) == [(HOME, "1")]
+    assert len(_wakes(queue)) == 1
+
+
+def test_a_failed_open_pr_read_without_feeder_history_keeps_the_flag(tmp_path: Path) -> None:
+    feeder, queue, github = _blocked_on_90(tmp_path, [10_000.0])
+
+    def broken(repo: str):
+        raise RuntimeError("fake GitHub failure in open pulls")
+
+    read = github.open_pull_commits
+    github.open_pull_commits = broken
+    feeder.feed_once()
+    assert _attention(tmp_path, IDLE) == {}
+    assert _wakes(queue) == []
+
+    github.open_pull_commits = read
+    feeder.feed_once()
+    assert list(_attention(tmp_path, IDLE)) == [(HOME, "1")]
+
+    github.open_pull_commits = broken
+    feeder.feed_once()
+    assert list(_attention(tmp_path, IDLE)) == [(HOME, "1")]
+    assert len(_wakes(queue)) == 1

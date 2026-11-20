@@ -250,6 +250,7 @@ class FakeGitHub:
                 complete=True,
                 base=pull.get("base", "main"),
                 head=self.branches.get((repo, pull["head"]), pull["head"]),
+                branch=pull["head"],
             )
             for (pull_repo, number), pull in self.pulls.items()
             if pull_repo == repo and pull.get("state", "open") == "open" and not pull.get("merged")
