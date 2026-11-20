@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 
@@ -128,6 +129,13 @@ DECISIONS = [
     pytest.param(project("$(reboot)"), ledger(), "name", id="kept: hostile name"),
     pytest.param(project(NAME.upper()), ledger(), "name", id="kept: uppercase name"),
     pytest.param(project(labelled=True), ledger(), "factory.job", id="kept: labelled container"),
+    pytest.param(
+        Project("compose", NAME, project().containers, complete=False),
+        ledger(),
+        "could not be read",
+        id="kept: a container could not be read",
+    ),
+    pytest.param(Project("compose", NAME, ()), ledger(), "could not be read", id="kept: no containers"),
 ]
 
 
@@ -157,13 +165,18 @@ def epoch(*parts):
     return datetime(*parts, tzinfo=timezone.utc).timestamp()
 
 
+def docker_json(value):
+    return json.dumps(value, ensure_ascii=False).replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+
+
 def line(created, *, id_="0123456789ab", name=NAME, working_dir="/w", job=""):
-    return "\t".join((id_, name, working_dir, job, created))
+    return "\t".join(docker_json(field) for field in (id_, name, working_dir, job, created))
 
 
 def test_listing_format_has_the_fields_parse_listing_reads():
     fields = listing_format("supabase").split("\t")
     assert len(fields) == 5
+    assert all(field.startswith("{{json ") for field in fields)
     assert "com.supabase.cli.project" in fields[1]
     assert "factory.job" in fields[3]
 
@@ -184,26 +197,102 @@ def test_parse_listing_reads_created_at(created, at):
     assert projects[0].containers[0].created == pytest.approx(at, abs=1e-6)
 
 
+GOOD_AT = "2026-11-20 13:05:01 +0000 UTC"
+
+
 @pytest.mark.parametrize(
     "bad",
     [
-        line("yesterday"),
-        line("2026-13-20 13:05:01 +0000 UTC"),
-        line("2026-11-20 13:05:01 UTC"),
-        line("2026-11-20"),
-        line(""),
-        "0123456789ab\taut0\t/w\t2026-11-20 13:05:01 +0000 UTC",
-        line("2026-11-20 13:05:01 +0000 UTC") + "\textra",
-        line("2026-11-20 13:05:01 +0000 UTC", id_="0123456789AB"),
-        line("2026-11-20 13:05:01 +0000 UTC", id_="$(rm -rf /)"),
-        line("2026-11-20 13:05:01 +0000 UTC", name=""),
+        line("yesterday", name="good"),
+        line("2026-13-20 13:05:01 +0000 UTC", name="good"),
+        line("2026-11-20 13:05:01 UTC", name="good"),
+        line("2026-11-20", name="good"),
+        line("", name="good"),
+        line(GOOD_AT, name="good", id_="0123456789AB"),
+        line(GOOD_AT, name="good", id_="$(rm -rf /)"),
     ],
 )
-def test_parse_listing_counts_unreadable_lines(bad):
-    good = line("2026-11-20 13:05:01 +0000 UTC", id_="fedcba987654", name="good")
-    projects, unreadable = parse_listing("compose", f"{bad}\n{good}\n")
+def test_an_unreadable_container_keeps_its_whole_project(bad):
+    good = line(GOOD_AT, id_="fedcba987654", name="good")
+    sibling = line(GOOD_AT, id_="aaaaaaaaaaaa", name="sibling")
+    projects, unreadable = parse_listing("compose", f"{bad}\n{good}\n{sibling}\n")
     assert unreadable == 1
-    assert [(p.name, [c.id for c in p.containers]) for p in projects] == [("good", ["fedcba987654"])]
+    by_name = {p.name: p for p in projects}
+    assert [c.id for c in by_name["good"].containers] == ["fedcba987654"]
+    assert not by_name["good"].complete
+    assert by_name["sibling"].complete
+    assert decide(by_name["good"], ledger({OWNER: facts()}, {}), "pc", ROOTS) == Keep(
+        "a container could not be read"
+    )
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "\t".join(("0123456789ab", "good", "/w", "", GOOD_AT)),
+        line(GOOD_AT, name="good")[:-1],
+        line(GOOD_AT, name="good") + '\t""',
+        "\t".join(line(GOOD_AT, name="good").split("\t")[:4]),
+        line(GOOD_AT, name="good").replace('"good"', "7"),
+        line(GOOD_AT, name=""),
+    ],
+)
+def test_a_line_that_names_no_project_keeps_every_project(bad):
+    good = line(GOOD_AT, id_="fedcba987654", name="good")
+    projects, unreadable = parse_listing("compose", f"{good}\n{bad}\n")
+    assert unreadable == 1
+    assert [p.name for p in projects] == ["good"]
+    assert not projects[0].complete
+
+
+def test_a_junk_created_at_on_a_labelled_sibling_keeps_the_project():
+    stdout = "\n".join(
+        (
+            line(GOOD_AT, id_="aaaaaaaaaaaa", name=NAME),
+            line("junk", id_="bbbbbbbbbbbb", name=NAME, job="job9"),
+        )
+    )
+    projects, unreadable = parse_listing("compose", stdout)
+    assert unreadable == 1
+    assert isinstance(decide(projects[0], ledger(), "pc", ROOTS), Keep)
+
+
+HOSTILE = [
+    "/manual\t\t" + GOOD_AT + "\ncccccccccccc\tunrelated\t/root/jobs/job1",
+    "/w\r\n0123456789ab\tother",
+    "/w\x85cccccccccccc",
+    "/w\u2028x\u2029y\x1c\x1d\x1e",
+    '/w"\\\t"',
+]
+
+
+@pytest.mark.parametrize("working_dir", HOSTILE)
+def test_a_hostile_field_round_trips_as_one_container(working_dir):
+    projects, unreadable = parse_listing(
+        "compose", line(GOOD_AT, id_="aaaaaaaaaaaa", name="unrelated", working_dir=working_dir) + "\n"
+    )
+    assert unreadable == 0
+    assert projects == [
+        Project(
+            "compose",
+            "unrelated",
+            (Container("aaaaaaaaaaaa", epoch(2026, 11, 20, 13, 5, 1), working_dir, False),),
+        )
+    ]
+
+
+def test_a_forged_second_container_cannot_tie_a_project_to_a_job():
+    owner = ("org/repo", "T1")
+    tied = Ledger({owner: TicketFacts(True, epoch(2025, 1, 2), frozenset(), False)}, {"job1": owner})
+    created = "2025-01-01 00:00:00 +0000 UTC"
+    working_dir = "/manual\t\t" + created + "\ncccccccccccc\tunrelated\t/root/jobs/job1"
+    physical = Project("compose", "unrelated", (Container("aaaaaaaaaaaa", epoch(2025, 1, 1), working_dir, False),))
+    assert decide(physical, tied, "box", ["/root"]) == Keep("no ticket owns it")
+    projects, unreadable = parse_listing(
+        "compose", line(created, id_="aaaaaaaaaaaa", name="unrelated", working_dir=working_dir)
+    )
+    assert (projects, unreadable) == ([physical], 0)
+    assert decide(projects[0], tied, "box", ["/root"]) == Keep("no ticket owns it")
 
 
 def test_parse_listing_groups_and_keeps_hostile_fields_as_data():

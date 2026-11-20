@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import posixpath
 import re
 import sqlite3
@@ -36,6 +37,7 @@ class Project:
     kind: str
     name: str
     containers: tuple[Container, ...]
+    complete: bool = True
 
 
 @dataclass(frozen=True)
@@ -72,7 +74,8 @@ def stack_name(repo: str, ticket: str, device: str) -> str:
 
 def listing_format(kind: str) -> str:
     labels = (KINDS[kind], WORKING_DIR, LABEL)
-    return "\t".join(["{{.ID}}", *(f'{{{{.Label "{label}"}}}}' for label in labels), "{{.CreatedAt}}"])
+    fields = ["{{json .ID}}", *(f'{{{{json (.Label "{label}")}}}}' for label in labels), "{{json .CreatedAt}}"]
+    return "\t".join(fields)
 
 
 def _created(value: str) -> float | None:
@@ -87,18 +90,39 @@ def _created(value: str) -> float | None:
     return at.timestamp() + float(fraction or 0)
 
 
+def _fields(line: str) -> list[str] | None:
+    try:
+        fields = [json.loads(field) for field in line.split("\t")]
+    except ValueError:
+        return None
+    if len(fields) != 5 or not all(isinstance(field, str) for field in fields):
+        return None
+    return fields
+
+
 def parse_listing(kind: str, stdout: str) -> tuple[list[Project], int]:
     by_name: dict[str, list[Container]] = {}
+    incomplete: set[str] = set()
     unreadable = 0
-    for line in filter(str.strip, stdout.splitlines()):
-        fields = line.split("\t")
-        created = _created(fields[4]) if len(fields) == 5 else None
-        if created is None or not _CONTAINER_ID.fullmatch(fields[0]) or not fields[1]:
+    every_project_incomplete = False
+    for line in filter(str.strip, stdout.split("\n")):
+        fields = _fields(line)
+        if fields is None or not fields[1]:
             unreadable += 1
+            every_project_incomplete = True
             continue
-        container_id, name, working_dir, job, _ = fields
-        by_name.setdefault(name, []).append(Container(container_id, created, working_dir, bool(job)))
-    return [Project(kind, name, tuple(found)) for name, found in sorted(by_name.items())], unreadable
+        container_id, name, working_dir, job, created_at = fields
+        found = by_name.setdefault(name, [])
+        created = _created(created_at)
+        if created is None or not _CONTAINER_ID.fullmatch(container_id):
+            unreadable += 1
+            incomplete.add(name)
+            continue
+        found.append(Container(container_id, created, working_dir, bool(job)))
+    return [
+        Project(kind, name, tuple(found), not every_project_incomplete and name not in incomplete)
+        for name, found in sorted(by_name.items())
+    ], unreadable
 
 
 def _parts(path: str) -> tuple[str, ...] | None:
@@ -156,6 +180,8 @@ def read_ledger(connection: sqlite3.Connection, live: Collection[str]) -> Ledger
 
 
 def decide(project: Project, ledger: Ledger, device: str, roots: Collection[str]) -> Verdict:
+    if not project.complete or not project.containers:
+        return Keep("a container could not be read")
     if any(container.labelled for container in project.containers):
         return Keep(f"a container is labelled {LABEL}")
     if not _NAME.fullmatch(project.name):
