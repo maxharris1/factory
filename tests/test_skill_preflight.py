@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import device_sync, skill_preflight
+from lib import account_home, device_sync, skill_preflight
 from lib.device_pool import UNREACHABLE_BACKOFF_SECONDS, DevicePool, Placement
 from lib.device_pool import placement_blocked as pool_blocked
 from lib.job_state import MAX_FREE_REQUEUES, free_requeues
@@ -973,3 +973,114 @@ def test_a_held_row_excuses_only_the_checkout_it_names(tmp_path: Path, lock_root
     assert skill_preflight.box_behind_origin("box", "claude-bot", str(lock_root), held) is None
     assert skill_preflight.box_behind_origin("box", "claude-bot", str(other), held) == (
         f"preflight-lagging: box claude-bot {other} at {head[:12]}, origin/main at {later[:12]}")
+
+
+ACCOUNT = "claude-max-2"
+
+
+def on_account(device: Device, name: str, monkeypatch: pytest.MonkeyPatch,
+               *, account: str | None = ACCOUNT) -> Path:
+    machines = device.waiter.machines
+    text = machines.read_text(encoding="utf-8")
+    text = text.replace(f"  - name: {name}\n", f"  - name: {name}\n    home: {device.home}\n", 1)
+    text = f"accounts:\n  - {{id: {ACCOUNT}, harness: claude, signed_in_on: [{name}]}}\n" + text
+    machines.write_text(text, encoding="utf-8")
+    config, findings = load_machines_yml(machines)
+    assert config is not None, findings
+    device.waiter.pool.config = config
+    start = device.waiter._start
+
+    def placed_on_account(job, placement, proof):
+        if placement is not None and account is not None:
+            placement = replace(placement, account=account)
+        return start(job, placement, proof)
+
+    monkeypatch.setattr(device.waiter, "_start", placed_on_account)
+    return device.home / ".factory-accounts" / ACCOUNT
+
+
+@pytest.mark.parametrize("remote", [False, True], ids=["box", "pc"])
+def test_an_account_folder_missing_a_pinned_skill_fails_with_its_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path, remote: bool
+) -> None:
+    device = Device(tmp_path, monkeypatch, remote=remote)
+    folder = on_account(device, "pc" if remote else "box", monkeypatch)
+    install(device.home)
+    deploy(device.checkout if remote else lock_root)
+
+    job_id, started = device.run_one()
+
+    first = sorted(INSTALLED)[0]
+    error = f"preflight-missing: {folder}/skills/{first}"
+    assert started is None
+    assert device.spawn.calls == []
+    assert state(device.db, job_id) == "failed"
+    assert any(error in line for line in device.log)
+    entry = detail_of(device.db, job_id)["skill_preflight"]
+    assert entry["error"] == error
+    assert entry["account_home"] == str(folder)
+    assert len(device.ssh.calls()) == (1 if remote else 0)
+
+
+@pytest.mark.parametrize("remote", [False, True], ids=["box", "pc"])
+def test_an_account_folder_passes_after_prepare(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path, remote: bool
+) -> None:
+    device = Device(tmp_path, monkeypatch, remote=remote)
+    folder = on_account(device, "pc" if remote else "box", monkeypatch)
+    install(device.home)
+    deploy(device.checkout if remote else lock_root)
+    changes = account_home.prepare(
+        device.waiter.pool.config, "pc" if remote else "box", "claude-bot", device.home, ACCOUNT
+    )
+    assert any(change.path == str(folder / "skills") for change in changes)
+
+    job_id, started = device.run_one()
+
+    assert started == job_id
+    entry = detail_of(device.db, job_id)["skill_preflight"]
+    assert "error" not in entry
+    assert entry["account_home"] == str(folder)
+    assert {path: digest for path, digest in entry["files"].items() if ".factory-accounts" in path} == {
+        f"{folder}/skills/{rel}": _sha(text) for rel, text in INSTALLED.items()
+    }
+
+
+@pytest.mark.parametrize("remote", [False, True], ids=["box", "pc"])
+def test_a_default_account_job_checks_exactly_todays_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path, remote: bool
+) -> None:
+    device = Device(tmp_path, monkeypatch, remote=remote)
+    on_account(device, "pc" if remote else "box", monkeypatch, account=None)
+    install(device.home)
+    checkout = device.checkout if remote else lock_root
+    deploy(checkout)
+
+    job_id, started = device.run_one()
+
+    assert started == job_id
+    entry = detail_of(device.db, job_id)["skill_preflight"]
+    assert "account_home" not in entry
+    assert set(entry["files"]) == {f"~/.claude/skills/{rel}" for rel in INSTALLED} | set(
+        checkout_files(checkout if remote else checkout.resolve())
+    )
+
+
+def test_a_codex_account_folder_adds_no_path(tmp_path: Path, lock_root: Path) -> None:
+    home = tmp_path / "home"
+    for rel, text in INSTALLED.items():
+        path = home / ".agents" / "skills" / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    deploy(lock_root)
+    checkout = str(lock_root.resolve())
+
+    report = skill_preflight.check(
+        bot="codex-bot", placement=None, device=None, transport=SshTransport(), home=home,
+        checkout=checkout, root=lock_root, account_home=f"{home}/.factory-accounts/codex-max-2",
+    )
+
+    assert report.error is None
+    assert set(report.found) == {f"~/.agents/skills/{rel}" for rel in INSTALLED} | set(
+        checkout_files(Path(checkout))
+    )

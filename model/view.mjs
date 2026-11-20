@@ -85,6 +85,7 @@ export const step = (action, from, to) => {
   if (action === "MaxGoAfterBlocked") return "approver's go, fresh review at the same round";
   if (action === "T1UnsatFix") return "approver's building go on an unsat= REVISE, fix round";
   if (action === "ReenterAfterHandoff") return "trusted ready at a new head, within the effective cap";
+  if (action === "ReopenAfterHandoff") return "approver's building go within the cap, reopen";
   // A merge seen in any state ends the ticket (#108); the chart draws only the
   // handed-off one, and section 4.1 says the rest in prose. From merge-queue
   // the QueueMerge arrow's label names it.

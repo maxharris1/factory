@@ -10,6 +10,7 @@ installs or starts anything outside a temporary HOME.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -20,6 +21,8 @@ import pytest
 
 from tests.conftest import reap_home, sandbox_env
 from tests.procs import alive
+from tests.test_oom import at_300, linux, score
+from tests.test_poller_service import fake_systemd, scope_units
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVICE = ROOT / "deploy" / "waiter-service.sh"
@@ -100,7 +103,7 @@ def _env(home: Path, cron: Path | None = None, **extra: str) -> dict[str, str]:
     })
 
 
-def _service(home: Path, *args: str, cron: Path | None = None, **extra: str):
+def _service(home: Path, *args: str, cron: Path | None = None, preexec_fn=None, **extra: str):
     return subprocess.run(
         ["bash", str(SERVICE), *args],
         env=_env(home, cron, **extra),
@@ -108,6 +111,7 @@ def _service(home: Path, *args: str, cron: Path | None = None, **extra: str):
         capture_output=True,
         timeout=60,
         check=False,
+        preexec_fn=preexec_fn,
     )
 
 
@@ -796,3 +800,55 @@ def test_a_running_supervisor_starts_no_waiter_once_the_host_is_retired(home: Pa
 
     assert _wait_for(lambda: not alive(supervisor))
     assert _starts(home) == first
+
+
+@linux
+def test_start_and_restart_run_the_supervisor_in_a_new_user_scope_at_the_oom_floor(
+    home: Path, tmp_path: Path
+) -> None:
+    path, log = fake_systemd(tmp_path, "yes")
+    started = _service(home, "claude-bot", "start", preexec_fn=at_300, PATH=path)
+    assert started.returncode == 0, started.stderr
+    supervisor = _supervisor(home)
+    assert f"started waiter supervisor (pid {supervisor})" in started.stdout
+    assert score(supervisor) < 300
+    assert score(_wait_for(lambda: _starts(home))[0]) < 300, "the waiter shares its score"
+
+    restarted = _service(home, "claude-bot", "restart", preexec_fn=at_300, PATH=path)
+    assert restarted.returncode == 0, restarted.stderr
+    assert score(_supervisor(home)) < 300
+
+    units = scope_units(log)
+    assert len(units) == 2 and units[0] != units[1], units
+    assert all(re.fullmatch(r"orch-wait-claude-bot-\d+-\d+\.scope", unit) for unit in units), units
+    assert "uncontained" not in (home / ".local/state/factory/waiter-claude-bot.log").read_text()
+
+
+@linux
+def test_without_a_user_scope_the_supervisor_starts_uncontained_at_the_oom_floor(
+    home: Path, tmp_path: Path
+) -> None:
+    path, log = fake_systemd(tmp_path, "no")
+    started = _service(home, "claude-bot", "start", preexec_fn=at_300, PATH=path)
+    assert started.returncode == 0, started.stderr
+    supervisor = _supervisor(home)
+    assert score(supervisor) < 300
+    _wait_for(lambda: _starts(home))
+    assert scope_units(log) == []
+    waiter_log = (home / ".local/state/factory/waiter-claude-bot.log").read_text()
+    assert "orch-wait-claude-bot: uncontained (no systemd user scope)" in waiter_log
+
+
+@linux
+@pytest.mark.parametrize("stall", ["stall_loginctl", "stall_probe"])
+def test_a_stalled_user_manager_still_starts_the_supervisor_uncontained(
+    home: Path, tmp_path: Path, stall: str
+) -> None:
+    path, log = fake_systemd(tmp_path, "yes", **{stall: True})
+    started = _service(home, "claude-bot", "start", preexec_fn=at_300, PATH=path)
+    assert started.returncode == 0, started.stdout + started.stderr
+    assert score(_supervisor(home)) < 300
+    _wait_for(lambda: _starts(home))
+    assert scope_units(log) == []
+    waiter_log = (home / ".local/state/factory/waiter-claude-bot.log").read_text()
+    assert "orch-wait-claude-bot: uncontained (no systemd user scope)" in waiter_log

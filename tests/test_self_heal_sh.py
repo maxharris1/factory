@@ -359,6 +359,12 @@ def test_the_repo_units_run_once_every_two_minutes() -> None:
     assert "WantedBy=timers.target" in timer
 
 
+def test_the_self_heal_unit_runs_at_the_oom_floor_and_leaves_what_it_starts_running() -> None:
+    lines = (ROOT / "deploy" / "factory-self-heal.service").read_text(encoding="utf-8").splitlines()
+    assert "OOMScoreAdjust=0" in lines
+    assert "KillMode=process" in lines
+
+
 def _detached(home: Path, count: int) -> list[dict]:
     path = home / "detached-calls"
     deadline = time.monotonic() + 10

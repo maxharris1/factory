@@ -6,10 +6,12 @@ from lib.handoff import HandoffError, parse_comment
 
 
 def _approved_round(shipped: tuple[str, int | None] | None, review_round: int) -> int:
-    """The round a handed-off ticket's shipped APPROVE completed (#108); one
-    past review_round when that APPROVE names none."""
+    """The round a handed-off ticket has completed (#108): its shipped
+    APPROVE's round, never below review_round, since rounds a reopen ran
+    after that APPROVE count too (#1197); one past review_round when that
+    APPROVE names none."""
     if shipped is not None and shipped[1] is not None:
-        return shipped[1]
+        return max(shipped[1], review_round)
     return review_round + 1
 
 
