@@ -1096,6 +1096,8 @@ one. While the issue is open, each later red head adds one comment to it
 carrying that head's red checks, failing tests and log tails, cut to the same
 limit. A head marker in the comment and the row's claim keep it to one comment
 per head, and a crash after the post finds the marker and posts nothing more.
+A head whose log read fails posts nothing that poll and is retried on the
+next, and a feeder clears the row's claim only while it still holds it.
 The streak's first head gets no comment. A ticket that waits is
 `waiting-blocked` with its reason, takes no room and is re-checked every poll; a blocker cycle, a blocker closed without finishing and a blocker that
 does not exist are flagged needs-attention (`blocker-cycle`,

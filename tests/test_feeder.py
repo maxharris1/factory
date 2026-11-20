@@ -1502,6 +1502,57 @@ def test_a_second_feeder_adds_no_head_comment_while_the_first_holds_the_row(
     assert len(issue_comments(github)) == 1
 
 
+def test_a_later_head_whose_log_read_fails_adds_its_log_on_a_later_poll(tmp_path: Path) -> None:
+    now = [10_000.0]
+    feeder, _, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD, now=now)
+    red_main(github)
+    feeder.feed_once()
+    second = red_head(github, 2)
+    github.fail["run_logs"] = 1
+
+    now[0] += 60
+    assert feeder.feed_once().errors == 1
+    assert issue_comments(github) == []
+    for _ in range(3):
+        now[0] += 60
+        assert feeder.feed_once().errors == 0
+
+    [comment] = issue_comments(github)
+    assert second in comment
+    assert "FAILED tests/test_x.py::test_2 - HEAD-2" in comment
+
+
+def test_a_stale_filing_completion_keeps_the_head_comment_claim(tmp_path: Path) -> None:
+    now = [10_000.0]
+    stale, queue, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD, now=now)
+    recovering = another_feeder(stale, queue, github)
+    competing = another_feeder(stale, queue, github)
+    red_main(github)
+    line = stale._main_reads(stale._contexts()[0])[0][MAIN]
+    assert line.read.red is not None
+    claimed = stale._claim_main_fix(line, *MAIN, line.read.red, now[0])
+    assert claimed is not None
+    now[0] += CLAIM_SECONDS + 1
+    assert recovering.feed_once().errors == 0
+    assert main_fixes(github) == [900]
+    red_head(github, 2)
+    raced: list[int] = []
+
+    def stale_read_then_post(repo: str, number: int, body: str, marker: str) -> str:
+        del github.post_issue_comment_once
+        stale._post_main_fix(line, *claimed)
+        raced.append(competing.feed_once().errors)
+        return github.post_comment(repo, number, body)
+
+    github.post_issue_comment_once = stale_read_then_post
+    now[0] += 60
+    assert recovering.feed_once().errors == 0
+
+    assert raced == [0]
+    assert len(issue_comments(github)) == 1
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
+
+
 def another_feeder(feeder: Feeder, queue, github: FakeGitHub) -> Feeder:
     return Feeder(queue, feeder.config, feeder.machines, github=github, linear=None,
                   factory_for=feeder.factory_for, head=lambda: None)

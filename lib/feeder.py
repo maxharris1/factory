@@ -107,7 +107,8 @@ closed while main stays red starts a new one. The row stores the title and body
 rendered from the streak's first red read, and a feeder posts or retires it
 only while it holds the row's claim, which lapses after CLAIM_SECONDS. Each
 later red head of the streak adds one comment with its log to the open issue,
-once per head by a marker, under the row's claim.
+once per head by a marker, under the row's claim. A head whose log read fails
+posts nothing until a later poll reads it.
 
 Stacked branches (#205, lib/branch_stack.py): a ticket whose branch already
 exists and carries commits of another open PR is `waiting-blocked` until
@@ -1405,20 +1406,28 @@ class Feeder:
             connection.execute(f"UPDATE {MAIN_FIX_TABLE} SET state = 'closed' WHERE marker = ?", (marker,))
 
     def _main_fix_body(self, line: _MainLine, base: str, red: MainRed, tag: str) -> str:
-        evidence = self._main_fix_evidence(line.project.repo, red)
+        runs = self._main_fix_runs(line.project.repo, red)
+        evidence = self._main_fix_evidence(line.project.repo, red, runs)
         return issue_body(line.project.repo, base, line.required, red, evidence, tag)
 
-    def _main_fix_evidence(self, repo: str, red: MainRed) -> CIEvidence:
-        logs: dict[str, str | None] = {}
+    def _main_fix_runs(self, repo: str, red: MainRed) -> dict[str, Mapping[str, str] | None]:
+        runs: dict[str, Mapping[str, str] | None] = {}
         for run_id in dict.fromkeys(check.run_id for check in red.checks):
             try:
-                run_logs = self.github.failed_run_logs(repo, run_id)
+                runs[run_id] = self.github.failed_run_logs(repo, run_id)
             except Exception as exc:
                 self.log(f"feeder: {repo} run {run_id} log unavailable: {safe_ship_error(exc)}")
-                continue
-            for check in red.checks:
-                if check.run_id == run_id:
-                    logs[check.job_id] = run_logs.get(check.name)
+                runs[run_id] = None
+        return runs
+
+    def _main_fix_evidence(
+        self, repo: str, red: MainRed, runs: Mapping[str, Mapping[str, str] | None]
+    ) -> CIEvidence:
+        logs = {
+            check.job_id: run_logs.get(check.name)
+            for check in red.checks
+            if (run_logs := runs[check.run_id]) is not None
+        }
         failed = [
             FailedCheck(check.name, check.run_id, check.job_id,
                         f"https://github.com/{repo}/actions/runs/{check.run_id}")
@@ -1434,6 +1443,7 @@ class Feeder:
                 before_post=lambda: self._renew_main_fix(row.marker, claim, "filing"),
             )
         except _ClaimLost:
+            self._release_main_fix(row.marker, claim)
             self.log(f"feeder: main-fix for {repo}@{row.base} left to the feeder now holding it")
             return
         except Exception:
@@ -1442,10 +1452,11 @@ class Feeder:
         keep = self._close_main_fix_duplicates(repo, row, number)
         with self.queue.connect() as connection:
             connection.execute(
-                f"UPDATE {MAIN_FIX_TABLE} SET state = 'open', issue = ?, claimed_by = NULL "
+                f"UPDATE {MAIN_FIX_TABLE} SET state = 'open', issue = ? "
                 "WHERE marker = ? AND state != 'closed'",
                 (keep, row.marker),
             )
+        self._release_main_fix(row.marker, claim)
         self.log(f"feeder: filed main-fix {repo}#{keep} for red {row.base} at {row.last_head[:8]}")
 
     def _comment_main_fix(self, line: _MainLine, row: MainFixRow, red: MainRed) -> None:
@@ -1454,12 +1465,16 @@ class Feeder:
         if claim is None:
             return
         try:
-            evidence = self._main_fix_evidence(repo, red)
+            runs = self._main_fix_runs(repo, red)
+            if None in runs.values():
+                raise RuntimeError(f"a log of red {red.head[:8]} is unreadable")
+            evidence = self._main_fix_evidence(repo, red, runs)
             tag = head_marker(row, red.head)
             body = head_comment(row.base, red, evidence, tag)
             self._renew_main_fix(row.marker, claim, "open")
             self.github.post_issue_comment_once(repo, row.issue, body, tag)
         except _ClaimLost:
+            self._release_main_fix(row.marker, claim)
             self.log(f"feeder: main-fix {repo}#{row.issue} left to the feeder now holding it")
             return
         except Exception:
