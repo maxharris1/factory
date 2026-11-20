@@ -515,3 +515,36 @@ def test_a_replayed_review_queues_nothing_more_and_keeps_the_round(tmp_path: Pat
     assert (flow.state()["review_round"], flow.state()["cap_extra"]) == (2, 0)
     assert review_outcomes(flow) == [("review:909", "queued-fix")]
     assert flow.actions.linear_reopens == [TICKET]
+
+
+def test_a_review_replayed_after_a_failed_label_write_retries_the_label_once(
+    tmp_path: Path,
+) -> None:
+    flow = with_human_reviewer(Flow(tmp_path))
+    flow.factory = replace(flow.factory, tickets="linear")
+    with flow.queue.connect() as connection:
+        connection.execute("UPDATE tracked_tickets SET tracker = 'linear'")
+    flow.hand_off_at(2)
+    before = len(fixes(flow))
+    original = flow.actions.set_state
+    attempts: list[str] = []
+
+    def fail_fixing_once(ticket, state):
+        if state == "fixing":
+            attempts.append(state)
+            if len(attempts) == 1:
+                raise RuntimeError("transient label failure")
+        original(ticket, state)
+
+    flow.actions.set_state = fail_fixing_once
+    with pytest.raises(RetryableStateError):
+        reviewed(flow, "910")
+    for _ in range(3):
+        flow.dispatcher.process(flow.snapshot())
+
+    assert attempts == ["fixing", "fixing"]
+    assert flow.actions.states[-1] == "fixing"
+    assert flow.state()["workflow_state"] == "fixing"
+    assert [fix["source_comment_id"] for fix in fixes(flow)[before:]] == ["review:910"]
+    assert flow.state()["review_round"] == 2
+    assert flow.actions.linear_reopens == [TICKET]

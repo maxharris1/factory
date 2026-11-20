@@ -59,6 +59,27 @@ class ResumeMixin:
                     (ticket.repo.lower(), ticket.ticket_id),
                 )
             }
+            unlabelled = [
+                str(item["comment_id"])
+                for item in connection.execute(
+                    """
+                    SELECT comment_id FROM review_events
+                    WHERE repo = ? AND ticket_id = ? AND comment_id LIKE 'review:%'
+                      AND outcome = 'queued-fix'
+                      AND NOT EXISTS (
+                        SELECT 1 FROM handled_comments
+                        WHERE handled_comments.repo = review_events.repo
+                          AND handled_comments.ticket_id = review_events.ticket_id
+                          AND handled_comments.comment_id = review_events.comment_id
+                      )
+                    """,
+                    (ticket.repo.lower(), ticket.ticket_id),
+                )
+            ]
+        for comment_id in unlabelled:
+            if row is not None and row["workflow_state"] == "fixing":
+                self._after_lift(ticket, queued=False, reopened=False)
+            self._mark_handled(ticket, comment_id, "queued-fix")
         if row is None or row["workflow_state"] != "handed-off":
             return
         approved_at = self._shipped_approval_at(ticket)
@@ -83,6 +104,7 @@ class ResumeMixin:
             lifted = self._lift_cap(ticket, comment, building=True, trusted_review=True)
             if lifted is not None and lifted[1]:
                 self._after_lift(ticket, queued=True, reopened=True)
+                self._mark_handled(ticket, comment.id, "queued-fix")
                 return
 
     def _after_lift(self, ticket: TrackedTicket, queued: bool, reopened: bool) -> None:
