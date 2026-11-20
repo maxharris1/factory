@@ -2391,7 +2391,7 @@ class LivePollSource:
         return pages
 
     def _gh_list(self, endpoint: str) -> list[object]:
-        body, has_next = self._gh_response(endpoint, _replayed=f"{endpoint}&page=1")
+        body, has_next = self._gh_response(endpoint, _refetch=f"{endpoint}&page=1")
         try:
             pages = [json.loads(body)]
         except json.JSONDecodeError as exc:
@@ -2408,7 +2408,7 @@ class LivePollSource:
         *args: str,
         fresh: bool = False,
         _unconditional: bool = False,
-        _replayed: str | None = None,
+        _refetch: str | None = None,
     ) -> tuple[str, bool]:
         conditional = "--paginate" not in args and not fresh
         cache_key = tuple(args)
@@ -2426,7 +2426,7 @@ class LivePollSource:
         if conditional and result.stdout.startswith("HTTP/"):
             included = _included_response(result.stdout)
             if included[0] == 304:
-                return self._not_modified(args, _unconditional, _replayed)
+                return self._not_modified(args, _unconditional, _refetch)
         if result.returncode != 0:
             status = (
                 included[0]
@@ -2443,7 +2443,7 @@ class LivePollSource:
             included if included is not None else _included_response(result.stdout)
         )
         if status == 304:
-            return self._not_modified(args, _unconditional, _replayed)
+            return self._not_modified(args, _unconditional, _refetch)
         has_next = 'rel="next"' in headers.get("link", "")
         etag = headers.get("etag")
         if etag is not None:
@@ -2451,7 +2451,7 @@ class LivePollSource:
         return body, has_next
 
     def _not_modified(
-        self, args: tuple[str, ...], unconditional: bool, replayed: str | None
+        self, args: tuple[str, ...], unconditional: bool, refetch: str | None
     ) -> tuple[str, bool]:
         """Serve a 304 from the ETag cache, or refetch once when it is empty.
 
@@ -2459,19 +2459,18 @@ class LivePollSource:
         can replay a 304 it stored for the previous process's conditional
         request (gh does not key its cache on If-None-Match). Refetch once
         with neither --cache nor If-None-Match, which cannot return 304.
-        A list refetches its explicit page=1 URL instead: gh caches that URL
-        apart from the replayed one and it never carries If-None-Match, so
-        later restarts within gh's 60s reuse it rather than bill again.
+        A list refetches its explicit page=1 URL through --cache instead,
+        which gh caches under a separate key from the bare endpoint.
         """
         cached = self._etag_cache.get(tuple(args))
         if cached is not None and not unconditional:
             return cached[1], cached[2]
         if unconditional:
             raise PollSourceError("gh returned 304 without a cached response")
-        if replayed is None:
+        if refetch is None:
             return self._gh_response(*args, _unconditional=True)
-        response = self._gh_response(replayed)
-        stored = self._etag_cache.pop((replayed,), None)
+        response = self._gh_response(refetch)
+        stored = self._etag_cache.pop((refetch,), None)
         if stored is not None:
             self._etag_cache[tuple(args)] = stored
         return response
@@ -2545,7 +2544,7 @@ class LivePollSource:
         cacheable = result.returncode == 0 or (
             status is not None and status < 500 and status != 403
         )
-        replayed = self._replayed_from_gh_cache(argv, cacheable, started_wall)
+        replayed = self._refetch_from_gh_cache(argv, cacheable, started_wall)
         own = _rate_window(
             headers.get("x-ratelimit-limit"),
             headers.get("x-ratelimit-remaining"),
@@ -2584,7 +2583,7 @@ class LivePollSource:
             f"github reads paused {minutes}m{secs:02d}s until {until} ET ({basis})"
         )
 
-    def _replayed_from_gh_cache(
+    def _refetch_from_gh_cache(
         self, argv: Sequence[str], cacheable: bool, started_wall: float
     ) -> bool:
         cached = _gh_cache_key(argv)

@@ -1447,12 +1447,6 @@ def test_labelled_candidate_ending_on_the_pull_read_reads_no_comments(ending: st
 
 
 class DiskCachedGh:
-    """gh api against three unchanging pages, with gh's --cache on disk.
-
-    gh keys its disk cache on the URL alone, so it replays a stored 304 to a
-    later request that sent no If-None-Match.
-    """
-
     def __init__(self, endpoint: str) -> None:
         self.endpoint = endpoint
         self.now = 0.0
