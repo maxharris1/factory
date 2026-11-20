@@ -34,11 +34,11 @@ reports the window ends the streak.
 `Session._write` (lib/telemetry.py) stores them in the same transaction as
 the job's telemetry row, on the existing heartbeat flush. A reading is keyed
 by account, device and window in `usage_account_readings`, so two accounts
-signed in on one device keep their own, and replaces one only when its
-source time is newer. `usage_readings`, keyed by harness, bot (the login's
+signed in on one device keep their own, and replaces one only when it
+was written later (`updated_at`). `usage_readings`, keyed by harness, bot (the login's
 OS user) and device, is the table older binaries read and write: only the
 device's own login account's readings go there too. `stored` reads both
-tables; a `usage_readings` row wins only with a newer source time. Its
+tables; a `usage_readings` row wins only when written later. Its
 `account` is the subscription the placed device's login uses, and readers
 and the not-on-plan streak key on it; a NULL account, written by older
 code, is `<harness>-default`. Cursor is not tracked.
@@ -180,9 +180,7 @@ WHERE COALESCE(excluded.source_at, excluded.observed_at) > COALESCE({TABLE}.sour
 
 
 def updated_at(row: str = "") -> str:
-    """SQL for when a stored row was last written: its source time, or its
-    observation time once a historical writer, which leaves source_at as it
-    was, has observed it later."""
+    """A historical writer's upsert advances observed_at but leaves source_at as it was."""
     prefix = f"{row}." if row else ""
     return f"MAX({prefix}observed_at, COALESCE({prefix}source_at, {prefix}observed_at))"
 
