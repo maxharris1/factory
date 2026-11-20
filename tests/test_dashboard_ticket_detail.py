@@ -1130,6 +1130,7 @@ def test_picking_a_log_row_on_the_ticket_page_selects_its_bar_and_the_reverse(tm
 KEEP_PLACE = r"""
 (async () => {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
+  document.querySelector('article.ticketpage details.jd-runlog > summary').click();
   document.querySelector('article.ticketpage .runlog button[data-visit="2"]').focus();
   window.scrollTo(0, 240);
   await sleep(50);
@@ -2032,7 +2033,7 @@ def test_on_a_phone_the_ticket_page_reads_live_run_journey_run_log_next_then_cha
     found = {}
     try:
         for kind in PHONE_SECS:
-            for width in (375, 1440):
+            for width in (375, 1024, 1280, 1440):
                 _ticket_at(chrome, base, ADDRESS[kind], width)
                 found[kind, width] = chrome.run(PHONE_LAYOUT)
     finally:
@@ -2045,6 +2046,11 @@ def test_on_a_phone_the_ticket_page_reads_live_run_journey_run_log_next_then_cha
         assert phone["open"] is False, kind
         assert phone["scrollWidth"] == phone["innerWidth"] == 375, kind
         assert desk["runlog"][1] <= desk["journey"][0], kind
+        for width in (1024, 1280):
+            stacked = found[kind, width]
+            assert stacked["order"] == order, (kind, width)
+            assert stacked["runlog"] == stacked["journey"], (kind, width)
+            assert stacked["scrollWidth"] == stacked["innerWidth"] == width, (kind, width)
 
 
 def _current_node(snapshot: dict, address: str) -> tuple[float, float]:
@@ -2652,3 +2658,136 @@ def test_the_script_draws_a_finished_qa_job_s_exposure(tmp_path: Path) -> None:
     views = _both(tmp_path, snapshot, EXPOSURE_ADDRESS)
     assert views["script"] == views["server"]
     assert _run_log_exposures(views["script"])["ship"] == [(f"{job_id[:8]} · qa", _shown(REAL))]
+
+
+RUN_LOG_HEAD = re.compile(
+    r'<details class="jd-panel jd-runlog" data-sec="runlog" data-key="runlog:([^"]*)"><summary><h2>'
+    r'<span class="t">Run log</span><span class="count">(\d+) visits · oldest first</span></h2></summary><ol class="runlog">')
+
+
+def _visit_items(markup: str) -> list[str]:
+    return re.findall(r"<li>(.*?)</li>", re.search(r'<ol class="runlog">(.*?)</ol>', markup, re.S).group(1), re.S)
+
+
+def test_the_run_log_and_each_visit_s_job_metadata_render_collapsed(tmp_path: Path) -> None:
+    snapshot, ids = _ticket_jobs(tmp_path, {"plan": REAL, "build": INDEPENDENT})
+    markup = _ticket_server(snapshot, EXPOSURE_ADDRESS)
+    head = RUN_LOG_HEAD.search(markup)
+    assert head, markup
+    items = _visit_items(markup)
+    assert head.groups() == (EXPOSURE_ADDRESS, str(len(items)))
+    assert " open" not in re.search(r"<details[^>]*jd-runlog[^>]*>", markup).group(0)
+    with_jobs = {}
+    for item in items:
+        assert item.startswith("<button"), item
+        visit = re.search(r'data-visit="(\d+)"', item).group(1)
+        assert '<span class="name">' in item.split("</button>")[0], item
+        meta = re.search(r'</button><details class="exp-more" data-key="runlog-jobs:([^"]*)"><summary>([^<]*)</summary>'
+                         r'(<table class="exp">.*</table>)</details>$', item, re.S)
+        assert ('<table class="exp">' in item) == bool(meta), item
+        if meta:
+            assert meta.group(1) == f"{EXPOSURE_ADDRESS}:{visit}"
+            with_jobs[re.search(r'data-state="([^"]*)"', item).group(1)] = meta.group(2)
+    assert with_jobs == {"planning": "1 job · metadata", "building": "1 job · metadata"}
+    shown = _run_log_exposures(markup)
+    assert shown["planning"] == [(f"{ids['plan'][:8]} · plan", _shown(REAL))]
+    assert shown["building"] == [(f"{ids['build'][:8]} · build", _shown(INDEPENDENT))]
+
+
+@needs_node
+def test_the_script_draws_the_same_collapsed_run_log(tmp_path: Path) -> None:
+    (tmp_path / "db").mkdir()
+    snapshot, _ = _ticket_jobs(tmp_path / "db", {"plan": REAL, "build": INDEPENDENT})
+    views = _both(tmp_path, snapshot, EXPOSURE_ADDRESS)
+    assert views["script"] == views["server"]
+    assert RUN_LOG_HEAD.search(views["script"]), views["script"]
+    assert views["script"].count('<details class="exp-more"') == 2
+
+
+def _css_px(rule: str) -> float:
+    return float(re.search(re.escape(rule) + r"([\d.]+)px", ticket_detail.CSS).group(1))
+
+
+def test_below_the_side_by_side_width_live_run_and_journey_come_before_the_run_log() -> None:
+    fits = _css_px(".jd-runlog{flex:1 1 ") + _css_px(".jd-cols{display:flex;flex-wrap:wrap;align-items:flex-start;gap:") \
+        + _css_px(".jd-right{flex:0 1 ")
+    query = re.search(r"\.jd-cols\{[^}]*container-type:inline-size[^}]*\}", ticket_detail.CSS)
+    assert query, "the columns are a size container"
+    stacked = re.search(r"@container \(max-width:([\d.]+)px\)\{\n(.*?)\n\}", ticket_detail.CSS, re.S)
+    assert stacked, ticket_detail.CSS
+    assert fits - 1 < float(stacked.group(1)) < fits
+    order = {name: int(n) for name, n in re.findall(r"\[data-sec=([a-z]+)\]\{order:(\d+)\}", stacked.group(2))}
+    assert order["liverun"] < order["summary"] < order["journey"] < order["runlog"] < order["next"]
+
+
+RUN_LOG_VIEW = r"""
+(() => {
+  const art = document.querySelector('article.ticketpage');
+  const log = art.querySelector('details.jd-runlog');
+  const shown = n => !!n && n.checkVisibility();
+  const metas = [...log.querySelectorAll('details.exp-more')];
+  return {open: log.open, height: log.getBoundingClientRect().height,
+          head: log.querySelector('summary').textContent, rows: [...log.querySelectorAll('.runlog .visit')].map(shown),
+          metaOpen: metas.map(d => d.open), tables: [...log.querySelectorAll('table.exp')].map(shown),
+          rowsWithMeta: metas.map(d => shown(d.parentNode.querySelector('.visit')))};
+})()"""
+
+
+def _run_log_expanded(chrome: _Chrome) -> list[bool]:
+    nodes = chrome.send("Accessibility.getFullAXTree", chrome.session)["nodes"]
+    return [{p["name"]: p["value"].get("value") for p in node.get("properties", [])}.get("expanded")
+            for node in nodes if node.get("role", {}).get("value") == "DisclosureTriangle"
+            and node.get("name", {}).get("value", "").startswith("Run log")]
+
+
+def _press(chrome: _Chrome, key: str, code: int) -> None:
+    for kind in ("keyDown", "keyUp"):
+        chrome.send("Input.dispatchKeyEvent", chrome.session, type=kind, key=key, code=key,
+                    windowsVirtualKeyCode=code, **({"text": "\r"} if kind == "keyDown" and key == "Enter" else {}))
+
+
+@pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
+def test_the_run_log_opens_by_key_and_stays_open_through_a_live_redraw(tmp_path: Path) -> None:
+    (tmp_path / "db").mkdir()
+    snapshot, _ = _ticket_jobs(tmp_path / "db", {"plan": REAL, "build": INDEPENDENT})
+    records = threading.Event()
+    server = _serve(tmp_path, {"fixture": snapshot}, records_gate=records)
+    base = f"http://127.0.0.1:{server.server_address[1]}/fixture/"
+    chrome = _Chrome(tmp_path / "profile")
+    views = {}
+    try:
+        chrome.send("Emulation.setDeviceMetricsOverride", chrome.session, width=1440, height=900,
+                    deviceScaleFactor=1, mobile=False)
+        _open(chrome, f"{base}ticket.html#t={_quote(EXPOSURE_ADDRESS)}",
+              "document.querySelector('article.ticketpage details.jd-runlog')")
+        views["start"] = chrome.run(RUN_LOG_VIEW)
+        views["start", "ax"] = _run_log_expanded(chrome)
+        chrome.run("document.querySelector('article.ticketpage details.jd-runlog > summary').focus()")
+        _press(chrome, "Enter", 13)
+        views["keyed"] = chrome.run(RUN_LOG_VIEW)
+        views["keyed", "ax"] = _run_log_expanded(chrome)
+        chrome.run("window.oldTicket = document.querySelector('article.ticketpage');"
+                   "oldTicket.querySelector('details.exp-more > summary').click()")
+        views["meta"] = chrome.run(RUN_LOG_VIEW)
+        records.set()
+        chrome.wait_for("!window.oldTicket.isConnected", "the records redraw")
+        views["redrawn"] = chrome.run(RUN_LOG_VIEW)
+        chrome.run("document.querySelector('article.ticketpage details.jd-runlog > summary').click()")
+        views["closed"] = chrome.run(RUN_LOG_VIEW)
+    finally:
+        records.set()
+        chrome.close()
+        server.shutdown()
+    start = views["start"]
+    assert start["open"] is False and start["height"] < 80, start
+    assert start["head"] == "Run log" + f"{len(start['rows'])} visits · oldest first", start
+    assert not any(start["rows"]) and not any(start["tables"]), start
+    assert views["start", "ax"] == [False], views["start", "ax"]
+    keyed = views["keyed"]
+    assert keyed["open"] is True and all(keyed["rows"]), keyed
+    assert views["keyed", "ax"] == [True], views["keyed", "ax"]
+    assert keyed["metaOpen"] == [False, False] and not any(keyed["tables"]) and all(keyed["rowsWithMeta"]), keyed
+    assert views["meta"]["metaOpen"] == [True, False] and views["meta"]["tables"] == [True, False], views["meta"]
+    redrawn = views["redrawn"]
+    assert redrawn["open"] is True and redrawn["metaOpen"] == [True, False] and all(redrawn["rows"]), redrawn
+    assert views["closed"]["open"] is False and not any(views["closed"]["rows"]), views["closed"]
