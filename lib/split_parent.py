@@ -1,5 +1,3 @@
-"""Close a split parent once every part, follow-ups included, is done (issue #1260)."""
-
 from __future__ import annotations
 
 from collections.abc import Collection, Sequence

@@ -1,5 +1,3 @@
-"""A split parent closes when its last part, follow-ups included, has merged (issue #1260)."""
-
 from __future__ import annotations
 
 from pathlib import Path
