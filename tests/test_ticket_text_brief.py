@@ -218,6 +218,39 @@ def test_a_brief_with_no_type_line_sets_no_ticket_type(tmp_path) -> None:
         assert "ticket_type" not in json.loads(dispatcher._job_detail(polled, action=action))
 
 
+def _criteria_feeder_comment() -> str:
+    context, findings = parse_factory_context(FACTORY_MD)
+    assert context is not None, findings
+    body = (
+        "Ship it.\nFeatures: upload-file, search\nRisk: low\nPlan first: no\nDepends on: none\n\n"
+        "## Acceptance criteria\n- The export stops failing.\n- ops: restart the daemon.\n"
+        "- qa(search): Search finds the export.\n"
+    )
+    issue = IntakeIssue(
+        repo="acme/widgets", tracker="github", key="41", title="Fix the export", body=body, labels=(),
+        created_at=0.0, applied_by="max", url="https://github.com/acme/widgets/issues/41",
+    )
+    return feeder_brief(issue, context, number=12, branch="factory/issue-41", base="main", risk="low",
+                        state="building", visible=False, template=parse_intake(body, ()))
+
+
+@pytest.mark.parametrize("action", ["build", "fix"])
+def test_a_builder_job_carries_the_proof_its_ready_owes(tmp_path, action: str) -> None:
+    polled = _polled(("grok-login", _criteria_feeder_comment()))
+    dispatcher, _ = setup(tmp_path)
+    detail = json.loads(dispatcher._job_detail(polled, action=action))
+    assert detail["proof"] == [
+        {"id": "ac-1", "kind": "review", "journeys": []},
+        {"id": "ac-2", "kind": "qa", "journeys": ["search"]},
+    ]
+
+
+def test_a_review_job_carries_no_proof(tmp_path) -> None:
+    polled = _polled(("grok-login", _criteria_feeder_comment()))
+    dispatcher, _ = setup(tmp_path)
+    assert "proof" not in json.loads(dispatcher._job_detail(polled, action="review"))
+
+
 def _linear_polled(brief: str):
     issue = linear_issue()
     issue["comments"]["nodes"].insert(0, {
