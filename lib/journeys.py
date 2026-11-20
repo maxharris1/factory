@@ -23,6 +23,11 @@ Problem = tuple[JourneyCode, str]
 ID = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 _GRAMMAR = "`[a-z0-9][a-z0-9-]{0,63}`"
 _NEW = re.compile(r"new:", re.IGNORECASE)
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_VERIFY_LINE = re.compile(r"^- Verify skill: `(?P<verify>[^`\s]+)`$")
+_BASE_LINE = re.compile(r"^- Base: `(?P<sha>[0-9a-f]{40,64})`$")
+_JOURNEY_LINE = re.compile(rf"^- `(?P<new>new:)?(?P<id>{ID.pattern})`(?: \(.*\))?$")
+_CHECK_LINE = re.compile(r"^- (?P<ac>ac-[1-9][0-9]*) \[(?P<ids>[^\]]+)\]:(?: (?P<text>.*))?$")
 _QA_TAG = re.compile(r"^(?:qa\s*(?:\((?P<ids>[^)]*)\))?\s*:|\(qa\)|\[qa\])\s*", re.IGNORECASE)
 
 
@@ -36,6 +41,100 @@ class Journey:
 class QaCriterion:
     text: str
     journeys: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class QaCheck:
+    ac: str
+    journeys: tuple[str, ...]
+    text: str
+
+
+@dataclass(frozen=True)
+class QaPlan:
+    verify: str
+    base_sha: str
+    journeys: tuple[Journey, ...]
+    checks: tuple[QaCheck, ...]
+
+    def render(self) -> list[str]:
+        lines = ["### QA journeys", f"- Verify skill: `{self.verify}`", f"- Base: `{self.base_sha}`"]
+        lines += [
+            f"- `new:{j.id}` (this PR adds `features/{j.id}.md` and its README row)" if j.new else f"- `{j.id}`"
+            for j in self.journeys
+        ]
+        if self.checks:
+            lines += ["", "### QA criteria"]
+            lines += [f"- {c.ac} [{', '.join(c.journeys)}]: {c.text}".rstrip() for c in self.checks]
+        return lines
+
+    @classmethod
+    def parse(cls, text: str | None) -> QaPlan | None:
+        """The plan in a brief's `### QA journeys` and `### QA criteria` sections, else None.
+
+        Fenced lines are skipped so a quoted ticket cannot forge a plan, and any line off
+        the grammar makes the whole block None.
+        """
+        sections = _sections(_unfenced(text or ""))
+        titles = [title for title, _ in sections]
+        if "QA journeys" not in titles:
+            return None
+        at = titles.index("QA journeys")
+        found = sections[at][1]
+        following = sections[at + 1] if at + 1 < len(sections) else (None, [])
+        if len(found) < 3:
+            return None
+        verify, base = _VERIFY_LINE.match(found[0]), _BASE_LINE.match(found[1])
+        listed = [_JOURNEY_LINE.match(line) for line in found[2:]]
+        checks = [_CHECK_LINE.match(line) for line in (following[1] if following[0] == "QA criteria" else [])]
+        if verify is None or base is None or None in listed or None in checks:
+            return None
+        return cls(
+            verify["verify"],
+            base["sha"],
+            tuple(Journey(m["id"], new=bool(m["new"])) for m in listed if m),
+            tuple(
+                QaCheck(m["ac"], tuple(i.strip() for i in m["ids"].split(",")), m["text"] or "")
+                for m in checks
+                if m
+            ),
+        )
+
+
+def qa_plan(
+    verify: str, base_sha: str, journeys: tuple[Journey, ...], criteria: Iterable[tuple[str, str]]
+) -> QaPlan:
+    every = tuple(journey.id for journey in journeys)
+    checks = tuple(
+        QaCheck(ac, tag.journeys or every, tag.text)
+        for ac, item in criteria
+        if (tag := qa_tag(item)) is not None
+    )
+    return QaPlan(verify, base_sha, journeys, checks)
+
+
+def _unfenced(text: str) -> list[str]:
+    lines: list[str] = []
+    fence: str | None = None
+    for line in text.splitlines():
+        mark = _FENCE.match(line)
+        if fence is None and mark:
+            fence = mark.group(1)
+        elif fence is None:
+            lines.append(line.rstrip())
+        elif mark and mark.group(1)[0] == fence[0] and len(mark.group(1)) >= len(fence) and line.strip() == mark.group(1):
+            fence = None
+    return lines
+
+
+def _sections(lines: list[str]) -> list[tuple[str | None, list[str]]]:
+    sections: list[tuple[str | None, list[str]]] = []
+    for line in lines:
+        if line.startswith("#"):
+            sections.append((line[4:].strip() if line.startswith("### ") else None, []))
+        elif sections and line.strip():
+            sections[-1][1].append(line)
+    return sections
 
 
 def parse_features(value: str | None) -> tuple[tuple[Journey, ...], tuple[str, ...]]:

@@ -121,6 +121,11 @@ def criteria_evidence(
     return CriteriaEvidence(issue_key, issue_url, "none", None, EMPTY, (), None)
 
 
+def numbered(body: str) -> tuple[Criterion, ...]:
+    """The criteria in body that criteria_evidence keeps, with the ids it gives them."""
+    return _criteria(body, TEXT_LIMIT)[1]
+
+
 def canonical_brief(
     comments: Sequence[Comment],
     trusted_logins: Mapping[str, Mapping[str, frozenset[str]]],

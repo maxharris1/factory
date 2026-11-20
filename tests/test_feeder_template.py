@@ -15,7 +15,7 @@ import pytest
 
 from lib.feeder import parse_intake
 from lib.handoff import parse_comment
-from lib.journeys import Journey, QaCriterion, skill_dir
+from lib.journeys import Journey, QaCheck, QaCriterion, QaPlan, skill_dir
 from tests.test_feeder import (
     BASE_SHA,
     FACTORY_MD,
@@ -896,6 +896,56 @@ def test_the_map_is_read_once_per_base_in_a_poll(tmp_path: Path) -> None:
     feeder.feed_once()
     assert len(github.dir_reads) == 1
 
+
+
+
+def fed_brief(tmp_path: Path, ticket: str) -> str:
+    feeder, github = map_feeder(tmp_path)
+    github.issues[HOME] = [issue(7, template=False, body=ticket)]
+    assert len(feeder.feed_once().fed) == 1
+    return go_and_brief(github)[1]
+
+
+def test_a_brief_for_a_ticket_with_journeys_carries_the_qa_plan(tmp_path: Path) -> None:
+    brief = fed_brief(tmp_path, journey_ticket(
+        "search, new:start-free",
+        "- [ ] The API returns 201.",
+        "- [ ] qa: The button opens the sign-up form.",
+    ))
+    assert QaPlan.parse(brief) == QaPlan(
+        "verify-app",
+        BASE_SHA,
+        (Journey("search"), Journey("start-free", new=True)),
+        (QaCheck("ac-2", ("search", "start-free"), "The button opens the sign-up form."),),
+    )
+    order = [brief.index(f"\n### {name}\n") for name in ("Acceptance criteria", "QA journeys", "QA criteria", "Ticket")]
+    assert order == sorted(order)
+    assert "- ac-2 [search, start-free]: The button opens the sign-up form." in brief
+
+
+def test_journeys_with_no_qa_criteria_brief_the_journeys_only(tmp_path: Path) -> None:
+    brief = fed_brief(tmp_path, journey_ticket("search"))
+    assert "### QA journeys" in brief and "### QA criteria" not in brief
+    assert QaPlan.parse(brief) == QaPlan("verify-app", BASE_SHA, (Journey("search"),), ())
+
+
+
+def test_a_pr_moved_to_a_stacked_base_briefs_that_base_tip(tmp_path: Path) -> None:
+    feeder, github = map_feeder(tmp_path)
+    github.issues[HOME] = [issue(7, template=False, body=journey_ticket("search"))]
+    github.branches[(HOME, "factory/issue-7")] = "f" * 40
+    github.branches[(HOME, "factory/issue-6")] = "b" * 40
+    github.pulls[(HOME, 77)] = {"head": "factory/issue-7", "base": "factory/issue-6",
+                                "title": "t", "body": "Fixes #7", "draft": True}
+    assert len(feeder.feed_once().fed) == 1
+    brief = parse_comment(github.posted[(HOME, 77)][0].body).body
+    assert QaPlan.parse(brief) == QaPlan("verify-app", "b" * 40, (Journey("search"),), ())
+
+
+def test_a_brief_for_a_ticket_without_features_has_no_qa_sections(tmp_path: Path) -> None:
+    brief = fed_brief(tmp_path, body())
+    assert "### QA" not in brief
+    assert QaPlan.parse(brief) is None
 
 
 def bounded(*, criteria=("- [ ] It works.",), sections: str = "") -> str:

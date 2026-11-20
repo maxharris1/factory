@@ -8,7 +8,7 @@ from markdown_it import MarkdownIt
 from lib.dispatcher import Comment
 from lib.orchestrate import brief_comment
 from lib.evidence import TEXT_LIMIT, Criterion, criteria_evidence
-from lib.evidence.criteria import EMPTY, canonical_brief
+from lib.evidence.criteria import EMPTY, canonical_brief, numbered
 
 TRUSTED = {"github": {"factory-app[bot]": frozenset({"grok-bot"}), "claude-app[bot]": frozenset({"claude-bot"})}}
 
@@ -648,3 +648,11 @@ def test_job_criteria_match_the_intake_criteria(tail):
     body = SCOPED + tail
     texts = tuple(item.text for item in _bundle(issue_body=body).criteria)
     assert texts == parse_intake(body, ()).criteria
+
+
+def test_numbered_gives_only_the_ids_the_cut_evidence_keeps():
+    body = "## Acceptance criteria\n" + "\n".join(f"- [ ] Item {n} {'x' * 90}" for n in range(400))
+    evidence = criteria_evidence(issue_key="#1", issue_url=None, brief=None, issue_body=body,
+                                 pr_body=None, ready_starts_review=False)
+    assert evidence.cut is not None
+    assert numbered(body) == evidence.criteria
