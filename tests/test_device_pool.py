@@ -1068,3 +1068,175 @@ def test_waiting_polling_and_an_unclaimed_autostart_hold_no_slot(tmp_path: Path)
     claimed = pool.claim("claude", autostart=(4242, "start"))
     assert claimed is not None
     assert slot_rows(queue) == [(job.id, "pc")]
+
+
+UNREACHABLE = "preflight-unreachable"
+HELD = "memory-wait: MemAvailable 6.0 GiB < 8 GiB"
+
+
+def backoff_row(queue: SQLiteJobQueue, device_name: str) -> tuple[float, str] | None:
+    with queue.connect() as connection:
+        row = connection.execute(
+            "SELECT until, reason FROM device_backoff WHERE device = ?", (device_name,)
+        ).fetchone()
+    return (float(row[0]), str(row[1])) if row is not None else None
+
+
+def unreachable(queue: SQLiteJobQueue, device_name: str, until: float) -> None:
+    with queue.connect() as connection:
+        device_pool.back_off(connection, device_name, until=until, reason=UNREACHABLE)
+
+
+def memory_hold(queue: SQLiteJobQueue, device_name: str, until: float) -> None:
+    with queue.connect() as connection:
+        device_pool.hold_memory(connection, device_name, until=until, reason=HELD, now=queue.now())
+
+
+def clear_memory(queue: SQLiteJobQueue, device_name: str) -> None:
+    with queue.connect() as connection:
+        device_pool.clear_memory_hold(connection, device_name)
+
+
+def test_a_memory_held_device_takes_no_claim_until_the_hold_clears(tmp_path: Path) -> None:
+    pool, queue = make_pool(tmp_path, device("pc", 4, "claude"))
+    config = pool.config
+    enqueue(queue, "claude", "1")
+    memory_hold(queue, "pc", 280.0)
+
+    assert pool.claim("claude") is None
+    assert [job.state for job in queue.outstanding()] == ["queued"]
+    blocked = device_pool.placement_blocks(queue, config, None)
+    assert choose_device(config, "claude", {}, blocked) is None
+    assert device_pool.free_slots(config, "claude", {}, blocked) == 0
+
+    clear_memory(queue, "pc")
+
+    claimed = pool.claim("claude")
+    assert claimed is not None and claimed[1].device == "pc"
+    assert [job.state for job in queue.outstanding()] == ["running"]
+
+
+def test_a_memory_hold_on_the_emptier_device_sends_the_claim_to_the_other(tmp_path: Path) -> None:
+    pool, queue = make_pool(tmp_path, device("pc", 4, "claude"), device("box", 4, "claude"))
+    enqueue(queue, "claude", "busy")
+    busy = pool.claim("claude")
+    assert busy is not None
+    held = "box" if busy[1].device == "pc" else "pc"
+    enqueue(queue, "claude", "next")
+    memory_hold(queue, held, 280.0)
+
+    claimed = pool.claim("claude")
+
+    assert claimed is not None and claimed[1].device == busy[1].device
+
+
+def test_a_pinned_qa_job_waits_while_its_device_is_memory_held(tmp_path: Path) -> None:
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 100.0)
+    pool = DevicePool(
+        queue,
+        MachinesConfig(devices=(device("pc", 4, "claude"),)),
+        pins=lambda: {"owner/repo": frozenset({"pc"})},
+    )
+    memory_hold(queue, "pc", 280.0)
+
+    def place() -> bool:
+        with queue.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            placed = pool.place_qa(connection, "qa-1", "owner/repo")
+            connection.commit()
+            return placed
+
+    def qa_slots() -> list[str]:
+        with queue.connect() as connection:
+            if not connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = 'qa_device_slots'"
+            ).fetchone():
+                return []
+            return [str(row[0]) for row in connection.execute("SELECT device FROM qa_device_slots")]
+
+    assert place() is False
+    assert qa_slots() == []
+
+    clear_memory(queue, "pc")
+
+    assert place() is True
+    assert qa_slots() == ["pc"]
+
+
+def test_a_shorter_memory_hold_never_shortens_or_takes_over_an_unreachable_backoff(
+    tmp_path: Path,
+) -> None:
+    now = [100.0]
+    pool, queue = make_pool(tmp_path, device("pc", 4, "claude"), now=now)
+    enqueue(queue, "claude", "1")
+    unreachable(queue, "pc", 400.0)
+    memory_hold(queue, "pc", 280.0)
+
+    assert backoff_row(queue, "pc") == (400.0, UNREACHABLE)
+    clear_memory(queue, "pc")
+    assert backoff_row(queue, "pc") == (400.0, UNREACHABLE)
+    now[0] = 399.0
+    assert pool.claim("claude") is None
+    now[0] = 400.0
+    assert pool.claim("claude") is not None
+
+
+def test_an_unreachable_backoff_over_a_memory_hold_owns_the_row(tmp_path: Path) -> None:
+    pool, queue = make_pool(tmp_path, device("pc", 4, "claude"))
+    enqueue(queue, "claude", "1")
+    memory_hold(queue, "pc", 280.0)
+    unreachable(queue, "pc", 400.0)
+
+    assert backoff_row(queue, "pc") == (400.0, UNREACHABLE)
+    clear_memory(queue, "pc")
+    assert backoff_row(queue, "pc") == (400.0, UNREACHABLE)
+    assert pool.claim("claude") is None
+
+
+def test_a_longer_memory_hold_extends_a_live_unreachable_backoff_but_keeps_its_reason(
+    tmp_path: Path,
+) -> None:
+    now = [100.0]
+    pool, queue = make_pool(tmp_path, device("pc", 4, "claude"), now=now)
+    enqueue(queue, "claude", "1")
+    unreachable(queue, "pc", 400.0)
+    memory_hold(queue, "pc", 500.0)
+
+    assert backoff_row(queue, "pc") == (500.0, UNREACHABLE)
+    clear_memory(queue, "pc")
+    now[0] = 399.0
+    assert pool.claim("claude") is None
+
+
+def test_a_memory_hold_over_an_expired_unreachable_row_clears_away(tmp_path: Path) -> None:
+    now = [100.0]
+    pool, queue = make_pool(tmp_path, device("pc", 4, "claude"), now=now)
+    enqueue(queue, "claude", "1")
+    unreachable(queue, "pc", 400.0)
+    now[0] = 500.0
+    memory_hold(queue, "pc", 680.0)
+
+    assert backoff_row(queue, "pc") == (680.0, HELD)
+    assert pool.claim("claude") is None
+    clear_memory(queue, "pc")
+    assert backoff_row(queue, "pc") is None
+    assert pool.claim("claude") is not None
+
+
+def test_a_later_back_off_never_shortens_a_longer_one(tmp_path: Path) -> None:
+    _, queue = make_pool(tmp_path, device("pc", 4, "claude"))
+    unreachable(queue, "pc", 400.0)
+    with queue.connect() as connection:
+        device_pool.back_off(connection, "pc", until=200.0, reason="lost")
+
+    assert backoff_row(queue, "pc") == (400.0, "lost")
+
+
+def test_clearing_a_memory_hold_on_a_device_with_no_backoff_table_is_a_no_op(
+    tmp_path: Path,
+) -> None:
+    pool, queue = make_pool(tmp_path, device("pc", 4, "claude"))
+    enqueue(queue, "claude", "1")
+    clear_memory(queue, "pc")
+
+    assert pool.claim("claude") is not None
