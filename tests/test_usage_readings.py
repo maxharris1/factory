@@ -1779,6 +1779,25 @@ def test_an_older_binarys_upsert_still_works_and_its_newer_row_is_read(tmp_path:
     assert _dashboard(db, CAPTURED + 300)["codex-a"]["headroom"] == 0.4
 
 
+def test_a_historical_writers_newer_row_is_read_though_its_source_time_is_stale(tmp_path: Path) -> None:
+    db = _migrated_db(tmp_path)
+    _store_on(db, "codex-a", "box", 0.2, CAPTURED + 60, own_login=True)
+    reset = FIVE_HOUR_RESET + 3600
+    with sqlite3.connect(db) as connection:
+        connection.executemany(HISTORICAL_UPSERT, [
+            ("codex", "codex-bot", "box", window, 1.0, reset, CAPTURED + 120, "old-job")
+            for window in usage_readings.WINDOWS
+        ])
+
+    now = CAPTURED + 180
+    assert _headroom(db, "codex-a", now) == 0.0
+    assert _lane_readings(db, "codex-a") == {"five_hour": 1.0, "seven_day": 1.0}
+    assert _dashboard(db, now)["codex-a"]["headroom"] == 0.0
+    with closing(sqlite3.connect(db)) as connection:
+        found = lane_limit.readings(connection, "codex-a")
+    assert lane_limit.until(lane_limit.UsageLimit(None), found, now) == (reset, "reading")
+
+
 def test_before_the_account_table_a_side_accounts_reading_is_not_stored(tmp_path: Path) -> None:
     db = tmp_path / "orch.db"
     _pre_account_db(db)

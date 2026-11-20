@@ -178,6 +178,15 @@ ON CONFLICT (harness, bot, device, window) DO UPDATE SET
 WHERE COALESCE(excluded.source_at, excluded.observed_at) > COALESCE({TABLE}.source_at, {TABLE}.observed_at)
 """
 
+
+def updated_at(row: str = "") -> str:
+    """SQL for when a stored row was last written: its source time, or its
+    observation time once a historical writer, which leaves source_at as it
+    was, has observed it later."""
+    prefix = f"{row}." if row else ""
+    return f"MAX({prefix}observed_at, COALESCE({prefix}source_at, {prefix}observed_at))"
+
+
 _READINGS_COLUMNS = "account, device, window, harness, bot, used, resets_at, observed_at, job_id, absent, source_at"
 _READINGS_CONFLICT = f"""
 ON CONFLICT (account, device, window) DO UPDATE SET
@@ -189,8 +198,7 @@ ON CONFLICT (account, device, window) DO UPDATE SET
     job_id = excluded.job_id,
     absent = excluded.absent,
     source_at = excluded.source_at
-WHERE COALESCE(excluded.source_at, excluded.observed_at)
-    > COALESCE({ACCOUNT_READINGS}.source_at, {ACCOUNT_READINGS}.observed_at)
+WHERE {updated_at("excluded")} > {updated_at(ACCOUNT_READINGS)}
 """
 ACCOUNT_READINGS_UPSERT = f"""
 INSERT INTO {ACCOUNT_READINGS} ({_READINGS_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -576,7 +584,7 @@ def stored(
 ) -> list[StoredRow] | None:
     """The stored rows (account's only, when given), one per account, device
     and window, ordered by account, device, harness and bot: the
-    ACCOUNT_READINGS row, unless TABLE holds one with a newer source time.
+    ACCOUNT_READINGS row, unless TABLE holds one written later (`updated_at`).
     None when neither table exists."""
     present = tables(connection)
     parts = []
@@ -600,7 +608,7 @@ def stored(
         f"""
         SELECT account, device, harness, bot, window, used, resets_at, observed_at, absent, source_at FROM (
             SELECT *, ROW_NUMBER() OVER (
-                PARTITION BY account, device, window ORDER BY COALESCE(source_at, observed_at) DESC, rank
+                PARTITION BY account, device, window ORDER BY {updated_at()} DESC, rank
             ) AS n
             FROM ({" UNION ALL ".join(parts)}) WHERE :account IS NULL OR account = :account
         ) WHERE n = 1 ORDER BY account, device, harness, bot LIMIT :limit
