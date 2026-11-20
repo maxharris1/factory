@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Literal
@@ -17,7 +16,7 @@ from lib.factory_md import (
     FactoryContext,
 )
 from lib.github_actions import TOKEN_VARIABLES
-from lib.journeys import QaPlan, skill_dir
+from lib.journeys import QaPlan
 from lib.pr_title import SOURCE
 from lib.queue import Job, plan_round
 
@@ -537,11 +536,9 @@ _NEW_JOURNEYS = {
 }
 
 
-def journey_lines(where: Literal["plan", "ready"], plan: QaPlan, skills: Iterable[str]) -> list[str]:
-    folder = skill_dir(skills, plan.verify)
-
+def journey_lines(where: Literal["plan", "ready"], plan: QaPlan) -> list[str]:
     def path(name: str) -> str:
-        return f"`{folder}/features/{name}`" if folder else f"`features/{name}` in the `{plan.verify}` skill's folder"
+        return f"`features/{name}` in the `{plan.verify}` skill's folder"
 
     new = [journey.id for journey in plan.journeys if journey.new]
     return [

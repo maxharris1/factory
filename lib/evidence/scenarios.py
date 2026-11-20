@@ -53,7 +53,7 @@ from lib.dispatch.constants import _FENCE_OPEN
 from lib.dispatcher import Comment, _comment_order
 from lib.evidence.criteria import Criterion
 from lib.handoff import HandoffError, parse_comment
-from lib.journeys import QaCheck, QaPlan, qa_tag
+from lib.journeys import QaCheck, QaPlan
 
 HEADING = "## Verify, live"
 SOURCE_KINDS = ("plan", "ready")
@@ -219,8 +219,8 @@ def qa_scenarios(
     plan = QaPlan.parse(brief.body) if brief is not None else None
     if brief is None or plan is None:
         return _live_scenarios(comments)
-    edited = _edited_tag(plan, criteria) if criteria is not None else None
-    return replace(edited or from_plan(plan), source_url=brief.url)
+    edited = plan.edited((c.id, c.text) for c in criteria) if criteria is not None else None
+    return replace(EditedTag(*edited) if edited else from_plan(plan), source_url=brief.url)
 
 
 def from_plan(plan: QaPlan) -> LiveScenarios:
@@ -252,19 +252,6 @@ def _steps(plan: QaPlan, check: QaCheck, new: set[str]) -> str:
         if journey in new
     ]
     return " ".join(steps)
-
-
-def _edited_tag(plan: QaPlan, criteria: Sequence[Criterion]) -> EditedTag | None:
-    every = tuple(journey.id for journey in plan.journeys)
-    checks = {check.ac: check for check in plan.checks}
-    for criterion in criteria:
-        tag = qa_tag(criterion.text)
-        check = checks.pop(criterion.id, None)
-        if (tag and (tag.journeys or every)) != (check and check.journeys):
-            return EditedTag(criterion.id, f"{criterion.id}'s qa tag changed after the brief")
-    for ac in checks:
-        return EditedTag(ac, f"{ac} is not in the ticket any more")
-    return None
 
 
 def _live_scenarios(comments: Sequence[Comment]) -> LiveScenarios | InvalidSection:

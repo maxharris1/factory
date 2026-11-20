@@ -744,33 +744,39 @@ QA_PLAN = QaPlan(
     (QaCheck("ac-2", ("pricing", "start-free"), "The button opens the sign-up form."),),
 )
 JOURNEYS_BRIEF = "**Brief for #41**\n\n" + "\n".join(QA_PLAN.render()) + "\n"
-FEATURE_FILE = "`.claude/skills/verify-cleffy/features/start-free.md`"
-FEATURE_ROW = "`.claude/skills/verify-cleffy/features/README.md`"
+FEATURE_FILE = "`features/start-free.md` in the `verify-cleffy` skill's folder"
+FEATURE_ROW = "`features/README.md` in the `verify-cleffy` skill's folder"
 QA_RUNS = "QA runs the brief's `### QA journeys` with `verify-cleffy` against its `### QA criteria`."
 LIVE_ASK = "with a `## Verify, live` section"
 
 
 def test_journey_lines_name_each_new_journeys_file_and_readme_row():
-    lines = "\n".join(journey_lines("ready", QA_PLAN, [".claude/skills/verify-cleffy/SKILL.md"]))
+    lines = "\n".join(journey_lines("ready", QA_PLAN))
     assert QA_RUNS in lines
     assert "Write no `## Verify, live` section." in lines
     assert f"- `new:start-free`: add {FEATURE_FILE}" in lines
     assert f"and its row in {FEATURE_ROW}" in lines
     assert "pricing" not in lines
     assert "Map each as work" not in lines
-    assert "Map each as work" in "\n".join(journey_lines("plan", QA_PLAN, [".claude/skills/verify-cleffy/SKILL.md"]))
-
-
-def test_journey_lines_without_a_skill_path_name_the_verify_skills_folder():
-    lines = "\n".join(journey_lines("ready", QA_PLAN, []))
-    assert "`features/start-free.md` in the `verify-cleffy` skill's folder" in lines
+    assert "Map each as work" in "\n".join(journey_lines("plan", QA_PLAN))
 
 
 def test_journey_lines_with_no_new_journeys_ask_for_no_file():
     plain = replace(QA_PLAN, journeys=(Journey("pricing"),))
-    lines = journey_lines("plan", plain, [".claude/skills/verify-cleffy/SKILL.md"])
+    lines = journey_lines("plan", plain)
     assert QA_RUNS in lines[0]
     assert "features/" not in "\n".join(lines)
+
+
+@pytest.mark.parametrize("action", ["plan", "build"])
+def test_a_new_journey_names_the_map_beside_the_verify_skill_not_a_repo_skill_path(action: str):
+    nested = ["apps/web/.cursor/skills/verify-cleffy/SKILL.md"]
+    synthesized = [".claude/skills/verify-cleffy/SKILL.md"]
+    for paths in (nested, synthesized):
+        task = _task_under(QA_FACTORY_MD, action, {"brief_text": JOURNEYS_BRIEF, "repo_skill_paths": paths})
+        assert f"- `new:start-free`: add {FEATURE_FILE}" in task
+        assert f"and its row in {FEATURE_ROW}" in task
+        assert "/features/" not in task
 
 
 @pytest.mark.parametrize(
@@ -836,3 +842,34 @@ def test_a_review_of_a_journeys_brief_with_no_qa_criteria_names_no_owner():
     task = _review_under(with_qa("report"), [])
     assert "owned by QA" not in task
     assert "that is not under the brief's `### QA criteria` is a note in the verdict" in task
+
+
+def test_a_review_after_the_issue_renumbers_the_qa_criterion_names_no_owner():
+    from lib.dispatcher import Comment
+    from lib.evidence.criteria import canonical_brief, criteria_evidence
+    from tests.regenerate_brief_snapshots import TRUSTED
+
+    plan = replace(QA_PLAN, checks=(QaCheck("ac-2", ("pricing",), "Page shows a warning"),))
+    brief = Comment(
+        id="1",
+        author="factory-app[bot]",
+        created_at=1.0,
+        url="https://github.com/owner/repo/pull/42#issuecomment-1",
+        body="<!-- orch:v1 kind=brief from=grok-bot role=orchestrator risk=high -->\n" + JOURNEYS_BRIEF,
+    )
+    brief = replace(brief, body=brief.body.replace("\n".join(QA_PLAN.render()), "\n".join(plan.render())))
+    issue = "## Acceptance criteria\n- qa: Page shows a warning\n- Validation rejects a missing account\n"
+    criteria = criteria_evidence(
+        issue_key="#42",
+        issue_url="https://github.com/owner/repo/issues/42",
+        brief=canonical_brief([brief], TRUSTED),
+        issue_body=issue,
+        pr_body=None,
+        ready_starts_review=False,
+    )
+    context, findings = parse_factory_context(with_qa("block"))
+    assert context is not None, findings
+    job = _job("review", "codex", 1, HEAD, {"round": "1/3", "evidence": _evidence(criteria=asdict(criteria))})
+    task = _task(render_brief(job, bot="codex-bot", context=context, factory_root="/srv/orch/factory"))
+    assert "owned by QA" not in task
+    assert "`ac-2` under `### QA criteria`" not in task

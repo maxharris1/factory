@@ -63,7 +63,7 @@ def lead(job: Job, facts: dict) -> Lead:
             base_step(4, facts),
             "5. Push, then post the ready handoff below with the head you pushed.",
             *(
-                journey_lines("ready", facts["qa_plan"], facts["skills"])
+                journey_lines("ready", facts["qa_plan"])
                 if facts["qa_plan"]
                 else live_lines("ready", job.created_at) if facts["qa"] and not (facts["plan_text"] or facts["plan"]) else []
             ),

@@ -45,7 +45,8 @@ ends with a note of how many characters and criteria were cut.
 When no source has any text, the source is "none" and the text is EMPTY.
 
 qa_criteria holds the ids under the brief's `### QA criteria`, () when its QA
-plan lists none, and None when there is no brief or it has no valid QA plan.
+plan lists none, and None when there is no brief, it has no valid QA plan, or
+the issue body lists criteria that no longer match the plan's QA criteria.
 """
 
 from __future__ import annotations
@@ -112,12 +113,14 @@ def criteria_evidence(
     """The issue fields and acceptance criteria. See the module doc."""
     candidates: list[tuple[str, str | None, str | None]] = []
     qa_criteria = None
-    if _lists_criteria(issue_body):
+    listed = _lists_criteria(issue_body)
+    if listed:
         candidates.append(("issue", issue_url, issue_body))
     if brief is not None:
         brief_body = parse_comment(brief.body).body
         plan = QaPlan.parse(brief_body)
-        qa_criteria = None if plan is None else tuple(check.ac for check in plan.checks)
+        if plan is not None and not (listed and plan.edited((c.id, c.text) for c in numbered(issue_body))):
+            qa_criteria = tuple(check.ac for check in plan.checks)
         candidates.append(("brief", brief.url, quoted_ticket(brief_body)))
     candidates.append(("issue", issue_url, issue_body))
     if ready_starts_review:

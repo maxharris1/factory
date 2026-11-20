@@ -31,7 +31,7 @@ def lead(job: Job, facts: dict) -> Lead:
             "proof: the test, command or observation that will show it is met. The plan lives in the "
             "plan handoff comment, never in a file in the repo.",
             *(
-                journey_lines("plan", facts["qa_plan"], facts["skills"])
+                journey_lines("plan", facts["qa_plan"])
                 if facts["qa_plan"]
                 else live_lines("plan", job.created_at) if facts["qa"] else []
             ),
