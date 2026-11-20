@@ -3484,3 +3484,44 @@ def test_a_read_gh_replays_from_its_cache_counts_as_cached(read, route, pages) -
     assert lines[0].endswith(billed)
     assert lines[1].endswith(f"; github core 0, free {pages} (304 0, cached {pages}), graphql 0")
     assert lines[2].endswith(billed)
+
+
+def test_a_restarted_poller_counts_a_read_gh_still_caches_as_cached(tmp_path: Path) -> None:
+    database = tmp_path / "orch.db"
+    orch = tmp_path / "orch.yml"
+    orch.write_text(
+        "poll_seconds: 60\n"
+        "grok:\n  webhook_url_env: U\n  webhook_key_env: K\n"
+        "trusted_logins:\n  grok-login: [grok-bot]\n"
+        "projects:\n  - repo: acme/widgets\n    factory_ref: main\n",
+        encoding="utf-8",
+    )
+    cli._runtime(database, orch, create=True)
+    now = [1_800_000_000.0]
+    gh_cache: dict[tuple[str, ...], float] = {}
+    requests: list[list[str]] = []
+
+    def gh(argv, timeout):
+        assert "--cache" in argv
+        if gh_cache.get(tuple(argv), 0.0) <= now[0]:
+            requests.append(list(argv))
+            gh_cache[tuple(argv)] = now[0] + 60
+        return GhResult(0, '{"runners":[]}', "")
+
+    def restarted_cycle() -> str:
+        _, source = cli._runtime(database, orch, create=False)
+        source.gh_runner = gh
+        source.wall = lambda: now[0]
+        source.cycle_clock = clock = CycleClock(wall=lambda: now[0])
+        clock.start()
+        source.github.list_runners("acme/widgets")
+        return clock.end()
+
+    billed = "; github core 1 [GET actions/runners 1], free 0 (304 0, cached 0), graphql 0"
+    assert restarted_cycle().endswith(billed)
+    now[0] += 30
+    assert restarted_cycle().endswith("; github core 0, free 1 (304 0, cached 1), graphql 0")
+    assert len(requests) == 1
+    now[0] += 31
+    assert restarted_cycle().endswith(billed)
+    assert len(requests) == 2
