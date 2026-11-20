@@ -15,6 +15,8 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 from types import MappingProxyType
 
@@ -979,12 +981,13 @@ def finished_with_leftovers(root: Path, job_id: str, *, tag: str = TAG) -> Path:
 
 
 def live_cases_unchanged(root: Path, job_id: str, reason: str,
-                         rows: list[tuple[str, str, str, float | None]], tmp_path: Path) -> None:
+                         rows: list[tuple[str, str, str, float | None]], tmp_path: Path,
+                         scan=job_cleanup.jobs_held_open) -> None:
     jobs = root / "jobs"
     before = snapshot(jobs, job_id)
     db = database(tmp_path, rows)
 
-    [(_, report)] = job_cleanup.run(db, machines(tmp_path, "pc"), InProcessTransport(root),
+    [(_, report)] = job_cleanup.run(db, machines(tmp_path, "pc"), InProcessTransport(root, scan),
                                     now=NOW, grace_hours=6, dry_run=False)
 
     assert report.removed == {} and report.kept == {job_id: reason}
@@ -1078,13 +1081,6 @@ def test_work_made_in_a_dead_owners_worktree_after_hold_keeps_it_at_finish(tmp_p
     assert (jobs / "j" / "tracked.txt").read_text() == "valuable uncommitted edit\n"
 
 
-def test_a_dead_owners_record_beside_a_folder_that_is_no_worktree_keeps_it(tmp_path: Path) -> None:
-    root = work_root(tmp_path)
-    finished_with_leftovers(root, "j")
-    (root / "jobs" / "j.json").write_text(json.dumps({"job_id": "j", "pid": dead_pid()}))
-    live_cases_unchanged(root, "j", "worktree-work", [("j", "t1", "done", OLD)], tmp_path)
-
-
 def test_a_dead_owners_clean_worktree_no_longer_keeps_the_folder(tmp_path: Path) -> None:
     root = work_root(tmp_path)
     folder = stale_worktree(tmp_path, root)
@@ -1112,21 +1108,6 @@ def test_a_held_lock_keeps_the_folder_without_waiting(tmp_path: Path) -> None:
         holder.kill()
         holder.wait()
     assert time.monotonic() - began < 30
-
-
-def test_a_claim_after_the_jobs_own_finish_keeps_the_folder(tmp_path: Path) -> None:
-    root = work_root(tmp_path)
-    finished_with_leftovers(root, "j")
-    os.utime(root / "jobs" / "j.claimed", (OLD + HOUR, OLD + HOUR))
-    live_cases_unchanged(root, "j", "claimed-since", [("j", "t1", "done", OLD)], tmp_path)
-
-
-def test_a_live_worktree_owner_keeps_the_folder(tmp_path: Path) -> None:
-    root = work_root(tmp_path)
-    finished_with_leftovers(root, "j")
-    (root / "jobs" / "j.json").write_text(json.dumps({"job_id": "j", "pid": os.getpid()}))
-    age(root / "jobs" / "j.json", OLD)
-    live_cases_unchanged(root, "j", "worktree-owner-live", [("j", "t1", "done", OLD)], tmp_path)
 
 
 def test_an_unsure_worker_check_keeps_the_folder(tmp_path: Path, monkeypatch) -> None:
@@ -1404,3 +1385,299 @@ def test_an_open_file_under_run_keeps_the_folder(tmp_path: Path) -> None:
 
     assert report.removed == {} and report.kept == {"j": "held-open"}
     assert (jobs / "j" / "repo" / "README").exists() and not (root / "jobs-kept").exists()
+
+
+DONE = [("j", "t1", "done", OLD)]
+
+
+def hold_for_the_test(stack: ExitStack, argv: list[str], **options) -> None:
+    process = subprocess.Popen(argv, **options)
+    stack.callback(process.wait)
+    stack.callback(process.kill)
+
+
+def no_flock(root, monkeypatch, stack):
+    monkeypatch.setattr(job_cleanup.shutil, "which", lambda name: None)
+    return DONE, job_cleanup.jobs_held_open
+
+
+def lock_held(root, monkeypatch, stack):
+    holder = hold_lock(root / "jobs" / "j.lock", 60)
+    stack.callback(holder.wait)
+    stack.callback(holder.kill)
+    return DONE, job_cleanup.jobs_held_open
+
+
+def claimed_since(root, monkeypatch, stack):
+    os.utime(root / "jobs" / "j.claimed", (OLD + HOUR, OLD + HOUR))
+    return DONE, job_cleanup.jobs_held_open
+
+
+def worktree_record(root, monkeypatch, stack):
+    (root / "jobs" / "j.json").write_text("{not json")
+    return DONE, job_cleanup.jobs_held_open
+
+
+def worktree_owner_live(root, monkeypatch, stack):
+    (root / "jobs" / "j.json").write_text(json.dumps({"job_id": "j", "pid": os.getpid()}))
+    age(root / "jobs" / "j.json", OLD)
+    return DONE, job_cleanup.jobs_held_open
+
+
+def worktree_work(root, monkeypatch, stack):
+    (root / "jobs" / "j.json").write_text(json.dumps({"job_id": "j", "pid": dead_pid()}))
+    return DONE, job_cleanup.jobs_held_open
+
+
+def worker_exits(code: int):
+    def arrange(root, monkeypatch, stack):
+        monkeypatch.setattr(job_cleanup.remote, "worker_check_script",
+                            lambda job_dir, tag: f"exit {code}")
+        return DONE, job_cleanup.jobs_held_open
+    return arrange
+
+
+def held_open(root, monkeypatch, stack):
+    hold_for_the_test(stack, ["sleep", "60"], cwd=root / "jobs" / "j" / "repo")
+    return DONE, job_cleanup.jobs_held_open
+
+
+def cannot_scan(root, monkeypatch, stack):
+    return DONE, lambda _: None
+
+
+def rows(*given):
+    return lambda root, monkeypatch, stack: (list(given), job_cleanup.jobs_held_open)
+
+
+PART_1_GUARDS = {
+    "cannot-lock": no_flock,
+    "lock-held": lock_held,
+    "claimed-since": claimed_since,
+    "worktree-record": worktree_record,
+    "worktree-owner-live": worktree_owner_live,
+    "worktree-work": worktree_work,
+    "worker-live": worker_exits(1),
+    "worker-unsure": worker_exits(3),
+    "held-open": held_open,
+    "cannot-scan": cannot_scan,
+    "live": rows(("j", "t1", "running", None)),
+    "recent": rows(("j", "t1", "done", NOW - HOUR)),
+    "retry-held": rows(("j", "t1", "failed", OLD), ("retry", "t1", "queued", None)),
+    "unknown": rows(),
+}
+
+
+@pytest.mark.parametrize("guard", PART_1_GUARDS, ids=list(PART_1_GUARDS))
+def test_every_part_1_guard_keeps_its_folder_and_archives_nothing(
+    tmp_path: Path, monkeypatch, guard: str
+) -> None:
+    root = work_root(tmp_path)
+    finished_with_leftovers(root, "j")
+    with ExitStack() as stack:
+        given, scan = PART_1_GUARDS[guard](root, monkeypatch, stack)
+        live_cases_unchanged(root, "j", guard, given, tmp_path, scan)
+
+
+def old_gone_beside(root: Path) -> Path:
+    gone = root / "jobs" / "j.gone"
+    (gone / "handoff.md").parent.mkdir(parents=True)
+    (gone / "handoff.md").write_text("old handoff\n")
+    return gone
+
+
+def current_run(jobs: Path) -> dict[str, bytes | None]:
+    return {name: content for name, content in snapshot(jobs, "j").items()
+            if not name.startswith("j.gone")}
+
+
+@pytest.mark.parametrize("guard", PART_1_GUARDS, ids=list(PART_1_GUARDS))
+def test_every_part_1_guard_keeps_a_later_checkout_beside_an_old_gone(
+    tmp_path: Path, monkeypatch, guard: str
+) -> None:
+    root = work_root(tmp_path)
+    jobs = root / "jobs"
+    finished_with_leftovers(root, "j")
+    old_gone_beside(root)
+    with ExitStack() as stack:
+        given, scan = PART_1_GUARDS[guard](root, monkeypatch, stack)
+        before = current_run(jobs)
+
+        [(_, report)] = job_cleanup.run(database(tmp_path, given), machines(tmp_path, "pc"),
+                                        InProcessTransport(root, scan), now=NOW,
+                                        grace_hours=6, dry_run=False)
+
+    assert report.kept == {"j": guard}
+    assert current_run(jobs) == before
+    kept = root / "jobs-kept" / "j"
+    assert not kept.exists() or not any(path.name.startswith("j.") for path in kept.iterdir())
+
+
+def test_finishing_an_old_gone_leaves_a_later_run_held_open_by_a_process(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    jobs = root / "jobs"
+    old_gone_beside(root)
+    current = jobs / "j"
+    subprocess.run(["sh", "-c", "d=$1; lk=$(command -v flock); " + remote._CLAIM,
+                    "claim", str(current)], check=True)
+    (current / "repo").mkdir(parents=True)
+    (current / "repo" / "source").write_text("new checkout\n")
+    reader = jobs / "j.run" / "log-reader"
+    reader.mkdir(parents=True)
+    with ExitStack() as stack:
+        hold_for_the_test(stack, ["sleep", "60"], cwd=reader)
+        finished = time.time()
+        [(_, report)] = job_cleanup.run(database(tmp_path, [("j", "t1", "done", finished)]),
+                                        machines(tmp_path, "pc"), InProcessTransport(root),
+                                        now=finished + 1, grace_hours=0, dry_run=False)
+
+        assert report.kept == {"j": "held-open"}
+        assert (current / "repo" / "source").read_text() == "new checkout\n"
+        assert reader.is_dir() and (jobs / "j.claimed").exists()
+        assert not (jobs / "j.gone").exists()
+        assert (root / "jobs-kept" / "j" / job_leftovers.KEPT_JSON).exists()
+
+
+class Crash(BaseException):
+    pass
+
+
+def crash_at(point: str) -> tuple[object, str, Callable]:
+    real_archive, real_remove, real_rename = (
+        job_leftovers.archive, job_leftovers.scratch.remove, os.rename)
+    renames = []
+
+    def at_once(*args, **kwargs):
+        raise Crash
+
+    def after(real):
+        def call(*args, **kwargs):
+            real(*args, **kwargs)
+            raise Crash
+        return call
+
+    def on_the_third_rename(source, target):
+        renames.append(source)
+        if len(renames) == 3:
+            raise Crash
+        real_rename(source, target)
+
+    return {
+        "after the rename": (job_leftovers, "archive", at_once),
+        "partway through the archive": (job_leftovers.os, "rename", on_the_third_rename),
+        "after the archive": (job_leftovers, "archive", after(real_archive)),
+        "after .claimed is deleted": (job_leftovers.scratch, "remove", at_once),
+        "after the folder is deleted": (job_leftovers.scratch, "remove", after(real_remove)),
+    }[point]
+
+
+CRASH_POINTS = ("after the rename", "partway through the archive", "after the archive",
+                "after .claimed is deleted", "after the folder is deleted")
+
+
+def collect(root: Path, rows) -> job_cleanup.Report:
+    [(_, report)] = job_cleanup.run(database(root.parent, rows), machines(root.parent.parent, "pc"),
+                                    InProcessTransport(root), now=NOW, grace_hours=6,
+                                    dry_run=False)
+    return report
+
+
+def crash_while_finishing(root: Path, point: str, monkeypatch,
+                          finished_at: float = OLD, cutoff: float = NOW - 6 * HOUR) -> None:
+    plan = Plan(frozenset({"j"}), cutoff, False, finished_at={"j": finished_at})
+    assert job_cleanup.device_step(root, plan).held == ("j",)
+    with monkeypatch.context() as patched:
+        patched.setattr(*crash_at(point))
+        with pytest.raises(Crash):
+            job_cleanup.device_step(root, Plan(frozenset({"j"}), cutoff, False,
+                                               job_cleanup.FINISH, {"j": finished_at}))
+
+
+def archived(root: Path) -> dict[str, bytes]:
+    kept = root / "jobs-kept" / "j"
+    return {name: (kept / name).read_bytes() for name in files_under(kept)
+            if name != job_leftovers.KEPT_JSON}
+
+
+@pytest.mark.parametrize("point", CRASH_POINTS)
+def test_a_crash_after_the_commit_point_is_finished_by_the_next_pass(
+    tmp_path: Path, monkeypatch, point: str
+) -> None:
+    reference = work_root(tmp_path / "reference")
+    finished_with_leftovers(reference, "j")
+    assert set(collect(reference, DONE).removed) == {"j"}
+    root = work_root(tmp_path / "crashed")
+    finished_with_leftovers(root, "j")
+    jobs = root / "jobs"
+    crash_while_finishing(root, point, monkeypatch)
+    assert not (jobs / "j").exists() and not (jobs / "j.cleanup").exists()
+    assert not (root / "jobs-kept" / "j" / job_leftovers.KEPT_JSON).exists()
+
+    report = collect(root, DONE)
+
+    assert set(report.removed) == {"j"} and report.kept == {}
+    assert [path.name for path in jobs.iterdir()] == ["j.lock"]
+    assert archived(root) == archived(reference)
+    record = json.loads((root / "jobs-kept" / "j" / job_leftovers.KEPT_JSON).read_text())
+    assert record["archived"] == sorted(archived(reference))
+    assert record["id"] == "j" and record["finished_at"] == OLD
+
+
+@pytest.mark.parametrize("since", ["requeued", "claimed after the host read"])
+def test_a_claim_beside_a_gone_folder_leaves_it_and_the_next_pass_finishes_only_it(
+    tmp_path: Path, monkeypatch, since: str
+) -> None:
+    root = work_root(tmp_path)
+    jobs = root / "jobs"
+    runner = checkout_folder(tmp_path, root, "j")
+    (jobs / "j" / "handoff.md").write_text("old handoff\n")
+    (jobs / "j.run" / "old").mkdir(parents=True)
+    (jobs / "j.run" / "old" / "log").write_text("old log\n")
+    for path in jobs.iterdir():
+        age(path, wall_clock_days_ago(3))
+    finished_at = wall_clock_days_ago(2)
+    crash_while_finishing(root, "after the rename", monkeypatch, finished_at,
+                          time.time() - 6 * HOUR)
+    gone = sorted(path.relative_to(jobs) for path in (jobs / "j.gone").rglob("*"))
+
+    assert "new" in runner.checkout()
+
+    assert sorted(path.relative_to(jobs) for path in (jobs / "j.gone").rglob("*")) == gone
+    assert (jobs / "j" / "README").read_text() == "checkout\n"
+    (jobs / "j.run" / "new").mkdir()
+    (jobs / "j.run" / "new" / "log").write_text("new log\n")
+    beside = {str(path.relative_to(jobs)): None if path.is_dir() else path.read_bytes()
+              for path in jobs.rglob("*") if not path.is_relative_to(jobs / "j.gone")}
+    rows = ([("j", "t1", "running", None)] if since == "requeued"
+            else [("j", "t1", "done", finished_at)])
+    [(_, report)] = job_cleanup.run(database(tmp_path, rows), machines(tmp_path, "pc"),
+                                    InProcessTransport(root), now=time.time(), grace_hours=6,
+                                    dry_run=False)
+
+    assert set(report.removed) == {"j"}
+    assert report.kept == {"j": "live" if since == "requeued" else "claimed-since"}
+    assert not (jobs / "j.gone").exists()
+    assert {str(path.relative_to(jobs)): None if path.is_dir() else path.read_bytes()
+            for path in jobs.rglob("*")} == beside
+    kept = root / "jobs-kept" / "j"
+    assert (kept / "j" / "handoff.md").read_text() == "old handoff\n"
+    assert (kept / job_leftovers.KEPT_JSON).exists() and not (kept / "j.run").exists()
+
+
+def test_a_dry_run_lists_a_gone_folder_and_writes_nothing(tmp_path: Path, monkeypatch) -> None:
+    root = work_root(tmp_path)
+    finished_with_leftovers(root, "j")
+    jobs = root / "jobs"
+    crash_while_finishing(root, "after the rename", monkeypatch)
+    before = {str(path.relative_to(root)): None if path.is_dir() else path.read_bytes()
+              for path in root.rglob("*") if not path.is_symlink()}
+
+    [(_, report)] = job_cleanup.run(database(tmp_path, DONE), machines(tmp_path, "pc"),
+                                    InProcessTransport(root), now=NOW, grace_hours=6,
+                                    dry_run=True)
+
+    assert report.dry_run and report.kept == {}
+    assert report.removed["j"] > 0 and set(report.removed) == {"j"}
+    assert {str(path.relative_to(root)): None if path.is_dir() else path.read_bytes()
+            for path in root.rglob("*") if not path.is_symlink()} == before
+    assert (jobs / "j.gone").is_dir()

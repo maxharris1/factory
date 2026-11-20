@@ -17,10 +17,15 @@ since the first read is moved back. For each confirmed folder the device
 renames `<job-id>.cleanup` to `<job-id>.gone`, the commit point, then moves
 its logs, results and worker records with the `.run/`, `.brief.md` and
 `.launched` beside it to `jobs-kept/<job-id>/` (lib/job_leftovers.py),
-deletes the folder and `.claimed`, and writes `kept.json` last. The
+deletes `.claimed` and the folder, and writes `kept.json` last. The
 `.lock` stays. A `<job-id>.gone` already there puts the folder back with
-an error, and one left by a failure after the commit stays for a later
-pass to settle. A device that cannot scan for
+an error. `_CLAIM` only ever restores `.cleanup`, never `.gone`, so the
+next HOLD first finishes every `<job-id>.gone` and pending `kept.json.tmp`
+under the root it was sent to. It archives the siblings and deletes
+`.claimed` only while the host still names the job finished, nothing
+claimed it since and no later `<job-id>` or `<job-id>.cleanup` checkout
+exists; otherwise it finishes only the `.gone` tree and leaves the siblings
+to the later run and its own guards. A device that cannot scan for
 processes of this user with a cwd or open file in a folder removes
 nothing. A process of this user whose cwd or open files the scan cannot
 read (a non-dumpable one: ssh, an agent, a sandboxed shell) could be in any
@@ -389,10 +394,17 @@ def _worktree_reason(folder: Path, job_id: str) -> str | None:
     return None if held is None else WORKTREE_WORK
 
 
+def _claimed_since(jobs: Path, job_id: str, own_finish: float) -> bool:
+    return any(_changed_after(jobs / f"{job_id}{mark}", own_finish) for mark in (CLAIMED, LAUNCHED))
+
+
+def _checked_out_again(jobs: Path, job_id: str) -> bool:
+    return any(os.path.lexists(jobs / f"{job_id}{mark}") for mark in ("", SET_ASIDE))
+
+
 def _live_reason(folder: Path, job_id: str, own_finish: float,
                  scan: Callable[[Path], set[str] | None]) -> str | None:
-    jobs = folder.parent
-    if any(_changed_after(jobs / f"{job_id}{mark}", own_finish) for mark in (CLAIMED, LAUNCHED)):
+    if _claimed_since(folder.parent, job_id, own_finish):
         return CLAIMED_SINCE
     return (_worktree_reason(folder, job_id) or _worker_reason(folder, job_id)
             or _in_use(folder, job_id, scan))
@@ -429,12 +441,40 @@ def _put_back(aside: Path, job_id: str) -> str | None:
     return None
 
 
-def _hold(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None]) -> Report:
+def _finish_crashed(root: Path, plan: Plan, locks: bool) -> tuple[dict[str, int], dict[str, str]]:
     jobs = root / "jobs"
     removed: dict[str, int] = {}
     kept: dict[str, str] = {}
-    held = list(_job_folders(jobs, SET_ASIDE))
+    pending = filter(_JOB_ID.fullmatch, job_leftovers.pending(root))
+    for job_id in sorted(set(_job_folders(jobs, GONE)).union(pending)):
+        gone = jobs / f"{job_id}{GONE}"
+        try:
+            with _claim_lock(jobs, job_id, wait=False, create=not plan.dry_run) as locked:
+                if not locked:
+                    kept[job_id] = LOCK_HELD
+                elif gone.is_dir() and not gone.is_symlink():
+                    size = _deleted_bytes(gone)
+                    if not plan.dry_run:
+                        siblings = (locks and job_id in plan.finished
+                                    and not _checked_out_again(jobs, job_id)
+                                    and not _claimed_since(jobs, job_id, plan.own_finish(job_id)))
+                        job_leftovers.retire(root, job_id, gone, siblings=siblings,
+                                             finished_at=plan.own_finish(job_id),
+                                             removed_bytes=size)
+                    removed[job_id] = size
+                else:
+                    removed[job_id] = (0 if plan.dry_run
+                                       else job_leftovers.commit_record(root, job_id))
+        except OSError as exc:
+            kept[job_id] = f"error: {exc}".splitlines()[0]
+    return removed, kept
+
+
+def _hold(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None]) -> Report:
+    jobs = root / "jobs"
     locks = runner_locks()
+    removed, kept = _finish_crashed(root, plan, locks)
+    held = list(_job_folders(jobs, SET_ASIDE))
     folders = _job_folders(jobs)
     away = job_leftovers.cross_device(root) if folders else None
     for job_id, folder in folders.items():
@@ -454,7 +494,7 @@ def _hold(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None]) -> Re
                 if reason is not None:
                     kept[job_id] = reason
                 elif plan.dry_run:
-                    removed[job_id] = _deleted_bytes(folder)
+                    removed[job_id] = removed.get(job_id, 0) + _deleted_bytes(folder)
                 elif job_id in held:
                     kept[job_id] = f"error: {job_id}{SET_ASIDE} is still there"
                 else:
@@ -575,7 +615,9 @@ def clean_target(transport: CaptureTransport, target: Target, db: Path, plan: Pl
     if isinstance(finish, str):
         return f"set aside {len(hold.held)} checkouts, then {finish}"
     taken_back = {i: reread.get(i) or RECENT for i in hold.held if i not in finish.removed}
-    return Report(finish.removed,
+    removed = {i: hold.removed.get(i, 0) + finish.removed.get(i, 0)
+               for i in hold.removed | finish.removed}
+    return Report(removed,
                   {**held.kept, **taken_back, **label_unnamed(finish, reread).kept}, False)
 
 
