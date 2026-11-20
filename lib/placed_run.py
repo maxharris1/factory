@@ -117,6 +117,7 @@ from lib.remote import (
     stop_worker,
 )
 from lib.remote_follow import (
+    EXITED,
     FOLLOW_GRACE_SECONDS,
     LAUNCH_TTL_SECONDS,
     LOST,
@@ -133,6 +134,7 @@ from lib.worktrees import WorktreeError, check_remote_url, pid_alive, process_st
 STOP_CHECKS = 5
 STOP_PAUSE_SECONDS = 2.0
 KILL_CHECK = 2
+KILLABLE_ENDS = (EXITED, WORKER_GONE, STOPPED)
 
 Log = Callable[[str], None]
 
@@ -491,13 +493,13 @@ class PlacedRun:
         end = self.follow_end
         fence = end is None or end.kind != REFUSED or end.in_transit
         status = check_worker(self.transport, self.target, fence=fence)
-        cancelled = end is not None and end.kind == STOPPED
+        killable = end is not None and end.kind in KILLABLE_ENDS
         checks = 0
         while status == RUNNING and checks < STOP_CHECKS:
             if checks == 0:
                 self.log(f"job {job_id} worker still runs on {self.device.name}; stopping it")
                 stop_worker(self.transport, self.target)
-            elif cancelled and checks == KILL_CHECK:
+            elif killable and checks == KILL_CHECK:
                 self.log(f"job {job_id} worker ignored SIGTERM on {self.device.name}; killing it")
                 stop_worker(self.transport, self.target, kill=True)
             self.sleep(STOP_PAUSE_SECONDS)

@@ -24,6 +24,7 @@ from lib import health as component_health
 from lib import lane_limit
 from lib.device_pool import SLOTS_TABLE, Placement
 from lib.feeder import feeder_counts, feeder_items, last_feeder_poll
+from lib.feeder_gates import ATTENTION_CRITICAL_PATH, ATTENTION_IDLE_BLOCKED
 from lib.job_state import Alive, JobStateConfig, derive, liveness, read_placements
 from lib.linear_webhook import WebhookHealth, read_health
 from lib.machines_yml import DEFAULT_ORCH_HOST, MachinesConfig, load_machines_yml, orch_host
@@ -36,7 +37,10 @@ from lib.worktrees import pid_alive
 ROOT = Path(__file__).resolve().parent.parent
 
 MERGE_QUEUE_STATES = ("merge-queue", "updating")
-CRITICAL_PATH_BLOCKER = "critical-path-blocker"
+ATTENTION_GROUPS = {
+    ATTENTION_CRITICAL_PATH: "Critical-path blockers",
+    ATTENTION_IDLE_BLOCKED: "Idle-blocked-ready",
+}
 PAUSED_STATES = frozenset(
     {"waiting-max", "waiting-external", "awaiting-ok", "stuck", "blocked", "capped"}
 )
@@ -772,11 +776,12 @@ def render(status: Status) -> str:
                 f"  {row.repo}#{row.ticket_id} {row.state}{_retried(row, status.observed_at)} "
                 f"{positions[key]} of {sizes[key]} [{row.tracker}]"
             )
-    blockers = [flag for flag in status.attention if flag.reason == CRITICAL_PATH_BLOCKER]
-    flags = [flag for flag in status.attention if flag.reason != CRITICAL_PATH_BLOCKER]
-    if blockers:
-        lines.extend(("", f"Critical-path blockers ({len(blockers)})"))
-        lines.extend(f"  {_label(flag)} {flag.detail or ''}".rstrip() for flag in blockers)
+    for reason, heading in ATTENTION_GROUPS.items():
+        grouped = [flag for flag in status.attention if flag.reason == reason]
+        if grouped:
+            lines.extend(("", f"{heading} ({len(grouped)})"))
+            lines.extend(f"  {_label(flag)} {flag.detail or ''}".rstrip() for flag in grouped)
+    flags = [flag for flag in status.attention if flag.reason not in ATTENTION_GROUPS]
     if flags:
         lines.extend(("", f"Needs attention ({len(flags)})"))
         for flag in flags:
