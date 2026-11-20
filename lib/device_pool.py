@@ -57,9 +57,7 @@ token the job's current `orch job run` holds (never the token itself). The
 `device_health` table holds each remote device's last successful SSH
 contact and when it began failing, for the lost check (#662). #460
 adds `device_backoff`: a device whose start preflight could not reach it
-takes no new placement, for any harness, until its `until` time. #1225
-holds a device low on memory there too, under a `memory-wait` reason that
-never shortens or takes over another backoff. #662
+takes no new placement, for any harness, until its `until` time. #662
 adds `device_orphans`: the slot of a job lost with its device, moved there
 so the slot is free while its worker may still run. #679 reads it back:
 the monitor stops that worker once its device answers and forgets the row
@@ -979,7 +977,6 @@ def back_off(connection: sqlite3.Connection, device: str, *, until: float, reaso
 def hold_memory(
     connection: sqlite3.Connection, device: str, *, until: float, reason: str, now: float
 ) -> None:
-    """back_off for low memory that keeps a live non-memory backoff's reason (#1225)."""
     _backoff_table(connection)
     connection.execute(
         f"""
@@ -996,7 +993,6 @@ def hold_memory(
 
 
 def clear_memory_hold(connection: sqlite3.Connection, device: str) -> None:
-    """Drop device's memory-wait hold; any other backoff stays (#1225)."""
     _backoff_table(connection)
     connection.execute(
         f"DELETE FROM {BACKOFF_TABLE} WHERE device = ? AND reason LIKE ?",

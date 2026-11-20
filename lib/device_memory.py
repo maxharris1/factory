@@ -1,11 +1,3 @@
-"""Memory limits on placing new work on a device (#1225).
-
-A device is held while /proc/meminfo's MemAvailable is under
-MIN_AVAILABLE_BYTES or the `some` avg10 of /proc/pressure/memory is over
-MAX_PSI_SOME_AVG10. Each file is judged on its own: a missing or unreadable
-one passes and never cancels the other's verdict.
-"""
-
 from __future__ import annotations
 
 MIN_AVAILABLE_BYTES = 8 * 1024**3
@@ -15,7 +7,6 @@ _GIB = 1024**3
 
 
 def over_limit(meminfo: str | None, pressure: str | None) -> str | None:
-    """The memory-wait reason when either file is past its limit, else None."""
     available = _available_bytes(meminfo)
     if available is not None and available < MIN_AVAILABLE_BYTES:
         return (
