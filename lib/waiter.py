@@ -119,6 +119,7 @@ from __future__ import annotations
 import base64
 import errno
 import fcntl
+import functools
 import json
 import os
 import re
@@ -139,7 +140,7 @@ from lib.device_pool import UNREACHABLE_BACKOFF_SECONDS, DevicePool, Placement, 
 from lib.factory_md import FactoryContext, parse_factory_context
 from lib.load import load_yaml
 from lib.machines_yml import Device, MachinesConfig, orch_host
-from lib import containers, device_deploy, job_token
+from lib import containers, device_deploy, job_token, stacks
 from lib.device_monitor import remote_target
 from lib.harness_env import ApproverProfileExposed, harness_environ
 from lib.handoff_check import (
@@ -1164,18 +1165,37 @@ class Waiter:
         if now - self._containers_swept_at < CONTAINER_SWEEP_SECONDS:
             return
         self._containers_swept_at = now
-        runners = [(orch_host(self.pool.config), containers.local_runner())]
+        runners = [(orch_host(self.pool.config), containers.local_runner(), [str(work_root(None))])]
         for device in self.pool.config.devices:
             target = remote_target(device, self.recipient, "containers")
             if target is not None:
-                runners.append((device.name, containers.remote_runner(self.transport, target)))
+                roots = [root for harness in device.harnesses if (root := device.workdir_for(harness))]
+                runners.append((device.name, containers.remote_runner(self.transport, target), roots))
         lines: set[str] = set()
-        for name, runner in runners:
+
+        def note(line: str) -> None:
+            if line not in self._container_lines:
+                self.log(line)
+            lines.add(line)
+
+        ledger = functools.cache(lambda: self._stack_ledger(note))
+        for name, runner, roots in runners:
             for line in containers.sweep(runner, self._job_state_name, name):
-                if line not in self._container_lines:
-                    self.log(line)
-                lines.add(line)
+                note(line)
+            for line in stacks.sweep(runner, ledger, name, roots):
+                note(line)
         self._container_lines = lines
+
+    def _stack_ledger(self, note: Log) -> stacks.Ledger | None:
+        def read() -> stacks.Ledger:
+            with self.queue.connect() as connection:
+                return stacks.read_ledger(connection, live=set(self._children))
+
+        try:
+            return retry_locked(read)
+        except (QueueError, sqlite3.Error, OSError) as exc:
+            note(f"stacks kept, orch.db is unreadable ({_one_line(exc)})")
+            return None
 
     def _job_state_name(self, job_id: str) -> str | None:
         try:
