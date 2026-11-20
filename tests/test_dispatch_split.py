@@ -62,7 +62,7 @@ NAMES_BEFORE_SPLIT = (
 DISPATCHER_METHODS = (
     "__init__", "_abandon_closed", "_advance_merge_queue", "_advance_merge_queues",
     "_advance_poll_error_streak", "_after_finish", "_answered_by", "_app_may_post",
-    "_approval_covers", "_approver_go", "_base_update_out", "_busy_recipients",
+    "_approval_covers", "_approver_go", "_base_update_out", "_busy",
     "_cancel_answered", "_cancel_answered_jobs", "_check_devices", "_check_job_states",
     "_classify_update", "_clear_poll_error_streak", "_close_abandoned_jobs", "_closed_unfinished",
     "_complete_redrive", "_complete_ship_intent", "_config_cap", "_connect",

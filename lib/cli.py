@@ -81,6 +81,7 @@ from lib.device_pool import DevicePool
 from lib.machines_yml import MachinesConfig, default_account, load_machines_yml
 from lib.orch_yml import (
     OrchConfig,
+    ProjectPins,
     approvals,
     bot_approver_findings,
     hold_approver_findings,
@@ -845,7 +846,7 @@ def _wait(argv: list[str]) -> int:
         queue = open_queue(_db_path(args.db))
         machines = _machines_config(args.machines, required=True)
         assert machines is not None
-        pool = _device_pool(queue, machines, args.machines)
+        pool = _device_pool(queue, machines, args.machines, orch=args.orch)
     except (WaitError, waiter.WaiterError, ValueError) as exc:
         print(f"orch wait: {exc}", file=sys.stderr)
         return 2
@@ -1504,13 +1505,19 @@ def _machines_path(path: Path | None) -> Path:
 
 
 def _device_pool(
-    queue: SQLiteJobQueue, machines: MachinesConfig, path: Path | None
+    queue: SQLiteJobQueue,
+    machines: MachinesConfig,
+    path: Path | None,
+    *,
+    orch: Path | None = None,
 ) -> DevicePool:
+    pins = ProjectPins(orch if orch is not None else ROOT / "orch.yml")
     try:
         return retry_locked(
             lambda: DevicePool(
                 queue, machines, machines_path=_machines_path(path),
                 head=lambda: health.checkout_sha(ROOT),
+                pins=pins,
             )
         )
     except (QueueError, sqlite3.Error, OSError) as exc:

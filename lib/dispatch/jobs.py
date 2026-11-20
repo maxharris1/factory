@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -229,23 +229,34 @@ class JobsMixin:
                 connection, job, "handed-off", "Max handed the ticket off; no T6 retry", now
             )
 
-    def _busy_recipients(self) -> frozenset[str]:
-        """#18: harnesses whose every schedulable slot is in use.
+    def _busy(self) -> Callable[[Job], bool]:
+        """#18: whether every slot a queued job could take is in use.
 
-        Read from the device monitor's machines.yml. With none, or for a
-        harness no schedulable device lists, nothing counts as busy.
+        Read from the device monitor's machines.yml. A pinned project's job
+        (projects[].devices, #1172) counts only its listed devices. With no
+        machines.yml, or when no device it may use lists its harness, nothing
+        counts as busy.
         """
         config = getattr(self.devices, "config", None)
         if config is None:
-            return frozenset()
+            return lambda job: False
         used = used_slots(self.queue, config)
         blocked = placement_blocks(self.queue, config, self._head())
-        return frozenset(
-            harness
-            for harness in HARNESSES
-            if any(device.eligible(harness) for device in config.devices)
-            and free_slots(config, harness, used, blocked) == 0
-        )
+
+        def busy(job: Job) -> bool:
+            harness = job.request.recipient
+            project = self.wake_routes.get(job.request.repo.lower())
+            only = project.devices if project is not None else None
+            return (
+                harness in HARNESSES
+                and any(
+                    device.eligible(harness) and (only is None or device.name in only)
+                    for device in config.devices
+                )
+                and free_slots(config, harness, used, blocked, only=only) == 0
+            )
+
+        return busy
 
     def _head(self) -> str | None:
         pool = getattr(self.devices, "pool", None)
@@ -325,7 +336,7 @@ class JobsMixin:
         self._check_job_states()
         self._close_abandoned_jobs()
         now = self.queue.now()
-        busy = self._busy_recipients()
+        busy = self._busy()
         lag_blocked = self._lag_blocked_recipients()
         serving = self._serving()
         with self._connect() as connection:
@@ -359,7 +370,7 @@ class JobsMixin:
             ):
                 continue
             if now - waited_since >= job.request.timeout_seconds:
-                if job.state == "queued" and job.request.recipient in busy:
+                if job.state == "queued" and busy(job):
                     self._restart_queue_wait(job, now)
                     continue
                 if not self.queue.mark_timed_out(job) and job.state == "running":

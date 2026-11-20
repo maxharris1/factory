@@ -539,6 +539,31 @@ def load_orch_yml(
     return _validate(data, allow_placeholders=allow_placeholders)
 
 
+class ProjectPins:
+    """Lower-cased repo -> projects[].devices, read from orch.yml on each call (#1172).
+
+    A repo absent from the map runs on every device. A missing file pins
+    nothing. A file that fails to load keeps the last good map, and is None
+    until one loads, so a broken orch.yml never drops a pin.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.last: dict[str, frozenset[str]] | None = None
+
+    def __call__(self) -> dict[str, frozenset[str]] | None:
+        if not self.path.exists():
+            return {}
+        config, findings = load_orch_yml(self.path, allow_placeholders=True)
+        if config is not None and not any(item.severity == "error" for item in findings):
+            self.last = {
+                project.repo.lower(): project.devices
+                for project in config.projects
+                if project.devices is not None
+            }
+        return self.last
+
+
 def _read(path: Path, *, overlay: bool = True) -> tuple[dict | None, list[Finding]]:
     if not path.is_file():
         return None, [Finding("error", "file not found")]
