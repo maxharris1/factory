@@ -58,8 +58,9 @@ def review_rules(facts: dict) -> str:
     if facts["stop_on"] == "convergence":
         high_risk = (
             "Risk high: three rounds, then rounds continue while the open blocking findings shrink to a new low "
-            "(factory.md `review.stop_on: convergence`). Two flat rounds in a row, or a flat round that carries "
-            "a blocker from the round before, stop the review and ask Max."
+            "(factory.md `review.stop_on: convergence`), and one flat round (no new low) may still continue. Two "
+            "flat rounds in a row, or a flat round that carries a blocker from the round before, stop the review "
+            "and ask Max."
         )
     else:
         high_risk = (

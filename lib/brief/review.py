@@ -252,7 +252,9 @@ def lead(facts: dict) -> Lead:
             (
                 " When a blocker breaks the same rule as an earlier round's blocker, set `repeat=<id>` in the "
                 "header with that earlier id. Rounds continue while the open blocking findings shrink to a new "
-                "low; the poller stops the review when they do not."
+                "low, and one flat round (no new low) may still continue. Two flat rounds in a row, or a flat "
+                "round that carries a blocker from the round before, stop the review, and the poller asks Max; "
+                "a `repeat=` that names an older round does not stop it alone."
                 if facts["stop_on"] == "convergence"
                 else " When a blocker breaks the same rule as an earlier round's blocker, set `repeat=<id>` in "
                 "the header with that earlier id, ask Max what to do, and stop."

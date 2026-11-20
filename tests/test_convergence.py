@@ -80,6 +80,11 @@ def last(history: list[RoundFindings]) -> Convergence:
             id="an empty set after a new low is one flat round",
         ),
         pytest.param(
+            rounds("f-1 f-2 f-3", "f-4 f-5", "f-1 f-6", repeat={3: "f-1"}),
+            Continue(reduced=False),
+            id="a flat round whose repeat= names an older round gets another try",
+        ),
+        pytest.param(
             rounds("f-1 f-2", "", "f-3"),
             Stalled(rounds=(2, 3), ids=frozenset({"f-3"})),
             id="an empty set is flat, not a new low",
