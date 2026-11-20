@@ -116,7 +116,11 @@ def _proof_lines(detail: dict[str, object]) -> list[str]:
         "the verify skill's command for the criterion's journeys and its output, and names each journey.",
         *(
             f"- {item.id} ({item.kind})"
-            + (f": journeys {', '.join(item.journeys)}" if item.journeys else "")
+            + (
+                ": journeys unknown, because the brief's ticket quote has no whole Features line, "
+                "so write it as `unverified` with the doctor command and its output" if item.journeys is None
+                else f": journeys {', '.join(item.journeys)}" if item.journeys else ""
+            )
             for item in items
         ),
         "Its shape, with placeholders:",

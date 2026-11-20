@@ -7,7 +7,9 @@ own `ac-<n>:` prefix, else `ac-<position>` among the builder criteria. A
 in a fenced block. A `qa` criterion's entry gives the verify skill's command
 and output and names each journey the criterion binds (lib/journeys.py
 qa_tag), or says `unverified` and gives the failed doctor command and its
-output instead.
+output instead. A bare `qa` tag binds the ticket's Features journeys; when
+the brief's ticket quote shows no whole Features line, its journeys are None
+and only the `unverified` form proves it.
 
 The dispatcher stores what a ticket requires in the job detail under
 `proof`; `orch job done` refuses a ready that misses an entry.
@@ -30,6 +32,7 @@ _ID = re.compile(r"^ac-\d+$")
 _PREFIX = re.compile(r"^(ac-\d+)\s*:\s*", re.IGNORECASE)
 _ENTRY_ID = re.compile(r"^\s*(ac-\d+)\b", re.IGNORECASE)
 _UNVERIFIED = re.compile(r"\bunverified\b", re.IGNORECASE)
+_CUT = re.compile(r"\n\[cut at \d+ characters\]\Z")
 _HEADING = "proof"
 _MARKDOWN = MarkdownIt("commonmark")
 
@@ -38,7 +41,7 @@ _MARKDOWN = MarkdownIt("commonmark")
 class Required:
     id: str
     kind: Kind
-    journeys: tuple[str, ...] = ()
+    journeys: tuple[str, ...] | None = ()
 
 
 @dataclass
@@ -56,7 +59,7 @@ def required(brief: str) -> tuple[Required, ...]:
 
     ticket = quoted_ticket(brief)
     template = parse_intake(ticket, ())
-    every = tuple(journey.id for journey in template.journeys)
+    every = tuple(journey.id for journey in parse_intake(_whole_lines(ticket), ()).journeys) or None
     items: list[Required] = []
     for position, item in enumerate(_listed_above_quote(brief, ticket) or template.criteria, start=1):
         prefix = _PREFIX.match(item)
@@ -75,8 +78,16 @@ def _listed_above_quote(brief: str, ticket: str) -> tuple[str, ...]:
     return parse_intake(brief[:brief.find(ticket)], ()).criteria if ticket != brief else ()
 
 
+def _whole_lines(ticket: str) -> str:
+    cut = _CUT.search(ticket)
+    return ticket[:cut.start()].rpartition("\n")[0] if cut else ticket
+
+
 def to_detail(items: tuple[Required, ...]) -> list[dict]:
-    return [{"id": item.id, "kind": item.kind, "journeys": list(item.journeys)} for item in items]
+    return [
+        {"id": item.id, "kind": item.kind, "journeys": None if item.journeys is None else list(item.journeys)}
+        for item in items
+    ]
 
 
 def from_detail(value: object) -> tuple[Required, ...] | None:
@@ -92,11 +103,11 @@ def from_detail(value: object) -> tuple[Required, ...] | None:
             not isinstance(criterion, str)
             or not _ID.fullmatch(criterion)
             or kind not in get_args(Kind)
-            or not isinstance(journeys, list)
-            or not all(isinstance(journey, str) for journey in journeys)
+            or not (journeys is None and kind == "qa" or isinstance(journeys, list))
+            or not all(isinstance(journey, str) for journey in journeys or ())
         ):
             return None
-        items.append(Required(criterion, kind, tuple(journeys)))
+        items.append(Required(criterion, kind, None if journeys is None else tuple(journeys)))
     return tuple(items)
 
 
@@ -121,6 +132,11 @@ def _problems(item: Required, entry: _Entry) -> list[str]:
     if _UNVERIFIED.search("\n".join(entry.prose)):
         return [] if shown else [
             f"{name} is unverified but lacks the doctor command in backticks and its output in a fenced block"
+        ]
+    if item.journeys is None:
+        return [
+            f"{name} binds journeys the brief's ticket quote does not show, so write it as unverified "
+            "with the doctor command in backticks and its output in a fenced block"
         ]
     found = [] if shown else [
         f"{name} needs the verify-skill command in backticks and its output in a fenced block"

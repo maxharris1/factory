@@ -199,3 +199,33 @@ def test_a_feeder_brief_requires_criteria_its_cut_ticket_quote_lost() -> None:
         + ticket[:20_000] + "\n[cut at 20000 characters]\n```\n"
     )
     assert required(brief) == (Required("ac-1", "review"), Required("ac-2", "qa", ("search",)))
+
+
+def _cut_brief(ticket: str) -> str:
+    return (
+        "**Brief**\n\n### Acceptance criteria\n- qa: Upload then search.\n\n### Ticket\n```\n"
+        + ticket[:20_000] + "\n[cut at 20000 characters]\n```\n"
+    )
+
+
+@pytest.mark.parametrize("brief", [
+    _cut_brief("Risk: low\n\n" + "Background. " * 1800 + "\n\nFeatures: upload-file, search\n"),
+    _cut_brief("Risk: low\n" + "x" * (20_000 - len("Risk: low\nFeatures: upload-file, se")) + "\nFeatures: upload-file, search\n"),
+    "## Acceptance criteria\n- qa: Upload then search.\n",
+], ids=["features-below-the-cut", "features-line-cut-mid-list", "no-features-line"])
+def test_a_bare_qa_tag_whose_journeys_cannot_be_resolved_binds_none(brief: str) -> None:
+    assert required(brief) == (Required("ac-1", "qa", None),)
+
+
+def test_an_unresolved_qa_criterion_round_trips_through_job_detail() -> None:
+    items = (Required("ac-1", "qa", None),)
+    assert to_detail(items) == [{"id": "ac-1", "kind": "qa", "journeys": None}]
+    assert from_detail(to_detail(items)) == items
+
+
+def test_an_unresolved_qa_criterion_is_refused_unless_it_is_declared_unverified() -> None:
+    items = (Required("ac-1", "qa", None),)
+    (problem,) = missing(items, _ready("- ac-1 (qa): `verify run upload-file`\n  ```\n  upload-file PASS\n  ```"))
+    assert problem.startswith("Proof entry ac-1 (qa)") and "unverified" in problem
+    declared = "- ac-1 (qa): unverified. Journeys unknown: `verify doctor`\n  ```\n  doctor ok\n  ```"
+    assert missing(items, _ready(declared)) == []
