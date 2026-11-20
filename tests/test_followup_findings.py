@@ -868,3 +868,36 @@ def test_an_untitled_part_is_named_for_its_number_and_a_long_title_is_cut() -> N
     assert split_issue("1052", "url", "77", 2, untitled, "high", ())[0] == "Part 2 of #1052"
     long = SplitPart("t" * 300, ("ac-1: a.",), None, None)
     assert split_issue("1052", "url", "77", 1, long, "high", ())[0] == "t" * 256
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "- ac-1: Parse values.\n  Invalid inputs must return HTTP 400.\n",
+        "- ac-1: Parse values.\nInvalid inputs must return HTTP 400.\n",
+        "- ac-1: Parse values.\n\n  Invalid inputs must return HTTP 400.\n",
+        "* ac-1: Parse values.\n    Invalid inputs must\n    return HTTP 400.\n",
+        "- ac-1: Parse values.\n  - Invalid inputs must return HTTP 400.\n",
+    ],
+    ids=["indented", "lazy", "indented-after-blank", "two-lines", "nested-item"],
+)
+def test_a_wrapped_criterion_keeps_every_line(block: str) -> None:
+    plan = f"## Proposed split\n### A\n{block}Estimate: 100\nDepends on: none\n### B\n- ac-2: Use it.\n"
+    first, second = split_parts(plan)
+    assert "".join(first.criteria).replace(" - ", " ") == "ac-1: Parse values. Invalid inputs must return HTTP 400."
+    assert (first.estimate, first.depends, second.criteria) == (100, (), ("ac-2: Use it.",))
+    _, body = split_issue("1052", "url", "77", 1, first, "high", ())
+    assert parse_intake(body, ("factory:ready",)).criteria == first.criteria
+
+
+def test_a_criterion_under_any_list_marker_is_kept() -> None:
+    plan = (
+        "## Proposed split\n### A\n- ac-1: a.\n1. ac-2: b.\n- [ ] ac-3: c.\n2) AC-4: d.\n- Notes: not one.\n"
+        "### B\n- ac-5: e.\n"
+    )
+    assert split_parts(plan)[0].criteria == ("ac-1: a.", "ac-2: b.", "ac-3: c.", "AC-4: d.")
+
+
+def test_a_paragraph_after_a_blank_line_ends_the_criterion() -> None:
+    plan = "## Proposed split\n### A\n- ac-1: a.\n\nSome notes.\n### B\n- ac-2: b.\n"
+    assert split_parts(plan)[0].criteria == ("ac-1: a.",)

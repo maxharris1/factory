@@ -416,3 +416,22 @@ def test_a_split_that_does_not_parse_or_a_linear_or_unlabelled_repo_still_parks(
     assert flow.actions.issues == {}
     assert flow.state()["workflow_state"] == "waiting-max"
     assert len(size_wakes(flow)) == 1
+
+
+WRAPPED_PARTS = (
+    "## Proposed split\n"
+    "### Parser\n- ac-1: The parser returns values.\n  Invalid inputs must return HTTP 400.\nEstimate: 100\nDepends on: none\n"
+    "### Integration\n- ac-2: The app uses the parser.\nEstimate: 100\n"
+)
+
+
+def test_a_split_files_each_wrapped_criterion_whole(tmp_path: Path) -> None:
+    flow = SplitFlow(tmp_path)
+
+    assert flow.plan("500", "ac=met", estimated(600, WRAPPED_PARTS)) == "auto-split"
+
+    assert flow.state()["workflow_state"] == "abandoned"
+    (_, first, _), (_, second, _) = flow.actions.issues.values()
+    assert "- ac-1: The parser returns values. Invalid inputs must return HTTP 400.\n" in first
+    assert "Estimate: 100" in first and "Depends on: none" in first
+    assert "Depends on: #300" in second
