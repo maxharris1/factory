@@ -30,9 +30,13 @@ class Pinned:
     section: str
     rel: str
 
-    def under(self, root: str) -> str:
+    @property
+    def path(self) -> str:
         base = PSTACK_DIR if self.section == "files" else FACTORY_DIR
-        return f"{root}/{base.as_posix()}/{self.rel}"
+        return f"{base.as_posix()}/{self.rel}"
+
+    def under(self, root: str) -> str:
+        return f"{root}/{self.path}"
 
 
 def _pstack(rel: str) -> Pinned:
@@ -62,8 +66,8 @@ ADAPTERS = {
 }
 _READ_WITH = {
     "claude-bot": "Read each file with `Read`: the Skill tool refuses most pstack skills "
-    "(`docs/harness/claude-code.md`, Tools).",
-    "codex-bot": "Read each file with the shell (`harness/codex.md`, Tools).",
+    "(`{adapter}`, Tools).",
+    "codex-bot": "Read each file with the shell (`{adapter}`, Tools).",
 }
 _GENERAL_HELPER = {
     "claude-bot": '`subagent_type: "general-purpose"`',
@@ -147,7 +151,7 @@ def section(router: Router) -> str:
         "## Skills",
         "Read the router (the first path) and the pstack files it names, at these absolute paths "
         "in the deployed factory checkout, never the job's working directory. "
-        + _READ_WITH[router.bot],
+        + _READ_WITH[router.bot].format(adapter=ADAPTERS[router.bot].path),
         "1. Before you read any of them, check that every path below exists (`test -f`). "
         "If one is missing, post a `questions` handoff naming it, then stop: do no work.",
         "2. Read the router in full, then the rest as it says.",
