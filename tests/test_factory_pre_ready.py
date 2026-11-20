@@ -5,6 +5,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from lib.factory_md import load_factory_md
 from lib.pre_ready import check_environ, run
 
@@ -17,6 +19,8 @@ def git(cwd: Path, *args: str) -> str:
     ).stdout.strip()
 
 
+@pytest.mark.serial
+@pytest.mark.timeout(360)
 def test_the_gate_passes_when_path_python3_is_not_the_install_venv(tmp_path: Path) -> None:
     config, _ = load_factory_md(ROOT / "factory.md")
     assert config is not None and config.pre_ready is not None
