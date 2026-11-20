@@ -143,12 +143,12 @@ GitHub and Linear clients it is given; tests pass fakes.
 
 from __future__ import annotations
 
+import heapq
 import json
 import re
 import sqlite3
 import sys
 import uuid
-from collections import deque
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from typing import Literal, NamedTuple, Protocol
@@ -200,7 +200,6 @@ from lib.journeys import (
     parse_features,
     problems,
     qa_tag,
-    skill_dir,
 )
 from lib.main_fix import (
     MAIN_FIX_TABLE,
@@ -1196,36 +1195,36 @@ class Feeder:
             sha = self.github.branch_sha(repo, base) if base else None
             if sha is not None:
                 skill = self._skill_dir(repo, verify, sha)
-                return frozenset() if skill is None else map_ids(
-                    self.github.dir_names(repo, f"{skill}/features", sha)
-                )
+                return map_ids(self.github.dir_names(repo, f"{skill}/features", sha))
             why = f"no {base or 'base'} branch"
         except Exception as exc:
             why = safe_ship_error(exc)
         self.log(f"feeder: {repo}@{base} feature map unreadable: {why}")
         return None
 
-    def _skill_dir(self, repo: str, verify: str, sha: str) -> str | None:
-        folders = deque([""])
+    def _skill_dir(self, repo: str, verify: str, sha: str) -> str:
+        tail = f"/{verify}/SKILL.md"
+        folders = [""]
+        best: str | None = None
         reads = 0
-        while folders:
+        while folders and (best is None or folders[0] < best):
             if reads == SKILL_WALK_READS:
                 raise RuntimeError(f"verify skill {verify} not found in {SKILL_WALK_READS} tree reads")
-            folder = folders.popleft()
-            prefix = f"{folder}/" if folder else ""
+            prefix = heapq.heappop(folders)
+            folder = prefix.removesuffix("/")
             tree, truncated = self.github.tree_paths(repo, sha, folder)
             reads += 1
-            paths = list(tree)
+            paths = [prefix + path for path in tree]
             if truncated:
                 for name in self.github.dir_names(repo, folder, sha):
                     if name.endswith("/"):
-                        folders.append(prefix + name[:-1])
+                        heapq.heappush(folders, prefix + name)
                     else:
-                        paths.append(name)
-            found = skill_dir((prefix + path for path in paths), verify)
-            if found is not None:
-                return found
-        return None
+                        paths.append(prefix + name)
+            best = min((path for path in (*paths, best) if path and path.endswith(tail)), default=None)
+        if best is None:
+            raise RuntimeError(f"verify skill {verify} not found at {sha}")
+        return best.removesuffix("/SKILL.md")
 
     def _sync_intake_attention(
         self, refused: Sequence[_Candidate], repos: set[str], now: float

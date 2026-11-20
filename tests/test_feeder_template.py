@@ -15,7 +15,7 @@ import pytest
 
 from lib.feeder import parse_intake
 from lib.handoff import parse_comment
-from lib.journeys import Journey, QaCriterion
+from lib.journeys import Journey, QaCriterion, skill_dir
 from tests.test_feeder import (
     BASE_SHA,
     FACTORY_MD,
@@ -729,14 +729,102 @@ def test_a_skill_the_walk_cannot_reach_leaves_the_ticket_eligible(tmp_path: Path
     assert wakes(tmp_path) == [] and flags(tmp_path) == set()
 
 
-def test_a_verify_skill_missing_at_the_base_has_an_empty_map(tmp_path: Path) -> None:
+def test_a_verify_skill_missing_at_the_base_is_retried_and_clears_an_earlier_refusal(
+    tmp_path: Path,
+) -> None:
     feeder, github = map_feeder(tmp_path)
-    github.trees[HOME] = (("README.md",), False)
+    tree = github.trees[HOME]
     github.issues[HOME] = [issue(7, template=False, body=journey_ticket("search"))]
+    github.dirs[MAP] = ("other.md",)
+    assert feeder.feed_once().refused == 1
+    assert flags(tmp_path) == {(HOME, "7", "intake-refused")}
+    github.trees[HOME] = (("README.md",), False)
+    reads = len(github.dir_reads)
     report = feeder.feed_once()
-    assert report.fed == () and report.refused == 1
-    assert github.dir_reads == []
-    assert json.loads(wakes(tmp_path)[0]["detail"])["defects"] == ["features-unknown"]
+    assert (len(report.fed), report.refused, report.errors) == (0, 0, 1)
+    assert github.dir_reads[reads:] == []
+    assert rows(tmp_path / "orch.db")["7"]["state"] == "eligible"
+    assert flags(tmp_path) == set() and len(wakes(tmp_path)) == 1
+    github.trees[HOME] = tree
+    github.dirs[MAP] = ("search.md",)
+    assert len(feeder.feed_once().fed) == 1
+
+
+OTHER = "z/.cursor/skills/verify-app"
+
+
+@pytest.mark.parametrize("value", ["search", "new:search"])
+@pytest.mark.parametrize("case", ["unresolved", "wrong-map"])
+def test_a_truncated_walk_retries_an_unresolved_skill_and_reads_the_earliest_map(
+    tmp_path: Path, value: str, case: str
+) -> None:
+    feeder, github = map_feeder(tmp_path, skill=NESTED)
+    github.issues[HOME] = [issue(7, template=False, body=journey_ticket(value))]
+    github.trees[HOME] = (("README.md",), True)
+    if case == "unresolved":
+        github.dirs[(HOME, "")] = ("README.md", "apps/")
+        github.trees[(HOME, "apps")] = (("README.md",), False)
+    else:
+        github.dirs[(HOME, "")] = ("apps/", "z/")
+        github.trees[(HOME, "apps")] = (("README.md",), True)
+        github.dirs[(HOME, "apps")] = ("web/",)
+        github.trees[(HOME, "apps/web")] = ((".cursor/skills/verify-app/SKILL.md",), False)
+        github.trees[(HOME, "z")] = ((".cursor/skills/verify-app/SKILL.md",), False)
+        github.dirs[(HOME, f"{OTHER}/features")] = ("other.md",)
+    report = feeder.feed_once()
+    state = rows(tmp_path / "orch.db")["7"]["state"]
+    if case == "unresolved":
+        assert (len(report.fed), report.refused, report.errors, state) == (0, 0, 1, "eligible")
+        assert nothing_written(github)
+        assert wakes(tmp_path) == [] and flags(tmp_path) == set()
+    else:
+        expected = (1, 0) if value == "search" else (0, 1)
+        assert (len(report.fed), report.refused) == expected
+        assert github.dir_reads[-1] == (HOME, f"{NESTED}/features", BASE_SHA)
+        assert (HOME, f"{OTHER}/features", BASE_SHA) not in github.dir_reads
+
+
+def tree_with_truncation(github, paths: tuple[str, ...], truncated: set[str], order, partial=()):
+    folders = {path.rsplit("/", 1)[0] if "/" in path else "" for path in paths}
+    folders |= {"/".join(folder.split("/")[:n]) for folder in folders for n in range(len(folder.split("/")))}
+    for folder in folders:
+        prefix = f"{folder}/" if folder else ""
+        inside = [path.removeprefix(prefix) for path in paths if path.startswith(prefix)]
+        key = (HOME, folder) if folder else HOME
+        if folder in truncated:
+            github.trees[key] = (tuple(partial) if not folder else (), True)
+            names = {name.split("/", 1)[0] + ("/" if "/" in name else "") for name in inside}
+            github.dirs[(HOME, folder)] = tuple(order(names))
+        else:
+            github.trees[key] = (tuple(inside), False)
+
+
+@pytest.mark.parametrize(
+    ("skills", "partial"),
+    [
+        ((NESTED, OTHER), ()),
+        ((NESTED, OTHER), (f"{OTHER}/SKILL.md",)),
+        ((NESTED, "apps-x/.cursor/skills/verify-app"), ()),
+        ((NESTED, "apps-x/.cursor/skills/verify-app"), (f"{NESTED}/SKILL.md",)),
+    ],
+    ids=["z-later", "z-in-partial-tree", "apps-x-first", "apps-x-first-partial"],
+)
+@pytest.mark.parametrize("order", [sorted, lambda names: sorted(names, reverse=True)], ids=["sorted", "reversed"])
+def test_a_truncated_walk_picks_the_skill_the_full_tree_picks(
+    tmp_path: Path, skills: tuple[str, str], partial: tuple[str, ...], order
+) -> None:
+    feeder, github = map_feeder(tmp_path, skill=NESTED)
+    paths = ("README.md", *(f"{skill}/SKILL.md" for skill in skills))
+    tree_with_truncation(github, paths, {"", "apps"}, order, partial)
+    for skill in skills:
+        github.dirs[(HOME, f"{skill}/features")] = ("other.md",)
+    winner = skill_dir(paths, "verify-app")
+    github.dirs[(HOME, f"{winner}/features")] = ("search.md",)
+    github.issues[HOME] = [issue(7, template=False, body=journey_ticket("search"))]
+    assert len(feeder.feed_once().fed) == 1
+    assert [read for read in github.dir_reads if read[1].endswith("/features")] == [
+        (HOME, f"{winner}/features", BASE_SHA)
+    ]
 
 
 def test_a_ticket_with_map_ids_is_fed_after_one_map_read_at_the_base(tmp_path: Path) -> None:

@@ -54,6 +54,9 @@ These are the defaults the builder picked for issue #204. They are listed in the
 - **When:** 2026-11-19 ET, by Factory decided (technical)
 - **Source:** https://github.com/maxharris1/factory/pull/1093
 
+- **Decision:** This replaces two clauses of the map-read entry above. Under a truncated tree the feeder walks folders in path order, not breadth first, and keeps reading until no unread folder can hold an earlier `SKILL.md` path, so it picks the same skill as the complete-tree lookup in any listing order. A verify skill that cannot be found at the base, in a complete or a truncated tree, is a failed read under the retry rule, never an empty map: the ticket stays `eligible` and an earlier intake refusal flag is cleared. A features folder missing next to a found skill is still an empty map. A mistyped `qa.verify` therefore holds `Features:` tickets in `eligible` with only a feeder log line; Max could ask for it to refuse with its own defect code instead.
+- **When:** 2026-11-19 ET, by Factory decided (technical)
+- **Source:** https://github.com/maxharris1/factory/pull/1135
 - **Decision:** A ticket can add two optional sections, `## Assumed environment` and `## Out of scope` (F-14, #1033). They are read like `Acceptance criteria`: a heading at levels 2 to 4, with the same bold and colon forms, and the section ends at the next heading of the same or a higher level. A heading that names another of the three sections always starts that section, even when it is nested deeper, so `### Out of scope` under `## Acceptance criteria` ends the criteria. Each list item is one entry, and in these two sections a plain paragraph is one entry too. The brief lists them under their own headings right after the acceptance criteria. Neither section is required, and neither can refuse a ticket.
 - **When:** 2026-11-19 ET, by Factory decided (technical)
 - **Source:** https://github.com/maxharris1/factory/pull/1137
