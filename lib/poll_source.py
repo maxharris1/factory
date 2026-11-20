@@ -2272,6 +2272,7 @@ class LivePollSource:
                 issue,
                 project.linear_handoff_states[0],
                 frozenset(project.linear_handoff_states),
+                frozenset(project.linear_rework_states),
             ),
             linear_ready_for_review=project.linear_ready_for_review,
             linear_state_phase=_linear_state_phase(
@@ -3188,10 +3189,13 @@ def _linear_reopen_state_id(
     issue: Mapping[str, Any],
     ready_name: str = DEFAULT_LINEAR_HANDOFF_STATES[0],
     handoff_names: frozenset[str] = frozenset(DEFAULT_LINEAR_HANDOFF_STATES),
+    rework: frozenset[str] = frozenset(),
 ) -> str | None:
     if DEFAULT_LINEAR_REOPEN_STATE not in handoff_names:
         named = _linear_team_state(issue, "name", DEFAULT_LINEAR_REOPEN_STATE)
-        if named is not None:
+        if named is not None and _linear_state_phase(
+            {**issue, "state": named}, ready_name, rework
+        ) in ("before-review", "rework", "no-ready-state"):
             return _optional_string(named.get("id"))
     ready = _linear_ready_state(issue, ready_name)
     if ready is None or not _is_position(ready.get("position")):
