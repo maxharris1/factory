@@ -643,12 +643,12 @@ def search(parent: int) -> tuple[str, ...]:
 
 def test_split_children_returns_every_issue_split_from_the_parent() -> None:
     gh = RecordedGh()
-    gh.route(search(12), GhResult(0, json.dumps({"incomplete_results": False, "items": [
+    gh.route(search(12), GhResult(0, json.dumps({"total_count": 4, "incomplete_results": False, "items": [
         {"number": 21, "body": "Split from #12 (plan url).", "state": "closed",
          "state_reason": "completed"},
         {"number": 30, "body": "Split from #123", "state": "open", "state_reason": None},
         {"number": 31, "body": "```\nSplit from #12\n```", "state": "open", "state_reason": None},
-    ]}) + json.dumps({"incomplete_results": False, "items": [
+    ]}) + json.dumps({"total_count": 4, "incomplete_results": False, "items": [
         {"number": 22, "body": "Context.\n\nSplit from #12\n", "state": "open",
          "state_reason": "reopened"},
     ]}), ""))
@@ -663,9 +663,35 @@ def test_split_children_returns_every_issue_split_from_the_parent() -> None:
 
 def test_split_children_raises_on_incomplete_search_results() -> None:
     gh = RecordedGh()
-    gh.route(search(12), ok({"incomplete_results": True, "items": [
+    gh.route(search(12), ok({"total_count": 1, "incomplete_results": True, "items": [
         {"number": 21, "body": "Split from #12", "state": "open", "state_reason": None},
     ]}))
 
     with pytest.raises(GitHubAdapterError, match="incomplete"):
+        GitHubIntakeClient(gh).split_children("owner/app", 12)
+
+
+def test_split_children_raises_when_search_returns_fewer_issues_than_it_counts() -> None:
+    pages = [
+        {"total_count": 1001, "incomplete_results": False, "items": [
+            {"number": number, "body": "Split from #12", "state": "closed",
+             "state_reason": "completed"}
+            for number in range(page * 100 + 1, page * 100 + 101)
+        ]}
+        for page in range(10)
+    ]
+    gh = RecordedGh()
+    gh.route(search(12), GhResult(0, "".join(json.dumps(page) for page in pages), ""))
+
+    with pytest.raises(GitHubAdapterError, match="1000 of 1001"):
+        GitHubIntakeClient(gh).split_children("owner/app", 12)
+
+
+def test_split_children_raises_when_search_page_has_no_total_count() -> None:
+    gh = RecordedGh()
+    gh.route(search(12), ok({"incomplete_results": False, "items": [
+        {"number": 21, "body": "Split from #12", "state": "open", "state_reason": None},
+    ]}))
+
+    with pytest.raises(GitHubAdapterError, match="total_count"):
         GitHubIntakeClient(gh).split_children("owner/app", 12)
