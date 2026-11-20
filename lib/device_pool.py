@@ -57,7 +57,9 @@ token the job's current `orch job run` holds (never the token itself). The
 `device_health` table holds each remote device's last successful SSH
 contact and when it began failing, for the lost check (#662). #460
 adds `device_backoff`: a device whose start preflight could not reach it
-takes no new placement, for any harness, until its `until` time. #662
+takes no new placement, for any harness, until its `until` time. #1225
+holds a device low on memory there too, under a `memory-wait` reason that
+never shortens or takes over another backoff. #662
 adds `device_orphans`: the slot of a job lost with its device, moved there
 so the slot is free while its worker may still run. #679 reads it back:
 the monitor stops that worker once its device answers and forgets the row
@@ -79,6 +81,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from lib import device_sync, lane_limit, live_settings
+from lib.device_memory import MEMORY_WAIT
 from lib.device_sync import NOTHING_BLOCKED, Blocked
 from lib.machines_yml import (
     Device,
@@ -947,8 +950,7 @@ def _float(value: object) -> float | None:
     return float(value) if isinstance(value, (int, float)) else None
 
 
-def back_off(connection: sqlite3.Connection, device: str, *, until: float, reason: str) -> None:
-    """Keep new placements off device until `until`, in the caller's transaction (#460)."""
+def _backoff_table(connection: sqlite3.Connection) -> None:
     connection.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {BACKOFF_TABLE} (
@@ -958,12 +960,47 @@ def back_off(connection: sqlite3.Connection, device: str, *, until: float, reaso
         )
         """
     )
+
+
+def back_off(connection: sqlite3.Connection, device: str, *, until: float, reason: str) -> None:
+    """Keep new placements off device until `until`, in the caller's transaction (#460)."""
+    _backoff_table(connection)
     connection.execute(
         f"""
         INSERT INTO {BACKOFF_TABLE} (device, until, reason) VALUES (?, ?, ?)
-        ON CONFLICT(device) DO UPDATE SET until = excluded.until, reason = excluded.reason
+        ON CONFLICT(device) DO UPDATE SET
+            until = MAX(until, excluded.until),
+            reason = excluded.reason
         """,
         (device, until, reason),
+    )
+
+
+def hold_memory(
+    connection: sqlite3.Connection, device: str, *, until: float, reason: str, now: float
+) -> None:
+    """back_off for low memory that keeps a live non-memory backoff's reason (#1225)."""
+    _backoff_table(connection)
+    connection.execute(
+        f"""
+        INSERT INTO {BACKOFF_TABLE} (device, until, reason) VALUES (?, ?, ?)
+        ON CONFLICT(device) DO UPDATE SET
+            until = MAX(until, excluded.until),
+            reason = CASE
+                WHEN until > ? AND reason NOT LIKE ? THEN reason
+                ELSE excluded.reason
+            END
+        """,
+        (device, until, reason, now, f"{MEMORY_WAIT}%"),
+    )
+
+
+def clear_memory_hold(connection: sqlite3.Connection, device: str) -> None:
+    """Drop device's memory-wait hold; any other backoff stays (#1225)."""
+    _backoff_table(connection)
+    connection.execute(
+        f"DELETE FROM {BACKOFF_TABLE} WHERE device = ? AND reason LIKE ?",
+        (device, f"{MEMORY_WAIT}%"),
     )
 
 
