@@ -1,5 +1,3 @@
-"""The waiter's sweep of finished jobs' leftover runs on remote devices (#1233)."""
-
 from __future__ import annotations
 
 import pytest
@@ -37,8 +35,6 @@ def tag(n: int) -> str:
 
 
 class Device:
-    """A scripted device: one listing, then one answer per reaped tag."""
-
     def __init__(self, listing: Called, reaps: dict[str, Called] | None = None):
         self.listing = listing
         self.reaps = reaps or {}
@@ -63,12 +59,14 @@ def test_sweep_lines() -> None:
     device = Device(
         Called(0, "Welcome to the profile\n" + listed(
             ("done1", 1, 1), ("done2", 2, 1), ("failed1", 3, 1), ("gone1", 4, 1), ("run1", 5, 1),
+            ("failed1", 6, 1),
         ) + f"{remote.LEFTOVER_MARK} done1 not-a-tag 1\n{remote.LEFTOVER_MARK} two words\n", ""),
         {
             tag(1): Called(0, f"{remote.REAP_MARK} 0 -\n", ""),
             tag(2): Called(0, f"motd\n{remote.REAP_MARK} 1 0\n", ""),
-            tag(3): Called(0, f"{remote.REAP_MARK} 1 3\n", ""),
+            tag(3): Called(0, f"{remote.REAP_MARK} 1 1\n", ""),
             tag(4): Called(1, "", "boom"),
+            tag(6): Called(0, f"{remote.REAP_MARK} 3 3\n", ""),
         },
     )
     lines = leftovers.sweep(device, BASE, STATES.get, lambda: frozenset())
@@ -78,8 +76,9 @@ def test_sweep_lines() -> None:
         f"kept run {tag(3)} of job failed1 on pc: still running after a kill",
         f"could not sweep run {tag(4)} of job gone1 on pc (exit 1: boom)",
         f"kept run {tag(5)} of job run1 on pc: its job is running",
+        f"kept run {tag(6)} of job failed1 on pc: not known to be gone after a kill",
     ]
-    assert device.reaped == [tag(1), tag(2), tag(3), tag(4)]
+    assert device.reaped == [tag(1), tag(2), tag(3), tag(4), tag(6)]
 
 
 def test_sweep_reaps_at_most_a_cap_of_runs_per_device() -> None:

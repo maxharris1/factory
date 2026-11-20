@@ -5,6 +5,8 @@ from dataclasses import dataclass, replace
 
 from lib.containers import FINISHED_STATES, Runner, failure
 from lib.remote import (
+    GONE,
+    RUNNING,
     SSH_UNREACHABLE,
     ListedRun,
     RemoteTarget,
@@ -79,15 +81,16 @@ def sweep(
             continue
         reaps += 1
         reaped = runner(reap_script(replace(base, job_id=run.job_id, tag=run.tag)))
-        codes = read_reap(reaped.stdout)
-        if (failed := failure(reaped)) is not None or codes is None:
+        states = read_reap(reaped.stdout)
+        if (failed := failure(reaped)) is not None or states is None:
             lines.append(f"could not sweep {where} ({failed or 'no reap line'})")
             if reaped.code == SSH_UNREACHABLE:
                 return lines
-        elif codes[1] == 0:
+        elif states[1] == GONE:
             lines.append(f"killed what was left of {where}")
-        elif codes[0] != 0:
-            lines.append(f"kept {where}: still running after a kill")
+        elif states[0] != GONE:
+            left = "still running" if states[1] == RUNNING else "not known to be gone"
+            lines.append(f"kept {where}: {left} after a kill")
     if deferred:
         lines.append(f"deferred {deferred} run(s) on {device} to the next sweep")
     return lines

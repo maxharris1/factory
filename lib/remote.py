@@ -162,7 +162,7 @@ import shlex
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import NamedTuple, Protocol, runtime_checkable
 
 from lib.github_app_token import TOKEN_VARIABLES
 from lib.handoff_marker import MARKER_LINE_LIMIT, MARKER_PREFIX, MARKER_SEARCH_LINES, RUNNER_LOG_PREFIX
@@ -1078,7 +1078,6 @@ def env_clear_script(target: RemoteTarget) -> str:
     return _sh(f"rm -f -- {shlex.quote(run_file(target, ENV_FILE))}")
 
 
-# --- #1233: the waiter's sweep of finished jobs' leftover runs ----------------
 SWEPT_FILE = "swept"
 LEFTOVER_MARK = "orch-leftover:"
 REAP_MARK = "orch-reap:"
@@ -1092,10 +1091,6 @@ class ListedRun:
 
 
 def leftovers_script(jobs_dir: str) -> str:
-    """Print `LEFTOVER_MARK <job> <tag> <ended>` per run directory under jobs_dir not yet swept.
-
-    ended is 1 once `exit` exists, or when no pid in `pid` answers `kill -0`.
-    """
     return _sh(
         f"cd -- {shlex.quote(jobs_dir)} 2>/dev/null || exit 0; "
         'for r in *.run/*/; do r=${r%/}; j=${r%%.run/*}; t=${r#*.run/}; '
@@ -1109,8 +1104,12 @@ def leftovers_script(jobs_dir: str) -> str:
     )
 
 
-def read_leftovers(stdout: str) -> tuple[list[ListedRun], int]:
-    """The listed runs, and how many marked lines could not be read."""
+class Listing(NamedTuple):
+    runs: list[ListedRun]
+    unreadable: int
+
+
+def read_leftovers(stdout: str) -> Listing:
     runs: list[ListedRun] = []
     unreadable = 0
     for line in stdout.splitlines():
@@ -1121,14 +1120,10 @@ def read_leftovers(stdout: str) -> tuple[list[ListedRun], int]:
                 runs.append(ListedRun(job_id, tag, ended == "1"))
             case _:
                 unreadable += 1
-    return runs, unreadable
+    return Listing(runs, unreadable)
 
 
 def reap_script(target: RemoteTarget) -> str:
-    """Check the run; unless gone, kill it and check again. Print `REAP_MARK <before> <after|->`.
-
-    Once a check says gone, the run's SWEPT_FILE keeps it out of later listings.
-    """
     check = worker_check_script(target.job_dir, target.require_tag())
     swept = shlex.quote(run_file(target, SWEPT_FILE))
     return _sh(
@@ -1139,12 +1134,11 @@ def reap_script(target: RemoteTarget) -> str:
     )
 
 
-def read_reap(stdout: str) -> tuple[int, int | None] | None:
-    """reap_script's (before, after) check codes; after is None when no kill was needed."""
+def read_reap(stdout: str) -> tuple[str, str | None] | None:
     fields = (_marked(stdout, REAP_MARK) or "").split()
     if len(fields) != 2 or not fields[0].isdigit() or not (fields[1].isdigit() or fields[1] == "-"):
         return None
-    return int(fields[0]), None if fields[1] == "-" else int(fields[1])
+    return worker_state(int(fields[0])), None if fields[1] == "-" else worker_state(int(fields[1]))
 
 
 def launch_script(
