@@ -1885,6 +1885,7 @@ the run log, the telemetry or the job detail. The job's usage probe and
 the run's transcript from that folder. A job on the device's own login runs
 unchanged. `lib/harness_env.py` `ACCOUNT_ISOLATION` is the one table that
 names these variables.
+To sign an account in on each device, follow [docs/ACCOUNTS.md](docs/ACCOUNTS.md).
 
 The older device value `{bot: <bot user>, account: <id>}` still loads and
 means that account is the device's own login. `orch check-config` reports

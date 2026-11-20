@@ -84,6 +84,7 @@ from lib.device_sync import NOTHING_BLOCKED, Blocked
 from lib.machines_yml import (
     Device,
     MachinesConfig,
+    default_account,
     orch_host,
     shared_tailscale_names,
 )
@@ -188,6 +189,13 @@ def placed_account(config: MachinesConfig, placement: Placement) -> str | None:
         return placement.account
     device = config.device(placement.device)
     return None if device is None else device.account_for(placement.harness)
+
+
+def run_account(config: MachinesConfig, placement: Placement) -> tuple[str, str | None]:
+    """The account the placed run uses and its folder, None for the device's own login.
+    Raises ValueError when the account is not signed in on the device."""
+    account = placed_account(config, placement) or default_account(placement.harness)
+    return account, config.account_home(placement.device, placement.harness, account)
 
 
 def choose_device(
