@@ -6,6 +6,7 @@ from lib.brief.common import GH
 from lib.dispatcher import FailedCheck
 from lib.evidence.ci import ci_evidence
 from tests.regenerate_brief_snapshots import HEAD
+from tests.test_brief import contradictions_in
 from tests.test_brief_variants import CI_FIX, _evidence, _render, _task
 
 RUN_URL = "https://github.com/owner/repo/actions/runs/9"
@@ -64,3 +65,34 @@ def test_every_failed_check_gets_its_log_or_the_command_for_it():
     assert "The end of the `pytest` log" in task
     assert f"The factory could not fetch the `check-config` log. Get it with {VIEW}." in task
     assert "No Actions run is linked to `commit status`" in task
+
+
+GO_URL = "https://github.com/owner/repo/pull/42#issuecomment-555"
+REOPEN = ("fix", 1, HEAD, {"instruction": GO_URL, "round": "3/3", "kind": "reopen", "evidence": _evidence()})
+
+
+def _reopen_brief() -> str:
+    action, attempt, head, extra = REOPEN
+    return _render(action, attempt, head, extra)
+
+
+def test_a_reopen_fix_merges_the_base_before_the_change_unless_it_is_already_in():
+    task = _task(_reopen_brief())
+
+    steps = [
+        f"Make the changes the approver's go at {GO_URL} asks for",
+        "1. Check out the PR branch",
+        "2. `git fetch origin dev`",
+        "`git merge-base --is-ancestor origin/dev HEAD`",
+        "`git merge origin/dev`: a merge commit only, no rebase, no force-push.",
+        "3. Make the changes the go asks for.",
+        "5. Push, then post the ready handoff below with the head you pushed.",
+    ]
+    positions = [task.index(step) for step in steps]
+    assert positions == sorted(positions)
+    assert "--force-with-lease" not in task
+    assert "REVISE verdict" not in task
+
+
+def test_a_reopen_brief_states_no_contradicting_pair():
+    assert contradictions_in(_reopen_brief()) == []

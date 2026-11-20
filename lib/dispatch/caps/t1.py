@@ -34,14 +34,15 @@ class T1Mixin:
                 (self._fix_unsat_revise(ticket, comment) if state == "building" else None)
                 or self._resume_for_max(ticket, comment)
                 or self._resume_after_blocked(ticket, comment)
-                or self._resume_after_cap(ticket, comment)
+                or self._resume_after_cap(ticket, comment, building=state == "building")
             )
             if resumed is not None:
                 self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
                 return resumed
         if current == "handed-off":
-            # #108, #118: inside the cap a handed-off ticket re-enters only
-            # through the builder's ready; a go changes nothing.
+            # #108, #118, #1197: inside the cap only a building go on a
+            # ship: handoff ticket reopens it (_resume_after_cap); any other
+            # go changes nothing, and the builder's ready still re-enters.
             return True, "go-after-handoff"
         if not trusted:
             return True, "rejected-go-author"

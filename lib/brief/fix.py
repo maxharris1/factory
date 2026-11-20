@@ -11,6 +11,8 @@ def lead(job: Job, facts: dict) -> Lead:
     verdict = _revise_verdict_url(detail, facts)
     if _qa_only(detail):
         goal, lines, proof = _qa_fix(qa, facts)
+    elif detail.get("kind") == "reopen":
+        goal, lines, proof = _reopen_fix(facts, verdict or "the approver's go")
     elif verdict:
         goal, lines, proof = _review_fix(detail, facts, verdict)
     else:
@@ -19,7 +21,7 @@ def lead(job: Job, facts: dict) -> Lead:
 
 
 def quoted_findings(detail: dict[str, object], facts: dict) -> list[dict[str, object]]:
-    if _qa_only(detail):
+    if _qa_only(detail) or detail.get("kind") == "reopen":
         return []
     return _open_findings(detail) if _revise_verdict_url(detail, facts) else []
 
@@ -83,6 +85,28 @@ def _review_fix(detail: dict[str, object], facts: dict, verdict: str) -> tuple[s
             *_class_fix_steps(facts, "finding", "Fixing only the line the reviewer quoted is not a fix."),
         ],
         _class_fix_proof("finding"),
+    )
+
+
+def _reopen_fix(facts: dict, go: str) -> tuple[str, list[str], str]:
+    base = facts["base"] or "<base branch>"
+    return (
+        f"Make the changes the approver's go at {go} asks for on {pr_ref(facts)}, "
+        f"after bringing `origin/{base}` in.",
+        [
+            "The PR was handed off after an APPROVE. The approver's go reopens it for one more review round. "
+            "Follow the router in Skills below.",
+            _checkout(facts),
+            f"2. `git fetch origin {base}`. If `git merge-base --is-ancestor origin/{base} HEAD` succeeds, the "
+            f"base is already in: skip the merge. Otherwise `git merge origin/{base}`: a merge commit only, "
+            "no rebase, no force-push. Resolve any conflict without changing behavior.",
+            "3. Make the changes the go asks for. Write tests first, as the `tdd` skill says.",
+            f"4. Run only the new tests and the tests for the files you touched, plus a short smoke set, {TEST_SCOPE} "
+            "Then run the router's \"Before ready\" steps.",
+            "5. Push, then post the ready handoff below with the head you pushed.",
+        ],
+        f"The ready names the pushed head, says whether the merge of `origin/{base}` ran or was skipped, "
+        "and gives each change the go asked for with the test that covers it.",
     )
 
 

@@ -1,5 +1,6 @@
 """#130: a trusted go on an approved, watched ticket is honored; on a
-ready-for-review ticket it still changes nothing (#108)."""
+ready-for-review ticket inside the cap a building go reopens it for one fix
+round (#1197) and any other go changes nothing (#108)."""
 
 from __future__ import annotations
 
@@ -94,15 +95,26 @@ def test_an_untrusted_go_is_rejected_and_the_ticket_stays_queued(tmp_path: Path)
     assert row["approved_head"] == sha(1)
 
 
-def test_go_on_a_ready_for_review_handoff_still_changes_nothing(tmp_path: Path) -> None:
+def test_a_planning_go_on_a_ready_for_review_handoff_still_changes_nothing(tmp_path: Path) -> None:
     board, pr = queued(tmp_path, finish_line="ready-for-review")
     assert board.state("42")["workflow_state"] == "handed-off"
+    jobs = len(board.jobs())
+    board.go(pr, "go-again", state="planning")
+    board.dispatcher.process(board.snapshot(pr))
+    assert board.outcome("go-again") == "go-after-handoff"
+    assert len(board.jobs()) == jobs
+    assert board.state("42")["workflow_state"] == "handed-off"
+
+
+def test_a_building_go_on_a_ready_for_review_handoff_reopens_it(tmp_path: Path) -> None:
+    board, pr = queued(tmp_path, finish_line="ready-for-review")
     builds = len(board.jobs("build"))
     board.go(pr, "go-again")
     board.dispatcher.process(board.snapshot(pr))
-    assert board.outcome("go-again") == "go-after-handoff"
+    assert board.outcome("go-again") == "queued-fix"
     assert len(board.jobs("build")) == builds
-    assert board.state("42")["workflow_state"] == "handed-off"
+    assert [row["source_comment_id"] for row in board.jobs("fix")] == ["go-again"]
+    assert board.state("42")["workflow_state"] == "fixing"
 
 
 def test_a_builder_ready_at_a_new_head_re_enters_review(tmp_path: Path) -> None:

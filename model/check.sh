@@ -179,6 +179,7 @@ grep -q 'T1KindGo' "$RUN_OUT/report.md" || fail "phase 1 report did not check T1
 grep -q 'T1PDecided' "$RUN_OUT/report.md" || fail "phase 1 report did not check T1PDecided"
 grep -q 'Phase1T9Off' "$RUN_OUT/report.md" || fail "phase 1 report did not check Phase1T9Off"
 grep -q 'HandoffCountsApprovedRound' "$RUN_OUT/report.md" || fail "phase 1 report did not check HandoffCountsApprovedRound"
+grep -q 'ReopenHeld' "$RUN_OUT/report.md" || fail "phase 1 report did not check ReopenHeld"
 grep -q 'ShipNeedsCoveredQa' "$RUN_OUT/report.md" || fail "phase 1 report did not check ShipNeedsCoveredQa"
 grep -q 'QaResultFromRun' "$RUN_OUT/report.md" || fail "phase 1 report did not check QaResultFromRun"
 if grep -q ' breaks$' "$RUN_OUT/report.md"; then
