@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from lib.dispatcher import Comment
 from tests.qa_support import HEAD_A, HEAD_B, Harness, qa_config, qa_report, ready, scenarios, verdict
 
 pytestmark = pytest.mark.usefixtures("every_wake_reaches_grok")
@@ -126,3 +127,45 @@ def test_qa_detail_carries_live_bodies_and_regression(tmp_path: Path) -> None:
         {"id": "qa-2", "criterion": "ac-2", "steps": "Click save.", "passes": "it saves.", "pack": None, "saves": []},
     ]
     assert job["regression"] == ["qa-2"]
+
+
+QA_BRIEF = Comment(
+    id="b1",
+    author="maxharris1",
+    created_at=1.0,
+    url="https://github.com/maxharris1/factory/pull/812#issuecomment-1",
+    body=(
+        "<!-- orch:v1 kind=brief from=grok-bot role=orchestrator -->\n"
+        "**Brief for #763**\n\n"
+        "### QA journeys\n- Verify skill: `verify-cleffy`\n- Base: `" + "d" * 40 + "`\n"
+        "- `search`\n- `new:bulk-export` (this PR adds `features/bulk-export.md` and its README row)\n\n"
+        "### QA criteria\n- ac-1 [search]: search finds a note\n- ac-2 [search, bulk-export]: export works\n"
+    ),
+)
+ISSUE = "## Acceptance criteria\n- qa(search): search finds a note\n- qa: export works\n"
+
+
+def test_qa_detail_live_comes_from_the_brief_for_a_ticket_with_map_ids(tmp_path: Path) -> None:
+    run = Harness(tmp_path, qa_config(), brief=QA_BRIEF, issue_body=ISSUE)
+    run.post("r1", ready(HEAD_A, body=scenarios("qa-7")), head=HEAD_A)
+    run.poll()
+
+    [job] = run.qa_jobs()
+    assert [(item["id"], item["criterion"], item["passes"]) for item in job["live"]] == [
+        ("qa-1", "ac-1", "search finds a note"),
+        ("qa-2", "ac-2", "export works"),
+    ]
+    assert "`search`" in job["live"][0]["steps"] and "`verify-cleffy`" in job["live"][0]["steps"]
+    assert "`features/bulk-export.md`" in job["live"][1]["steps"]
+    assert job["regression"] == ["qa-1"]
+
+
+def test_an_edited_qa_tag_drops_the_brief_scenarios_and_runs_smoke(tmp_path: Path) -> None:
+    edited = "## Acceptance criteria\n- qa(bulk-export): search finds a note\n- qa: export works\n"
+    run = Harness(tmp_path, qa_config(), brief=QA_BRIEF, issue_body=edited)
+    run.post("r1", ready(HEAD_A, body=scenarios("qa-7")), head=HEAD_A)
+    run.poll()
+
+    [job] = run.qa_jobs()
+    assert job["live"] == [] and job["regression"] == []
+    assert [row[1] for row in run.qa_runs()] == ["smoke"]

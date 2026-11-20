@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from lib.factory_md import load_factory_md
+from lib.factory_md import PreReady, load_factory_md
 from lib.pre_ready import check_environ, run
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -19,8 +19,21 @@ def git(cwd: Path, *args: str) -> str:
     ).stdout.strip()
 
 
-@pytest.mark.serial
-@pytest.mark.timeout(360)
+FULL_FAST_SUITE = "-m fast"
+
+
+def gate_steps(command: str) -> list[str]:
+    return [step.strip() for step in command.split("&&")]
+
+
+def test_every_gate_step_runs_on_the_install_interpreter() -> None:
+    config, _ = load_factory_md(ROOT / "factory.md")
+    assert config is not None and config.pre_ready is not None
+    steps = gate_steps(config.pre_ready.command)
+    assert steps
+    assert all(step.startswith('"$ORCH_PYTHON" ') for step in steps), steps
+
+
 def test_the_gate_passes_when_path_python3_is_not_the_install_venv(tmp_path: Path) -> None:
     config, _ = load_factory_md(ROOT / "factory.md")
     assert config is not None and config.pre_ready is not None
@@ -36,7 +49,12 @@ def test_the_gate_passes_when_path_python3_is_not_the_install_venv(tmp_path: Pat
         fake.chmod(0o755)
     caller = {"PATH": f"{bare_host}:/usr/bin:/bin", "HOME": os.environ.get("HOME", str(tmp_path))}
 
-    result = run(config.pre_ready, checkout, head, check_environ(caller, None))
+    steps = gate_steps(config.pre_ready.command)
+    quick = [step for step in steps if not step.endswith(FULL_FAST_SUITE)]
+    assert quick and len(quick) < len(steps)
+    spec = PreReady(" && ".join(quick), config.pre_ready.timeout_seconds)
+
+    result = run(spec, checkout, head, check_environ(caller, None))
 
     assert result.passed, f"{result.reason}\n{result.tail}"
     assert "no factory packages here" not in result.tail

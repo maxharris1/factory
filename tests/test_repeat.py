@@ -48,16 +48,20 @@ def repeat_stop(tmp_path: Path) -> AppFlow:
     return flow
 
 
-def capped_stop(tmp_path: Path) -> AppFlow:
+def capped_stop(tmp_path: Path, stop_on: str = "rounds", cap: int = 3) -> AppFlow:
     flow = AppFlow(tmp_path, enabled=True)
-    flow.factory = replace(flow.factory, auto_extra_rounds=0)
+    flow.factory = replace(flow.factory, auto_extra_rounds=0, stop_on=stop_on, rounds_high=cap)
     to_first_review(flow)
     bodies = (F1, F2, "- [blocking] f-3: the exit code is 0.\n")
     for number, body in enumerate(bodies[:-1], start=1):
-        assert revise(flow, f"{number}/3", f"revise-{number}", body=body) == "queued-review-fix"
+        assert revise(flow, f"{number}/{cap}", f"revise-{number}", body=body) == "queued-review-fix"
         respond(flow, number, f"Fixed f-{number} in round {number}.\n")
-    assert revise(flow, "3/3", "revise-3", body=bodies[-1]) == "capped-review"
+    assert revise(flow, f"3/{cap}", "revise-3", body=bodies[-1]) == "capped-review"
     return flow
+
+
+def stalled_stop(tmp_path: Path) -> AppFlow:
+    return capped_stop(tmp_path, stop_on="convergence", cap=4)
 
 
 def unsat_stop(tmp_path: Path) -> AppFlow:
@@ -124,6 +128,7 @@ def test_an_unsat_stop_quotes_the_criterion_finding(tmp_path: Path) -> None:
     [
         (repeat_stop, "clarify", "repeat-block", "repeat"),
         (capped_stop, "capped", "review round cap reached", "capped"),
+        (stalled_stop, "capped", "review not converging", "stalled"),
         (unsat_stop, "clarify", "criterion-unsatisfiable", "unsat"),
     ],
 )

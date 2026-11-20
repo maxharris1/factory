@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
@@ -10,6 +11,7 @@ import pytest
 
 from lib import account_doctor
 from lib.account_doctor import Probe, SignIn
+from lib.queue import JobRequest, SQLiteJobQueue
 
 NOW = 1_800_000_000.0
 ORG = "4b0c6c5e-0000-4000-8000-00000000a001"
@@ -527,6 +529,68 @@ def test_doctor_prints_one_line_per_row(world: World, capsys: pytest.CaptureFixt
     assert "claude-default@pc ok claude.ai" in lines
     assert "claude-default@box unreachable - no ssh_alias for claude on box" in lines
     assert len(lines) == len(EXPECTED)
+
+
+def test_canaries_from_every_device_reply_reach_no_sink_end_to_end(
+    world: World, capsys: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    every = " ".join(CANARIES)
+    planted = {"orgId": CANARY_ORG, "email": CANARY_EMAIL, "oauthAccessToken": CANARY_TOKEN, "unknownKey": CANARY_EXTRA}
+    replies = tmp_path / "replies"
+    (replies / "claude" / "default").write_bytes(
+        claude_reply(org=CANARY_ORG, email=CANARY_EMAIL, oauthAccessToken=CANARY_TOKEN, unknownKey=CANARY_EXTRA))
+    (replies / "claude" / "claude-b").write_bytes(claude_reply(**planted)[:-1])
+    for name in ("claude-c", "token"):
+        reply = json.loads(REPLIES["claude"][name][0])
+        (replies / "claude" / name).write_bytes(json.dumps({**reply, **planted}).encode())
+    for name, (reply, _) in REPLIES["codex"].items():
+        (replies / "codex" / name).write_bytes(reply + every.encode() + b"\n")
+    world.profile(
+        f"echo '{every}'\necho '{every}' >&2\n"
+        f"claude() {{ echo '{every}' >&2; command claude \"$@\"; }}\n"
+        f"codex() {{ command codex \"$@\"; code=$?; echo '{every}' >&2; return $code; }}\n"
+    )
+    SQLiteJobQueue(world.db, clock=lambda: NOW).enqueue(JobRequest(
+        repo="maxharris1/factory", ticket_id="1123", action="review", recipient="codex",
+        source_comment_id="c1", timeout_seconds=600, detail='{"note": "seeded"}',
+    ), dedupe_key="k1")
+    wal_holder = sqlite3.connect(world.db)
+    wal_holder.execute("SELECT count(*) FROM jobs").fetchone()
+    from lib import cli
+
+    caplog.set_level(logging.DEBUG)
+    assert world.doctor() == 0
+    assert world.doctor("--json") == 0
+    wal = tmp_path / "orch.db-wal"
+    wal_before = wal.read_bytes()
+    out = tmp_path / "site"
+    assert cli.main(["dashboard", "snapshot", "--db", str(world.db), "--log", str(tmp_path / "poller.log"),
+                     "--out", str(out), "--machines", str(world.machines)]) == 0
+    printed = capsys.readouterr()
+
+    rows = world.rows()
+    expected = fingerprint(CANARY_ORG, CANARY_EMAIL)
+    assert (rows[("claude-default", "pc")].status, rows[("claude-default", "pc")].fingerprint) == ("ok", expected)
+    assert rows[("claude-b", "pc")].status == "signed-out"
+
+    assert wal_holder.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
+    details = [row[0] for row in wal_holder.execute("SELECT detail FROM jobs")]
+    wal_holder.close()
+    assert details, "a seeded job has a detail to check"
+    sinks = {
+        "orch.db": world.db.read_bytes(),
+        "orch.db-wal before checkpoint": wal_before,
+        "orch.db-wal after checkpoint": wal.read_bytes() if wal.exists() else b"",
+        "stdout": printed.out.encode(),
+        "stderr": printed.err.encode(),
+        "status.json": (out / "status.json").read_bytes(),
+        **{f"log record {i}": f"{r.getMessage()} {r.args!r}".encode() for i, r in enumerate(caplog.records)},
+        **{f"jobs.detail {i}": (detail or "").encode() for i, detail in enumerate(details)},
+    }
+    for name, data in sinks.items():
+        for canary in CANARIES:
+            assert canary.encode() not in data, f"{canary} reached {name}"
+    assert expected.encode() in sinks["orch.db"]
 
 
 def framed(*frames: tuple[int, int, bytes], before: bytes = b"") -> bytes:

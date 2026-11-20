@@ -77,6 +77,12 @@ def decide(row: MainFixRow | None, read: MainRead, *, issue_open: bool | None) -
     return ()
 
 
+def marked_issue_fate(row: MainFixRow, number: int) -> Literal["feed", "hold", "close"]:
+    if row.state == "filing":
+        return "hold"
+    return "feed" if number == row.issue else "close"
+
+
 def marker(repo: str, base: str, filed_at: float) -> str:
     return f"<!-- factory-main-fix id={repo.lower()}:{base}:{filed_at} -->"
 

@@ -149,7 +149,7 @@ class T3Mixin:
             )
             if granted is not None:
                 cap += 1
-            next_state = "capped" if round_number >= cap else "fixing"
+            next_state = "capped" if isinstance(convergence, Stalled) or round_number >= cap else "fixing"
             answered = None
             if next_state == "fixing":
                 detail = self._job_detail(
@@ -206,8 +206,8 @@ class T3Mixin:
             connection.execute(
                 """
                 INSERT INTO review_events (
-                    repo, ticket_id, comment_id, outcome, qa_failed
-                ) VALUES (?, ?, ?, ?, ?)
+                    repo, ticket_id, comment_id, outcome, qa_failed, stop
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     ticket.repo.lower(),
@@ -215,6 +215,7 @@ class T3Mixin:
                     comment.id,
                     outcome,
                     failed_column(qa),
+                    "stalled" if next_state == "capped" and isinstance(convergence, Stalled) else None,
                 ),
             )
             if granted is not None:
