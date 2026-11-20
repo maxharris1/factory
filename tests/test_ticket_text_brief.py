@@ -302,6 +302,34 @@ def test_a_qa_criterion_whose_features_line_was_cut_is_refused_without_every_jou
     assert "- ac-1 (qa): journeys unknown" in text
 
 
+def test_a_qa_criterion_whose_features_line_was_cut_binds_the_source_issue_journeys(tmp_path) -> None:
+    from dataclasses import replace
+
+    from tests.test_handoff_check import HEADER, _check, _job
+
+    context, findings = parse_factory_context(FACTORY_MD)
+    assert context is not None, findings
+    body = (
+        "Risk: low\nPlan first: no\nDepends on: none\n\n## Acceptance criteria\n- qa: Upload then search.\n\n"
+        + "Background. " * 1800
+        + "\n\nFeatures: upload-file, search\n"
+    )
+    template = parse_intake(body, ())
+    issue = IntakeIssue(
+        repo="acme/widgets", tracker="github", key="41", title="Export works", body=body, labels=(),
+        created_at=0.0, applied_by="max", url="https://github.com/acme/widgets/issues/41",
+    )
+    brief = feeder_brief(issue, context, number=12, branch="factory/issue-41", base="main", risk="low",
+                         state="building", visible=False, template=template)
+    dispatcher, _ = setup(tmp_path)
+    polled = replace(_polled(("grok-login", brief)), issue_body=body)
+    detail = json.loads(dispatcher._job_detail(polled, action="fix"))
+    assert detail["proof"] == [{"id": "ac-1", "kind": "qa", "journeys": ["upload-file", "search"]}]
+    ran_one = "- ac-1 (qa): `verify run upload-file`\n  ```\n  upload-file PASS\n  ```\n"
+    found = _check(_job(proof=detail["proof"]), f"{HEADER}\nDone.\n\n## Proof\n{ran_one}")
+    assert found == ["Proof entry ac-1 (qa) does not name journey search"], found
+
+
 def _linear_polled(brief: str):
     issue = linear_issue()
     issue["comments"]["nodes"].insert(0, {

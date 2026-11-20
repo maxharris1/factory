@@ -229,3 +229,12 @@ def test_an_unresolved_qa_criterion_is_refused_unless_it_is_declared_unverified(
     assert problem.startswith("Proof entry ac-1 (qa)") and "unverified" in problem
     declared = "- ac-1 (qa): unverified. Journeys unknown: `verify doctor`\n  ```\n  doctor ok\n  ```"
     assert missing(items, _ready(declared)) == []
+
+
+def test_a_bare_qa_tag_binds_the_features_the_source_issue_shows_below_the_cut() -> None:
+    issue = "Risk: low\n\n## Acceptance criteria\n- qa: Upload then search.\n\n" + "Background. " * 1800
+    issue += "\n\nFeatures: upload-file, search\n"
+    items = required(_cut_brief(issue), issue)
+    assert items == (Required("ac-1", "qa", ("upload-file", "search")),)
+    ran_one = "- ac-1 (qa): `verify run upload-file`\n  ```\n  upload-file PASS\n  ```"
+    assert missing(items, _ready(ran_one)) == ["Proof entry ac-1 (qa) does not name journey search"]

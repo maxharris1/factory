@@ -117,8 +117,8 @@ def _proof_lines(detail: dict[str, object]) -> list[str]:
         *(
             f"- {item.id} ({item.kind})"
             + (
-                ": journeys unknown, because the brief's ticket quote has no whole Features line, "
-                "so write it as `unverified` with the doctor command and its output" if item.journeys is None
+                ": journeys unknown, because neither the brief's ticket quote nor the source issue "
+                "shows a Features line, so write it as `unverified` with the doctor command and its output" if item.journeys is None
                 else f": journeys {', '.join(item.journeys)}" if item.journeys else ""
             )
             for item in items

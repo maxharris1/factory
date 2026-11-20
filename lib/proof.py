@@ -7,9 +7,10 @@ own `ac-<n>:` prefix, else `ac-<position>` among the builder criteria. A
 in a fenced block. A `qa` criterion's entry gives the verify skill's command
 and output and names each journey the criterion binds (lib/journeys.py
 qa_tag), or says `unverified` and gives the failed doctor command and its
-output instead. A bare `qa` tag binds the ticket's Features journeys; when
-the brief's ticket quote shows no whole Features line, its journeys are None
-and only the `unverified` form proves it.
+output instead. A bare `qa` tag binds the ticket's Features journeys, read
+from whole lines of the brief's ticket quote, else from the source issue's
+full body. When neither shows a Features line, its journeys are None and only
+the `unverified` form proves it.
 
 The dispatcher stores what a ticket requires in the job detail under
 `proof`; `orch job done` refuses a ready that misses an entry.
@@ -52,14 +53,14 @@ class _Entry:
     prose: list[str] = field(default_factory=list)
 
 
-def required(brief: str) -> tuple[Required, ...]:
+def required(brief: str, issue_body: str | None = None) -> tuple[Required, ...]:
     """The proof each builder criterion of the brief's ticket needs, in order."""
     from lib.evidence.criteria import quoted_ticket
     from lib.feeder import parse_intake
 
     ticket = quoted_ticket(brief)
     template = parse_intake(ticket, ())
-    every = tuple(journey.id for journey in parse_intake(_whole_lines(ticket), ()).journeys) or None
+    every = _journeys(_whole_lines(ticket)) or _journeys(issue_body or "") or None
     items: list[Required] = []
     for position, item in enumerate(_listed_above_quote(brief, ticket) or template.criteria, start=1):
         prefix = _PREFIX.match(item)
@@ -76,6 +77,12 @@ def _listed_above_quote(brief: str, ticket: str) -> tuple[str, ...]:
     from lib.feeder import parse_intake
 
     return parse_intake(brief[:brief.find(ticket)], ()).criteria if ticket != brief else ()
+
+
+def _journeys(ticket: str) -> tuple[str, ...]:
+    from lib.feeder import parse_intake
+
+    return tuple(journey.id for journey in parse_intake(ticket, ()).journeys)
 
 
 def _whole_lines(ticket: str) -> str:
