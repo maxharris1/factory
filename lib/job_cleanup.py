@@ -11,13 +11,12 @@ once and names the finished jobs: done, failed or cancelled before the
 cutoff (now minus the grace period), except a failed job whose ticket still
 has a queued or running job (a retry may still need it). It sends that list
 to every device target over ssh. `orch cleanup device` then moves each
-named folder aside to `<job-id>.cleanup`, unless the folder or its launch
-or worker records changed after the cutoff, a worktree record sits beside
-it, or a process of this user has its cwd or an open file inside it. The
-host reads orch.db again and confirms only the ids still finished, so a
-job requeued and claimed since the first read is moved back. The device
-empties each confirmed folder, keeping only its `.orch-worker*` records,
-and moves it back. A device that cannot scan for such processes removes
+named folder aside to `<job-id>.cleanup` unless `_live_reason` or a held
+lock keeps it. The host reads orch.db again and confirms only the ids
+still finished, so a job requeued and claimed since the first read is moved
+back. The device empties each confirmed folder, keeping only its
+`.orch-worker*` records, and moves it back. A device that cannot scan for
+processes of this user with a cwd or open file in a folder removes
 nothing. A process of this user whose cwd or open files the scan cannot
 read (a non-dumpable one: ssh, an agent, a sandboxed shell) could be in any
 job folder. So while one lives, every folder is kept as held-open.
@@ -25,11 +24,10 @@ job folder. So while one lives, every folder is kept as held-open.
 The runner's checkout and start claim the job first under `flock` on
 `jobs/<job-id>.lock`: they touch `jobs/<job-id>.claimed` and move a
 set-aside folder back (lib/remote.py `_CLAIM`). Each move aside and each
-empty here holds the same lock and first checks that claim mark against
-the cutoff, so no claim made during the pass loses its checkout. A device
-whose login PATH has no `flock` claims unlocked, so it removes nothing.
-A folder the host did not name is never touched; the host labels each one
-live, recent, retry-held or unknown.
+empty here holds the same lock. A device whose login PATH has no `flock`
+claims unlocked, so it removes nothing. A folder the host did not name is
+never touched; the host labels each one live, recent, retry-held or
+unknown.
 """
 
 from __future__ import annotations
@@ -48,10 +46,10 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from lib import health, scratch
+from lib import health, remote, scratch, worktrees
 from lib.device_deploy import PICK_PYTHON, Target, targets
 from lib.remote import SSH_UNREACHABLE, CaptureTransport, SshTransport, _login, _marked, ssh_argv
 
@@ -69,16 +67,24 @@ NOT_NAMED = "not-finished"
 HELD_OPEN = "held-open"
 CANNOT_SCAN = "cannot-scan"
 CANNOT_LOCK = "cannot-lock"
+LOCK_HELD = "lock-held"
+CLAIMED_SINCE = "claimed-since"
 WORKTREE_RECORD = "worktree-record"
+WORKTREE_OWNER_LIVE = "worktree-owner-live"
+WORKER_LIVE = "worker-live"
+WORKER_UNSURE = "worker-unsure"
 HOLD = "hold"
 FINISH = "finish"
 SET_ASIDE = ".cleanup"
 CLAIMED = ".claimed"
+LAUNCHED = ".launched"
 LOCK = ".lock"
 PROC = Path("/proc")
 SSH_SESSION = frozenset({"sshd", "sshd-session", "systemd", "(sd-pam)"})
 
 _JOB_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+_TAG = re.compile(r"[0-9a-f]{32}")
+_RECORD_TAG = re.compile(rf"{re.escape(WORKER_RECORD)}-([0-9a-f]{{32}})\.")
 
 
 @dataclass(frozen=True)
@@ -129,11 +135,15 @@ class Plan:
     cutoff: float
     dry_run: bool
     step: str = HOLD
+    finished_at: Mapping[str, float] = field(default_factory=dict)
+
+    def own_finish(self, job_id: str) -> float:
+        return self.finished_at.get(job_id, self.cutoff)
 
     def to_json(self) -> str:
         return json.dumps(
             {"finished": sorted(self.finished), "cutoff": self.cutoff, "dry_run": self.dry_run,
-             "step": self.step}
+             "step": self.step, "finished_at": dict(sorted(self.finished_at.items()))}
         )
 
     @classmethod
@@ -147,7 +157,13 @@ class Plan:
         step = data.get("step", HOLD)
         if step not in (HOLD, FINISH):
             raise ValueError(f"unknown step {step!r}")
-        return cls(frozenset(finished), float(data["cutoff"]), bool(data["dry_run"]), step)
+        finished_at = data.get("finished_at", {})
+        if not isinstance(finished_at, dict) or not all(
+            isinstance(key, str) and _JOB_ID.fullmatch(key) for key in finished_at
+        ):
+            raise ValueError("finished_at must map plain job ids to times")
+        return cls(frozenset(finished), float(data["cutoff"]), bool(data["dry_run"]), step,
+                   {key: float(value) for key, value in finished_at.items()})
 
 
 @dataclass(frozen=True)
@@ -298,17 +314,11 @@ def jobs_held_open(jobs: Path) -> set[str] | None:
     return held
 
 
-def _newer(path: Path, cutoff: float) -> bool:
+def _changed_after(path: Path, when: float) -> bool:
     try:
-        return path.lstat().st_mtime >= cutoff
+        return path.lstat().st_mtime > when
     except FileNotFoundError:
         return False
-
-
-def _launched_since(folder: Path, job_id: str, cutoff: float) -> bool:
-    records = [path for path in folder.iterdir() if path.name.startswith(WORKER_RECORD)]
-    marks = (folder.parent / f"{job_id}.launched", folder.parent / f"{job_id}{CLAIMED}")
-    return any(_newer(path, cutoff) for path in (*marks, *records))
 
 
 def runner_locks() -> bool:
@@ -316,10 +326,65 @@ def runner_locks() -> bool:
 
 
 @contextmanager
-def _claim_lock(jobs: Path, job_id: str) -> Iterator[None]:
-    with open(jobs / f"{job_id}{LOCK}", "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        yield
+def _claim_lock(jobs: Path, job_id: str, *, wait: bool = True,
+                create: bool = True) -> Iterator[bool]:
+    try:
+        opened = open(jobs / f"{job_id}{LOCK}", "a" if create else "r")
+    except FileNotFoundError:
+        if create:
+            raise
+        yield True
+        return
+    with opened as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        except BlockingIOError:
+            yield False
+            return
+        yield True
+
+
+def _worker_tags(folder: Path, job_id: str) -> list[str]:
+    tags = {match.group(1) for path in folder.iterdir()
+            if (match := _RECORD_TAG.match(path.name))}
+    run = folder.parent / f"{job_id}.run"
+    if run.is_dir():
+        tags |= {path.name for path in run.iterdir()
+                 if _TAG.fullmatch(path.name) and path.is_dir() and not path.is_symlink()}
+    return sorted(tags)
+
+
+def _worker_reason(folder: Path, job_id: str) -> str | None:
+    for tag in _worker_tags(folder, job_id):
+        try:
+            state = remote.worker_state(subprocess.run(
+                ["sh", "-c", remote.worker_check_script(str(folder), tag)],
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=120, check=False,
+            ).returncode)
+        except (OSError, subprocess.TimeoutExpired):
+            return WORKER_UNSURE
+        if state != remote.GONE:
+            return WORKER_LIVE if state == remote.RUNNING else WORKER_UNSURE
+    return None
+
+
+def _worktree_reason(jobs: Path, job_id: str) -> str | None:
+    record = jobs / f"{job_id}.json"
+    if not record.exists() and not record.is_symlink():
+        return None
+    live = worktrees.record_owner_live(record)
+    if live is None:
+        return WORKTREE_RECORD
+    return WORKTREE_OWNER_LIVE if live else None
+
+
+def _live_reason(folder: Path, job_id: str, own_finish: float,
+                 scan: Callable[[Path], set[str] | None]) -> str | None:
+    jobs = folder.parent
+    if any(_changed_after(jobs / f"{job_id}{mark}", own_finish) for mark in (CLAIMED, LAUNCHED)):
+        return CLAIMED_SINCE
+    return (_worktree_reason(jobs, job_id) or _worker_reason(folder, job_id)
+            or _in_use(folder, scan))
 
 
 def _in_use(folder: Path, scan: Callable[[Path], set[str] | None]) -> str | None:
@@ -329,14 +394,6 @@ def _in_use(folder: Path, scan: Callable[[Path], set[str] | None]) -> str | None
     if folder.name in held:
         return HELD_OPEN
     return None
-
-
-def _device_reason(folder: Path, cutoff: float, scan: Callable[[Path], set[str] | None]) -> str | None:
-    if (folder.parent / f"{folder.name}.json").exists():
-        return WORKTREE_RECORD
-    if _newer(folder, cutoff) or _launched_since(folder, folder.name, cutoff):
-        return RECENT
-    return _in_use(folder, scan)
 
 
 def _removable(folder: Path) -> list[Path]:
@@ -387,21 +444,22 @@ def _hold(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None]) -> Re
         if job_id not in plan.finished:
             kept[job_id] = NOT_NAMED
             continue
+        if not locks:
+            kept[job_id] = CANNOT_LOCK
+            continue
         try:
-            reason = _device_reason(folder, plan.cutoff, scan) if locks else CANNOT_LOCK
-            if reason is not None:
-                kept[job_id] = reason
-            elif plan.dry_run:
-                removed[job_id] = disk_bytes(_removable(folder))
-            elif job_id in held:
-                kept[job_id] = f"error: {job_id}{SET_ASIDE} is still there"
-            else:
-                with _claim_lock(jobs, job_id):
-                    if _launched_since(folder, job_id, plan.cutoff):
-                        kept[job_id] = RECENT
-                    else:
-                        folder.rename(folder.with_name(job_id + SET_ASIDE))
-                        held.append(job_id)
+            with _claim_lock(jobs, job_id, wait=False, create=not plan.dry_run) as locked:
+                reason = (_live_reason(folder, job_id, plan.own_finish(job_id), scan)
+                          if locked else LOCK_HELD)
+                if reason is not None:
+                    kept[job_id] = reason
+                elif plan.dry_run:
+                    removed[job_id] = disk_bytes(_removable(folder))
+                elif job_id in held:
+                    kept[job_id] = f"error: {job_id}{SET_ASIDE} is still there"
+                else:
+                    folder.rename(folder.with_name(job_id + SET_ASIDE))
+                    held.append(job_id)
         except OSError as exc:
             kept[job_id] = f"error: could not set aside {folder}: {exc}".splitlines()[0]
     return Report(removed, kept, plan.dry_run, tuple(sorted(held)))
@@ -413,9 +471,7 @@ def _finish_reason(aside: Path, job_id: str, plan: Plan, locks: bool,
         return NOT_NAMED
     if not locks:
         return CANNOT_LOCK
-    if _launched_since(aside, job_id, plan.cutoff):
-        return RECENT
-    return _in_use(aside, scan)
+    return _live_reason(aside, job_id, plan.own_finish(job_id), scan)
 
 
 def _finish(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None]) -> Report:
@@ -516,7 +572,9 @@ def clean_target(transport: CaptureTransport, target: Target, db: Path, plan: Pl
         return held
     reread = keep_reasons(read_jobs(db), plan.cutoff)
     confirmed = frozenset(i for i in hold.held if i in reread and reread[i] is None)
-    finish = _device_call(transport, target, Plan(confirmed, plan.cutoff, False, FINISH))
+    finish = _device_call(transport, target, Plan(
+        confirmed, plan.cutoff, False, FINISH,
+        {i: at for i, at in plan.finished_at.items() if i in confirmed}))
     if isinstance(finish, str):
         return f"set aside {len(hold.held)} checkouts, then {finish}"
     taken_back = {i: reread.get(i) or RECENT for i in hold.held if i not in finish.removed}
@@ -527,8 +585,11 @@ def clean_target(transport: CaptureTransport, target: Target, db: Path, plan: Pl
 def run(db: Path, machines, transport: CaptureTransport, *, now: float, grace_hours: float,
         dry_run: bool) -> list[tuple[Target, Report | str]]:
     cutoff = now - grace_hours * 3600
-    reasons = keep_reasons(read_jobs(db), cutoff)
-    plan = Plan(frozenset(i for i, r in reasons.items() if r is None), cutoff, dry_run)
+    rows = read_jobs(db)
+    reasons = keep_reasons(rows, cutoff)
+    finished_at = {row.id: row.finished_at for row in rows
+                   if reasons[row.id] is None and row.finished_at is not None}
+    plan = Plan(frozenset(finished_at), cutoff, dry_run, HOLD, finished_at)
     found = {(t.device, t.remote.workdir_root): t for t in targets(machines)}
     work = list(found.values())
     if not work:

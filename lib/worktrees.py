@@ -539,6 +539,12 @@ def _live_owner(data: dict) -> int | None:
     return pid
 
 
+def record_owner_live(record: Path) -> bool | None:
+    """Whether the process that owns a `<job-id>.json` record still runs; None when unreadable."""
+    data = _read_record(record)
+    return None if data is None else _live_owner(data) is not None
+
+
 def process_start(pid: int) -> str | None:
     """A pid's start time, recorded beside it so a reused pid is not mistaken."""
     return _process_start(pid)

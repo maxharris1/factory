@@ -462,7 +462,7 @@ def scope_record(tag: str) -> str:
 
 
 def _darwin_worker(
-    target: RemoteTarget,
+    job_dir: str,
     *,
     gone: str,
     unsure: str,
@@ -500,7 +500,7 @@ def _darwin_worker(
     numbers, awk read less than the whole listing, failed, or printed
     anything but three fields of 0 or 1).
     """
-    directory = shlex.quote(target.job_dir)
+    directory = shlex.quote(job_dir)
     empty_group_is_gone = (
         f"{_DARWIN_LIST} || {blind}; "
         'set -f; set -- $o; set +f; w=$(($# / 3)); '
@@ -755,20 +755,27 @@ def start_script(
 
 def check_script(target: RemoteTarget) -> str:
     """Exit 1 while the job's worker runs, 0 once it is gone, 3 when unsure."""
-    return _sh(f"t={target.require_tag()}; {_check_body(target)}")
+    return _sh(f"t={target.require_tag()}; {_check_body(target.job_dir)}")
 
 
-def _check_body(target: RemoteTarget, *, fence: bool = True, claim: bool = False) -> str:
+def worker_check_script(job_dir: str, tag: str) -> str:
+    """Exit 1 while tag's worker in job_dir runs, 0 once it is gone, 3 when unsure."""
+    if not _TAG.fullmatch(tag):
+        raise RemoteError("worker tag is not 32 lowercase hex digits")
+    return _sh(f"t={tag}; {_check_body(job_dir, fence=False)}")
+
+
+def _check_body(job_dir: str, *, fence: bool = True, claim: bool = False) -> str:
     """check_script's test for the worker whose tag is in $t (fence: _darwin_worker).
 
     claim (Linux): first take the start's record as _darwin_worker's fence
     does, or be unsure, so a start of $t not yet recorded refuses and never
     runs after this check says gone, even one the process scan missed.
     """
-    directory = shlex.quote(target.job_dir)
-    pid_file = shlex.quote(f"{target.job_dir}/{PID_FILE}")
+    directory = shlex.quote(job_dir)
+    pid_file = shlex.quote(f"{job_dir}/{PID_FILE}")
     darwin = _darwin_worker(
-        target, gone="exit 0", unsure="exit 3", running="exit 1", blind="exit 3", fence=fence
+        job_dir, gone="exit 0", unsure="exit 3", running="exit 1", blind="exit 3", fence=fence
     )
     record = (
         f'r={directory}/{start_record("$t")}; if [ ! -e "$r" ]; then '
@@ -813,7 +820,7 @@ def fenced_check_script(target: RemoteTarget) -> str:
         'if (umask 077 && mkdir -- "$R/$t") 2>/dev/null; then '
         f'echo {START_REFUSED} > "$R/$t/exit" 2>/dev/null || :; '
         'elif [ ! -d "$R/$t" ]; then exit 3; fi; '
-        f"{_check_body(target, claim=True)}"
+        f"{_check_body(target.job_dir, claim=True)}"
     )
 
 
@@ -837,7 +844,7 @@ def stop_script(target: RemoteTarget, *, kill: bool = False) -> str:
     )
     resume = 'for q in $a; do kill -CONT "$q" 2>/dev/null; done; ' if kill else ""
     darwin = _darwin_worker(
-        target,
+        target.job_dir,
         gone="exit 0",
         unsure="exit 0",
         running=f'{{ kill -{sig} -"$p" 2>/dev/null; exit 0; }}',
@@ -1078,7 +1085,7 @@ def launch_script(
         'c="$R/current"; '
         'if { read -r o < "$c"; } 2>/dev/null && [ -n "$o" ] && [ "$o" != "$t" ] '
         '&& [ ! -e "$R/$o/exit" ]; then '
-        f'(t=$o; {_check_body(target)}) || {{ echo {START_REFUSED} > "$T/exit"; say busy; exit 0; }}; '
+        f'(t=$o; {_check_body(target.job_dir)}) || {{ echo {START_REFUSED} > "$T/exit"; say busy; exit 0; }}; '
         "fi; "
         'printf "%s\\n" "$t" > "$c.$$" && mv -f -- "$c.$$" "$c" '
         f'|| {{ echo {START_REFUSED} > "$T/exit"; say refused current; exit 0; }}; '
@@ -1119,7 +1126,7 @@ def poll_script(target: RemoteTarget, offset: int, chunk: int) -> str:
         'e=; [ -f "$T/exit" ] && { read -r e < "$T/exit"; } 2>/dev/null; '
         'if [ -n "$e" ]; then st=exited; '
         'elif [ ! -f "$T/pid" ]; then st=unsure; '
-        f'else ({_check_body(target, fence=False)}); '
+        f'else ({_check_body(target.job_dir, fence=False)}); '
         'case $? in 0) st=gone;; 1) st=running;; *) st=unsure;; esac; '
         '[ -f "$T/exit" ] && { read -r e < "$T/exit"; } 2>/dev/null; '
         'if [ -n "$e" ]; then st=exited; '
@@ -1487,14 +1494,12 @@ def check_worker(transport: Transport, target: RemoteTarget, *, fence: bool = Tr
     of the tag can still reach the device (it answered and none went unanswered).
     """
     script = fenced_check_script(target) if fence else check_script(target)
-    code = transport.run(ssh_argv(target, script), timeout=PROBE_TIMEOUT_SECONDS)
-    if code == 0:
-        return GONE
-    if code == 1:
-        return RUNNING
-    if code == SSH_UNREACHABLE:
-        return UNREACHABLE
-    return UNKNOWN
+    return worker_state(transport.run(ssh_argv(target, script), timeout=PROBE_TIMEOUT_SECONDS))
+
+
+def worker_state(code: int) -> str:
+    """A worker check's exit code as GONE, RUNNING, UNREACHABLE (ssh's 255) or UNKNOWN."""
+    return {0: GONE, 1: RUNNING, SSH_UNREACHABLE: UNREACHABLE}.get(code, UNKNOWN)
 
 
 def stop_worker(transport: Transport, target: RemoteTarget, *, kill: bool = False) -> bool:

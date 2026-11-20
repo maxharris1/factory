@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import fcntl
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -334,12 +335,11 @@ def test_failed_job_is_released_once_its_ticket_has_no_live_job(tmp_path: Path) 
 
 def test_device_guards_keep_recent_held_and_unscannable_folders(tmp_path: Path) -> None:
     root = work_root(tmp_path)
-    for job_id in ("launched", "worker", "held", "free"):
+    for job_id in ("launched", "held", "free"):
         job_folder(root, job_id)
     jobs = root / "jobs"
     os.utime(jobs / "launched.launched", (NOW, NOW))
-    os.utime(jobs / "worker" / ".orch-worker.pid", (NOW, NOW))
-    plan = Plan(frozenset({"launched", "worker", "held", "free"}), NOW - 6 * HOUR, False)
+    plan = Plan(frozenset({"launched", "held", "free"}), NOW - 6 * HOUR, False)
     sleeper = subprocess.Popen(["sleep", "60"], cwd=jobs / "held" / "repo")
     try:
         report = device_pass(root, plan)
@@ -348,7 +348,7 @@ def test_device_guards_keep_recent_held_and_unscannable_folders(tmp_path: Path) 
         sleeper.kill()
         sleeper.wait()
 
-    assert report.kept == {"launched": "recent", "worker": "recent", "held": "held-open"}
+    assert report.kept == {"launched": "claimed-since", "held": "held-open"}
     assert set(report.removed) == {"free"}
     job_folder(root, "free2")
     blind = device_pass(root, Plan(frozenset({"free2"}), NOW - 6 * HOUR, False),
@@ -382,7 +382,7 @@ def test_backlog_sweep_of_mixed_folders_removes_only_finished_checkouts(
         job_folder(root, job_id, size=size)
     for job_id in ("running1", "held1", "stray1", "wt1", "recent1"):
         job_folder(root, job_id)
-    (jobs / "wt1.json").write_text("{}")
+    (jobs / "wt1.json").write_text("not json")
     (jobs / "notes.txt").write_text("not a job folder")
     db = database(tmp_path, [
         ("done1", "t1", "done", OLD),
@@ -875,7 +875,7 @@ def test_a_job_claimed_during_the_pass_keeps_its_checkout_and_its_worker_sees_it
     assert (jobs / "j" / "README").read_text() == "checkout\n"
     assert not (jobs / "j.cleanup").exists()
     assert job_cleanup.read_jobs(db)[0].state == "running"
-    assert report.removed == {} and report.kept["j"] in ("live", "recent")
+    assert report.removed == {} and report.kept["j"] in ("live", "recent", "claimed-since")
 
 
 def hold_lock(path: Path, seconds: float, then_touch: Path | None = None) -> subprocess.Popen:
@@ -912,19 +912,6 @@ def test_a_checkout_waits_while_cleanup_holds_the_job_lock(tmp_path: Path) -> No
     assert (jobs / "j.claimed").stat().st_mtime > wall_clock_days_ago(1 / 24)
 
 
-def test_the_hold_waits_for_a_claim_in_progress_and_keeps_the_folder(tmp_path: Path) -> None:
-    root = work_root(tmp_path)
-    folder = job_folder(root, "j", when=wall_clock_days_ago())
-    jobs = root / "jobs"
-    holder = hold_lock(jobs / "j.lock", 1.0, then_touch=jobs / "j.claimed")
-    began = time.monotonic()
-
-    hold = job_cleanup.device_step(root, Plan(frozenset({"j"}), wall_clock_days_ago(0.25), False))
-
-    assert time.monotonic() - began >= 0.8
-    holder.wait(timeout=10)
-    assert hold.kept == {"j": "recent"} and hold.held == ()
-    assert (folder / "repo" / "README").exists() and not (jobs / "j.cleanup").exists()
 
 
 @pytest.mark.parametrize("dry_run", [True, False])
@@ -956,3 +943,178 @@ def test_a_claim_moves_a_set_aside_checkout_back_and_leaves_one_beside_a_present
     (jobs / "j.cleanup" / "stale").write_text("x")
     assert "reused" in runner.checkout()
     assert (jobs / "j.cleanup" / "stale").exists() and (jobs / "j" / "README").exists()
+
+
+DEAD_BOOT = "00000000-0000-0000-0000-000000000000"
+TAG = "0123456789abcdef0123456789abcdef"
+
+
+def snapshot(jobs: Path, job_id: str) -> dict[str, bytes | None]:
+    paths = [jobs / job_id, *(jobs / job_id).rglob("*"),
+             *(path for path in jobs.iterdir() if path.name.startswith(f"{job_id}."))]
+    return {str(path.relative_to(jobs)): None if path.is_dir() or path.is_symlink()
+            else path.read_bytes() for path in paths if ".tree.pid" not in path.name}
+
+
+def finished_with_leftovers(root: Path, job_id: str, *, tag: str = TAG) -> Path:
+    folder = job_folder(root, job_id)
+    jobs = root / "jobs"
+    (folder / ".orch-worker.pid").write_text(f"99999 {DEAD_BOOT}\n")
+    (folder / f".orch-worker-{tag}.pid").write_text(
+        f"99999 {DEAD_BOOT} {tag} Mon Jan  1 00:00:00 2024\n")
+    (jobs / f"{job_id}.run" / tag).mkdir()
+    (jobs / f"{job_id}.claimed").touch()
+    (jobs / f"{job_id}.lock").touch()
+    for path in (folder, *jobs.glob(f"{job_id}.*")):
+        age(path, OLD - HOUR)
+    return folder
+
+
+def live_cases_unchanged(root: Path, job_id: str, reason: str,
+                         rows: list[tuple[str, str, str, float | None]], tmp_path: Path) -> None:
+    jobs = root / "jobs"
+    before = snapshot(jobs, job_id)
+    db = database(tmp_path, rows)
+
+    [(_, report)] = job_cleanup.run(db, machines(tmp_path, "pc"), InProcessTransport(root),
+                                    now=NOW, grace_hours=6, dry_run=False)
+
+    assert report.removed == {} and report.kept == {job_id: reason}
+    assert snapshot(jobs, job_id) == before
+    assert not (root / "jobs-kept").exists()
+
+
+def test_leftover_claimed_and_lock_from_the_jobs_own_run_do_not_block(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    folder = finished_with_leftovers(root, "j")
+    (root / "jobs" / "j.json").write_text(json.dumps({"job_id": "j", "pid": dead_pid()}))
+    db = database(tmp_path, [("j", "t1", "done", OLD)])
+
+    [(_, report)] = job_cleanup.run(db, machines(tmp_path, "pc"), InProcessTransport(root),
+                                    now=NOW, grace_hours=6, dry_run=False)
+
+    assert set(report.removed) == {"j"} and report.kept == {}
+    assert not (folder / "repo").exists() and not (folder / "top-file").exists()
+
+
+def test_a_held_lock_keeps_the_folder_without_waiting(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    finished_with_leftovers(root, "j")
+    holder = hold_lock(root / "jobs" / "j.lock", 60)
+    began = time.monotonic()
+    try:
+        live_cases_unchanged(root, "j", "lock-held", [("j", "t1", "done", OLD)], tmp_path)
+    finally:
+        holder.kill()
+        holder.wait()
+    assert time.monotonic() - began < 30
+
+
+def test_a_claim_after_the_jobs_own_finish_keeps_the_folder(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    finished_with_leftovers(root, "j")
+    os.utime(root / "jobs" / "j.claimed", (OLD + HOUR, OLD + HOUR))
+    live_cases_unchanged(root, "j", "claimed-since", [("j", "t1", "done", OLD)], tmp_path)
+
+
+def test_a_live_worktree_owner_keeps_the_folder(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    finished_with_leftovers(root, "j")
+    (root / "jobs" / "j.json").write_text(json.dumps({"job_id": "j", "pid": os.getpid()}))
+    age(root / "jobs" / "j.json", OLD)
+    live_cases_unchanged(root, "j", "worktree-owner-live", [("j", "t1", "done", OLD)], tmp_path)
+
+
+def test_an_unsure_worker_check_keeps_the_folder(tmp_path: Path, monkeypatch) -> None:
+    root = work_root(tmp_path)
+    finished_with_leftovers(root, "j")
+    seen = []
+    monkeypatch.setattr(job_cleanup.remote, "worker_check_script",
+                        lambda job_dir, tag: seen.append((job_dir, tag)) or "exit 3")
+    live_cases_unchanged(root, "j", "worker-unsure", [("j", "t1", "done", OLD)], tmp_path)
+    assert seen == [(str(root / "jobs" / "j"), TAG)]
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the Linux check reads /proc environments")
+def test_a_live_tagged_worker_keeps_the_folder_on_linux(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    finished_with_leftovers(root, "j")
+    worker = subprocess.Popen(["sleep", "60"], cwd=tmp_path,
+                              env={**os.environ, remote.TAG_ENV: TAG})
+    try:
+        live_cases_unchanged(root, "j", "worker-live", [("j", "t1", "done", OLD)], tmp_path)
+    finally:
+        worker.kill()
+        worker.wait()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the Darwin check reads the start's record")
+def test_a_live_recorded_worker_keeps_the_folder_on_darwin(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    folder = finished_with_leftovers(root, "j")
+    worker = subprocess.Popen(["sleep", "60"], cwd=tmp_path, start_new_session=True)
+    try:
+        boot = subprocess.run(["sysctl", "-n", "kern.bootsessionuuid"], capture_output=True,
+                              text=True, check=True).stdout.strip()
+        started = " ".join(subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(worker.pid)], capture_output=True, text=True,
+            check=True, env={**os.environ, "LC_ALL": "C", "TZ": "UTC0"}).stdout.split())
+        record = folder / f".orch-worker-{TAG}.pid"
+        record.write_text(f"{worker.pid} {boot} {TAG} {started}\n")
+        age(record, OLD - HOUR)
+        live_cases_unchanged(root, "j", "worker-live", [("j", "t1", "done", OLD)], tmp_path)
+    finally:
+        worker.kill()
+        worker.wait()
+
+
+def test_a_worker_that_starts_between_hold_and_finish_keeps_the_folder(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = work_root(tmp_path)
+    finished_with_leftovers(root, "j")
+    jobs = root / "jobs"
+    plan = Plan(frozenset({"j"}), NOW - 6 * HOUR, False, finished_at={"j": OLD})
+    hold = job_cleanup.device_step(root, plan)
+    assert hold.held == ("j",)
+    monkeypatch.setattr(job_cleanup.remote, "worker_check_script", lambda job_dir, tag: "exit 1")
+
+    done = job_cleanup.device_step(
+        root, Plan(frozenset({"j"}), plan.cutoff, False, job_cleanup.FINISH, {"j": OLD}))
+
+    assert done.removed == {} and done.kept == {"j": "worker-live"}
+    assert (jobs / "j" / "repo" / "README").exists() and not (jobs / "j.cleanup").exists()
+
+
+def test_the_plan_carries_each_jobs_finish_time_to_the_device(tmp_path: Path) -> None:
+    plan = Plan(frozenset({"a", "b"}), NOW, True, finished_at={"a": OLD, "b": OLD + 1})
+    assert Plan.parse(plan.to_json()) == plan
+    legacy = Plan.parse(json.dumps({"finished": ["a"], "cutoff": NOW, "dry_run": False}))
+    assert legacy.own_finish("a") == NOW
+    with pytest.raises(ValueError):
+        Plan.parse(json.dumps({"finished": ["a"], "cutoff": NOW, "dry_run": False,
+                               "finished_at": {"../x": 1.0}}))
+
+
+def dead_pid() -> int:
+    child = subprocess.Popen(["true"])
+    child.wait()
+    return child.pid
+
+
+def test_a_dry_run_reports_a_held_lock_and_writes_nothing(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    finished_with_leftovers(root, "held")
+    job_folder(root, "free")
+    jobs = root / "jobs"
+    holder = hold_lock(jobs / "held.lock", 60)
+    try:
+        before = sorted(path.name for path in jobs.iterdir())
+        dry = job_cleanup.device_step(
+            root, Plan(frozenset({"held", "free"}), NOW - 6 * HOUR, True))
+    finally:
+        holder.kill()
+        holder.wait()
+
+    assert dry.kept == {"held": "lock-held"} and set(dry.removed) == {"free"}
+    assert sorted(path.name for path in jobs.iterdir()) == before
