@@ -2014,7 +2014,8 @@ PHONE_LAYOUT = r"""
   return {order: Object.entries(tops).filter(([, r]) => r).sort((a, b) => a[1].top - b[1].top).map(([k]) => k),
           runlog: tops.runlog && [tops.runlog.left, tops.runlog.right], journey: tops.journey && [tops.journey.left, tops.journey.right],
           cols: new Set(tiles.map(r => Math.round(r.left))).size, rows: new Set(tiles.map(r => Math.round(r.top))).size,
-          open: chart.open, scrollWidth: document.documentElement.scrollWidth, innerWidth: innerWidth};
+          open: chart.open, scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth,
+          innerWidth: innerWidth};
 })()"""
 
 
@@ -2050,7 +2051,8 @@ def test_on_a_phone_the_ticket_page_reads_live_run_journey_run_log_next_then_cha
             stacked = found[kind, width]
             assert stacked["order"] == order, (kind, width)
             assert stacked["runlog"] == stacked["journey"], (kind, width)
-            assert stacked["scrollWidth"] == stacked["innerWidth"] == width, (kind, width)
+            assert stacked["innerWidth"] == width, (kind, width)
+            assert stacked["scrollWidth"] == stacked["clientWidth"] <= width, (kind, width)
 
 
 def _current_node(snapshot: dict, address: str) -> tuple[float, float]:
