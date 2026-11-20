@@ -11,7 +11,9 @@ to devices (orch.yml projects[].devices, #1172) takes only a listed device;
 with none free it stays queued and the next job in claim order is tried.
 Both writes happen
 in one BEGIN IMMEDIATE transaction, so two claims cannot take the same
-last slot. Slots are generic: any free slot on an eligible device takes
+last slot. A pinned project's QA job (recipient 'qa') holds a slot on a listed
+device too, a row in `qa_device_slots` written by `place_qa` in the QA claim's
+own transaction. Slots are generic: any free slot on an eligible device takes
 any harness. Inside that transaction a pool given `machines_path` reads
 the shared settings row (lib/live_settings.py, #852) with machines.yml as
 it is now written into it, and places by the row's enabled, drain and
@@ -31,7 +33,10 @@ A queued job never holds a slot. Requeueing a claimed job
 claim drops any slot row left on a queued job before counting, so a
 requeued job can always be claimed again.
 
-Finishing, failing or timing out a job does not free its slot. Apart
+A QA slot counts only while its job is running: it needs no release,
+since no device worker runs it.
+
+Finishing, failing or timing out a harness job does not free its slot. Apart
 from a requeue, only `DevicePool.release` frees a slot, and F2-02 calls
 it only once the worker is confirmed gone: `orch job run` after its
 command exits (a remote worker is checked over SSH first), or the
@@ -100,6 +105,7 @@ from lib.schema import HARNESSES
 HEALTH_TABLE = "device_health"
 BACKOFF_TABLE = "device_backoff"
 ORPHANS_TABLE = "device_orphans"
+QA_SLOTS_TABLE = "qa_device_slots"
 UNREACHABLE_BACKOFF_SECONDS = 5 * 60
 # Columns F2-02 added to the F2-01 slot table, added in place on an old database.
 _SLOT_COLUMNS = (
@@ -320,19 +326,50 @@ class DevicePool:
             connection.commit()
         return config.serving(harness)
 
-    def room_for(self, repo: str) -> bool:
+    def place_qa(self, connection: sqlite3.Connection, job_id: str, repo: str) -> bool:
+        """Hold a slot for a pinned project's QA job on a listed device.
+
+        Runs inside the caller's open BEGIN IMMEDIATE transaction, the one
+        that moves the job to running. True for an unpinned project, which
+        holds no slot; False when no listed device has a free slot, and for
+        every project while the pins are unknown (None).
+        """
         pins = self.pins()
         if pins is None:
             return False
         allowed = pins.get(repo.lower())
         if allowed is None:
             return True
-        with self.queue.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            config, _ = self._placement(connection)
-            used = _used(connection, config)
-            connection.commit()
-        return any(free_slots(config, harness, used, allowed=allowed) for harness in HARNESSES)
+        now = self.queue.now()
+        config, _ = self._placement(connection)
+        blocked = placement_blocked(connection, now, config, self.head())
+        used = _used(connection, config)
+        for harness in sorted(HARNESSES):
+            device = choose_device(config, harness, used, blocked, allowed=allowed)
+            if device is not None:
+                break
+        else:
+            return False
+        connection.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {QA_SLOTS_TABLE} (
+                job_id TEXT PRIMARY KEY,
+                device TEXT NOT NULL,
+                placed_at REAL NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            f"""
+            DELETE FROM {QA_SLOTS_TABLE}
+            WHERE job_id NOT IN (SELECT id FROM jobs WHERE state = 'running')
+            """
+        )
+        connection.execute(
+            f"INSERT OR REPLACE INTO {QA_SLOTS_TABLE} (job_id, device, placed_at) VALUES (?, ?, ?)",
+            (job_id, device.name, now),
+        )
+        return True
 
     def claim(
         self,
@@ -1062,8 +1099,8 @@ def _used(
     connection: sqlite3.Connection,
     config: MachinesConfig | None = None,
 ) -> dict[str, int]:
-    """Held slots per device, plus every running harness job that has no
-    placement (a claim made without a device, issue #90) on the orch host.
+    """Held slots per device, running QA jobs' slots, plus every running
+    harness job that has no placement (a claim made without a device, issue #90) on the orch host.
 
     Such a job runs on the orch host all the same, so it takes a slot there:
     the host never runs more than its slot_max, however the job was claimed.
@@ -1080,6 +1117,16 @@ def _used(
                 f"SELECT device, COUNT(*) FROM {SLOTS_TABLE} GROUP BY device"
             )
         }
+    if _has_table(connection, QA_SLOTS_TABLE):
+        for device, count in connection.execute(
+            f"""
+            SELECT slots.device, COUNT(*) FROM {QA_SLOTS_TABLE} AS slots
+            JOIN jobs ON jobs.id = slots.job_id
+            WHERE jobs.state = 'running'
+            GROUP BY slots.device
+            """
+        ):
+            used[str(device)] = used.get(str(device), 0) + int(count)
     harnesses = sorted(HARNESSES)
     marks = ", ".join("?" for _ in harnesses)
     unplaced_filter = (

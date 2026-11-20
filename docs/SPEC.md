@@ -355,7 +355,7 @@ One wake: the same pass checks every primary row reported `FAIL`. When its comme
 
 **The tick.**
 
-1. Claim. Walk `claim_order(conn, "qa")`. Skip a job whose runner is not registered, is backed off, yields to its shared account (below), or is at `qa.max_cloud_lanes`, or whose project is pinned to devices none of which has a free slot (section 7, Project devices); a skipped job blocks nothing behind it. A job skipped for the cap, a backed-off runner, a shared account or a full pin gets its queue-wait clock restarted, so waiting is not a timeout. A claimed job's first lane is reserved `launching` in the same transaction as the cap count. A job whose detail has no `live` (queued before this worker) is finished failed and never retried.
+1. Claim. Walk `claim_order(conn, "qa")`. Skip a job whose runner is not registered, is backed off, yields to its shared account (below), or is at `qa.max_cloud_lanes`, or whose project is pinned to devices none of which has a free slot (section 7, Project devices); a skipped job blocks nothing behind it. A job skipped for the cap, a backed-off runner, a shared account or a full pin gets its queue-wait clock restarted, so waiting is not a timeout. A claimed job's first lane is reserved `launching`, and a pinned project's job takes its slot on a listed device, in the same transaction as the cap count. A job whose detail has no `live` (queued before this worker) is finished failed and never retried.
 2. Advance. Check for cancel and launch reserved lanes, in lane number order. Then grant: a running job whose first lane has started takes its next slices, one lane each, while its runner has room after one lane for each job still waiting on that runner. Then read each running lane's result through the evidence intake (Lane rules, Read), so a slice the cap has room for is reserved before a relaunch takes a number. The job is heartbeated (`owner=qa`) only after a pass that raised nothing, so a run that fails every tick times out and is cancelled.
 3. Finish. When every slice has a final row, or any slice is a gap and no lane is open, the run finishes in this order:
    1. Decide (Decision, below).
@@ -1197,11 +1197,15 @@ whose devices all lack the harness never places the job, and the job times
 out as a job with no eligible device does. Repo names match case-blind.
 
 A pinned project's `qa` job (recipient `qa`) runs its lanes on the cloud
-runner and holds no device slot, but it starts only while a listed device
-has a free slot for some harness. While none has, `orch qa-worker` leaves
-the job queued and restarts its queue wait on each tick, as for the lane
-cap, so the job waits and is never timed out for it. An unpinned project's
-`qa` job is claimed as before.
+runner and also holds a slot on a listed device. `orch qa-worker` takes the
+slot (a row in `qa_device_slots`, on a device free for some harness) in the
+transaction that moves the job to running, so no harness claim can take
+that slot in between. The slot counts with the device slots while the job
+runs and is free once the job leaves running, with no release. While no
+listed device has a free slot, the worker leaves the job queued and restarts
+its queue wait on each tick, as for the lane cap, so the job waits and is
+never timed out for it. An unpinned project's `qa` job holds no slot and is
+claimed as before.
 
 `orch wait`, `orch poll` and `orch qa-worker` each read orch.yml (their
 `--orch`, else the checkout's `orch.yml`) with its overlay on each claim or

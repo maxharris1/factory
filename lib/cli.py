@@ -1020,7 +1020,7 @@ def _qa_runtime(path: Path, config: OrchConfig, orch_path: Path | None = None) -
         log=lambda line: print(f"orch qa-worker: {line}", file=sys.stderr, flush=True),
         evidence={p.repo.lower(): p.qa_storage for p in config.projects if p.qa_storage},
         linear=HttpLinear(linear_key) if linear_key else None,
-        placeable=(lambda repo: True) if pool is None else pool.room_for,
+        place=(lambda connection, job_id, repo: True) if pool is None else pool.place_qa,
     )
 
 
