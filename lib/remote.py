@@ -95,11 +95,7 @@ the bot's login shell is (bash on Linux, zsh on macOS).
 keeps its files in `<workdir>/jobs/<job-id>.run/<tag>/`, and the box follows
 it with `poll_script` (lib/remote_follow.py). check and stop are unchanged:
 they find the detached start by its tag or record as before; the stop of
-a cancelled, exited or gone run escalates to SIGKILL. #1210: once the
-start exits, however it ended, the wrapper itself kills every process the
-run left (the stop with kill, until the check says gone) before it writes
-`exit`, so a leaked dev server never outlives its harness, whether or not
-the box still follows the run. #679: the box's check
+a cancelled, exited or gone run escalates to SIGKILL. #679: the box's check
 (`check_worker`) first makes the tag's run directory itself, so a launch
 that reaches the device after it starts nothing (`fenced_check_script`).
 
@@ -857,11 +853,9 @@ def fenced_check_script(target: RemoteTarget) -> str:
 def stop_script(target: RemoteTarget, *, kill: bool = False) -> str:
     """SIGTERM (SIGKILL with kill) each process of the run, and each tagged one's group.
 
-    With kill, the run's scope is killed first when the scope record names
-    it (#1210: `1` into its cgroup.kill, found from a member's `0::` path;
-    a kernel without the file skips this), then every member is stopped
-    (SIGSTOP), tracking again until no new one appears, so none forks a
-    process that escapes the SIGKILL.
+    With kill, the scope's cgroup.kill is written first when the scope record
+    names it (#1210), then every member is stopped (SIGSTOP), tracking again
+    until no new one appears, so none forks a process that escapes the SIGKILL.
     """
     tag = target.require_tag()
     sig = "KILL" if kill else "TERM"
@@ -1025,15 +1019,10 @@ _DEADLINE = (
     'while live; do sh -c "$5"; sleep 1; done'
 )
 
-# #1210: the wrapper's last step, once its start has exited however it
-# ended. $1 the run's directory, $2 the start's status, $3 and $4 the kill
-# and check scripts, $5 the launch call's pid. It runs without the tag and with ORCH_WORKER_DEADLINE,
-# so no check counts it or the scripts it runs, and no stop reaches it. It
-# first waits (up to 10 s) for the launch call to end, since that call
-# carries the tag and a kill would end it and its process group. Then it
-# kills every process the run left (each second until the check says gone,
-# up to WRAPPER_KILL_ROUNDS), then writes `handoff` and `exit`. A TERM or
-# INT never ends it: the wrapper ignored both before its exec into this.
+# #1210: the wrapper's last step. $1 the run's directory, $2 the start's
+# status, $3 and $4 the kill and check scripts, $5 the launch call's pid.
+# The launch call carries the tag, so the kill would end it: it waits for
+# that call first. TERM and INT stay ignored across the wrapper's exec.
 _FINISH = (
     'T=$1; r=$2; K=$3; C=$4; L=$5; k=0; '
     'while [ -n "$L" ] && kill -0 "$L" 2>/dev/null && [ "$k" -lt 100 ]; do '
@@ -1054,8 +1043,7 @@ _FINISH = (
 # the brief as its stdin and its output in `log`, records both pids, starts
 # its deadline (_DEADLINE) when it has a budget, waits for the start (again
 # after a SIGTERM, which it catches so the start keeps default handling),
-# then (#1210) execs into _FINISH, which kills what the run left before it
-# writes `handoff` and `exit`, each through a temporary file.
+# then execs into _FINISH.
 _WRAPPER = (
     'T=$1; S=$2; x=$3; K=$7; C=$8; L=$9; t=$ORCH_WORKER_TAG; s=; trap "s=1" TERM INT; '
     + _DETACH

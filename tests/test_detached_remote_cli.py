@@ -331,7 +331,7 @@ def test_a_cancel_stops_a_child_the_harness_forks_while_it_shuts_down(
         "def stop(signum, frame):\n"
         "    if os.fork() == 0:\n"
         "        signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-        f"        open({str(child_file)!r}, 'w').write(f'{os.getpid()} {os.getpgid(0)}')\n"
+        f"        open({str(child_file)!r}, 'w').write(f'{{os.getpid()}} {{os.getpgid(0)}}')\n"
         "        time.sleep(600)\n"
         "        os._exit(0)\n"
         "    os._exit(143)\n"
@@ -405,7 +405,6 @@ def test_finish_kills_a_cancelled_worker_that_ignores_sigterm(tmp_path: Path) ->
 
 @pytest.mark.parametrize("kind", [EXITED, GONE])
 def test_finish_kills_a_leftover_of_a_run_that_exited_or_is_gone(tmp_path: Path, kind: str) -> None:
-    """#1210: a leftover that ignores SIGTERM never outlives its harness."""
     poller, job_id, placed, transport = placed_for_finish(tmp_path, FollowEnd(kind, 0))
     assert placed.finish(0) is True
     assert transport.stops == ["TERM", "KILL"]

@@ -373,8 +373,7 @@ class Tree:
             time.sleep(0.05)
 
     def kill_round(self) -> dict[int, Process]:
-        """Kill the scope's cgroup, then stop every member, look again until none
-        is new, and kill them all; the members."""
+        """Stop every member, look again until none is new, kill them all; the members."""
         members = self.track()
         if self.scope is not None:
             cgroup_kill(self.scope, members.values(), self.cgroup_root)
