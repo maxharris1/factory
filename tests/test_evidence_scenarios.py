@@ -383,6 +383,9 @@ def test_a_ready_before_the_cutoff_is_read_under_a_plan_after_it() -> None:
         ("## Plan\nNo live scenarios.\n", CUTOFF, False),
         ("```\n## Verify, live\n- qa-1 (ac-1): x Pass: y\n```\n", CUTOFF, False),
         ("## Verify, live\n\n## Risks\n", CUTOFF, True),
+        ("Run ```npm test``` first.\n\n## Verify, live\n- qa-1 (ac-1): x Pass: y\n", CUTOFF, True),
+        ("```npm test```\n\n## Verify, live\n- qa-1 (ac-1): x Pass: y\n", CUTOFF, True),
+        ("~~~ not `closed`\n## Verify, live\n~~~\n", CUTOFF, False),
         (ONE_SCENARIO.format(n=1), CUTOFF - 1, False),
     ],
 )
@@ -390,3 +393,8 @@ def test_live_section_refusal(body: str, created_at: float, refused: bool) -> No
     reason = live_section_refusal(body, created_at)
     assert (reason is not None) == refused
     assert reason is None or "Features:" in reason
+
+
+def test_an_inline_triple_backtick_span_does_not_hide_the_section() -> None:
+    body = f"{PLAN_HEADER}\n```npm test```\n\n{ONE_SCENARIO.format(n=1)}"
+    assert qa_scenarios(None, None, [comment("1", body, CUTOFF - 1)]).scenarios == (opens(1),)

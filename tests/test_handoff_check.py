@@ -81,3 +81,12 @@ def test_a_live_section_is_refused_from_the_cutoff_naming_features(kind: str) ->
     found = _check(_job(action), body, "2026-12-15T00:00:00Z")
     assert len(found) == 1
     assert "Features:" in found[0]
+
+
+@pytest.mark.parametrize("kind", ["plan", "ready"])
+def test_an_inline_triple_backtick_span_before_the_live_section_is_still_refused(kind: str) -> None:
+    action, body = LIVE_JOBS[kind]
+    body = body.replace("## Verify, live", "```npm test```\n\n## Verify, live")
+    found = _check(_job(action), body, "2026-12-15T00:00:00Z")
+    assert len(found) == 1
+    assert "Features:" in found[0]

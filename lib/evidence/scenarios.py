@@ -49,6 +49,7 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
 
 from lib.brief.common import LIVE_SECTION_CUTOFF
+from lib.dispatch.constants import _FENCE_OPEN
 from lib.dispatcher import Comment, _comment_order
 from lib.evidence.criteria import Criterion
 from lib.handoff import HandoffError, parse_comment
@@ -57,7 +58,6 @@ from lib.journeys import QaCheck, QaPlan, qa_tag
 HEADING = "## Verify, live"
 SOURCE_KINDS = ("plan", "ready")
 
-_FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _FENCE_CLOSE = re.compile(r"^ {0,3}(`{3,}|~{3,})\s*$")
 _SECTION_END = re.compile(r"^ {0,3}#{1,2}(?:[ \t]|$)")
 _PACK = re.compile(r"\bpack ([A-Za-z0-9][\w-]*)")
