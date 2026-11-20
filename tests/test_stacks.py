@@ -6,8 +6,10 @@ from datetime import datetime, timezone
 
 import pytest
 
+from lib import containers
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.stacks import (
+    KINDS,
     Container,
     Keep,
     Ledger,
@@ -15,11 +17,15 @@ from lib.stacks import (
     Remove,
     TicketFacts,
     decide,
+    list_script,
     listing_format,
     parse_listing,
     read_ledger,
+    remove_script,
     stack_name,
+    sweep,
 )
+from tests.fake_docker import Docker
 
 OWNER = ("aut0-code/aut0", "AUT-2129")
 OTHER = ("aut0-code/aut0", "AUT-7")
@@ -397,3 +403,123 @@ def test_read_ledger_without_slot_tables(orch_db):
 def test_read_ledger_raises_on_a_database_without_jobs(tmp_path):
     with pytest.raises(sqlite3.Error):
         read_ledger(sqlite3.connect(tmp_path / "empty.db"), live=())
+
+
+@pytest.mark.parametrize("kind", sorted(KINDS))
+def test_a_stack_the_fake_starts_parses_back_from_its_listing(tmp_path, monkeypatch, kind):
+    docker = Docker(tmp_path)
+    monkeypatch.setenv("PATH", docker.path())
+    started = docker.start_stack(NAME, kind, working_dir=f"{BOX_JOB}/job1/repo", created=GOOD_AT)
+    docker.start(app="web")
+
+    listed = containers.local_runner()(list_script(kind))
+
+    assert listed.code == 0, listed.stderr
+    assert parse_listing(kind, listed.stdout) == (
+        [Project(kind, NAME, (Container(started, epoch(2026, 11, 20, 13, 5, 1), f"{BOX_JOB}/job1/repo", False),))],
+        0,
+    )
+
+
+def test_a_container_started_after_the_listing_stops_the_removal_before_networks_and_volumes(
+    tmp_path, monkeypatch
+):
+    docker = Docker(tmp_path)
+    monkeypatch.setenv("PATH", docker.path())
+    listed = docker.start_stack(NAME)
+    run = containers.local_runner()
+    started = []
+
+    def runner(script):
+        if "docker rm" in script:
+            started.append(docker.start(**{KINDS["compose"]: NAME}))
+        return run(script)
+
+    finished = ledger({OWNER: facts(last=epoch(2027, 1, 1))}, {})
+    lines = sweep(runner, lambda: finished, "pc", ROOTS)
+
+    assert docker.ids() == set(started)
+    assert listed not in docker.ids()
+    assert docker.networks() == [f"{NAME}_default"]
+    assert docker.volumes() == [f"{NAME}_db"]
+    assert lines == [f"kept compose project {NAME} on pc: a container started after the listing"]
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        Project("compose", "$(touch pwned)", (Container("0123456789ab", 0.0, "", False),)),
+        Project("compose", NAME, (Container("$(touch pwned)", 0.0, "", False),)),
+    ],
+)
+def test_remove_script_refuses_a_hostile_name_or_id(hostile):
+    with pytest.raises(ValueError):
+        remove_script(hostile)
+
+
+SECOND = "aut0-aut2130-pc"
+NEWER = "2027-06-01 00:00:00 +0000 UTC"
+
+
+def labelled_helper(docker):
+    docker.start(**{KINDS["compose"]: NAME, "factory.job": "live-job"})
+
+
+def newer_compose_container(docker):
+    docker.start(NEWER, **{KINDS["compose"]: NAME})
+
+
+def unfinished_supabase_in_the_same_compose_project(docker):
+    docker.start(**{KINDS["compose"]: NAME, KINDS["supabase"]: SECOND})
+
+
+@pytest.mark.parametrize(
+    "sibling, reason",
+    [
+        pytest.param(labelled_helper, "a container is labelled factory.job", id="labelled helper"),
+        pytest.param(newer_compose_container, f"newer than {OWNER[1]}'s last finish", id="newer container"),
+        pytest.param(
+            unfinished_supabase_in_the_same_compose_project, "AUT-2130 has an unfinished job", id="through compose"
+        ),
+    ],
+)
+def test_a_supabase_project_is_kept_when_a_project_sharing_its_containers_is_kept(
+    tmp_path, monkeypatch, sibling, reason
+):
+    docker = Docker(tmp_path)
+    monkeypatch.setenv("PATH", docker.path())
+    database = docker.start_stack(NAME, "supabase")
+    sibling(docker)
+    started = docker.ids()
+    finished = ledger(
+        {OWNER: facts(last=epoch(2027, 1, 1)), ("aut0-code/aut0", "AUT-2130"): facts(finished=False)}, {}
+    )
+
+    lines = sweep(containers.local_runner(), lambda: finished, "pc", ROOTS)
+
+    assert database in docker.ids()
+    assert docker.ids() == started
+    assert docker.networks() == [f"{NAME}_default"]
+    assert docker.volumes() == [f"{NAME}_db"]
+    assert f"kept supabase project {NAME} on pc: a project sharing its containers is kept ({reason})" in lines
+    assert not any(line.startswith("removed") for line in lines)
+
+
+def test_a_compose_only_member_of_a_removed_supabase_stack_is_removed_in_the_same_sweep(tmp_path, monkeypatch):
+    docker = Docker(tmp_path)
+    monkeypatch.setenv("PATH", docker.path())
+    database = docker.start_stack(NAME, "supabase")
+    helper = docker.start(**{KINDS["compose"]: NAME})
+    docker.start(app="web")
+    unrelated = docker.ids() - {database, helper}
+    finished = ledger({OWNER: facts(last=epoch(2027, 1, 1))}, {})
+
+    lines = sweep(containers.local_runner(), lambda: finished, "pc", ROOTS)
+
+    assert docker.ids() == unrelated
+    assert docker.networks() == []
+    assert docker.volumes() == []
+    assert lines == [
+        f"removed supabase project {NAME} on pc (ticket {OWNER[1]} finished)",
+        f"removed compose project {NAME} on pc (ticket {OWNER[1]} finished)",
+    ]

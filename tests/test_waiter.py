@@ -33,10 +33,11 @@ from lib import waiter as waiter_module
 from lib.device_pool import DevicePool
 from lib.dispatcher import Comment
 from lib.job_state import RUNNING, derive, read_placements
-from lib.machines_yml import load_machines_yml
+from lib.machines_yml import load_machines_yml, orch_host
 from lib.orch_yml import load_orch_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.remote import Called
+from lib.stacks import stack_name
 from lib.waiter import (
     ContextResult,
     GhContextSource,
@@ -48,7 +49,7 @@ from lib.waiter import (
     local_only,
 )
 from tests import fake_runner
-from tests.fake_docker import Docker
+from tests.fake_docker import CREATED, Docker
 from tests.child_reaper import descendants
 from tests.pool_helpers import LOCAL_BOX_MACHINES, poller_adopts
 from tests.procs import alive
@@ -543,7 +544,7 @@ def test_the_sweep_reaches_a_remote_device_over_the_bots_own_login(
     docker = Docker(tmp_path)
     for name, value in ssh.env().items():
         monkeypatch.setenv(name, value)
-    monkeypatch.setenv("PATH", f"{ssh.bin}{os.pathsep}/usr/bin:/bin")
+    monkeypatch.setenv("PATH", f"{ssh.bin}{os.pathsep}{Docker(tmp_path / 'box').path('/usr/bin:/bin')}")
     monkeypatch.setenv("FAKE_SSH_HOME", str(docker.login_home()))
     db, queue = make_queue(tmp_path)
     config, findings = load_machines_yml(remote_machines(tmp_path, pc=enabled))
@@ -560,6 +561,143 @@ def test_the_sweep_reaches_a_remote_device_over_the_bots_own_login(
     assert docker.labelled() == [running]
     assert any(f"on pc of finished job {done}" in line for line in log), log
     assert {(call["alias"], call["user"]) for call in ssh.calls()} == {("fakepc-claude-bot", "claude-bot")}
+
+
+STACK_REPO = "aut0-code/aut0"
+TICKET_FINISHED_AT = 1780272000.0
+
+
+def ticket_job(db: Path, queue: SQLiteJobQueue, key: str, job_state: str, ticket: str = "AUT-2129") -> str:
+    job_id = enqueue(queue, key, repo=STACK_REPO, ticket_id=ticket)
+    finished_at = TICKET_FINISHED_AT if job_state in containers.FINISHED_STATES else None
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            "UPDATE jobs SET state = ?, finished_at = ? WHERE id = ?", (job_state, finished_at, job_id)
+        )
+    return job_id
+
+
+def remote_stack_sweep(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from tests.test_remote_start import Ssh
+    from tests.test_waiter_remote import remote_machines
+
+    ssh = Ssh(tmp_path)
+    docker = Docker(tmp_path)
+    box_docker = Docker(tmp_path / "box")
+    for name, value in ssh.env().items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("PATH", f"{ssh.bin}{os.pathsep}{box_docker.path('/usr/bin:/bin')}")
+    monkeypatch.setenv("FAKE_SSH_HOME", str(docker.login_home()))
+    db, queue = make_queue(tmp_path)
+    config, findings = load_machines_yml(remote_machines(tmp_path))
+    assert config is not None, findings
+    log: list[str] = []
+    waiter, now = sweeping_waiter(tmp_path, queue, db, log, pool=DevicePool(queue, config))
+    now[0] = waiter_module.CONTAINER_SWEEP_SECONDS
+    return docker, db, queue, waiter, log
+
+
+def box_stack_sweep(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    db, queue = make_queue(tmp_path)
+    docker = Docker(tmp_path)
+    monkeypatch.setenv("PATH", docker.path())
+    log: list[str] = []
+    waiter, now = sweeping_waiter(tmp_path, queue, db, log)
+    now[0] = waiter_module.CONTAINER_SWEEP_SECONDS
+    return docker, db, queue, waiter, log, now
+
+
+def test_an_unlabelled_stack_of_a_finished_ticket_is_removed_on_its_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    docker, db, queue, waiter, log = remote_stack_sweep(tmp_path, monkeypatch)
+    ticket_job(db, queue, "built", "done")
+    ticket_job(db, queue, "reviewed", "failed")
+    docker.start_stack("aut0-aut2129-pc")
+
+    waiter._reap()
+
+    assert (docker.ids(), docker.networks(), docker.volumes()) == (set(), [], [])
+    assert sum("removed compose project aut0-aut2129-pc on pc" in line for line in log) == 1, log
+
+
+@pytest.mark.parametrize(
+    ("name", "jobs", "created", "kept_because"),
+    [
+        pytest.param("aut0-aut2129-pc", {"AUT-2129": ("done", "running")}, CREATED,
+                     "AUT-2129 has an unfinished job", id="a job of its ticket runs"),
+        pytest.param("aut0-aut2130-pc", {"AUT-2129": ("done",), "AUT-2130": ("done", "queued")}, CREATED,
+                     "AUT-2130 has an unfinished job", id="its ticket has a queued job"),
+        pytest.param("aut0-aut2129-mac", {"AUT-2129": ("done",)}, CREATED, None, id="named for another device"),
+        pytest.param("aut0-aut2129-pc", {"AUT-2129": ("done",)}, "2026-07-01 00:00:00 +0000 UTC",
+                     "newer than AUT-2129's last finish", id="started after its ticket finished"),
+    ],
+)
+def test_an_unlabelled_stack_something_could_still_use_is_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name, jobs, created, kept_because
+) -> None:
+    docker, db, queue, waiter, log = remote_stack_sweep(tmp_path, monkeypatch)
+    for ticket, states in jobs.items():
+        for index, job_state in enumerate(states):
+            ticket_job(db, queue, f"{ticket}-{index}", job_state, ticket)
+    started = docker.start_stack(name, created=created)
+
+    waiter._reap()
+
+    assert (docker.ids(), docker.networks(), docker.volumes()) == ({started}, [f"{name}_default"], [f"{name}_db"])
+    stack_lines = [line for line in log if f"project {name}" in line]
+    assert stack_lines == ([f"kept compose project {name} on pc: {kept_because}"] if kept_because else []), log
+
+
+def test_a_labelled_stack_container_stays_with_the_job_label_rule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    docker, db, queue, waiter, log, _ = box_stack_sweep(tmp_path, monkeypatch)
+    box = orch_host(waiter.pool.config)
+    done = ticket_job(db, queue, "built", "done")
+    docker.start_stack(stack_name(STACK_REPO, "AUT-2129", box), **{"factory.job": done})
+
+    waiter._reap()
+
+    assert docker.ids() == set()
+    assert sum(f"removed 1 container(s) on {box} of finished job {done}" in line for line in log) == 1, log
+    assert not any("compose project" in line for line in log), log
+
+
+def test_a_supabase_stack_of_a_finished_ticket_is_removed_on_the_box(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    docker, db, queue, waiter, log, _ = box_stack_sweep(tmp_path, monkeypatch)
+    box = orch_host(waiter.pool.config)
+    ticket_job(db, queue, "built", "done")
+    name = stack_name(STACK_REPO, "AUT-2129", box)
+    docker.start_stack(name, "supabase")
+
+    waiter._reap()
+
+    assert (docker.ids(), docker.networks(), docker.volumes()) == (set(), [], [])
+    assert [line for line in log if f"project {name}" in line] == [
+        f"removed supabase project {name} on {box} (ticket AUT-2129 finished)"
+    ], log
+
+
+def test_an_unreadable_orch_db_keeps_every_stack_and_says_so_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    docker, db, queue, waiter, log, now = box_stack_sweep(tmp_path, monkeypatch)
+    box = orch_host(waiter.pool.config)
+    ticket_job(db, queue, "built", "done")
+    name = stack_name(STACK_REPO, "AUT-2129", box)
+    started = docker.start_stack(name)
+    with sqlite3.connect(db) as connection:
+        connection.execute("ALTER TABLE jobs RENAME TO jobs_elsewhere")
+
+    waiter._reap()
+    now[0] += waiter_module.CONTAINER_SWEEP_SECONDS
+    waiter._reap()
+
+    assert (docker.ids(), docker.networks(), docker.volumes()) == ({started}, [f"{name}_default"], [f"{name}_db"])
+    assert sum("orch.db is unreadable" in line for line in log) == 1, log
 
 
 @pytest.mark.parametrize("replaced", ["never", "after-scratch", "before-scratch"])
