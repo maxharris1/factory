@@ -21,8 +21,7 @@ from lib.queue import Job, plan_round
 GH = "env " + " ".join(f"-u {name}" for name in TOKEN_VARIABLES) + " gh"
 NO_EDIT_RULE = (
     "Never edit a comment after you post it: the dispatcher refuses an edited `orch:v1` comment. "
-    "Put any correction (a typo, an updated test count, a better summary) in a new comment "
-    "and leave the posted one as it is."
+    "Put any correction in a new comment."
 )
 QUESTIONS_LINES = [
     "If the ticket lists a dependency that has not merged, post `questions` before any work.",

@@ -80,7 +80,7 @@ def test_the_model_lines_and_the_helper_permission_are_there_with_no_cap(
     if action == "review":
         assert "They do research only; you write the verdict." in text
     else:
-        assert "They never post to GitHub or push." in text
+        assert "They never post to GitHub or push." not in text
     assert not re.search(r"(at most|up to|no more than) \w+ (helper|agent)", text, re.IGNORECASE)
     assert not re.search(r"\b\d+ (helper|agent)s?\b", text, re.IGNORECASE)
 

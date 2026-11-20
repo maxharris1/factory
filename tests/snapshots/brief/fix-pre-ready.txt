@@ -51,7 +51,7 @@ Read the router (the first path) and the pstack files it names, at these absolut
 - `/srv/orch/factory/skills/pstack/agents/poteto-agent.md`
 - `/srv/orch/factory/skills/pstack/docs/harness/claude-code.md`
 
-Helper models, one `<role>: <value>` line per pstack role. Where any other model config differs, these lines win:
+Helper models, one `<role>: <value>` line per pstack role. They win over any other model config:
 
 ```
 feature, refactoring: opus high
@@ -73,7 +73,7 @@ architect runners: opus high, opus high
 interrogate reviewers: opus high, opus high
 ```
 
-You may start helper agents as pstack recommends. They never post to GitHub or push.
+You may start helper agents as pstack recommends.
 If your harness does not know an agent name the router uses (`comment-sicko`, `poteto-agent`), start a general helper (`subagent_type: "general-purpose"`) and tell it first to read and follow the agent file listed above.
 
 ## Ticket
@@ -93,7 +93,7 @@ Write the comment to `handoff.md` (never commit that file) and post it with this
 
 `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh api repos/owner/repo/issues/42/comments -F body=@handoff.md --jq .id`
 
-Never edit a comment after you post it: the dispatcher refuses an edited `orch:v1` comment. Put any correction (a typo, an updated test count, a better summary) in a new comment and leave the posted one as it is.
+Never edit a comment after you post it: the dispatcher refuses an edited `orch:v1` comment. Put any correction in a new comment.
 
 ## Finish the job
 - After the handoff comment is posted: `orch job done claude-bot 0123456789abcdef0123456789abcdef --handoff <comment-id>`.
@@ -204,7 +204,7 @@ Read the router (the first path) and the pstack files it names, at these absolut
 - `/home/claude-bot/factory/skills/pstack/agents/poteto-agent.md`
 - `/home/claude-bot/factory/skills/pstack/docs/harness/claude-code.md`
 
-Helper models, one `<role>: <value>` line per pstack role. Where any other model config differs, these lines win:
+Helper models, one `<role>: <value>` line per pstack role. They win over any other model config:
 
 ```
 feature, refactoring: opus high
@@ -226,7 +226,7 @@ architect runners: opus high, opus high
 interrogate reviewers: opus high, opus high
 ```
 
-You may start helper agents as pstack recommends. They never post to GitHub or push.
+You may start helper agents as pstack recommends.
 If your harness does not know an agent name the router uses (`comment-sicko`, `poteto-agent`), start a general helper (`subagent_type: "general-purpose"`) and tell it first to read and follow the agent file listed above.
 
 ## Ticket
@@ -246,7 +246,7 @@ Write the comment to `handoff.md` (never commit that file) and post it with this
 
 `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh api repos/owner/repo/issues/42/comments -F body=@handoff.md --jq .id`
 
-Never edit a comment after you post it: the dispatcher refuses an edited `orch:v1` comment. Put any correction (a typo, an updated test count, a better summary) in a new comment and leave the posted one as it is.
+Never edit a comment after you post it: the dispatcher refuses an edited `orch:v1` comment. Put any correction in a new comment.
 
 ## Finish the job
 - This device (mac) has no orch database: do not run `orch job done`.
