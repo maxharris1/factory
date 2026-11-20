@@ -361,8 +361,8 @@ FOLLOW_UP_KINDS = ("review-followups",)
 
 
 def wording_follow_up_rounds(rule_id: str) -> None:
-    later = {"followup_from": 2, "round_number": 2, "auto_extra": 0, "block_on": "any-failure"}
-    first = {"followup_from": 2, "round_number": 1, "auto_extra": 0, "block_on": "any-failure"}
+    later = {"followup_from": 2, "round_number": 2, "auto_extra": 0, "block_on": "any-failure", "stop_on": "rounds"}
+    first = {"followup_from": 2, "round_number": 1, "auto_extra": 0, "block_on": "any-failure", "stop_on": "rounds"}
     phrase = brief_rules.RULE_PHRASES[rule_id]
     assert phrase in brief_rules.review_rules(later)
     assert phrase not in brief_rules.review_rules(first)

@@ -249,8 +249,14 @@ def lead(facts: dict) -> Lead:
         "finding and number new ones after the highest earlier id. The same problem means the same broken rule, "
         "not the same line."
         + (
-            " When a blocker breaks the same rule as an earlier round's blocker, set `repeat=<id>` in the header "
-            "with that earlier id, ask Max what to do, and stop."
+            (
+                " When a blocker breaks the same rule as an earlier round's blocker, set `repeat=<id>` in the "
+                "header with that earlier id. Rounds continue while the open blocking findings shrink to a new "
+                "low; the poller stops the review when they do not."
+                if facts["stop_on"] == "convergence"
+                else " When a blocker breaks the same rule as an earlier round's blocker, set `repeat=<id>` in "
+                "the header with that earlier id, ask Max what to do, and stop."
+            )
             if later_round and not variant
             else ""
         ),

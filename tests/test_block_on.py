@@ -168,6 +168,7 @@ def test_a_later_user_impact_round_never_orders_the_full_pass(update: dict | Non
         "round_number": 2,
         "followup_from": None,
         "block_on": "user-impact",
+        "stop_on": "rounds",
         "update": update,
         "rebase": None,
         "size_flag": None,

@@ -159,6 +159,7 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
         "start_before_ci": context.config.start_before_ci if context is not None else False,
         "pre_ready": context.config.pre_ready if context is not None else None,
         "block_on": context.config.block_on if context is not None else "any-failure",
+        "stop_on": context.config.stop_on if context is not None else "rounds",
         "qa_gate": context.config.qa.gate if context is not None and context.config.qa is not None else None,
         "cap": cap,
         "head": head if isinstance(head, str) and _HEAD.fullmatch(head) else None,

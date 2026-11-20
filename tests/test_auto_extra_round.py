@@ -281,11 +281,12 @@ def test_bad_values_are_refused_strictly_and_read_as_zero_leniently(value: str) 
 def test_the_factory_repo_turns_it_on() -> None:
     config, findings = parse_factory_md((REPO / "factory.md").read_text(), strict=True)
     assert config is not None and config.auto_extra_rounds == 2
+    assert config.stop_on == "convergence"
     assert not [f for f in findings if f.severity == "error"]
 
 
 def _facts(auto_extra: int) -> dict:
-    return {"followup_from": None, "round_number": 1, "auto_extra": auto_extra, "block_on": "any-failure"}
+    return {"followup_from": None, "round_number": 1, "auto_extra": auto_extra, "block_on": "any-failure", "stop_on": "rounds"}
 
 
 def test_review_rules_name_the_policy_only_when_it_is_on() -> None:
