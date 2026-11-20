@@ -202,8 +202,8 @@ _TOKEN_VARIABLES = tuple(name for status in _STATUS.values() for name in status.
 def status_script(harness: Harness, homes: Sequence[str | None]) -> str:
     status = _STATUS[harness]
     calls = [
-        "code=0; " + ("" if home is None else f"{status.home_variable}={shlex.quote(home)} ")
-        + f"{status.command} </dev/null {status.streams} || code=$?; printf '\\nORCH-ACCOUNT %d %d\\n' {index} \"$code\";"
+        "code=0; (" + ("" if home is None else f"{status.home_variable}={shlex.quote(home)} ")
+        + f"{status.command} </dev/null {status.streams}) || code=$?; printf '\\nORCH-ACCOUNT %d %d\\n' {index} \"$code\";"
         for index, home in enumerate(homes)
     ]
     inner = " ".join([

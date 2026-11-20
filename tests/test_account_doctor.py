@@ -471,7 +471,9 @@ def test_token_variables_from_the_login_profile_never_reach_the_harness(world: W
 @pytest.mark.parametrize("errexit", [
     "set -e\n",
     'claude() { set -e; command claude "$@"; }\ncodex() { set -e; command codex "$@"; }\n',
-], ids=["profile", "function"])
+    'claude() { command claude "$@" || exit; }\ncodex() { command codex "$@" || exit; }\n',
+    'claude() { exec claude "$@"; }\ncodex() { exec codex "$@"; }\n',
+], ids=["profile", "function", "exit", "exec"])
 def test_errexit_from_the_login_profile_neither_skips_nor_loses_a_pair(world: World, errexit: str) -> None:
     world.profile(errexit)
     assert world.doctor() == 0
