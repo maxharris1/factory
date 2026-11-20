@@ -13,7 +13,7 @@ from lib.dispatch.qa import QaFix, failed_column
 from lib.dispatch.helpers import _comment_link, _comment_order, _matching_head, _round_number, _scope
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
-from lib.dispatch.verdict.convergence import Continue, Convergence, Repeated, RoundFindings, Stalled, converge
+from lib.dispatch.verdict.convergence import Continue, Convergence, Repeated, RoundFindings, converge
 from lib.handoff import HandoffError, parse_comment, repeat_id
 from lib.markdown_items import MARKDOWN
 from lib.queue import JobRequest
@@ -309,17 +309,12 @@ class RepeatBlockMixin:
         )
 
     def _capped_stop(self, ticket: TrackedTicket, verdict: Comment) -> Stop:
-        if ticket.factory.stop_on != "convergence":
-            return "capped"
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT qa_failed FROM review_events WHERE repo = ? AND ticket_id = ? AND comment_id = ?",
+                "SELECT stop FROM review_events WHERE repo = ? AND ticket_id = ? AND comment_id = ?",
                 (ticket.repo.lower(), ticket.ticket_id, verdict.id),
             ).fetchone()
-        qa_ids = frozenset(json.loads(row["qa_failed"] or "[]")) if row is not None else frozenset()
-        reported_round = _round_number(_handoff(verdict.body)[0].get("round"))
-        stalled = isinstance(self._convergence(ticket, verdict, reported_round, qa_ids), Stalled)
-        return "stalled" if stalled else "capped"
+        return "stalled" if row is not None and row["stop"] == "stalled" else "capped"
 
     def _held_stop(self, ticket: TrackedTicket) -> tuple[Stop, Comment] | None:
         with self._connect() as connection:

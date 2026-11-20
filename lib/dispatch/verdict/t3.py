@@ -206,8 +206,8 @@ class T3Mixin:
             connection.execute(
                 """
                 INSERT INTO review_events (
-                    repo, ticket_id, comment_id, outcome, qa_failed
-                ) VALUES (?, ?, ?, ?, ?)
+                    repo, ticket_id, comment_id, outcome, qa_failed, stop
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     ticket.repo.lower(),
@@ -215,6 +215,7 @@ class T3Mixin:
                     comment.id,
                     outcome,
                     failed_column(qa),
+                    "stalled" if next_state == "capped" and isinstance(convergence, Stalled) else None,
                 ),
             )
             if granted is not None:

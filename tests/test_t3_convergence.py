@@ -4,6 +4,8 @@ import dataclasses
 from collections.abc import Sequence
 from pathlib import Path
 
+import pytest
+
 from lib.dispatch.verdict.repeat import STOP_OPTIONS
 from tests.qa_support import Harness, qa_report, ready, scenarios, verdict
 from tests.test_approver_credential import MAX, AppFlow
@@ -11,6 +13,7 @@ from tests.test_auto_extra_round import AutoFlow, capped_wakes
 from tests.test_dispatcher import GO, VERDICT, job_count
 from tests.test_qa_gate_table import blocking
 from tests.test_repeat import ABANDONED, decisions, wake_detail
+from tests.test_repeat_block import edit
 from tests.test_rounds_and_caps import HEADS, round_of
 from tests.test_unsatisfiable_criterion import revise, to_first_review
 
@@ -158,6 +161,30 @@ def test_abandoning_a_stalled_stop_records_split_on_its_question(tmp_path: Path)
     assert flow.post("split", ABANDONED, "grok-login") == "abandoned"
     [decision] = decisions(flow)
     assert (decision["question"], decision["choice"]) == (asked, "Split: file smaller tickets.")
+
+
+WITHDRAWN = pytest.mark.parametrize("comment_id", ["revise-3/4", "revise-2/4"], ids=["stop", "earlier"])
+
+
+@WITHDRAWN
+def test_go_lifts_a_stalled_stop_after_a_verdict_is_withdrawn(tmp_path: Path, comment_id: str) -> None:
+    flow = _stalled(tmp_path)
+    edit(flow, comment_id, "Withdrawn.\n")
+    assert flow.go("go-max") == "queued-fix"
+    assert (flow.state()["workflow_state"], flow.state()["cap_extra"]) == ("fixing", 1)
+    [decision] = decisions(flow)
+    assert decision["question"].startswith("Blocking findings did not shrink")
+    assert decision["choice"] == "Another round: Go."
+
+
+@WITHDRAWN
+def test_abandoning_a_stalled_stop_after_a_verdict_is_withdrawn(tmp_path: Path, comment_id: str) -> None:
+    flow = _stalled(tmp_path)
+    edit(flow, comment_id, "Withdrawn.\n")
+    assert flow.post("split", ABANDONED, "grok-login") == "abandoned"
+    [decision] = decisions(flow)
+    assert decision["question"].startswith("Blocking findings did not shrink")
+    assert decision["choice"] == "Split: file smaller tickets."
 
 
 def _carried(tmp_path: Path, stop_on: str) -> str:
