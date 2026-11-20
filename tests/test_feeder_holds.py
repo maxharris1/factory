@@ -223,7 +223,7 @@ def commit_page(commits, *, total: int | None = None) -> dict:
 
 def open_pull(number: int, commits, *, base: str = "main", head: str = D, total: int | None = None):
     return {
-        "number": number, "baseRefName": base, "headRefOid": head,
+        "number": number, "baseRefName": base, "headRefName": f"branch-{number}", "headRefOid": head,
         "commits": commit_page(commits, total=total),
     }
 
@@ -288,8 +288,8 @@ def test_open_pull_commits_reads_every_page_of_open_prs() -> None:
     pulls = GitHubIntakeClient(gh).open_pull_commits(HOME)
 
     assert pulls == {
-        113: OpenPull(commits=frozenset({A, B}), complete=True, base="main", head=B),
-        114: OpenPull(commits=frozenset({C}), complete=False, base=RELEASE, head=C),
+        113: OpenPull(commits=frozenset({A, B}), complete=True, base="main", head=B, branch="branch-113"),
+        114: OpenPull(commits=frozenset({C}), complete=False, base=RELEASE, head=C, branch="branch-114"),
     }
     assert any("pullRequests(states: OPEN" in arg for arg in gh.calls[0])
 
@@ -483,7 +483,7 @@ class GitReads:
     def __init__(self, root: Path, base: str, head: str) -> None:
         self.root = root
         listed = git(root, "rev-list", "--reverse", f"{base}..{head}").split()
-        self.pull = OpenPull(frozenset(listed[:100]), len(listed) <= 100, base, head)
+        self.pull = OpenPull(frozenset(listed[:100]), len(listed) <= 100, base, head, "branch-113")
 
     def ahead_commits(self, repo: str, base: str, tip: str) -> list[str]:
         return git(self.root, "rev-list", f"{base}..{tip}").split()
