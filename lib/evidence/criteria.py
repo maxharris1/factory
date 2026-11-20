@@ -126,7 +126,7 @@ def numbered(body: str) -> tuple[Criterion, ...]:
 
 
 def issue_criteria(body: str | None) -> tuple[Criterion, ...] | None:
-    """body's numbered criteria when its Acceptance criteria section lists any, the case reviewers read it; else None."""
+    """body's numbered criteria when its Acceptance criteria section lists any, else None."""
     return numbered(body) if body is not None and _lists_criteria(body) else None
 
 

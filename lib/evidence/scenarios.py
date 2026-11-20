@@ -1,11 +1,12 @@
-"""The live scenarios QA drives, from the brief's journeys or a builder's section (#761, #1105).
+"""The live scenarios QA drives, from the brief's journeys or a builder's section.
 
 Pure functions: the caller passes only comments it already trusts, and this
-decides nothing about trust. `qa_scenarios` is the one reader. When the
-canonical brief carries a QA plan (`### QA journeys`, lib.journeys), the
-scenarios come from it alone, one per `qa` criterion, and no plan or ready
-comment is read. When the ticket's `qa` tags no longer match the brief's,
-the result is an `EditedTag` naming the first ac id that differs.
+decides nothing about trust. When the canonical brief carries a QA plan
+(`### QA journeys`, lib.journeys), the scenarios come from it alone, one per
+`### QA criteria` line, and no plan or ready comment is read. When the
+issue's criteria are given and a `qa` tag no longer matches the brief's
+check, or a check's ac id is gone, the result is an `EditedTag` naming the
+first such ac id.
 
 Without a plan in the brief, the scenarios come from the latest `kind=plan`
 comment's `## Verify, live` section. When there is no plan, or its section is

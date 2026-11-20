@@ -718,7 +718,7 @@ def test_the_example_the_plan_brief_shows_parses_to_its_two_scenarios():
     fences = [token.content for token in MarkdownIt("commonmark").parse(task) if token.type == "fence"]
     examples = [text for text in fences if text.startswith("## Verify, live")]
     assert len(examples) == 1
-    header = "<!-- orch:v1 kind=plan from=claude-bot role=builder -->"
+    header = "<!-- orch:v1 kind=plan from=claude-bot role=builder ac=met round=1/2 -->"
     found = qa_scenarios(None, None, [Comment(id="1", author="claude-bot", body=f"{header}\n{examples[0]}", created_at=1.0)])
     assert [scenario.id for scenario in found.scenarios] == ["qa-1", "qa-2"]
     assert found.regression == ("qa-1",)
