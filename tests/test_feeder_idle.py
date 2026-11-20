@@ -9,8 +9,10 @@ from pathlib import Path
 
 import pytest
 
+from lib.dashboard import collect_snapshot
 from lib.device_pool import DevicePool
 from lib.queue import JobRequest, SQLiteJobQueue
+from lib.status import SQLiteStatusReader, build_status, render
 from tests.test_feeder import issue, make_feeder, rows
 from tests.test_feeder_gates import CLOSED_PULL, DONE, HOME, OPEN, OPEN_PULL, ref
 
@@ -316,3 +318,29 @@ def test_a_failed_open_pr_read_without_feeder_history_keeps_the_flag(tmp_path: P
     feeder.feed_once()
     assert list(_attention(tmp_path, IDLE)) == [(HOME, "1")]
     assert len(_wakes(queue)) == 1
+
+
+def test_orch_status_lists_the_stall_in_its_own_group(tmp_path: Path) -> None:
+    feeder, _, _, _ = _coo(tmp_path)
+    feeder.feed_once()
+    with sqlite3.connect(tmp_path / "orch.db") as connection:
+        connection.execute("CREATE TABLE ticket_state (repo TEXT, ticket_id TEXT, workflow_state TEXT)")
+    reader = SQLiteStatusReader(tmp_path / "orch.db")
+
+    output = render(build_status(reader, reader, clock=lambda: 20_000, attention=reader.attention()))
+
+    assert "\nIdle-blocked-ready (1)\n  owner/app#19 waiting on #18\n" in output
+    assert "Needs attention" not in output
+
+
+def test_the_dashboard_names_the_stall_reason_and_its_blockers(tmp_path: Path) -> None:
+    feeder, _, _, _ = _coo(tmp_path)
+    feeder.feed_once()
+    log = tmp_path / "poller.log"
+    log.write_text("", encoding="utf-8")
+
+    snapshot = collect_snapshot(tmp_path / "orch.db", log, now=20_000)
+
+    (item,) = [row for row in snapshot["attention"]["items"] if row["kind"] == "needs-attention"]
+    assert (item["repo"], item["ticket_id"]) == (HOME, "19")
+    assert item["detail"] == f"{IDLE}: waiting on #18"
