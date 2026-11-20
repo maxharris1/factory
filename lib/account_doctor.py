@@ -3,11 +3,23 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shlex
 import sqlite3
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal
+
+from lib.machines_yml import Device, MachinesConfig
+from lib.remote import (
+    _UNTRACE,
+    PROBE_TIMEOUT_SECONDS,
+    SSH_BINARY,
+    SSH_OPTIONS,
+    SSH_UNREACHABLE,
+    ByteTransport,
+    _login,
+)
 
 Status = Literal["ok", "signed-out", "mismatch", "unreachable"]
 Harness = Literal["claude", "codex"]
@@ -37,6 +49,13 @@ CODEX_API_KEY = "api key, not a ChatGPT sign-in"
 METHOD_NOT_UNDERSTOOD = "auth method not understood"
 SHARED_IDENTITY = "same sign-in as account {}"
 SPLIT_IDENTITY = "another sign-in on device {}"
+PLACEHOLDER_DEVICE = "device has install placeholders"
+NO_SSH_ALIAS = "no ssh_alias for {} on {}"
+SSH_DOWN = "device unreachable over ssh"
+NO_REPLY = "no status reply"
+
+_BEGIN = b"ORCH-ACCOUNTS-BEGIN"
+_FRAME = re.compile(rb"ORCH-ACCOUNT (\d+) (\d+)")
 
 _SUBSCRIPTION = re.compile(r"[a-z][a-z0-9_]{0,23}")
 _CODEX_LINES = (
@@ -163,6 +182,83 @@ def parse_codex(account: str, device: str, code: int, reply: bytes) -> Probe:
     return Probe(account, device, "codex", True, False, None, None, None, NOT_UNDERSTOOD)
 
 
+@dataclass(frozen=True)
+class _Status:
+    command: str
+    streams: str
+    home_variable: str
+    token_variables: tuple[str, ...]
+    parse: Callable[[str, str, int, bytes], Probe]
+
+
+_STATUS: dict[Harness, _Status] = {
+    "claude": _Status("claude auth status", "2>/dev/null", "CLAUDE_CONFIG_DIR",
+                      ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"), parse_claude),
+    "codex": _Status("codex login status", "2>&1", "CODEX_HOME", ("OPENAI_API_KEY", "CODEX_API_KEY"), parse_codex),
+}
+_TOKEN_VARIABLES = tuple(name for status in _STATUS.values() for name in status.token_variables)
+
+
+def status_script(harness: Harness, homes: Sequence[str | None]) -> str:
+    status = _STATUS[harness]
+    calls = [
+        "code=0; (" + ("" if home is None else f"{status.home_variable}={shlex.quote(home)} ")
+        + f"{status.command} </dev/null {status.streams}) || code=$?; printf '\\nORCH-ACCOUNT %d %d\\n' {index} \"$code\";"
+        for index, home in enumerate(homes)
+    ]
+    inner = " ".join([
+        f"{_UNTRACE}set +e; unset {' '.join(_TOKEN_VARIABLES)} {status.home_variable};",
+        f"printf '\\n%s\\n' {_BEGIN.decode()};",
+        *calls,
+    ])
+    return _login(inner, "orch-accounts", ())
+
+
+def _replies(stdout: bytes, count: int) -> dict[int, tuple[int, bytes]]:
+    lines = stdout.split(b"\n")
+    if _BEGIN not in lines:
+        return {}
+    replies: dict[int, tuple[int, bytes]] = {}
+    reply: list[bytes] = []
+    for line in lines[lines.index(_BEGIN) + 1:]:
+        if len(replies) == count:
+            break
+        frame = _FRAME.fullmatch(line)
+        if frame and int(frame[1]) == len(replies):
+            replies[len(replies)] = (int(frame[2]), b"\n".join(reply))
+            reply = []
+        else:
+            reply.append(line)
+    return replies
+
+
+def _unreached(account: str, device: str, harness: Harness, detail: str) -> Probe:
+    return Probe(account, device, harness, False, False, None, None, None, detail)
+
+
+def probe(transport: ByteTransport, config: MachinesConfig, device: Device, harness: Harness) -> list[Probe]:
+    accounts = config.accounts_on(device.name, harness)
+    if not accounts:
+        return []
+    alias = device.ssh_alias_for(harness)
+    if device.placeholder or alias is None:
+        detail = PLACEHOLDER_DEVICE if device.placeholder else NO_SSH_ALIAS.format(harness, device.name)
+        return [_unreached(account, device.name, harness, detail) for account in accounts]
+    script = status_script(harness, [config.account_home(device.name, harness, account) for account in accounts])
+    exchanged = transport.exchange(
+        [SSH_BINARY, *SSH_OPTIONS, "-l", device.login_for(harness), "--", alias, script],
+        timeout=PROBE_TIMEOUT_SECONDS,
+    )
+    if exchanged.timed_out or exchanged.code == SSH_UNREACHABLE:
+        return [_unreached(account, device.name, harness, SSH_DOWN) for account in accounts]
+    replies = _replies(exchanged.stdout, len(accounts))
+    return [
+        _STATUS[harness].parse(account, device.name, *replies[index]) if index in replies
+        else _unreached(account, device.name, harness, NO_REPLY)
+        for index, account in enumerate(accounts)
+    ]
+
+
 def _rule(probe: Probe) -> _Rule:
     if not probe.logged_in:
         return _Rule("signed-out", probe.detail)
@@ -235,3 +331,15 @@ def write(connection: sqlite3.Connection, rows: Sequence[SignIn]) -> None:
     except BaseException:
         connection.execute("ROLLBACK")
         raise
+
+
+def run(connection: sqlite3.Connection, config: MachinesConfig, transport: ByteTransport, now: float) -> list[SignIn]:
+    probes = [
+        item
+        for device in config.devices
+        for harness in _STATUS
+        for item in probe(transport, config, device, harness)
+    ]
+    rows = judge(probes, now)
+    write(connection, rows)
+    return rows

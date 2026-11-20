@@ -285,3 +285,265 @@ def test_canaries_reach_neither_rows_details_nor_database(tmp_path: Path) -> Non
         for canary in CANARIES:
             assert canary.encode() not in data, f"{canary} reached {name}"
     assert expected.encode() in surfaces["orch.db"]
+
+
+ORG_B = "4b0c6c5e-0000-4000-8000-00000000b002"
+EMAIL_B = "bot-two@example.com"
+TOKENS = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY")
+
+WORLD_MACHINES = """\
+orch_host: box
+accounts:
+{accounts}
+devices:
+  - name: box
+    local: true
+    slot_max: 1
+    harnesses: {{claude: claude-bot}}
+  - name: pc
+    tailscale_name: pc.example.ts.net
+    slot_max: 2
+    harnesses: {{claude: claude-bot, codex: codex-bot}}
+    workdir_root: /home/{{bot}}/work
+    ssh_alias: pc-{{bot}}
+    factory_root: /srv/factory
+    home: {home}
+  - name: lap
+    tailscale_name: lap.example.ts.net
+    slot_max: 1
+    enabled: false
+    harnesses: {{claude: claude-bot, codex: codex-bot}}
+    workdir_root: /home/{{bot}}/work
+    ssh_alias: lap-{{bot}}
+    factory_root: /srv/factory
+    home: {home}
+"""
+WORLD_ACCOUNTS = {
+    "claude-b": "  - {id: claude-b, harness: claude, signed_in_on: [pc]}",
+    "claude-c": "  - {id: claude-c, harness: claude, signed_in_on: [pc]}",
+    "codex-b": "  - {id: codex-b, harness: codex, signed_in_on: [pc]}",
+}
+
+FAKE_HARNESS = """\
+#!/bin/sh
+printf '%s %s\\n' {name} "$(env | cut -d= -f1 | tr '\\n' ' ')" >> {log}
+folder=${{{home_variable}:-default}}
+reply=${{folder##*/}}
+if [ -n "{token_test}" ]; then reply=token; fi
+cat "{replies}/$reply" {stream}
+exit "$(cat "{replies}/$reply.code")"
+"""
+STREAMS = {"claude": "", "codex": ">&2"}
+TOKEN_TESTS = {
+    "claude": "$CLAUDE_CODE_OAUTH_TOKEN$ANTHROPIC_API_KEY$ANTHROPIC_AUTH_TOKEN",
+    "codex": "$OPENAI_API_KEY$CODEX_API_KEY",
+}
+HOME_VARIABLES = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}
+REPLIES = {
+    "claude": {
+        "default": (claude_reply(), 0),
+        "claude-b": (claude_reply(org=ORG_B, email=EMAIL_B, subscription="pro"), 0),
+        "claude-c": (SIGNED_OUT_CLAUDE, 1),
+        "token": (claude_reply(method="oauth_token"), 0),
+    },
+    "codex": {
+        "default": (b"Logged in using ChatGPT\n", 0),
+        "codex-b": (b"Not logged in\n", 1),
+        "token": (b"Logged in using an API key - sk-proj-***\n", 0),
+    },
+}
+PROFILE = """\
+export PATH={bin}:$PATH
+export CLAUDE_CONFIG_DIR={home}/.factory-accounts/claude-c CODEX_HOME={home}/.factory-accounts/codex-b
+{tokens}
+echo profile says hello
+printf 'no newline at the end'
+"""
+
+
+class World:
+    def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        from tests.test_remote_start import Ssh
+
+        self.tmp = tmp_path
+        self.ssh = Ssh(tmp_path)
+        for alias in ("pc-claude-bot", "lap-claude-bot"):
+            (self.ssh.hosts / alias).write_text("claude-bot", encoding="utf-8")
+        for alias in ("pc-codex-bot", "lap-codex-bot"):
+            (self.ssh.hosts / alias).write_text("codex-bot", encoding="utf-8")
+        for alias in ("lap-claude-bot", "lap-codex-bot"):
+            self.ssh.offline(alias).touch()
+        self.device_home = tmp_path / "device-home"
+        self.device_home.mkdir()
+        self.bin = tmp_path / "device-bin"
+        self.bin.mkdir()
+        self.env_log = tmp_path / "harness-env.log"
+        for harness, replies in REPLIES.items():
+            folder = tmp_path / "replies" / harness
+            folder.mkdir(parents=True)
+            for name, (reply, code) in replies.items():
+                (folder / name).write_bytes(reply)
+                (folder / f"{name}.code").write_text(str(code), encoding="utf-8")
+            fake = self.bin / harness
+            fake.write_text(FAKE_HARNESS.format(
+                name=harness, log=self.env_log, token_test=TOKEN_TESTS[harness],
+                replies=folder, home_variable=HOME_VARIABLES[harness], stream=STREAMS[harness],
+            ), encoding="utf-8")
+            fake.chmod(0o755)
+        self.profile()
+        self.machines = tmp_path / "machines.yml"
+        self.declare(*WORLD_ACCOUNTS)
+        self.db = tmp_path / "orch.db"
+        for name, value in self.ssh.env().items():
+            monkeypatch.setenv(name, value)
+        monkeypatch.setenv("FAKE_SSH_HOME", str(self.device_home))
+        monkeypatch.setenv("ORCH_SSH_MUX", "off")
+
+    def profile(self, extra: str = "") -> None:
+        tokens = "\n".join(f"export {name}=sk-planted-{name.lower()}" for name in TOKENS)
+        (self.device_home / ".bash_profile").write_text(
+            PROFILE.format(bin=self.bin, home=self.device_home, tokens=tokens) + extra, encoding="utf-8"
+        )
+
+    def declare(self, *accounts: str) -> None:
+        self.machines.write_text(WORLD_MACHINES.format(
+            accounts="\n".join(WORLD_ACCOUNTS[name] for name in accounts),
+            home=self.device_home,
+        ), encoding="utf-8")
+
+    def doctor(self, *extra: str) -> int:
+        from lib import cli
+
+        return cli.main(["accounts", "doctor", "--db", str(self.db), "--machines", str(self.machines), *extra])
+
+    def rows(self) -> dict[tuple[str, str], SignIn]:
+        with sqlite3.connect(self.db) as connection:
+            found = connection.execute(f"SELECT * FROM {account_doctor.TABLE}").fetchall()
+        return {(row[0], row[1]): SignIn(*row) for row in found}
+
+    def statuses(self) -> dict[tuple[str, str], str]:
+        return {key: row.status for key, row in self.rows().items()}
+
+    def harness_envs(self) -> list[tuple[str, set[str]]]:
+        lines = self.env_log.read_text(encoding="utf-8").splitlines()
+        return [(line.split(" ", 1)[0], set(line.split()[1:])) for line in lines]
+
+
+@pytest.fixture
+def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
+    return World(tmp_path, monkeypatch)
+
+
+EXPECTED = {
+    ("claude-default", "box"): "unreachable",
+    ("claude-default", "pc"): "ok",
+    ("claude-b", "pc"): "ok",
+    ("claude-c", "pc"): "signed-out",
+    ("codex-default", "pc"): "ok",
+    ("codex-b", "pc"): "signed-out",
+    ("claude-default", "lap"): "unreachable",
+    ("codex-default", "lap"): "unreachable",
+}
+
+
+def test_doctor_reads_ok_and_signed_out_end_to_end_for_both_harnesses(world: World) -> None:
+    assert world.doctor() == 0
+    assert world.statuses() == EXPECTED
+    rows = world.rows()
+    claude = rows[("claude-default", "pc")]
+    assert (claude.auth_method, claude.subscription_type, claude.fingerprint) == ("claude.ai", "max", fingerprint(ORG, EMAIL))
+    second = rows[("claude-b", "pc")]
+    assert (second.subscription_type, second.fingerprint) == ("pro", fingerprint(ORG_B, EMAIL_B))
+    assert rows[("claude-c", "pc")].detail == account_doctor.NOT_LOGGED_IN
+    assert rows[("codex-default", "pc")].auth_method == "chatgpt"
+    assert rows[("codex-b", "pc")].detail == account_doctor.NOT_LOGGED_IN
+
+
+def test_token_variables_from_the_login_profile_never_reach_the_harness(world: World) -> None:
+    assert world.doctor() == 0
+    envs = world.harness_envs()
+    assert sorted(name for name, _ in envs) == ["claude"] * 3 + ["codex"] * 2
+    for _, names in envs:
+        assert not names & set(TOKENS)
+    assert world.statuses() == EXPECTED
+
+
+@pytest.mark.parametrize("errexit", [
+    "set -e\n",
+    'claude() { set -e; command claude "$@"; }\ncodex() { set -e; command codex "$@"; }\n',
+    'claude() { command claude "$@" || exit; }\ncodex() { command codex "$@" || exit; }\n',
+    'claude() { exec claude "$@"; }\ncodex() { exec codex "$@"; }\n',
+], ids=["profile", "function", "exit", "exec"])
+def test_errexit_from_the_login_profile_neither_skips_nor_loses_a_pair(world: World, errexit: str) -> None:
+    world.profile(errexit)
+    assert world.doctor() == 0
+    assert sorted(name for name, _ in world.harness_envs()) == ["claude"] * 3 + ["codex"] * 2
+    assert world.statuses() == EXPECTED
+
+
+def test_profile_function_that_exports_a_token_at_call_time_reads_signed_out(world: World) -> None:
+    world.profile(
+        'claude() { export CLAUDE_CODE_OAUTH_TOKEN=x; command claude "$@"; }\n'
+        'codex() { export OPENAI_API_KEY=x; command codex "$@"; }\n'
+    )
+    assert world.doctor() == 0
+    rows = world.rows()
+    for account in ("claude-default", "claude-b", "claude-c"):
+        assert (rows[(account, "pc")].status, rows[(account, "pc")].detail) == ("signed-out", account_doctor.TOKEN_AUTH)
+    for account in ("codex-default", "codex-b"):
+        assert (rows[(account, "pc")].status, rows[(account, "pc")].detail) == ("signed-out", account_doctor.CODEX_API_KEY)
+
+
+def test_offline_device_and_device_without_ssh_alias_read_unreachable(world: World) -> None:
+    assert world.doctor() == 0
+    rows = world.rows()
+    assert rows[("claude-default", "box")].detail == "no ssh_alias for claude on box"
+    for account in ("claude-default", "codex-default"):
+        assert (rows[(account, "lap")].status, rows[(account, "lap")].detail) == ("unreachable", "device unreachable over ssh")
+    calls = world.ssh.calls()
+    assert sorted(call["alias"] for call in calls) == ["lap-claude-bot", "lap-codex-bot", "pc-claude-bot", "pc-codex-bot"]
+    assert all(call["script"].startswith("exec bash -lc ") for call in calls)
+
+
+def test_removed_account_loses_its_row_on_the_next_pass(world: World) -> None:
+    assert world.doctor() == 0
+    world.declare("claude-c", "codex-b")
+    assert world.doctor() == 0
+    expected = {key: status for key, status in EXPECTED.items() if key[0] != "claude-b"}
+    assert world.statuses() == expected
+
+
+def test_doctor_json_prints_every_stored_row(world: World, capsys: pytest.CaptureFixture[str]) -> None:
+    assert world.doctor("--json") == 0
+    printed = json.loads(capsys.readouterr().out)
+    fields = list(SignIn.__dataclass_fields__)
+    assert all(list(item) == fields for item in printed)
+    assert {(item["account"], item["device"]): SignIn(**item) for item in printed} == world.rows()
+
+
+def test_doctor_prints_one_line_per_row(world: World, capsys: pytest.CaptureFixture[str]) -> None:
+    assert world.doctor() == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert "claude-default@pc ok claude.ai" in lines
+    assert "claude-default@box unreachable - no ssh_alias for claude on box" in lines
+    assert len(lines) == len(EXPECTED)
+
+
+def framed(*frames: tuple[int, int, bytes], before: bytes = b"") -> bytes:
+    body = b"".join(reply + b"\nORCH-ACCOUNT %d %d\n" % (index, code) for index, code, reply in frames)
+    return before + b"\nORCH-ACCOUNTS-BEGIN\n" + body
+
+
+def test_replies_drop_profile_output_and_split_frames() -> None:
+    stdout = framed((0, 0, b'{"a": 1}'), (1, 3, b"Not logged in"), before=b"ORCH-ACCOUNT 0 9\nnoise")
+    assert account_doctor._replies(stdout, 2) == {0: (0, b'{"a": 1}'), 1: (3, b"Not logged in")}
+
+
+def test_replies_ignore_a_forged_marker_inside_a_reply() -> None:
+    stdout = framed((0, 0, b"first\nORCH-ACCOUNT 1 0\nstill first"), (1, 1, b"second"))
+    assert account_doctor._replies(stdout, 2) == {0: (0, b"first\nORCH-ACCOUNT 1 0\nstill first"), 1: (1, b"second")}
+
+
+def test_replies_without_a_frame_leave_it_out() -> None:
+    assert account_doctor._replies(framed((0, 0, b"only")), 2) == {0: (0, b"only")}
+    assert account_doctor._replies(b"no begin line\nORCH-ACCOUNT 0 0\n", 1) == {}
