@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from lib import skill_probe as sp
-from lib.harness_env import ACCOUNT_ISOLATION, harness_env
+from lib.harness_env import ACCOUNT_ISOLATION, CLAUDE_BG_WAIT_ENV, harness_env
 from lib.machines_yml import load_machines_yml
 from tests.pool_helpers import LOCAL_BOX_MACHINES
 
@@ -316,7 +316,7 @@ def test_prompt_goes_on_stdin_only(tmp_path):
     assert seen["stdin"] == prompt.encode()
     assert not any("probe" in part for part in seen["argv"])
     assert seen["cwd"] == launch.run_dir
-    assert seen["env"][sp.harness_env("claude").popitem()[0]] == "0"
+    assert seen["env"][CLAUDE_BG_WAIT_ENV] == "0"
     assert (text, note) == ("", "no transcript")
 
 
