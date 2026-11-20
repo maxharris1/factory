@@ -1135,7 +1135,10 @@ needs-attention flag per blocker, `critical-path-blocker` with the detail
 `gates N candidates, best tier T`. A fed or failed candidate still counts.
 The flag clears when a poll reads the blocker closed or no candidate names
 it; a failed status read or a failed intake read keeps it. `orch status`
-lists them under `Critical-path blockers`. `orch status` and the dashboard show
+lists them under `Critical-path blockers`, and the feeder's `idle-blocked-ready`
+flags, each a blocked ticket with its open blockers (`waiting on #18`), under
+`Idle-blocked-ready`; the dashboard's Needs attention lists both by their reason.
+`orch status` and the dashboard show
 the feeder's last poll, even an empty one: eligible, fed, waiting for
 capacity and waiting on blockers or files. With no `intake` anywhere the
 poller runs no feeder.
