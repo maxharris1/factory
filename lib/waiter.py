@@ -1162,18 +1162,61 @@ class Waiter:
         if now - self._containers_swept_at < CONTAINER_SWEEP_SECONDS:
             return
         self._containers_swept_at = now
-        runners = [(orch_host(self.pool.config), containers.local_runner())]
+        runners = [(orch_host(self.pool.config), containers.local_runner(), [str(self.state_dir)])]
         for device in self.pool.config.devices:
             target = remote_target(device, self.recipient, "containers")
             if target is not None:
-                runners.append((device.name, containers.remote_runner(self.transport, target)))
+                roots = sorted({root for h in device.harnesses if (root := device.workdir_for(h)) is not None})
+                runners.append((device.name, containers.remote_runner(self.transport, target), roots))
+        ledger = self._ledger()
         lines: set[str] = set()
-        for name, runner in runners:
-            for line in containers.sweep(runner, self._job_state_name, name):
+        for name, runner, roots in runners:
+            swept = containers.sweep(runner, self._job_state_name, name)
+            if ledger is not None:
+                swept += containers.sweep_stacks(runner, ledger, name, roots)
+            for line in swept:
                 if line not in self._container_lines:
                     self.log(line)
                 lines.add(line)
         self._container_lines = lines
+
+    def _ledger(self) -> containers.Ledger | None:
+        def read() -> tuple[list[sqlite3.Row], list[sqlite3.Row]]:
+            with self.queue.connect() as connection:
+                jobs = connection.execute("SELECT id, repo, ticket_id, state, finished_at FROM jobs").fetchall()
+                tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+                slots = [
+                    row
+                    for table in ("device_slots", "qa_device_slots") if table in tables
+                    for row in connection.execute(f"SELECT job_id, device FROM {table}").fetchall()
+                ]
+            return jobs, slots
+
+        try:
+            jobs, slots = retry_locked(read)
+        except (QueueError, sqlite3.Error, OSError) as exc:
+            self.log(f"compose/supabase stacks kept, orch.db is unreadable ({_one_line(exc)})")
+            return None
+        job_ticket = {str(job_id): (str(repo), str(ticket)) for job_id, repo, ticket, _, _ in jobs}
+        held: dict[tuple[str, str], set[str]] = {}
+        for job_id, device in slots:
+            if (key := job_ticket.get(str(job_id))) is not None:
+                held.setdefault(key, set()).add(str(device))
+        by_ticket: dict[tuple[str, str], list[tuple[str, str, float | None]]] = {}
+        for job_id, _, _, job_state, finished_at in jobs:
+            by_ticket.setdefault(job_ticket[str(job_id)], []).append((str(job_id), str(job_state), finished_at))
+        tickets = {}
+        for key, rows in by_ticket.items():
+            finishes = [at for _, job_state, at in rows if job_state in containers.FINISHED_STATES]
+            tickets[key] = containers.Ticket(
+                repo=key[0],
+                ticket_id=key[1],
+                all_finished=len(finishes) == len(rows),
+                last_finish=None if not finishes or None in finishes else float(max(finishes)),
+                held_on=frozenset(held.get(key, ())),
+                live=any(job_id in self._children for job_id, _, _ in rows),
+            )
+        return containers.Ledger(tickets, job_ticket)
 
     def _job_state_name(self, job_id: str) -> str | None:
         try:
