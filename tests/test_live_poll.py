@@ -1265,8 +1265,6 @@ def included(etag: str, value: object, *, link: str | None = None) -> GhResult:
 
 
 class ListGh(FakeGh):
-    """FakeGh whose conditional open-issue list replies per list_etags (None is a 304)."""
-
     def __init__(self) -> None:
         super().__init__(FACTORY.format(tickets="github", ship="merge"))
         self.list_etags: list[str | None] = []

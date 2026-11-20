@@ -871,8 +871,6 @@ class LivePollSource:
     def _comments_for(
         self, repo: str, number: str, issue: dict[str, Any]
     ) -> tuple[Comment, ...]:
-        """Candidate comments, reread only when the list item's updated_at or
-        comment count moved, so an unchanged candidate list costs no reads."""
         key = (repo.lower(), number)
         stamp = (issue.get("updated_at"), issue.get("comments"))
         valid = isinstance(stamp[0], str) and type(stamp[1]) is int
@@ -2380,8 +2378,6 @@ class LivePollSource:
         return pages
 
     def _gh_list(self, endpoint: str) -> list[object]:
-        """A list read whose first page is conditional, so an unchanged list
-        is a 304. Later pages are read only when page one links to them."""
         body, has_next = self._gh_response(endpoint)
         try:
             pages = [json.loads(body)]
