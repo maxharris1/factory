@@ -156,7 +156,6 @@ GH_CALL_TIMEOUT_SECONDS = 20.0
 GH_CALL_ATTEMPTS = 3
 GH_RETRY_BACKOFF_SECONDS = 2.0
 CACHE_REPLAY_SLACK_SECONDS = 2.0
-GH_CACHE_ENTRIES = 512
 READ_DEADLINE_SECONDS = 30.0
 TRACKED_READ_BUDGET_SECONDS = 120.0
 CYCLE_ERROR_DETAILS = 5
@@ -488,6 +487,30 @@ class FedPulls:
         return None if row is None or row[0] is None else str(row[0])
 
 
+class GhCacheExpiries:
+    def __init__(self, path: Path | None = None):
+        self._connection = sqlite3.connect(
+            ":memory:" if path is None else str(path), timeout=30, isolation_level=None
+        )
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS gh_cache_expiry (key TEXT PRIMARY KEY, expiry REAL NOT NULL)"
+        )
+
+    def replays(self, key: tuple[str, ...], now: float) -> bool:
+        row = self._connection.execute(
+            "SELECT expiry FROM gh_cache_expiry WHERE key = ?", (json.dumps(key),)
+        ).fetchone()
+        return row is not None and row[0] > now
+
+    def keep(self, key: tuple[str, ...], expiry: float, now: float) -> None:
+        self._connection.execute("DELETE FROM gh_cache_expiry WHERE expiry <= ?", (now,))
+        self._connection.execute(
+            "INSERT INTO gh_cache_expiry (key, expiry) VALUES (?, ?) "
+            "ON CONFLICT (key) DO UPDATE SET expiry = excluded.expiry",
+            (json.dumps(key), expiry),
+        )
+
+
 class LastRead(NamedTuple):
     probe_before_read: str | None
     read_at: float
@@ -526,10 +549,12 @@ class LivePollSource:
         tracked_read_budget_seconds: float = TRACKED_READ_BUDGET_SECONDS,
         risks: IntakeRisks | None = None,
         fed_pulls: FedPulls | None = None,
+        gh_cache: GhCacheExpiries | None = None,
     ):
         self.config = config
         self.risks = IntakeRisks() if risks is None else risks
         self.fed_pulls = FedPulls() if fed_pulls is None else fed_pulls
+        self.gh_cache = GhCacheExpiries() if gh_cache is None else gh_cache
         self.environ = environ
         self.gh_runner = gh_runner
         self.linear_transport = linear_transport
@@ -561,7 +586,6 @@ class LivePollSource:
         self._head_read_last_used: dict[tuple[str, str, str], float] = {}
         self._linear_issue_cache: dict[str, dict[str, Any] | None] = {}
         self._etag_cache: dict[tuple[str, ...], tuple[str, str]] = {}
-        self._gh_cache_expiry: dict[tuple[str, ...], float] = {}
         self._last_reads: dict[tuple[str, str], LastRead] = {}
         self._linear_branches: dict[str, str] = {}
         self._linear_branch_pulls: dict[str, str | None] = {}
@@ -2510,16 +2534,10 @@ class LivePollSource:
         if cached is None:
             return False
         key, ttl = cached
-        if self._gh_cache_expiry.get(key, 0.0) > started_wall:
+        if self.gh_cache.replays(key, started_wall):
             return True
         if cacheable:
-            if len(self._gh_cache_expiry) >= GH_CACHE_ENTRIES:
-                self._gh_cache_expiry = {
-                    k: expiry
-                    for k, expiry in self._gh_cache_expiry.items()
-                    if expiry > started_wall
-                }
-            self._gh_cache_expiry[key] = started_wall + ttl
+            self.gh_cache.keep(key, started_wall + ttl, started_wall)
         return False
 
     def _quota_wait(self, retry_after: str | None) -> tuple[float, str]:
