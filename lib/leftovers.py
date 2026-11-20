@@ -63,6 +63,7 @@ def sweep(
     base: RemoteTarget,
     job_state: Callable[[str], str | None],
     held_tags: Callable[[], frozenset[str] | None],
+    tried: dict[str, int],
 ) -> list[str]:
     device = base.device
     listed = runner(leftovers_script(f"{base.workdir_root.rstrip('/')}/jobs"))
@@ -70,16 +71,19 @@ def sweep(
         return [f"could not list runs on {device} ({failed})"]
     runs, unreadable = read_leftovers(listed.stdout)
     lines = [f"kept {unreadable} unreadable run line(s) on {device}"] if unreadable else []
-    reaps = deferred = 0
+    due: list[ListedRun] = []
     for run, verdict in plan_leftovers(runs, job_state, held_tags):
-        where = f"run {run.tag} of job {run.job_id} on {device}"
         if isinstance(verdict, Keep):
-            lines.append(f"kept {where}: {verdict.reason}")
-            continue
-        if reaps == REAPS_PER_SWEEP:
-            deferred += 1
-            continue
-        reaps += 1
+            lines.append(f"kept run {run.tag} of job {run.job_id} on {device}: {verdict.reason}")
+        else:
+            due.append(run)
+    for gone in tried.keys() - {run.tag for run in runs}:
+        del tried[gone]
+    stamp = max(tried.values(), default=0) + 1
+    due.sort(key=lambda run: tried.get(run.tag, 0))
+    for run in due[:REAPS_PER_SWEEP]:
+        tried[run.tag] = stamp
+        where = f"run {run.tag} of job {run.job_id} on {device}"
         reaped = runner(reap_script(replace(base, job_id=run.job_id, tag=run.tag)))
         states = read_reap(reaped.stdout)
         if (failed := failure(reaped)) is not None or states is None:
@@ -91,6 +95,6 @@ def sweep(
         elif states[0] != GONE:
             left = "still running" if states[1] == RUNNING else "not known to be gone"
             lines.append(f"kept {where}: {left} after a kill")
-    if deferred:
-        lines.append(f"deferred {deferred} run(s) on {device} to the next sweep")
+    if len(due) > REAPS_PER_SWEEP:
+        lines.append(f"deferred {len(due) - REAPS_PER_SWEEP} run(s) on {device} to the next sweep")
     return lines

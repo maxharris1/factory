@@ -647,6 +647,7 @@ class Waiter:
         self.transport = transport if transport is not None else SshTransport()
         self._containers_swept_at = clock()
         self._container_lines: set[str] = set()
+        self._leftover_tries: dict[str, dict[str, int]] = {}
         self._locked = 0
         self._recovered = False
         self._claimer = (os.getpid(), process_start(os.getpid()))
@@ -1186,7 +1187,9 @@ class Waiter:
             for line in stacks.sweep(runner, ledger, name, roots):
                 note(line)
             if target is not None:
-                for line in leftovers.sweep(runner, target, self._job_state_name, held_tags):
+                for line in leftovers.sweep(
+                    runner, target, self._job_state_name, held_tags, self._leftover_tries.setdefault(name, {})
+                ):
                     note(line)
         self._container_lines = lines
 
