@@ -175,7 +175,7 @@ class T4Mixin:
                 match self._convergence(ticket, comment, reported_round, frozenset(qa.failed)):
                     case Repeated() as repeated:
                         return self._t3_repeat(
-                            ticket, comment, repeated, reported_round, states=APPROVE_ROUND_STATES
+                            ticket, comment, repeated, reported_round, qa=qa, states=APPROVE_ROUND_STATES
                         )
                     case convergence:
                         return self._spend_review_round(

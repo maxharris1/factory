@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from lib import job_detail
 from lib.dispatch.constants import APPROVE_ROUND_STATES, REVISE_ROUND_STATES
 from lib.dispatch.helpers import _comment_link, _matching_head, _round_number, _scope, red_checks
-from lib.dispatch.qa import QaFix, ReviewFix, Wait
+from lib.dispatch.qa import QaFix, ReviewFix, Wait, failed_column
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, Registration, TrackedTicket
 from lib.dispatch.verdict.convergence import Continue, Repeated, Stalled
@@ -55,7 +55,7 @@ class T3Mixin:
         qa_ids = frozenset(qa.failed) if qa is not None else frozenset()
         match self._convergence(ticket, comment, reported_round, qa_ids):
             case Repeated() as repeated:
-                return self._t3_repeat(ticket, comment, repeated, reported_round)
+                return self._t3_repeat(ticket, comment, repeated, reported_round, qa=qa)
             case convergence:
                 ci_failure: tuple[str, ...] = ()
                 if ticket.factory.start_before_ci:
@@ -206,14 +206,15 @@ class T3Mixin:
             connection.execute(
                 """
                 INSERT INTO review_events (
-                    repo, ticket_id, comment_id, outcome
-                ) VALUES (?, ?, ?, ?)
+                    repo, ticket_id, comment_id, outcome, qa_failed
+                ) VALUES (?, ?, ?, ?, ?)
                 """,
                 (
                     ticket.repo.lower(),
                     ticket.ticket_id,
                     comment.id,
                     outcome,
+                    failed_column(qa),
                 ),
             )
             if granted is not None:

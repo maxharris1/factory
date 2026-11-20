@@ -43,6 +43,26 @@ class SchemaMixin:
                 )
             connection.commit()
 
+    def _migrate_review_qa_failed(self) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'review_events'"
+            ).fetchone()
+            if exists is not None and "qa_failed" not in _column_names(connection, "review_events"):
+                connection.execute("ALTER TABLE review_events ADD COLUMN qa_failed TEXT")
+                connection.execute(
+                    """
+                    UPDATE review_events SET qa_failed = (
+                        SELECT json_extract(jobs.detail, '$.qa_findings.failed') FROM jobs
+                        WHERE jobs.dedupe_key = 't3:' || review_events.repo || char(31)
+                              || review_events.ticket_id || ':' || review_events.comment_id
+                          AND json_valid(jobs.detail)
+                    )
+                    """
+                )
+            connection.commit()
+
     def _initialize(self) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
@@ -334,6 +354,7 @@ class SchemaMixin:
                 },
             )
         self._migrate_ship_intent_redrive()
+        self._migrate_review_qa_failed()
         with self._connect() as connection:
             connection.execute(
                 """
@@ -353,6 +374,7 @@ class SchemaMixin:
                     ticket_id TEXT NOT NULL,
                     comment_id TEXT NOT NULL,
                     outcome TEXT NOT NULL,
+                    qa_failed TEXT,
                     PRIMARY KEY (repo, ticket_id, comment_id)
                 )
                 """
