@@ -23,8 +23,8 @@ ENV = {"ORCH_JOB_ID": "job-1", "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "0"}
 SOURCE_MARK = "<codex_rollout source>"
 
 
-def _codex_probe() -> str:
-    script = usage_probe.codex_remote_script("thread-1")
+def _codex_probe(**home: None) -> str:
+    script = usage_probe.codex_remote_script("thread-1", **home)
     source = Path(usage_probe.codex_rollout.__file__).read_text(encoding="utf-8")
     return script.replace(shlex.quote(source), SOURCE_MARK)
 
@@ -73,3 +73,10 @@ def test_default_account_harness_env_is_unchanged(harness: str, expected: dict) 
 def test_no_extra_unset_names_leave_the_start_script_unchanged() -> None:
     expected = (GOLDEN / "start_plain.txt").read_text(encoding="utf-8")
     assert remote.start_script(TARGET, ["claude", "-p"], ENV, unset=()) == expected
+
+
+def test_no_account_home_leaves_the_usage_probe_scripts_unchanged() -> None:
+    assert usage_probe.claude_remote_script(home=None) == (GOLDEN / "usage_probe_claude.txt").read_text(
+        encoding="utf-8"
+    )
+    assert _codex_probe(home=None) == (GOLDEN / "usage_probe_codex.txt").read_text(encoding="utf-8")

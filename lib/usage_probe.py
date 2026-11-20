@@ -20,7 +20,9 @@
   reads it in process on each flush (lib/telemetry.py).
 
 Nothing here reads a credential: the CLI and the rollout reader run with
-the bot's own login, and only their stdout comes back. The run's proof
+the job's placed account, the bot's own login or, for another account,
+CLAUDE_CONFIG_DIR or CODEX_HOME set to its home with its token variables
+dropped by name, and only their stdout comes back. The run's proof
 token and worker tag are never passed to the probe.
 """
 
@@ -34,6 +36,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from lib import codex_rollout, telemetry
+from lib.harness_env import ACCOUNT_ISOLATION
 from lib.job_token import PROOF_ENV
 from lib.remote import LOGIN_SHELL, TAG_ENV, ByteTransport, RemoteTarget, Transport, ssh_argv
 from lib.usage_readings import (
@@ -100,13 +103,23 @@ def _login(script: str, args: Sequence[str]) -> str:
     return f"exec {LOGIN_SHELL} -lc {shlex.quote(script)} {LOGIN_NAME} {quoted}"
 
 
-def claude_remote_script() -> str:
-    return _login('cd && exec claude "$@"', CLAUDE_ARGS)
+def _as_account(harness: str) -> str:
+    isolation = ACCOUNT_ISOLATION[harness]
+    dropped = "".join(f"-u {name} " for name in isolation.tokens)
+    return f'/usr/bin/env {dropped}"{isolation.home}=$1"'
 
 
-def codex_remote_script(thread_id: str) -> str:
+def claude_remote_script(home: str | None = None) -> str:
+    if home is None:
+        return _login('cd && exec claude "$@"', CLAUDE_ARGS)
+    return _login(f'cd && exec {_as_account("claude")} claude "${{@:2}}"', (home, *CLAUDE_ARGS))
+
+
+def codex_remote_script(thread_id: str, home: str | None = None) -> str:
     source = Path(codex_rollout.__file__).read_text(encoding="utf-8")
-    return _login('exec python3 -I -S -c "$1" "$2"', (source, thread_id))
+    if home is None:
+        return _login('exec python3 -I -S -c "$1" "$2"', (source, thread_id))
+    return _login(f'exec {_as_account("codex")} python3 -I -S -c "$2" "$3"', (home, source, thread_id))
 
 
 def _exchange(transport: Transport, argv: list[str], data: bytes, timeout: float) -> bytes:
@@ -120,16 +133,27 @@ def _exchange(transport: Transport, argv: list[str], data: bytes, timeout: float
     return result.stdout[:MAX_REPLY_BYTES]
 
 
-def claude_remote(transport: Transport, target: RemoteTarget, *, timeout: float = TIMEOUT_SECONDS) -> bytes:
-    return _exchange(transport, ssh_argv(target, claude_remote_script()), REQUEST, timeout)
+def claude_remote(
+    transport: Transport,
+    target: RemoteTarget,
+    *,
+    home: str | None = None,
+    timeout: float = TIMEOUT_SECONDS,
+) -> bytes:
+    return _exchange(transport, ssh_argv(target, claude_remote_script(home)), REQUEST, timeout)
 
 
 def codex_remote(
-    transport: Transport, target: RemoteTarget, thread_id: str, *, timeout: float = TIMEOUT_SECONDS
+    transport: Transport,
+    target: RemoteTarget,
+    thread_id: str,
+    *,
+    home: str | None = None,
+    timeout: float = TIMEOUT_SECONDS,
 ) -> object:
     if not codex_rollout.THREAD_ID.fullmatch(thread_id):
         return None
-    out = _exchange(transport, ssh_argv(target, codex_remote_script(thread_id)), b"", timeout)
+    out = _exchange(transport, ssh_argv(target, codex_remote_script(thread_id, home)), b"", timeout)
     lines = out.strip().splitlines()
     try:
         return json.loads(lines[-1]) if lines else None
@@ -169,12 +193,19 @@ def start_claude(
 
 
 
-def remote_codex(transport: Transport, target: RemoteTarget, harness: str, thread_id: str | None) -> object:
+def remote_codex(
+    transport: Transport,
+    target: RemoteTarget,
+    harness: str,
+    thread_id: str | None,
+    *,
+    home: str | None = None,
+) -> object:
     """A finished remote Codex job's rollout read, as lib/codex_rollout.py
     printed it; None for another harness or on any failure."""
     if harness != "codex" or thread_id is None:
         return None
     try:
-        return codex_remote(transport, target, thread_id)
+        return codex_remote(transport, target, thread_id, home=home)
     except Exception:  # a usage read never touches the job's end
         return None

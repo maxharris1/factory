@@ -1018,7 +1018,7 @@ time.sleep(0.5)
 """
 
 
-def _running_job(tmp_path: Path):
+def _running_job(tmp_path: Path, machines: Path | None = None):
     queue = SQLiteJobQueue(tmp_path / "orch.db", clock=time.time)
     queue.enqueue(
         JobRequest(
@@ -1031,7 +1031,7 @@ def _running_job(tmp_path: Path):
         ),
         dedupe_key=f"k-{time.monotonic_ns()}",
     )
-    return queue, pool_claim(queue, "claude")
+    return queue, pool_claim(queue, "claude", machines)
 
 
 def _fake_claude(tmp_path: Path, fixture: str = "claude_stream.jsonl") -> Path:

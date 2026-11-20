@@ -2370,7 +2370,7 @@ def _job_run_command(argv: list[str]) -> int:
             usage_read = usage_probe.start_claude(
                 session.add_usage,
                 session.clock,
-                (lambda: usage_probe.claude_remote(placed.transport, target))
+                (lambda: usage_probe.claude_remote(placed.transport, target, home=placed.account_home))
                 if target is not None
                 else (lambda: usage_probe.claude_local(binary, probe_env)),
                 log,
@@ -2564,6 +2564,7 @@ def _job_run_command(argv: list[str]) -> int:
             if placed.target is not None:
                 session.add_rollout(usage_probe.remote_codex(
                     placed.transport, placed.target, session.harness, session.summary.thread_id,
+                    home=placed.account_home,
                 ))
             session.finish(code)
         placed.ended(code)  # #91: the exit reason, while the job still runs
