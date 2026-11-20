@@ -116,7 +116,6 @@ def test_dead_needs_the_runner_gone_and_the_worker_confirmed_gone() -> None:
 
 
 def test_a_stale_job_whose_runner_is_gone_shows_the_runner_gone() -> None:
-    # #1211: display only; a gone runner with its worker confirmed gone is DEAD.
     assert stale_cause(STALE, Liveness(runner_alive=False, worker_gone=False)) == RUNNER_GONE
     assert stale_cause(STALE, Liveness(runner_alive=False, worker_gone=None)) == RUNNER_GONE
     assert RUNNER_GONE == "runner-gone"
