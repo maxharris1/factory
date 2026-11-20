@@ -55,12 +55,20 @@ def review_rules(facts: dict) -> str:
     else:
         followup = ""
     auto_extra = facts["auto_extra"]
-    high_risk = (
-        f"Risk high: up to three rounds; the poller grants up to {auto_extra} more itself under factory.md "
-        "`review.auto_extra_rounds` (set by Max); each round past those needs Max's own words."
-        if auto_extra
-        else "Risk high: up to three rounds; every extra round needs Max's own words."
-    )
+    if facts["stop_on"] == "convergence":
+        high_risk = (
+            "Risk high: three rounds, then rounds continue while the open blocking findings shrink to a new low "
+            "(factory.md `review.stop_on: convergence`), and one flat round (no new low) may still continue. Two "
+            "flat rounds in a row, or a flat round that carries a blocker from the round before, stop the review "
+            "and ask Max."
+        )
+    else:
+        high_risk = (
+            f"Risk high: up to three rounds; the poller grants up to {auto_extra} more itself under factory.md "
+            "`review.auto_extra_rounds` (set by Max); each round past those needs Max's own words."
+            if auto_extra
+            else "Risk high: up to three rounds; every extra round needs Max's own words."
+        )
     return (
         "## Review rules (docs/SPEC.md section 8)\n"
         "- One reviewer, from a different model family than the builder, gives the final factory verdict.\n"
@@ -162,4 +170,5 @@ CONTRADICTIONS = (
     ("decided-builder-vs-reviewer", "build to them and do not ask them again", "is not raised again as a `[blocking]` finding"),
     ("proof-ready-vs-verdict", "The ready names the pushed head", "The verdict names each `ac-<n>`"),
     ("questions-only-vs-ready", "The questions handoff is this job's only output.", "Push, then post the ready handoff below"),
+    ("stop-on-rounds-vs-convergence", "ask Max what to do, and stop.", "Rounds continue while the open blocking findings shrink"),
 )

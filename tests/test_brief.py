@@ -514,9 +514,18 @@ def _instructions(text: str) -> str:
     return text.split("\n## Job data\n")[0]
 
 
-def _variant(variant: tuple, *, factory_root: str | None = BOX_FACTORY_ROOT, **extra: object) -> str:
+CONVERGENCE_FACTORY_MD = SNAPSHOT_FACTORY_MD.replace("review:\n", "review:\n  stop_on: convergence\n", 1)
+
+
+def _variant(
+    variant: tuple,
+    *,
+    factory_root: str | None = BOX_FACTORY_ROOT,
+    factory_md: str = SNAPSHOT_FACTORY_MD,
+    **extra: object,
+) -> str:
     action, recipient, head, detail_extra = variant
-    parsed, findings = parse_factory_context(SNAPSHOT_FACTORY_MD)
+    parsed, findings = parse_factory_context(factory_md)
     assert parsed is not None, findings
     return render_brief(
         _job(action, recipient, 1, head, {**detail_extra, **extra}),
@@ -539,7 +548,61 @@ def _corpus() -> dict[str, str]:
         texts[f"{name}/decided"] = _variant(variant, decisions=[DECISION])
     texts["build/questions-only"] = _variant(BUILD, factory_root=None)
     texts["review/questions-only"] = _variant(REVIEW, factory_root=None)
+    texts["review/convergence"] = _variant(REVIEW, factory_md=CONVERGENCE_FACTORY_MD, round="2/3")
+    texts["review-fix/convergence"] = _variant(REVIEW_FIX, factory_md=CONVERGENCE_FACTORY_MD)
     return {name: _instructions(text) for name, text in texts.items()}
+
+
+ROUNDS_STOP = "ask Max what to do, and stop."
+CONVERGENCE_STOP = "Rounds continue while the open blocking findings shrink to a new low"
+ROUNDS_HIGH_RISK = "Risk high: up to three rounds;"
+CONVERGENCE_HIGH_RISK = (
+    "Risk high: three rounds, then rounds continue while the open blocking findings shrink to a new low "
+    "(factory.md `review.stop_on: convergence`), and one flat round (no new low) may still continue."
+)
+
+
+@pytest.mark.parametrize(
+    ("factory_md", "said", "unsaid"),
+    [
+        (SNAPSHOT_FACTORY_MD, (ROUNDS_STOP, ROUNDS_HIGH_RISK), (CONVERGENCE_STOP, CONVERGENCE_HIGH_RISK)),
+        (CONVERGENCE_FACTORY_MD, (CONVERGENCE_STOP, CONVERGENCE_HIGH_RISK), (ROUNDS_STOP, ROUNDS_HIGH_RISK)),
+    ],
+    ids=["rounds", "convergence"],
+)
+def test_a_later_review_round_states_the_stop_rule_factory_md_sets(
+    factory_md: str, said: tuple[str, ...], unsaid: tuple[str, ...]
+) -> None:
+    text = _instructions(_variant(REVIEW, factory_md=factory_md, round="2/3"))
+    assert [phrase for phrase in said if phrase not in text] == []
+    assert [phrase for phrase in unsaid if phrase in text] == []
+
+
+CONVERGENCE_FLAT_ROUNDS = (
+    "one flat round (no new low) may still continue",
+    "two flat rounds in a row, or a flat round that carries a blocker from the round before, stop the review",
+)
+STOPS_AT_THE_FIRST_FLAT_ROUND = re.compile(r"stops? (?:the review|it) when they do not")
+
+
+def _review_section(factory_md: str) -> str:
+    return factory_md.split("\n## Review\n", 1)[1].split("\n## ", 1)[0]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            lambda: _instructions(_variant(REVIEW, factory_md=CONVERGENCE_FACTORY_MD, round="2/3")),
+            id="review brief",
+        ),
+        pytest.param(lambda: _review_section((ROOT / "factory.md").read_text()), id="factory.md"),
+    ],
+)
+def test_convergence_instructions_allow_one_flat_round_before_the_stop(text) -> None:
+    said = text().lower()
+    assert [phrase for phrase in CONVERGENCE_FLAT_ROUNDS if phrase not in said] == []
+    assert STOPS_AT_THE_FIRST_FLAT_ROUND.findall(said) == []
 
 
 def contradictions_in(text: str) -> list[str]:

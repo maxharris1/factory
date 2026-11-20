@@ -17,6 +17,7 @@ review:
   #   command: pytest -q tests/fast
   #   timeout_seconds: 300
   # block_on: any-failure  # optional; user-impact uses pstack's blocking bar and files follow-ups from round 1
+  # stop_on: rounds  # optional; convergence goes on while blocking findings reach a new low, through one flat round
   # verify_unavailable: true  # optional; the verify skill may not be on the base yet, so the reviewer lists it as not run
 ship: merge
 # finish_line: merge  # optional; omitted, it follows ship

@@ -172,6 +172,7 @@ def merge_update_task(verify: str, block_on: str = "user-impact") -> str:
         "round_number": 2,
         "followup_from": None,
         "block_on": block_on,
+        "stop_on": "rounds",
         "update": {"last_reviewed_head": "a" * 40, "merge": "b" * 40, "commits": []},
         "rebase": None,
         "size_flag": None,
