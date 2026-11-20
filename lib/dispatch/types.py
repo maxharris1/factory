@@ -429,6 +429,10 @@ class RetryableStateError(RuntimeError):
     pass
 
 
+class AlreadyDeferred(RuntimeError):
+    pass
+
+
 class RetryableShipError(RetryableStateError):
     pass
 

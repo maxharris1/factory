@@ -23,6 +23,7 @@ from lib.orch_yml import LinearConfig, OrchConfig, Project
 from lib.poll_source import (
     HANG_STRIKES,
     HTTPResult,
+    LINEAR_STATES_PAGE,
     LINEAR_STATES_QUERY,
     LivePollSource,
     PollCycleError,
@@ -684,3 +685,124 @@ def test_a_linear_hang_trip_records_its_timeouts_and_one_trip_row_and_defers_the
         ).fetchone()[0]
     assert set(keys) <= tracked
     assert trips == 1
+
+
+def test_a_linear_hang_trip_in_state_pages_defers_the_skipped_pages_without_per_ticket_rows(
+    tmp_path: Path,
+) -> None:
+    keys = tuple(f"AUT-{number}" for number in range(1, 251))
+    dispatcher = tracked_dispatcher(
+        tmp_path, [("acme/linear", key, "linear") for key in keys]
+    )
+    hanging = [True]
+
+    def transport(url, headers, body, timeout):
+        if hanging[0]:
+            raise TimeoutError()
+        request = json.loads(body)
+        if request["query"] == LINEAR_STATES_QUERY:
+            nodes = [
+                {"identifier": f"AUT-{number}", "state": {"name": "Doing", "type": "started"}}
+                for number in request["variables"]["numbers"]
+            ]
+            return HTTPResult(200, json.dumps({"data": {"issues": {"nodes": nodes}}}))
+        return HTTPResult(200, HEALTHY.decode())
+
+    source = LivePollSource(
+        mixed_config(),
+        environ={"LINEAR_KEY": "key"},
+        gh_runner=FakeGh(FACTORY.format(tickets="github", ship="merge")),
+        linear_transport=transport,
+        error_sink=dispatcher.record_poll_error,
+        deferral_sink=dispatcher.record_poll_deferral,
+        read_deadline_seconds=0.02,
+    )
+    clock = CycleClock()
+    dispatcher.cycle_clock = clock
+    clock.start()
+    with pytest.raises(PollCycleError) as raised:
+        dispatcher.poll_once(source)
+    line = clock.end()
+
+    with dispatcher._connect() as connection:
+        state_errors = [
+            row[0]
+            for row in connection.execute(
+                "SELECT error FROM poll_errors WHERE error LIKE 'linear-state:%'"
+            )
+        ]
+        trips = connection.execute(
+            "SELECT COUNT(*) FROM poll_errors WHERE error LIKE '%skipped for the rest%'"
+        ).fetchone()[0]
+        marked = connection.execute("SELECT COUNT(*) FROM linear_states").fetchone()[0]
+    timed_out = HANG_STRIKES * LINEAR_STATES_PAGE
+    assert len(state_errors) == timed_out, state_errors[:3]
+    assert not any("skipped for the rest" in error for error in state_errors)
+    assert trips == 1
+    assert marked == timed_out
+    assert "linear x1" in str(raised.value), raised.value
+    skips = re.search(r"linear hang-skip (\d+)", line)
+    assert skips is not None and int(skips.group(1)) >= len(keys) - timed_out, line
+
+    hanging[0] = False
+    try:
+        dispatcher.poll_once(source)
+    except PollCycleError:
+        pass
+
+    with dispatcher._connect() as connection:
+        read = {
+            row[0]
+            for row in connection.execute(
+                "SELECT ticket_id FROM linear_states WHERE state_name = 'Doing'"
+            )
+        }
+    assert read == set(keys)
+
+
+def test_a_github_hang_trip_while_processing_defers_the_later_reads_without_per_ticket_rows(
+    tmp_path: Path,
+) -> None:
+    dispatcher = tracked_dispatcher(
+        tmp_path, [("acme/widgets", number, "github") for number in GITHUB]
+    )
+    healthy = FakeGh(FACTORY.format(tickets="github", ship="merge"))
+    calls: list[float] = []
+    probe = ["gh", "api", "repos/acme/widgets/pulls/99"]
+
+    def runner(argv, timeout):
+        if argv == probe:
+            return hanging_gh(calls)(argv, timeout)
+        return healthy(argv, timeout)
+
+    source = LivePollSource(
+        github_config(),
+        gh_runner=runner,
+        error_sink=dispatcher.record_poll_error,
+        deferral_sink=dispatcher.record_poll_deferral,
+        gh_call_timeout_seconds=ATTEMPT,
+        read_deadline_seconds=DEADLINE,
+    )
+    dispatcher.process = Mock(side_effect=lambda ticket: source._run_gh_read(probe))
+    clock = CycleClock()
+    dispatcher.cycle_clock = clock
+    clock.start()
+    with pytest.raises(PollCycleError) as raised:
+        dispatcher.poll_once(source)
+    line = clock.end()
+
+    with dispatcher._connect() as connection:
+        errors = [row[0] for row in connection.execute("SELECT error FROM poll_errors")]
+        streaks = connection.execute(
+            "SELECT COUNT(*) FROM poll_error_streaks WHERE count > 0"
+        ).fetchone()[0]
+        deferrals = [row[0] for row in connection.execute("SELECT detail FROM poll_deferrals")]
+    skipped = len(GITHUB) - HANG_STRIKES
+    trip = f"github skipped for the rest of this cycle after {HANG_STRIKES} timed-out reads"
+    assert processed(dispatcher) == list(GITHUB)
+    assert len(errors) == HANG_STRIKES + 1, errors
+    assert sum(trip in error for error in errors) == 1, errors
+    assert str(raised.value).startswith("poll cycle recorded 1 source error(s)"), raised.value
+    assert streaks == HANG_STRIKES
+    assert f"github hang-skip {skipped}" in line, line
+    assert deferrals == [f"github hang-skip x{skipped}"]
