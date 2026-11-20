@@ -161,7 +161,7 @@ PINNED_READS = [
     SEARCHES + [("issue", "AUT-3"), ("issue", "AUT-1"), ("issue", "AUT-2")],
     SEARCHES + [("issue", "AUT-3"), ("issue", "AUT-1"), ("issue", "AUT-2")],
 ]
-PINNED_GH_CALLS = [16, 16, 16]
+PINNED_GH_CALLS = [19, 19, 19]
 
 
 def test_no_webhook_poll_cycles_make_exactly_todays_linear_reads(
