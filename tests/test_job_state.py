@@ -26,6 +26,7 @@ from lib.dispatcher import Dispatcher
 from lib.job_state import (
     CLAIMED,
     DEAD,
+    RUNNER_GONE,
     RUNNING,
     STALE,
     JobStateConfig,
@@ -33,6 +34,7 @@ from lib.job_state import (
     derive,
     liveness,
     read_placements,
+    stale_cause,
 )
 from lib.orch_yml import load_orch_yml
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
@@ -111,6 +113,16 @@ def test_dead_needs_the_runner_gone_and_the_worker_confirmed_gone() -> None:
             last_activity_at=500.0, now=1000.0, placement=started, stale_seconds=120,
             liveness=facts,
         ) == STALE
+
+
+def test_a_stale_job_whose_runner_is_gone_shows_the_runner_gone() -> None:
+    assert stale_cause(STALE, Liveness(runner_alive=False, worker_gone=False)) == RUNNER_GONE
+    assert stale_cause(STALE, Liveness(runner_alive=False, worker_gone=None)) == RUNNER_GONE
+    assert RUNNER_GONE == "runner-gone"
+    assert stale_cause(STALE, Liveness()) is None
+    for state in (RUNNING, CLAIMED, DEAD):
+        assert stale_cause(state, Liveness(runner_alive=False, worker_gone=False)) is None
+    assert stale_cause(RUNNING, Liveness(runner_alive=True)) is None
 
 
 def test_liveness_checks_the_runner_then_a_local_worker_by_pid() -> None:
@@ -604,8 +616,9 @@ def test_bad_job_states_are_refused(tmp_path: Path, extra: str, message: str) ->
 
 def dashboard_db(tmp_path: Path) -> tuple[Path, Path]:
     """bbfa3217 twelve minutes after its claim (no poller ran), plus a
-    stale job, a dead job and a running one."""
-    poller = Poller(tmp_path, box_slots=4)
+    stale job whose runner is gone, a stale job no runner recorded itself on
+    (quiet), a dead job and a running one."""
+    poller = Poller(tmp_path, box_slots=5)
     claimed = poller.review()
     poller.claim()
 
@@ -628,7 +641,10 @@ def dashboard_db(tmp_path: Path) -> tuple[Path, Path]:
         poller.pool.claim("codex")
         poller.pool.attach_runner(ids[name], owner="codex", pid=runner, start=None, alive=lambda *_: False)
         poller.pool.attach_worker(ids[name], owner="codex", pid=runner + 1, start=None)
+    ids["quiet"] = job("quiet", "83")
+    poller.pool.claim("codex")
     poller.now[0] = CLAIMED_AT + 60
+    poller.queue.heartbeat(ids["quiet"], owner="codex")
     poller.queue.heartbeat(ids["stale"], owner="codex")
     poller.queue.heartbeat(ids["dead"], owner="codex")
     poller.now[0] = CLAIMED_AT + 11 * 60
@@ -654,16 +670,27 @@ def test_the_dashboard_shows_each_state_and_the_real_round(tmp_path: Path) -> No
     )
     running = {row["job"]: row for row in snapshot["running"]}
     states = {name: running[job_id[:8]]["job_state"] for name, job_id in ids.items()}
-    assert states == {"claimed": "claimed", "stale": "stale", "dead": "dead", "running": "running"}
+    assert states == {
+        "claimed": "claimed", "stale": "stale", "quiet": "stale", "dead": "dead", "running": "running",
+    }
+    causes = {name: running[job_id[:8]]["stale_cause"] for name, job_id in ids.items()}
+    assert causes == {"claimed": None, "stale": "runner-gone", "quiet": None, "dead": None, "running": None}
     review = running[ids["claimed"][:8]]
     assert review["round"] == "1/1"  # from detail.round, not "round 0"
 
     # Stale and dead jobs count in stuck / overdue and need attention.
     overdue = {row["job"]: row for row in snapshot["stuck"]["overdue_jobs"]}
-    assert set(overdue) == {ids["stale"][:8], ids["dead"][:8]}
-    kinds = sorted(item["kind"] for item in snapshot["attention"]["items"])
-    assert kinds == ["dead", "stale"]
-    assert snapshot["attention"]["count"] == 2
+    assert set(overdue) == {ids["stale"][:8], ids["quiet"][:8], ids["dead"][:8]}
+    assert {job: row["stale_cause"] for job, row in overdue.items()} == {
+        ids["stale"][:8]: "runner-gone", ids["quiet"][:8]: None, ids["dead"][:8]: None,
+    }
+    details = {item["ticket_id"]: (item["kind"], item["detail"]) for item in snapshot["attention"]["items"]}
+    assert details == {
+        "80": ("stale", "codex build runner gone, worker alive, no heartbeat for 11m 00s"),
+        "83": ("stale", "codex build running, no heartbeat for 11m 00s"),
+        "81": ("dead", "codex build runner gone, no heartbeat for 11m 00s"),
+    }
+    assert snapshot["attention"]["count"] == 3
 
     pages = render_pages(snapshot)
     index = re.sub(r"<script>.*?</script>", "", pages["index.html"], flags=re.S)
@@ -678,6 +705,14 @@ def test_the_dashboard_shows_each_state_and_the_real_round(tmp_path: Path) -> No
     assert 'title="round 1/1"' in card.group(0) and "round 0" not in text
     assert "hb —" in text and '<i style="width:0%">' in card.group(0)
     assert "no heartbeat" in index and "runner dead" in index
+    assert "runner gone, worker alive" in _tile_of(index, ids["stale"])
+    assert "runner gone, worker alive" not in _tile_of(index, ids["quiet"])
+
+
+def _tile_of(html: str, job_id: str) -> str:
+    match = re.search(rf'<a class="tile [^"]*" href="[^"]*" title="[^"]*\(job {job_id[:8]}\)">.*?</a>', html, re.S)
+    assert match, job_id
+    return match.group(0)
 
 
 @needs_node
@@ -690,10 +725,13 @@ def test_the_page_script_draws_the_same_states(tmp_path: Path) -> None:
     )
     out = _run_page(tmp_path, snapshot, "main", BAR + ["lanes"])
     lanes = out["text"]["lanes"]
-    for needle in ("claimed", "waiting to start", "1/1", "no heartbeat", "runner dead", "running"):
+    for needle in ("claimed", "waiting to start", "1/1", "no heartbeat", "runner dead", "running",
+                   "runner gone, worker alive"):
         assert needle in lanes, (needle, lanes)
     assert "round 0" not in lanes
-    assert attention_count(out) == "2"
+    assert attention_count(out) == "3"
+    assert "runner gone, worker alive" in _tile_of(out["html"]["lanes"], ids["stale"])
+    assert "runner gone, worker alive" not in _tile_of(out["html"]["lanes"], ids["quiet"])
     dump = out["dump"]["lanes"]
     card = dump[dump.index(REVIEW_72) :]
     card = card[: card.index("a.tile", 1)] if "a.tile" in card[1:] else card

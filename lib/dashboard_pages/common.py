@@ -259,9 +259,9 @@ SCRIPT_HEAD = r"""
   function healthLink(href) { return /^health\.html#[A-Za-z0-9_-]+$/.test(String(href)) ? String(href) : 'health.html'; }
   // #75: lib/job_state.py's state of a running job, as a chip.
   var JOB_STATE = {claimed: ['claimed, not started', 'warn'], stale: ['stale heartbeat', 'warn'],
-                   dead: ['runner dead', 'bad']};
+                   dead: ['runner dead', 'bad'], 'runner-gone': ['runner gone, worker alive', 'warn']};
   function stateChip(r) {
-    var s = JOB_STATE[r.job_state];
+    var s = JOB_STATE[r.stale_cause || r.job_state];
     return s ? chip(s[0], s[1]) : null;
   }
   function ticking(node, base, prefix, suffix, attr) {
@@ -871,11 +871,12 @@ _JOB_STATE = {
     "claimed": ("claimed, not started", "warn"),
     "stale": ("stale heartbeat", "warn"),
     "dead": ("runner dead", "bad"),
+    "runner-gone": ("runner gone, worker alive", "warn"),
 }
 
 
 def _state_chip(row: dict) -> str:
-    found = _JOB_STATE.get(row.get("job_state"))  # type: ignore[arg-type]
+    found = _JOB_STATE.get(row.get("stale_cause") or row.get("job_state"))  # type: ignore[arg-type]
     return _chip(found[0], found[1]) if found else ""
 
 
