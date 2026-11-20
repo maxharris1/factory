@@ -67,7 +67,7 @@ from lib.factory_md import EXAMPLE_PATHS, QA_RUNNERS, FactoryConfig, load_factor
 from lib.github_actions import GitHubAdapterError, _status as gh_status
 from lib.grok_delivery import GrokDeliveryError, wake_delivery
 from lib.handoff import format_header
-from lib.harness_env import harness_env
+from lib.harness_env import account_tokens, harness_env
 from lib.hold import MergeUpdate
 from lib.hook_t7 import T7Hook
 from lib.hook_t8 import T8Hook
@@ -78,7 +78,7 @@ from lib.feeder import Feeder
 from lib.intake_live import GitHubIntakeClient, LinearIntakeClient
 from lib.job_state import record_job_event
 from lib.device_pool import DevicePool
-from lib.machines_yml import MachinesConfig, default_account, load_machines_yml
+from lib.machines_yml import MachinesConfig, load_machines_yml
 from lib.orch_yml import (
     OrchConfig,
     ProjectPins,
@@ -2323,7 +2323,8 @@ def _job_run_command(argv: list[str]) -> int:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
 
-    environment = dict(os.environ)
+    dropped = account_tokens(owner, placed.account_home)
+    environment = {name: value for name, value in os.environ.items() if name not in dropped}
     # Never pass on a token this process inherited (another job's run).
     environment.pop(job_token.PROOF_ENV, None)
     environment.update(
@@ -2331,7 +2332,7 @@ def _job_run_command(argv: list[str]) -> int:
             "ORCH_JOB_ID": args.job_id,
             "ORCH_JOB_BOT": args.bot,
             DB_ENV: str(database),
-            **harness_env(owner),
+            **harness_env(owner, placed.account_home),
         }
     )
     if proof is not None and not placed.remote:
@@ -2351,7 +2352,7 @@ def _job_run_command(argv: list[str]) -> int:
         environ=environment,
         worker_env=placed.remote,
         device=placed.device.name,
-        account=placed.device.account_for(owner) or default_account(owner),
+        account=placed.account,
         guard=lambda connection: require_latest_claim(connection, args.job_id, claim_proof),
         skills_root=None if factory_root is None else f"{factory_root}/skills",
     )
@@ -2369,7 +2370,7 @@ def _job_run_command(argv: list[str]) -> int:
             usage_read = usage_probe.start_claude(
                 session.add_usage,
                 session.clock,
-                (lambda: usage_probe.claude_remote(placed.transport, target))
+                (lambda: usage_probe.claude_remote(placed.transport, target, home=placed.account_home))
                 if target is not None
                 else (lambda: usage_probe.claude_local(binary, probe_env)),
                 log,
@@ -2385,7 +2386,7 @@ def _job_run_command(argv: list[str]) -> int:
         "ORCH_JOB_DEVICE": placed.device.name,
         # #94: with --worktree, the checkout's and the brief's remote paths
         **placed.remote_env(worktree=args.worktree, brief=box_brief is not None),
-        **harness_env(owner),
+        **harness_env(owner, placed.account_home),
     }
 
     scratch = telemetry.state_dir(args.job_id, args.bot, database, environment) / "tmp"
@@ -2563,6 +2564,7 @@ def _job_run_command(argv: list[str]) -> int:
             if placed.target is not None:
                 session.add_rollout(usage_probe.remote_codex(
                     placed.transport, placed.target, session.harness, session.summary.thread_id,
+                    home=placed.account_home,
                 ))
             session.finish(code)
         placed.ended(code)  # #91: the exit reason, while the job still runs

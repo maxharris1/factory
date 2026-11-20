@@ -1371,3 +1371,97 @@ def test_cli_job_run_records_the_harness_and_project_config_of_the_job_worktree(
         recorded = exposure.read(connection, job.id)
     assert recorded is not None, stderr
     assert (recorded.model, recorded.cli_version) == (exposure.UNKNOWN, "harness-cli 2.0.0")
+
+
+USAGE = ROOT / "tests" / "fixtures" / "usage"
+ROLLOUT_THREAD = "00000000-0000-4000-8000-000000000151"
+ACCOUNT_HOME = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}
+ACCOUNT_TOKENS = {
+    "claude": ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
+    "codex": ("OPENAI_API_KEY", "CODEX_API_KEY"),
+}
+ACCOUNT_HARNESS = f"""#!{sys.executable}
+import json, os, sys
+here = os.path.dirname(os.path.abspath(__file__))
+probe = "--input-format" in sys.argv
+json.dump(dict(os.environ), open(os.path.join(here, "probe-env.json" if probe else "env.json"), "w"))
+if probe:
+    sys.stdout.write(open({str(USAGE / "claude-2.1.322-get_usage.jsonl")!r}).read())
+elif os.path.basename(__file__) == "codex":
+    sys.stdout.write(open({str(USAGE / "codex-exec-json.jsonl")!r}).read())
+"""
+
+
+def _plant_rollout(home: Path, lines: int | None = None) -> None:
+    day = home / "sessions" / "2026" / "11" / "14"
+    day.mkdir(parents=True)
+    rollout = (USAGE / "codex-rollout.jsonl").read_text(encoding="utf-8").splitlines(keepends=True)
+    (day / f"rollout-2026-11-14T16-20-00-{ROLLOUT_THREAD}.jsonl").write_text(
+        "".join(rollout[:lines]), encoding="utf-8"
+    )
+
+
+@pytest.mark.parametrize("account", ["placed", "default"])
+@pytest.mark.parametrize("owner", ["claude", "codex"])
+def test_cli_job_run_runs_a_box_job_as_its_slots_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner: str, account: str
+) -> None:
+    bot = f"{owner}-bot"
+    placed = f"{owner}-max-2"
+    machines = tmp_path / "machines.yml"
+    machines.write_text(
+        "accounts:\n"
+        "  - {id: claude-max-2, harness: claude, signed_in_on: [box]}\n"
+        "  - {id: codex-max-2, harness: codex, signed_in_on: [box]}\n"
+        "devices:\n"
+        "  - name: box\n    local: true\n    slot_max: 3\n"
+        f"    home: {tmp_path}/homes/{{bot}}\n"
+        "    harnesses: {claude: claude-bot, codex: codex-bot}\n",
+        encoding="utf-8",
+    )
+    account_home = tmp_path / "homes" / bot / ".factory-accounts" / placed
+    login = tmp_path / "login"
+    queue = _queue(tmp_path)
+    job = _running_job(queue, recipient=owner, machines=machines)
+    if account == "placed":
+        with queue.connect() as connection:
+            connection.execute("UPDATE device_slots SET account = ? WHERE job_id = ?", (placed, job.id))
+        _plant_rollout(account_home)
+        _plant_rollout(login / ".codex", lines=3)
+    else:
+        _plant_rollout(login / ".codex")
+    harness = tmp_path / "bin" / owner
+    harness.parent.mkdir()
+    harness.write_text(ACCOUNT_HARNESS, encoding="utf-8")
+    harness.chmod(0o755)
+    for name in ACCOUNT_HOME.values():
+        monkeypatch.delenv(name, raising=False)
+    planted = {name: f"planted-{name}" for names in ACCOUNT_TOKENS.values() for name in names}
+    command = [str(harness), "-p"] if owner == "claude" else [str(harness), "exec", "-"]
+
+    proc = _orch(
+        "job", "run", bot, job.id, "--machines", str(machines), "--db", str(tmp_path / "orch.db"),
+        "--interval", "0.2", "--", *command,
+        env={"HOME": str(login), "ORCH_JOB_STATE_DIR": str(tmp_path / "state"), **planted},
+    )
+    _, stderr = proc.communicate(timeout=30)
+
+    assert proc.returncode == 0, stderr
+    seen = [json.loads((harness.parent / "env.json").read_text())]
+    if owner == "claude":
+        seen.append(json.loads((harness.parent / "probe-env.json").read_text()))
+    for env in seen:
+        if account == "placed":
+            assert env[ACCOUNT_HOME[owner]] == str(account_home)
+            assert not set(ACCOUNT_TOKENS[owner]) & set(env)
+        else:
+            assert ACCOUNT_HOME[owner] not in env
+            assert {name: env[name] for name in ACCOUNT_TOKENS[owner]} == {
+                name: planted[name] for name in ACCOUNT_TOKENS[owner]
+            }
+    with sqlite3.connect(tmp_path / "orch.db") as connection:
+        rows = connection.execute(
+            "SELECT account, window, used FROM usage_readings ORDER BY window"
+        ).fetchall()
+    expected = placed if account == "placed" else f"{owner}-default"
+    assert rows == [(expected, "five_hour", 0.125), (expected, "seven_day", 0.345)]

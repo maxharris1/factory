@@ -359,7 +359,7 @@ def test_a_requeued_job_shows_its_current_host_and_the_earlier_exit(
     with queue.connect() as connection:
         _ensure_job_events(connection)
     now[0] = 150.0
-    PlacedRun(pool, placement, old, "codex", print, None).ended(1)
+    PlacedRun(pool, placement, old, "codex", print, None, "codex-default", None).ended(1)
     queue.finish(job.id, owner="codex", handoff_comment_id=None)
     now[0] = 200.0
     with queue.connect() as connection:

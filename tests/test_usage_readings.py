@@ -30,6 +30,7 @@ import pytest
 from lib import codex_rollout, telemetry, usage_probe, usage_readings
 from lib.dashboard import collect_snapshot
 from lib.dashboard_usage import read_usage
+from lib.device_pool import DevicePool
 from lib.job_token import PROOF_ENV
 from lib.machines_yml import Device, MachinesConfig
 from lib.queue import JobRequest, SQLiteJobQueue
@@ -628,6 +629,87 @@ def test_a_remote_probe_timeout_logs_a_timeout(tmp_path: Path, monkeypatch: pyte
     assert not any(secret in lines[0] for secret in (PROBE_MARKER, CLAIM_PROOF, TAG_VALUE, ENV_VALUE))
 
 
+
+ACCOUNT_TOKENS = {
+    "claude": ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
+    "codex": ("OPENAI_API_KEY", "CODEX_API_KEY"),
+}
+TOKEN_VALUE = "sk_SYNTHETIC_account_token"
+ENV_DUMP = f"""#!{sys.executable}
+import json, os, sys
+json.dump({{"argv": sys.argv[1:], "cwd": os.getcwd(), "env": dict(os.environ)}},
+          open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "seen.json"), "w"))
+"""
+
+
+def _login_home(tmp_path: Path, harness: str, bin_dir: Path | None = None) -> Path:
+    home = tmp_path / "login"
+    home.mkdir()
+    profile = "".join(f"export {name}={TOKEN_VALUE}\n" for name in ACCOUNT_TOKENS[harness])
+    if bin_dir is not None:
+        profile += f"export PATH={shlex.quote(str(bin_dir))}:$PATH\n"
+    (home / ".bash_profile").write_text(profile, encoding="utf-8")
+    return home
+
+
+def _on_the_device(script: str, home: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["sh", "-c", script], env={"HOME": str(home), "PATH": os.environ["PATH"]},
+        capture_output=True, timeout=30, check=False,
+    )
+
+
+@pytest.mark.parametrize("account", ["placed", "default"])
+def test_the_claude_probe_script_runs_from_the_account_home_without_its_tokens(
+    tmp_path: Path, account: str
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "claude").write_text(ENV_DUMP, encoding="utf-8")
+    (bin_dir / "claude").chmod(0o755)
+    home = _login_home(tmp_path, "claude", bin_dir)
+    account_home = f"{tmp_path}/it's $HOME/.factory-accounts/claude-max-2"
+
+    script = usage_probe.claude_remote_script(account_home if account == "placed" else None)
+    assert _on_the_device(script, home).returncode == 0
+
+    seen = json.loads((bin_dir / "seen.json").read_text(encoding="utf-8"))
+    assert seen["argv"] == list(usage_probe.CLAUDE_ARGS) and seen["cwd"] == str(home)
+    if account == "placed":
+        assert seen["env"]["CLAUDE_CONFIG_DIR"] == account_home
+        assert not set(ACCOUNT_TOKENS["claude"]) & set(seen["env"])
+        assert TOKEN_VALUE not in script
+    else:
+        assert "CLAUDE_CONFIG_DIR" not in seen["env"]
+        assert {seen["env"][name] for name in ACCOUNT_TOKENS["claude"]} == {TOKEN_VALUE}
+
+
+@pytest.mark.parametrize("account", ["placed", "default"])
+def test_the_codex_rollout_script_reads_the_account_homes_rollout(tmp_path: Path, account: str) -> None:
+    home = _login_home(tmp_path, "codex")
+    earlier = b"".join(ROLLOUT.splitlines(keepends=True)[:3])
+    login_codex = codex_home(tmp_path, earlier).rename(home / ".codex")
+    account_home = codex_home(tmp_path)
+
+    script = usage_probe.codex_remote_script(THREAD, str(account_home) if account == "placed" else None)
+    out = _on_the_device(script, home)
+
+    assert out.returncode == 0, out.stderr
+    read = account_home if account == "placed" else login_codex
+    assert json.loads(out.stdout) == codex_rollout.latest(str(read), THREAD)
+    assert codex_rollout.latest(str(account_home), THREAD) != codex_rollout.latest(str(login_codex), THREAD)
+
+
+def test_the_remote_probes_send_the_account_homes_scripts() -> None:
+    home = "/home/claude-bot/.factory-accounts/claude-max-2"
+    transport = FakeTransport(Exchanged(0, GET_USAGE, ""))
+    usage_probe.claude_remote(transport, TARGET, home=home)
+    usage_probe.remote_codex(transport, TARGET, "codex", THREAD, home=home)
+    assert [argv for argv, _data in transport.calls] == [
+        ssh_argv(TARGET, usage_probe.claude_remote_script(home)),
+        ssh_argv(TARGET, usage_probe.codex_remote_script(THREAD, home)),
+    ]
+
 @pytest.mark.parametrize(
     ("out", "line"),
     [
@@ -651,6 +733,7 @@ if "--input-format" in argv:
     request = sys.stdin.read()
     with open(os.path.join(here, "probe-stdin"), "a", encoding="utf-8") as seen:
         seen.write(request)
+    json.dump(dict(os.environ), open(os.path.join(here, "probe-env.json"), "w"))
     print({marker!r}, *os.environ.values(), flush=True)
     print({marker!r}, *os.environ.values(), file=sys.stderr, flush=True)
     mode = open(os.path.join(here, "probe-mode"), encoding="utf-8").read().strip()
@@ -696,7 +779,7 @@ def _probe_bin(directory: Path, mode: str) -> Path:
 
 def _box_run(tmp_path: Path, mode: str, command: list[str] | None = None, env: dict | None = None,
              machines: Path = LOCAL_BOX_MACHINES):
-    _, job = _running_job(tmp_path)
+    _, job = _running_job(tmp_path, machines)
     wrapper = _probe_bin(tmp_path / "bin", mode)
     run = _orch(
         "job", "run", "claude-bot", job.id, "--machines", str(machines), "--db", str(tmp_path / "orch.db"), "--interval", "0.2",
@@ -726,6 +809,62 @@ def _remote_run(tmp_path: Path, mode: str):
     assert run.returncode == 0, run.stderr
     return run, worker_bin, queue.path
 
+
+
+CODEX_EXEC_FAKE = f"""#!{sys.executable}
+import sys
+sys.stdout.buffer.write(open({str(FIXTURES / "codex-exec-json.jsonl")!r}, "rb").read())
+"""
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex"])
+def test_a_remote_jobs_usage_reads_run_as_its_slots_account(tmp_path: Path, harness: str) -> None:
+    from tests.test_remote_start import Ssh, config_of, enqueue, machines_file
+
+    bot, placed = f"{harness}-bot", f"{harness}-max-2"
+    machines = machines_file(tmp_path, box_enabled=False)
+    machines.write_text(
+        f"accounts:\n  - {{id: {placed}, harness: {harness}, signed_in_on: [pc]}}\n"
+        + machines.read_text(encoding="utf-8").replace(
+            "    ssh_alias: fakepc-{bot}\n", f"    ssh_alias: fakepc-{{bot}}\n    home: {tmp_path}/homes/{{bot}}\n"
+        ),
+        encoding="utf-8",
+    )
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: CAPTURED)
+    job_id = enqueue(queue, harness, "1")
+    assert DevicePool(queue, config_of(machines)).claim(harness) is not None
+    with queue.connect() as connection:
+        connection.execute("UPDATE device_slots SET account = ? WHERE job_id = ?", (placed, job_id))
+    ssh = Ssh(tmp_path)
+    worker_bin = tmp_path / "worker-bin"
+    _probe_bin(worker_bin, "reply")
+    (worker_bin / "codex").write_text(CODEX_EXEC_FAKE, encoding="utf-8")
+    (worker_bin / "codex").chmod(0o755)
+    home = tmp_path / "homes" / bot
+    home.mkdir(parents=True)
+    profile = "".join(f"export {name}={TOKEN_VALUE}\n" for name in ACCOUNT_TOKENS[harness])
+    (home / ".bash_profile").write_text(
+        profile + f"export PATH={shlex.quote(str(worker_bin))}:$PATH\n", encoding="utf-8"
+    )
+    account_home = home / ".factory-accounts" / placed
+    account_home.parent.mkdir(parents=True)
+    codex_home(tmp_path).rename(account_home)
+    codex_home(tmp_path, b"".join(ROLLOUT.splitlines(keepends=True)[:3])).rename(home / ".codex")
+    command = ["claude-harness", *CLAUDE_BOT] if harness == "claude" else ["codex", "exec", "-"]
+
+    run = _orch(
+        "job", "run", bot, job_id, "--db", str(queue.path), "--machines", str(machines), "--", *command,
+        env={"HOME": str(tmp_path), **ssh.env(), "FAKE_SSH_HOME": str(home)},
+    )
+
+    assert run.returncode == 0, run.stderr
+    if harness == "claude":
+        probed = json.loads((worker_bin / "probe-env.json").read_text(encoding="utf-8"))
+        assert probed["CLAUDE_CONFIG_DIR"] == str(account_home)
+        assert not set(ACCOUNT_TOKENS["claude"]) & set(probed)
+    with sqlite3.connect(queue.path) as connection:
+        rows = connection.execute("SELECT account, window, used FROM usage_readings ORDER BY window").fetchall()
+    assert rows == [(placed, "five_hour", 0.125), (placed, "seven_day", 0.345)]
 
 def _probe_lines(run: subprocess.CompletedProcess) -> list[str]:
     for secret in (PROBE_MARKER, CLAIM_PROOF, TAG_VALUE, ENV_VALUE):
