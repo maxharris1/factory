@@ -440,7 +440,8 @@ def _settle(root: Path, plan: Plan, locks: bool) -> tuple[dict[str, int], dict[s
     jobs = root / "jobs"
     removed: dict[str, int] = {}
     kept: dict[str, str] = {}
-    for job_id in filter(_JOB_ID.fullmatch, job_leftovers.unsettled(root)):
+    pending = filter(_JOB_ID.fullmatch, job_leftovers.pending(root))
+    for job_id in sorted(set(_job_folders(jobs, GONE)).union(pending)):
         gone = jobs / f"{job_id}{GONE}"
         try:
             with _claim_lock(jobs, job_id, wait=False, create=not plan.dry_run) as locked:

@@ -10,7 +10,7 @@ when they hold their own `.git`. Other trees, symlinks and the checkout itself
 are not kept. The record goes to `kept.json.tmp` before the folder is deleted
 and is renamed to `kept.json` last, so a `kept.json` means the archive is whole.
 A crash after the `.gone` rename leaves `jobs/<id>.gone` or a `kept.json.tmp`
-behind, and `unsettled` lists both for the next pass to finish.
+behind for the next pass to finish.
 """
 
 from __future__ import annotations
@@ -126,9 +126,5 @@ def commit(root: Path, job_id: str) -> int:
     return int(json.loads((dest / KEPT_JSON).read_text())["removed_bytes"])
 
 
-def unsettled(root: Path) -> list[str]:
-    jobs = root / "jobs"
-    gone = {path.name.removesuffix(GONE) for path in (jobs.iterdir() if jobs.is_dir() else ())
-            if path.name.endswith(GONE) and path.is_dir() and not path.is_symlink()}
-    pending = {path.parent.name for path in (root / KEPT_ROOT).glob(f"*/{PENDING}")}
-    return sorted(gone | pending)
+def pending(root: Path) -> set[str]:
+    return {path.parent.name for path in (root / KEPT_ROOT).glob(f"*/{PENDING}")}
