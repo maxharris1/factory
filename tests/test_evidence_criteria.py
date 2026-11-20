@@ -626,3 +626,25 @@ def test_f2_a_backtick_in_a_link_destination_keeps_the_hard_break(goal):
     assert f"<p><strong>Goal</strong>\n{rendered_goal}</p>" in markdown.render(body)
     bundle = _bundle(comments=(Comment(id="1", author="factory-app[bot]", body=body, created_at=1.0),))
     assert [(c.id, c.text) for c in bundle.criteria] == [("ac-1", "Scripts are removed."), ("ac-2", "Safe HTML remains.")]
+
+
+SCOPED = "Risk: low\nPlan first: no\nDepends on: none\n\n## Acceptance criteria\n- Every ticket gets a brief.\n\n"
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "### Out of scope\n- Support GitLab tickets.\n",
+        "### Assumed environment\n- A Linux runner.\n",
+        "#### **Out of scope**:\n- Support GitLab tickets.\n",
+        "### Assumed environment\nA Linux runner.\n\n### Out of scope\n- Support GitLab tickets.\n",
+        "##### Out of scope\n- Support GitLab tickets.\n",
+        "### Notes\n- Still a criterion.\n",
+    ],
+)
+def test_job_criteria_match_the_intake_criteria(tail):
+    from lib.feeder import parse_intake
+
+    body = SCOPED + tail
+    texts = tuple(item.text for item in _bundle(issue_body=body).criteria)
+    assert texts == parse_intake(body, ()).criteria

@@ -53,3 +53,15 @@ These are the defaults the builder picked for issue #204. They are listed in the
 - **Decision:** The map is read only for an unstarted ticket with a `Features:` line, once per repo, base and verify skill per poll: the base branch's sha, one recursive tree read at that sha to find the verify skill, then one GitHub contents read of its features folder. When GitHub truncates a tree read, the feeder lists that folder and reads each subfolder's tree, breadth first, up to 64 tree reads, and takes the first match. A walk that hits the cap is a failed read under the retry rule below, never an empty map. A skill or features folder missing at the base is an empty map. A failed read never refuses a ticket: it stays `eligible`, is not fed that poll, and is checked again on the next one.
 - **When:** 2026-11-19 ET, by Factory decided (technical)
 - **Source:** https://github.com/maxharris1/factory/pull/1093
+
+- **Decision:** A ticket can add two optional sections, `## Assumed environment` and `## Out of scope` (F-14, #1033). They are read like `Acceptance criteria`: a heading at levels 2 to 4, with the same bold and colon forms, and the section ends at the next heading of the same or a higher level. A heading that names another of the three sections always starts that section, even when it is nested deeper, so `### Out of scope` under `## Acceptance criteria` ends the criteria. Each list item is one entry, and in these two sections a plain paragraph is one entry too. The brief lists them under their own headings right after the acceptance criteria. Neither section is required, and neither can refuse a ticket.
+- **When:** 2026-11-19 ET, by Factory decided (technical)
+- **Source:** https://github.com/maxharris1/factory/pull/1137
+
+- **Decision:** A builder criterion (qa criteria included, ops criteria not) whose text uses an unbounded quantifier (`every`, `everything`, `everywhere`, `all`, `any`, `anything`, `each`, `always`, `never`, `whatever` or `whenever`, as whole words) on a ticket with no `Out of scope` entries gets one warning in the brief, under `### Intake warnings`. The warning names the criterion and asks for an `Out of scope` section or a narrower criterion. It is not a defect: the ticket is fed as usual, with no wake and no needs-attention. Max could ask for the warning to refuse the ticket instead, or for a different word list.
+- **When:** 2026-11-19 ET, by Factory decided (technical)
+- **Source:** https://github.com/maxharris1/factory/pull/1137
+
+- **Decision:** The parser and the brief live in `lib/feeder.py`, so that file and `tests/test_feeder_template.py` carry the change. The ticket's Touches line named `lib/intake_live.py` and `tests/test_intake_live.py`, which hold the GitHub and Linear readers and do not change.
+- **When:** 2026-11-19 ET, by Factory decided (technical)
+- **Source:** https://github.com/maxharris1/factory/pull/1137

@@ -807,3 +807,89 @@ def test_the_map_is_read_once_per_base_in_a_poll(tmp_path: Path) -> None:
     ]
     feeder.feed_once()
     assert len(github.dir_reads) == 1
+
+
+
+def bounded(*, criteria=("- [ ] It works.",), sections: str = "") -> str:
+    return body(criteria=criteria) + sections
+
+
+def test_assumed_environment_and_out_of_scope_sections_parse() -> None:
+    text = bounded(sections=(
+        "\n## Assumed environment\n\n- Linux box with Docker.\n- Python 3.12.\n"
+        "\n## Out of scope\n\nWindows hosts.\n"
+    ))
+    parsed = parse_intake(text, ())
+    assert parsed.defects == ()
+    assert parsed.criteria == ("It works.",)
+    assert parsed.assumed_environment == ("Linux box with Docker.", "Python 3.12.")
+    assert parsed.out_of_scope == ("Windows hosts.",)
+
+
+def test_the_sections_are_optional() -> None:
+    parsed = parse_intake(body(), ())
+    assert parsed.defects == ()
+    assert parsed.assumed_environment == () and parsed.out_of_scope == ()
+
+
+def test_a_nested_out_of_scope_section_is_not_a_criterion() -> None:
+    text = body(criteria=("- [ ] Mine.", "", "### Out of scope", "", "- Not mine."))
+    parsed = parse_intake(text, ())
+    assert parsed.criteria == ("Mine.",)
+    assert parsed.out_of_scope == ("Not mine.",)
+
+
+@pytest.mark.parametrize("criterion", [
+    "- [ ] Every ticket gets a brief.",
+    "- [ ] All retries back off.",
+    "- [ ] It never drops a comment.",
+    "- [ ] Any repo can opt in.",
+    "- [ ] Each poll reads the map once.",
+    "- [ ] Users can always undo.",
+])
+def test_an_unbounded_criterion_with_no_out_of_scope_warns_and_is_not_refused(criterion: str) -> None:
+    parsed = parse_intake(body(criteria=(criterion,)), ())
+    assert parsed.defects == ()
+    (warning,) = parsed.warnings
+    assert criterion.split("] ", 1)[1] in warning
+    assert "Out of scope" in warning
+
+
+def test_an_out_of_scope_section_silences_the_warning() -> None:
+    text = bounded(criteria=("- [ ] Every ticket gets a brief.",), sections="\n## Out of scope\n\n- Linear.\n")
+    assert parse_intake(text, ()).warnings == ()
+
+
+@pytest.mark.parametrize("criterion", ["- [ ] It works.", "- [ ] The brief shows the overall count."])
+def test_a_bounded_criterion_does_not_warn(criterion: str) -> None:
+    assert parse_intake(body(criteria=(criterion,)), ()).warnings == ()
+
+
+def test_an_unbounded_ops_step_does_not_warn() -> None:
+    parsed = parse_intake(body(criteria=("- [ ] It works.", "- [ ] ops: Max restarts every poller.")), ())
+    assert parsed.warnings == ()
+
+
+def test_the_brief_shows_the_sections_beside_the_criteria(tmp_path: Path) -> None:
+    feeder, queue, github, _ = make_feeder(tmp_path)
+    text = bounded(sections="\n## Assumed environment\n\n- Docker.\n\n## Out of scope\n\n- Linear.\n")
+    github.issues[HOME] = [issue(7, body=text, template=False)]
+    feeder.feed_once()
+    _, brief = go_and_brief(github)
+    head = brief.split("### Ticket")[0]
+    assert head.index("### Acceptance criteria") < head.index("### Assumed environment") < head.index(
+        "### Out of scope")
+    assert "### Assumed environment\n- Docker." in head
+    assert "### Out of scope\n- Linear." in head
+    assert "### Intake warnings" not in head
+
+
+def test_an_unbounded_criterion_is_fed_with_a_brief_warning(tmp_path: Path) -> None:
+    feeder, queue, github, _ = make_feeder(tmp_path)
+    github.issues[HOME] = [issue(7, body=body(criteria=("- [ ] Every ticket gets a brief.",)), template=False)]
+    report = feeder.feed_once()
+    assert report.refused == 0
+    _, brief = go_and_brief(github)
+    warnings = brief.split("### Ticket")[0].split("### Intake warnings")[1]
+    assert "Every ticket gets a brief." in warnings
+    assert "### Assumed environment" not in brief and "### Out of scope" not in brief
