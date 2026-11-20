@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from lib.harness_env import ACCOUNT_ISOLATION
 from lib.machines_yml import DEFAULT_ORCH_HOST, load_machines_yml, orch_host
 from tests.pool_helpers import write_target_machines
 
@@ -981,6 +982,25 @@ def test_docs_describe_usage_accounts_and_the_grok_routine_approval(doc: str) ->
         "that needs Max's approval.",
     ):
         assert phrase in " ".join(text.split()), phrase
+
+
+@pytest.mark.parametrize("doc", ["README.md", "docs/SPEC.md"])
+def test_docs_describe_account_homes_and_the_token_variable_rule(doc: str) -> None:
+    text = " ".join((ROOT / doc).read_text(encoding="utf-8").split())
+    names = [name for isolation in ACCOUNT_ISOLATION.values() for name in (isolation.home, *isolation.tokens)]
+
+    assert ".factory-accounts" in text
+    assert [name for name in names if f"`{name}`" not in text] == []
+    assert "skill-probe run --account" in text
+    assert "Several bot users for one harness on one device" not in text
+
+
+def test_the_account_homes_note_supersedes_the_772_scope_line() -> None:
+    note = (ROOT / "docs/decisions/1184-account-homes.md").read_text(encoding="utf-8")
+
+    assert "772-usage-accounts.md" in note
+    for field in ("- **Decision:**", "- **When:**", "- **Source:**"):
+        assert field in note
 
 
 LEGACY_PREREQUISITE = (

@@ -1,0 +1,3 @@
+- **Decision:** One bot user on one device may run several accounts of its harness, each from `<home>/.factory-accounts/<id>` through `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, with the account's token variables dropped by name. This supersedes the line "Several bot users for one harness on one device is deferred" in `772-usage-accounts.md`: several accounts now share one bot user, and several bot users for one harness on one device are still not supported.
+- **When:** 2026-11-20 11:16 AM ET, by Factory decided (technical), under Max's standing delegation
+- **Source:** https://github.com/maxharris1/factory/pull/1186#issuecomment-7044437913
