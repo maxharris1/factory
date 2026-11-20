@@ -320,6 +320,20 @@ class DevicePool:
             connection.commit()
         return config.serving(harness)
 
+    def room_for(self, repo: str) -> bool:
+        pins = self.pins()
+        if pins is None:
+            return False
+        allowed = pins.get(repo.lower())
+        if allowed is None:
+            return True
+        with self.queue.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            config, _ = self._placement(connection)
+            used = _used(connection, config)
+            connection.commit()
+        return any(free_slots(config, harness, used, allowed=allowed) for harness in HARNESSES)
+
     def claim(
         self,
         harness: str,

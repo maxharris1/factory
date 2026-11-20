@@ -310,14 +310,15 @@ def test_poll_sees_a_machines_yml_edit_made_while_it_started(
     cli._runtime(database, orch, create=True)
     built = cli._device_pool
 
-    def edited_after_the_read(queue, config, path):
+    def edited_after_the_read(queue, config, path, **kwargs):
         machines.write_text(box.format(2), encoding="utf-8")
         os.utime(machines, ns=(10**18, 10**18))
-        return built(queue, config, path)
+        return built(queue, config, path, **kwargs)
 
     monkeypatch.setattr(cli, "_device_pool", edited_after_the_read)
     dispatcher, _ = cli._runtime(database, orch, create=False, machines_path=machines)
     assert dispatcher.devices.config.device("box").slot_max == 1
+    assert dispatcher.devices.pool.pins.path == orch
 
     dispatcher.devices.reload()
 

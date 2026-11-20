@@ -970,7 +970,7 @@ def _qa_worker(argv: list[str]) -> int:
             except BlockingIOError:
                 print("orch qa-worker: another qa worker holds this database", file=sys.stderr)
                 return 1
-            worker = _qa_runtime(path, config)
+            worker = _qa_runtime(path, config, args.orch)
             while True:
                 worker.tick()
                 if args.once:
@@ -983,8 +983,11 @@ def _qa_worker(argv: list[str]) -> int:
         return 130
 
 
-def _qa_runtime(path: Path, config: OrchConfig) -> QaWorker:
+def _qa_runtime(path: Path, config: OrchConfig, orch_path: Path | None = None) -> QaWorker:
     source = LivePollSource(config)
+    queue = open_queue(path)
+    machines = _machines_config(None, required=False)
+    pool = None if machines is None else _device_pool(queue, machines, None, orch=orch_path)
     projects = {project.repo.lower(): project for project in config.projects}
     actions = source.review_actions_by_repo()
 
@@ -1005,7 +1008,7 @@ def _qa_runtime(path: Path, config: OrchConfig) -> QaWorker:
 
     linear_key = os.environ.get(config.linear.api_key_env) if config.linear else None
     return QaWorker(
-        open_queue(path),
+        queue,
         runners={name: qa_runners.create(name) for name in QA_RUNNERS if name in qa_runners.registered()},
         factory=factory,
         base_commit=_qa_base_commit,
@@ -1017,6 +1020,7 @@ def _qa_runtime(path: Path, config: OrchConfig) -> QaWorker:
         log=lambda line: print(f"orch qa-worker: {line}", file=sys.stderr, flush=True),
         evidence={p.repo.lower(): p.qa_storage for p in config.projects if p.qa_storage},
         linear=HttpLinear(linear_key) if linear_key else None,
+        placeable=(lambda repo: True) if pool is None else pool.room_for,
     )
 
 
@@ -1370,7 +1374,7 @@ def _runtime(
             from lib import self_deploy
 
             devices = DeviceMonitor(
-                _device_pool(queue, machines, machines_path),
+                _device_pool(queue, machines, machines_path, orch=orch_path),
                 machines,
                 SshTransport(),
                 machines_path=_machines_path(machines_path),

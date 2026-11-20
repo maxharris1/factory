@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 
@@ -6,7 +7,7 @@ import pytest
 from lib.device_pool import DevicePool
 from lib.dispatcher import Dispatcher
 from lib.machines_yml import Device, MachinesConfig
-from lib.orch_yml import Project, ProjectPins
+from lib.orch_yml import Project, ProjectPins, load_orch_yml
 from lib.queue import Job, JobRequest, SQLiteJobQueue
 from tests.test_dispatcher import TRUSTED_LOGINS, FakeGrokDelivery, FakeReviewActions
 
@@ -107,7 +108,6 @@ def test_a_waiting_pinned_job_does_not_hold_back_the_jobs_behind_it(tmp_path: Pa
         ("build", "claude"),
         ("fix", "claude"),
         ("review", "codex"),
-        ("qa", "claude"),
         ("update-from-main", "codex"),
     ],
 )
@@ -215,13 +215,15 @@ def test_project_pins_are_unknown_until_orch_yml_first_loads(
 
 
 def dispatcher_for(tmp_path: Path, now: list[float]) -> tuple[Dispatcher, DevicePool, SQLiteJobQueue]:
+    pool, queue = make_pool(tmp_path, now=now)
+
     class Devices:
         config = CONFIG
 
         def reconcile(self, now, lost_after, on_lost):
             return None
 
-    pool, queue = make_pool(tmp_path, now=now)
+    Devices.pool = pool
     dispatcher = Dispatcher(
         tmp_path / "d.db",
         queue,
@@ -284,4 +286,42 @@ def test_the_orch_wait_pool_reads_its_pins_from_orch_yml(tmp_path: Path, no_over
     waiting = enqueue(queue, PINNED, "2")
 
     assert pool.claim("claude") is None
+    assert state(queue, waiting.id) == "queued"
+
+
+def test_the_dispatcher_never_times_out_a_job_pinned_to_a_disabled_device(tmp_path: Path) -> None:
+    now = [0.0]
+    dispatcher, pool, queue = dispatcher_for(tmp_path, now)
+    disabled = MachinesConfig(
+        devices=tuple(replace(d, enabled=False) if d.name == "pc" else d for d in CONFIG.devices)
+    )
+    pool.config = dispatcher.devices.config = disabled
+    waiting = enqueue(queue, PINNED, "1", timeout_seconds=60)
+    assert pool.claim("claude") is None
+
+    now[0] = 60
+    dispatcher.reconcile_jobs()
+
+    assert state(queue, waiting.id) == "queued"
+
+
+def test_the_dispatcher_waits_on_the_pin_orch_yml_names_now(tmp_path: Path, no_overlay: None) -> None:
+    now = [0.0]
+    dispatcher, pool, queue = dispatcher_for(tmp_path, now)
+    orch = tmp_path / "orch.yml"
+    write_orch(orch, "[mac]")
+    config, findings = load_orch_yml(orch)
+    assert config is not None, findings
+    dispatcher.wake_routes = {project.repo.lower(): project for project in config.projects}
+    pool.pins = ProjectPins(orch)
+    write_orch(orch, "[pc]")
+    holder = enqueue(queue, PINNED, "1")
+    assert pool.claim("claude")[1].device == "pc"
+    waiting = enqueue(queue, PINNED, "2", timeout_seconds=60)
+    assert pool.claim("claude") is None
+
+    now[0] = 60
+    queue.heartbeat(holder.id, owner="claude")
+    dispatcher.reconcile_jobs()
+
     assert state(queue, waiting.id) == "queued"

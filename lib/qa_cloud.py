@@ -435,6 +435,7 @@ class QaWorker:
     free_bytes: Callable[[Path], int] = lambda path: shutil.disk_usage(path).free
     linear: LinearClient | None = None
     upload_cap: int = UPLOAD_CAP_BYTES
+    placeable: Callable[[str], bool] = lambda repo: True
     _plans: dict[str, RunPlan] = field(default_factory=dict)
     _low_disk: set[str] = field(default_factory=set)
     _skips_logged: set[tuple[str, str]] = field(default_factory=set)
@@ -528,7 +529,7 @@ class QaWorker:
             repo = job.request.repo.lower()
             if repo not in low:
                 low[repo] = self._disk_low(repo)
-            if low[repo]:
+            if low[repo] or not self.placeable(job.request.repo):
                 self._restart_wait(job)
                 continue
             with self.queue.connect() as connection:

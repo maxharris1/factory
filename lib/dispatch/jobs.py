@@ -235,21 +235,35 @@ class JobsMixin:
             return lambda job: False
         used = used_slots(self.queue, config)
         blocked = placement_blocks(self.queue, config, self._head())
+        pins = self._pins()
 
         def full(job: Job) -> bool:
             harness = job.request.recipient
-            project = self.wake_routes.get(job.request.repo.lower())
-            allowed = project.devices if project is not None else None
+            allowed = pins.get(job.request.repo.lower())
+            if allowed is None:
+                serves = any(device.eligible(harness) for device in config.devices)
+            else:
+                serves = any(
+                    harness in device.harnesses for device in config.devices if device.name in allowed
+                )
             return (
                 harness in HARNESSES
-                and any(
-                    device.eligible(harness) and (allowed is None or device.name in allowed)
-                    for device in config.devices
-                )
+                and serves
                 and free_slots(config, harness, used, blocked, allowed=allowed) == 0
             )
 
         return full
+
+    def _pins(self) -> Mapping[str, frozenset[str]]:
+        pool = getattr(self.devices, "pool", None)
+        pins = None if pool is None else pool.pins()
+        if pins is not None:
+            return pins
+        return {
+            repo: project.devices
+            for repo, project in self.wake_routes.items()
+            if project.devices is not None
+        }
 
     def _head(self) -> str | None:
         pool = getattr(self.devices, "pool", None)

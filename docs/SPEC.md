@@ -355,7 +355,7 @@ One wake: the same pass checks every primary row reported `FAIL`. When its comme
 
 **The tick.**
 
-1. Claim. Walk `claim_order(conn, "qa")`. Skip a job whose runner is not registered, is backed off, yields to its shared account (below), or is at `qa.max_cloud_lanes`; a skipped job blocks nothing behind it. A job skipped for the cap, a backed-off runner or a shared account gets its queue-wait clock restarted, so waiting is not a timeout. A claimed job's first lane is reserved `launching` in the same transaction as the cap count. A job whose detail has no `live` (queued before this worker) is finished failed and never retried.
+1. Claim. Walk `claim_order(conn, "qa")`. Skip a job whose runner is not registered, is backed off, yields to its shared account (below), or is at `qa.max_cloud_lanes`, or whose project is pinned to devices none of which has a free slot (section 7, Project devices); a skipped job blocks nothing behind it. A job skipped for the cap, a backed-off runner, a shared account or a full pin gets its queue-wait clock restarted, so waiting is not a timeout. A claimed job's first lane is reserved `launching` in the same transaction as the cap count. A job whose detail has no `live` (queued before this worker) is finished failed and never retried.
 2. Advance. Check for cancel and launch reserved lanes, in lane number order. Then grant: a running job whose first lane has started takes its next slices, one lane each, while its runner has room after one lane for each job still waiting on that runner. Then read each running lane's result through the evidence intake (Lane rules, Read), so a slice the cap has room for is reserved before a relaunch takes a number. The job is heartbeated (`owner=qa`) only after a pass that raised nothing, so a run that fails every tick times out and is cancelled.
 3. Finish. When every slice has a final row, or any slice is a gap and no lane is open, the run finishes in this order:
    1. Decide (Decision, below).
@@ -1190,19 +1190,27 @@ any job, and never falls back to an unlisted one. When no listed device has a
 free slot for the job's harness, the job stays queued and the claim moves on
 to the next job in the global rank, so a waiting pinned job never holds back
 other projects' jobs. While it waits, its queue wait restarts on each poll,
-as for a busy bot, so the dispatcher does not time it out. That holds only
-while some listed device lists its harness: a pin whose devices all lack the
-harness never places the job, and the job times out as a job with no
-eligible device does. Repo names match case-blind. QA lanes run on the cloud
-runner, not on a device, so a pin does not apply to them.
+as for a busy bot, so the dispatcher does not time it out. That holds while
+some listed device lists its harness, even one that is disabled, draining or
+has a placeholder: the job waits until that device takes work again. A pin
+whose devices all lack the harness never places the job, and the job times
+out as a job with no eligible device does. Repo names match case-blind.
 
-`orch wait` reads orch.yml (its `--orch`, else the checkout's `orch.yml`)
-with its overlay on each claim, so an edit to `devices` takes effect at the
-next claim with no waiter restart. A missing orch.yml pins nothing. An
-orch.yml that fails to load keeps the last map that loaded, and a waiter
-whose orch.yml has never loaded claims nothing, so a broken file never drops
-a pin. The dispatcher reads the pins from the orch.yml the poller loaded.
-Projects without `devices` are placed exactly as before.
+A pinned project's `qa` job (recipient `qa`) runs its lanes on the cloud
+runner and holds no device slot, but it starts only while a listed device
+has a free slot for some harness. While none has, `orch qa-worker` leaves
+the job queued and restarts its queue wait on each tick, as for the lane
+cap, so the job waits and is never timed out for it. An unpinned project's
+`qa` job is claimed as before.
+
+`orch wait`, `orch poll` and `orch qa-worker` each read orch.yml (their
+`--orch`, else the checkout's `orch.yml`) with its overlay on each claim or
+poll, so an edit to `devices` takes effect at the next claim, and the
+dispatcher's timeout check uses the same pins as placement, with no restart.
+A missing orch.yml pins nothing. An orch.yml that fails to load keeps the
+last map that loaded, and a waiter or QA worker whose orch.yml has never
+loaded claims nothing, so a broken file never drops a pin. Projects without
+`devices` are placed exactly as before.
 
 ### QA storage and evidence intake
 
