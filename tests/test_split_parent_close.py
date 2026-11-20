@@ -349,6 +349,63 @@ def test_parts_closed_before_the_first_poll_never_trigger(tmp_path: Path) -> Non
     assert not any(call.startswith("split-children:") for call in github.calls)
 
 
+def fresh_board_with_an_old_part_and_an_open_follow_up(tmp_path: Path):
+    clock = [START]
+    github = FakeGitHub()
+    github.clock = lambda: clock[0]
+    github.filed[(REPO, PARENT)] = {
+        "title": "Parent", "body": "x\n", "state": "open", "labels": ("factory:ready",),
+    }
+    github.filed[(REPO, 11)] = {
+        "title": "Part", "body": auto_part(1), "state": "closed", "reason": "completed",
+        "closed_at": START - 86_400, "labels": (),
+    }
+    github.filed[(REPO, 12)] = {
+        "title": "Follow-up", "body": FOLLOW_UP, "state": "open", "labels": ("factory:ready",),
+    }
+    feeder, queue, github, _ = make_feeder(tmp_path, github=github, now=clock)
+    feeder.feed_once()
+    return feeder, queue, github, clock
+
+
+def test_a_follow_up_merged_right_after_a_fresh_start_closes_the_parent(tmp_path: Path) -> None:
+    feeder, queue, github, clock = fresh_board_with_an_old_part_and_an_open_follow_up(tmp_path)
+
+    merge_in_orch(queue, 12)
+    for _ in range(5):
+        poll(feeder, clock)
+
+    assert github.filed[(REPO, 12)]["state"] == "open"
+    assert parent(github)["state"] == "closed"
+
+
+def test_a_failed_first_read_does_not_swallow_a_later_merge(tmp_path: Path) -> None:
+    feeder, queue, github, clock = fresh_board_with_an_old_part_and_an_open_follow_up(tmp_path)
+    github.fail["closed_issues"] = 2
+
+    poll(feeder, clock)
+    merge_in_orch(queue, 12)
+    for _ in range(5):
+        poll(feeder, clock)
+
+    assert parent(github)["state"] == "closed"
+
+
+def test_a_ticket_state_without_workflow_state_reads_no_merges(tmp_path: Path) -> None:
+    feeder, queue, github, clock = board(tmp_path, {11: auto_part(1), 12: auto_part(2)})
+    with queue.connect() as connection:
+        connection.execute("CREATE TABLE ticket_state (repo TEXT, ticket_id TEXT, stuck INTEGER)")
+    lines: list[str] = []
+    feeder.log = lines.append
+
+    close(github, clock, 11)
+    close(github, clock, 12)
+    poll(feeder, clock)
+
+    assert parent(github)["state"] == "closed"
+    assert not [line for line in lines if "split" in line and "cannot" in line]
+
+
 def test_a_linear_project_reads_no_closed_issues(tmp_path: Path) -> None:
     from tests.test_feeder import LINEAR_FACTORY_MD, LINEAR_ORCH
 

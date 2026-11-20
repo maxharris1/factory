@@ -967,6 +967,27 @@ def last_feeder_poll(connection: sqlite3.Connection) -> float | None:
     return None if row is None else float(row[0])
 
 
+def _merged_issues(
+    connection: sqlite3.Connection, repo: str, *, unnoted: bool = False
+) -> frozenset[int]:
+    if not _has_table(connection, "ticket_state"):
+        return frozenset()
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(ticket_state)")}
+    if not {"repo", "ticket_id", "workflow_state"} <= columns:
+        return frozenset()
+    rows = connection.execute(
+        f"""
+        SELECT feed.issue FROM {FEEDER_TABLE} AS feed
+        JOIN ticket_state AS ticket
+          ON lower(ticket.repo) = feed.repo AND ticket.ticket_id = feed.ticket_id
+        WHERE feed.repo = ? AND feed.tracker = 'github'
+          AND ticket.workflow_state = 'merged'
+        """ + (" AND feed.split_noted = 0" if unnoted else ""),
+        (repo.lower(),),
+    ).fetchall()
+    return frozenset(int(issue) for (issue,) in rows if str(issue).isdigit())
+
+
 def feeder_items(connection: sqlite3.Connection) -> list[dict[str, object]]:
     """Tickets eligible at the last poll, priority order, as plain rows."""
     last = last_feeder_poll(connection)
@@ -1180,12 +1201,16 @@ class Feeder:
             row = connection.execute(
                 f"SELECT at FROM {SPLIT_CURSOR_TABLE} WHERE repo = ?", (key,)
             ).fetchone()
-            cursor = float(row[0]) if row is not None else last_feeder_poll(connection)
             pending = dict(connection.execute(
                 f"SELECT parent, checked_at FROM {SPLIT_UNSETTLED_TABLE} WHERE repo = ?", (key,)
             ).fetchall())
-        if cursor is None:
-            return 0
+        if row is not None:
+            cursor = float(row[0])
+        else:
+            started = self._start_split_cursor(key, now)
+            if started is None:
+                return 0
+            cursor = started
         try:
             closed = self.github.closed_issues_since(repo, cursor)
         except Exception as exc:
@@ -1197,10 +1222,9 @@ class Feeder:
             parent = split_parent(record.body)
             if record.reason == "completed" and parent is not None:
                 triggers.setdefault(parent, []).append(record)
-        unnoted = sorted(self._merged_issues(repo, unnoted=True))
-        noted: list[int] = unnoted if row is None else []
+        noted: list[int] = []
         merged_parents: set[int] = set()
-        for issue in unnoted if row is not None else ():
+        for issue in sorted(self._merged_issues(repo, unnoted=True)):
             try:
                 record = self.github.issue_record(repo, issue)
             except Exception as exc:
@@ -1229,7 +1253,7 @@ class Feeder:
                 unsettled[parent] = now
             elif outcome == "closed":
                 self.log(f"feeder: closed split parent {repo}#{parent} (all parts merged)")
-        if row is not None and not closed and not check and not noted:
+        if not closed and not check and not noted:
             return errors
 
         def work(connection: sqlite3.Connection) -> None:
@@ -1251,21 +1275,31 @@ class Feeder:
         bookkeeping_write(self.queue.connect, work, site="_close_split_parents", ledger=self.ledger)
         return errors
 
+    def _start_split_cursor(self, key: str, now: float) -> float | None:
+        """Start the repo's split cursor at the last intake read, noting every
+        part merged before then so only later merges trigger; None when deferred."""
+        started: list[float] = []
+
+        def work(connection: sqlite3.Connection) -> None:
+            at = last_feeder_poll(connection)
+            started[:] = [now if at is None else at]
+            connection.execute(
+                f"INSERT INTO {SPLIT_CURSOR_TABLE} (repo, at) VALUES (?, ?)", (key, started[0])
+            )
+            connection.executemany(
+                f"UPDATE {FEEDER_TABLE} SET split_noted = 1 WHERE repo = ? AND issue = ?",
+                [(key, str(issue)) for issue in _merged_issues(connection, key, unnoted=True)],
+            )
+
+        if not bookkeeping_write(
+            self.queue.connect, work, site="_start_split_cursor", ledger=self.ledger
+        ):
+            return None
+        return started[0]
+
     def _merged_issues(self, repo: str, *, unnoted: bool = False) -> frozenset[int]:
         with self.queue.connect() as connection:
-            if not _has_table(connection, "ticket_state"):
-                return frozenset()
-            rows = connection.execute(
-                f"""
-                SELECT feed.issue FROM {FEEDER_TABLE} AS feed
-                JOIN ticket_state AS ticket
-                  ON lower(ticket.repo) = feed.repo AND ticket.ticket_id = feed.ticket_id
-                WHERE feed.repo = ? AND feed.tracker = 'github'
-                  AND ticket.workflow_state = 'merged'
-                """ + (" AND feed.split_noted = 0" if unnoted else ""),
-                (repo.lower(),),
-            ).fetchall()
-        return frozenset(int(issue) for (issue,) in rows if str(issue).isdigit())
+            return _merged_issues(connection, repo, unnoted=unnoted)
 
     def _candidates(
         self, contexts: Sequence[tuple[Project, FactoryContext]]
