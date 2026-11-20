@@ -81,6 +81,7 @@ SERVICE_LOCK="${STATE}/poller-service.lock"
 STOPPED="${STATE}/poller.stopped"
 AUTOSTART="${CONFIG}/poller-autostart"
 RUNNER="${HERE}/run-poller.sh"
+CONTAIN="${HERE}/contain.sh"
 MARKER="# factory-orch-poll"
 START_WAIT="${ORCH_POLL_START_WAIT:-15}"
 STOP_WAIT="${ORCH_POLL_STOP_WAIT:-60}"
@@ -285,7 +286,7 @@ launch() {
     }
     refuse_if_retired start
     # fd 9 is the service lock; the poller must not inherit it.
-    factory_detach "$RUNNER" --pidfile "$PIDFILE" >>"$LOG" 2>&1 </dev/null 9>&-
+    factory_detach "$CONTAIN" orch-poll "$RUNNER" --pidfile "$PIDFILE" >>"$LOG" 2>&1 </dev/null 9>&-
     child=$!
     for ((i = 0; i < START_WAIT * 10; i++)); do
         if pid="$(running_pid)"; then
