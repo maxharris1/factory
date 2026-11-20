@@ -95,6 +95,10 @@ class CommentsMixin:
         self._settle_external_ships(ticket)
         self._park_followups(ticket)
         try:
+            self._finish_auto_split(ticket)
+        except Exception as exc:
+            self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
+        try:
             self._watch_ci_silence(ticket)
         except Exception as exc:
             self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)

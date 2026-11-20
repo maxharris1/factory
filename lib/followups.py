@@ -241,7 +241,14 @@ def split_issue(
         f"Risk: {risk}\nPlan first: no\nDepends on: {depends}\nConflicts with: none\n\n"
         f"## Acceptance criteria\n\n{criteria}\n{estimate}{split_marker(comment_id, number)}"
     )
-    return part.title, body
+    return (part.title or f"Part {number} of #{issue}")[:256], body
+
+
+def split_dependencies(parts: tuple[SplitPart, ...]) -> tuple[tuple[int, ...], ...]:
+    return tuple(
+        (number - 1,) if part.depends is None and number > 1 else part.depends or ()
+        for number, part in enumerate(parts, 1)
+    )
 
 
 def split_comment(comment_id: str, issues: tuple[int, ...]) -> str:

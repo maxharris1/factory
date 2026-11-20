@@ -37,6 +37,7 @@ WRITERS = {
     "update-conflicts-anew": "lib/dispatch/merge_queue.py",
     "plan-check": "lib/dispatch/plan.py",
     "plan-gap": "lib/dispatch/plan.py",
+    "plan-auto-split": "lib/dispatch/plan.py",
     "t3": "lib/dispatch/verdict/t3.py",
     "t3-unsat": "lib/dispatch/verdict/t3.py",
     "t3-repeat": "lib/dispatch/verdict/repeat.py",

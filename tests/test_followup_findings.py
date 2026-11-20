@@ -20,6 +20,7 @@ from lib.followups import (
     followup_issue,
     has_marker,
     split_comment,
+    split_dependencies,
     split_issue,
     split_link_marker,
     split_marker,
@@ -855,3 +856,15 @@ def test_the_split_comment_links_every_part_once_by_marker() -> None:
     assert "#1201" in text and "#1202" in text
     assert has_marker(text, split_link_marker("77"))
     assert split_link_marker("77") != split_marker("77", 1)
+
+
+def test_a_part_without_a_depends_line_depends_on_the_previous_part() -> None:
+    parts = tuple(SplitPart("x", ("ac-1: x.",), None, depends) for depends in (None, (), None, (1,)))
+    assert split_dependencies(parts) == ((), (), (2,), (1,))
+
+
+def test_an_untitled_part_is_named_for_its_number_and_a_long_title_is_cut() -> None:
+    untitled = SplitPart("", ("ac-2: b.",), None, None)
+    assert split_issue("1052", "url", "77", 2, untitled, "high", ())[0] == "Part 2 of #1052"
+    long = SplitPart("t" * 300, ("ac-1: a.",), None, None)
+    assert split_issue("1052", "url", "77", 1, long, "high", ())[0] == "t" * 256
