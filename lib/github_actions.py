@@ -578,8 +578,9 @@ class GitHubReviewActions:
                     found.add(_issue_number(raw.get("number")))
         return tuple(sorted(found))
 
-    def close_issue(self, repo: str, number: int, comment: str) -> None:
-        self.post_issue_comment(repo, number, comment)
+    def close_issue(self, repo: str, number: int, comment: str | None) -> None:
+        if comment is not None:
+            self.post_issue_comment(repo, number, comment)
         self._call(
             "-X", "PATCH", f"{_repo_path(repo)}/issues/{_issue_number(number)}", "-f", "state=closed"
         )

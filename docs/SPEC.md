@@ -1098,7 +1098,13 @@ limit. A head marker in the comment and the row's claim keep it to one comment
 per head, and a crash after the post finds the marker and posts nothing more.
 A head whose log read fails posts nothing that poll and is retried on the
 next, and a feeder clears the row's claim only while it still holds it.
-The streak's first head gets no comment. A ticket that waits is
+The streak's first head gets no comment. When the green read comes and no feed
+of the issue has begun (no branch recorded and not feeding or fed), the feeder
+closes the issue under the row's claim with one comment saying the base is
+green, kept to one by a close marker, so a crash between the comment and the
+close posts nothing more on the retry. A fed issue stays open and only its row
+ends. While the issue's state cannot be read, the green read keeps the row and
+the next poll tries again. A ticket that waits is
 `waiting-blocked` with its reason, takes no room and is re-checked every poll; a blocker cycle, a blocker closed without finishing and a blocker that
 does not exist are flagged needs-attention (`blocker-cycle`,
 `blocker-closed`, `blocker-missing`). An open issue in a tracked repo that a

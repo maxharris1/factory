@@ -108,7 +108,10 @@ rendered from the streak's first red read, and a feeder posts or retires it
 only while it holds the row's claim, which lapses after CLAIM_SECONDS. Each
 later red head of the streak adds one comment with its log to the open issue,
 once per head by a marker, under the row's claim. A head whose log read fails
-posts nothing until a later poll reads it.
+posts nothing until a later poll reads it. When no feed of the issue has
+begun (no branch and not feeding or fed), a green read closes it with one
+comment, once by a marker; a fed issue stays open and only its row ends. An
+unreadable issue state on a green read keeps the row for the next poll.
 
 Stacked branches (#205, lib/branch_stack.py): a ticket whose branch already
 exists and carries commits of another open PR is `waiting-blocked` until
@@ -210,11 +213,14 @@ from lib.journeys import (
 )
 from lib.main_fix import (
     MAIN_FIX_TABLE,
+    Close,
     Comment as MainFixComment,
     File,
     MainFixRow,
     MainRead,
     Retire,
+    close_comment,
+    close_marker,
     decide,
     head_comment,
     head_marker,
@@ -634,7 +640,7 @@ class GitHubIntake(Protocol):
 
     def marked_issues(self, repo: str, marker: str, since: float) -> tuple[int, ...]: ...
 
-    def close_issue(self, repo: str, number: int, comment: str) -> None: ...
+    def close_issue(self, repo: str, number: int, comment: str | None) -> None: ...
 
     def post_issue_comment_once(self, repo: str, number: int, body: str, marker: str) -> str: ...
 
@@ -1307,13 +1313,15 @@ class Feeder:
         for (repo, base), line in lines.items():
             row = self._main_fix_row(repo, base)
             issue_open: bool | None = None
-            if row is not None and row.issue is not None and line.read.red is not None:
+            fed = False
+            if row is not None and row.issue is not None and not line.read.failed:
+                fed = self._main_fix_fed(repo, row.issue)
                 try:
                     issue_open = self.github.issue_state(line.project.repo, row.issue) == "open"
                 except Exception as exc:
                     self.log(f"feeder: cannot read main-fix {repo}#{row.issue}: {safe_ship_error(exc)}")
             try:
-                for action in decide(row, line.read, issue_open=issue_open):
+                for action in decide(row, line.read, issue_open=issue_open, fed=fed):
                     if isinstance(action, File):
                         claimed = self._claim_main_fix(line, repo, base, action.red, now)
                         if claimed is not None:
@@ -1321,6 +1329,9 @@ class Feeder:
                         continue
                     if isinstance(action, MainFixComment):
                         self._comment_main_fix(line, action.row, action.red)
+                        continue
+                    if isinstance(action, Close):
+                        self._close_main_fix(line, action.row)
                         continue
                     claim = None
                     if action.row.state == "filing":
@@ -1335,6 +1346,15 @@ class Feeder:
                 errors += 1
                 self.log(f"feeder: main-fix for {repo}@{base} not filed yet: {safe_ship_error(exc)}")
         return errors
+
+    def _main_fix_fed(self, repo: str, issue: int) -> bool:
+        with self.queue.connect() as connection:
+            found = connection.execute(
+                f"SELECT 1 FROM {FEEDER_TABLE} WHERE repo = ? AND issue = ? "
+                f"AND (branch IS NOT NULL OR state IN ({','.join('?' * len(HOLDING))}))",
+                (repo, str(issue), *HOLDING),
+            ).fetchone()
+        return found is not None
 
     def _main_fix_rows(self) -> list[MainFixRow]:
         with self.queue.connect() as connection:
@@ -1487,6 +1507,25 @@ class Feeder:
                 (red.head, row.marker, claim),
             )
         self.log(f"feeder: added {red.head[:8]} log to main-fix {repo}#{row.issue}")
+
+    def _close_main_fix(self, line: _MainLine, row: MainFixRow) -> None:
+        repo = line.project.repo
+        claim = self._take_main_fix(row.marker, "open")
+        if claim is None:
+            return
+        try:
+            self.github.post_issue_comment_once(repo, row.issue, close_comment(row), close_marker(row))
+            self.github.close_issue(repo, row.issue, None)
+        except Exception:
+            self._release_main_fix(row.marker, claim)
+            raise
+        with self.queue.connect() as connection:
+            connection.execute(
+                f"UPDATE {MAIN_FIX_TABLE} SET state = 'closed', claimed_by = NULL "
+                "WHERE marker = ? AND claimed_by = ?",
+                (row.marker, claim),
+            )
+        self.log(f"feeder: closed never-fed main-fix {repo}#{row.issue}: {row.base} is green")
 
     def _close_main_fix_duplicates(self, repo: str, row: MainFixRow, posted: int) -> int:
         found = (posted, *self.github.marked_issues(repo, row.marker, row.filed_at))

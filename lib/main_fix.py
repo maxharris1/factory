@@ -64,16 +64,28 @@ class Comment:
     red: MainRed
 
 
-Action = File | Resume | Retire | Comment
+@dataclass(frozen=True)
+class Close:
+    row: MainFixRow
 
 
-def decide(row: MainFixRow | None, read: MainRead, *, issue_open: bool | None) -> tuple[Action, ...]:
+Action = File | Resume | Retire | Comment | Close
+
+
+def decide(
+    row: MainFixRow | None, read: MainRead, *, issue_open: bool | None, fed: bool
+) -> tuple[Action, ...]:
     """What to do for one base, given its active row (filing or open) and
-    this poll's read. issue_open is None when the issue's state is unknown."""
+    this poll's read. issue_open is None when the issue's state is unknown;
+    fed is whether a feed of the issue has begun."""
     if read.failed:
         return ()
     if read.red is None:
-        return () if row is None else (Retire(row),)
+        if row is None:
+            return ()
+        if row.state == "filing" or fed or issue_open is False:
+            return (Retire(row),)
+        return () if issue_open is None else (Close(row),)
     if row is None:
         return (File(read.red),)
     if row.state == "filing":
@@ -97,6 +109,17 @@ def marker(repo: str, base: str, filed_at: float) -> str:
 
 def head_marker(row: MainFixRow, head: str) -> str:
     return f"<!-- factory-main-fix-head id={row.repo.lower()}:{row.base}:{row.filed_at} head={head} -->"
+
+
+def close_marker(row: MainFixRow) -> str:
+    return f"<!-- factory-main-fix-close id={row.repo.lower()}:{row.base}:{row.filed_at} -->"
+
+
+def close_comment(row: MainFixRow) -> str:
+    return (
+        f"{close_marker(row)}\n\n`{row.base}` is green again and no build started on this issue, "
+        "so the feeder closes it.\n"
+    )
 
 
 def issue_title(red: MainRed) -> str:
