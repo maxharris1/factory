@@ -27,7 +27,7 @@ from lib import device_monitor, device_pool, exposure, job_run, live_settings, p
 from lib.device_monitor import DeviceMonitor, remote_target, stranded
 from lib.device_pool import DevicePool, hold_memory
 from lib.dispatcher import Dispatcher
-from lib.harness_env import account_tokens, harness_env
+from lib.harness_env import CPU_CAP, account_tokens, cpu_cap_env, cpu_window, harness_env
 from lib.machines_yml import MachinesConfig, load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.wait import WaitError, deliver, wait_for_job
@@ -2949,6 +2949,112 @@ def test_an_uncontained_start_says_so_in_the_run_log_and_still_runs(tmp_path: Pa
     assert result.stdout == "HARNESS_RAN\n"
     assert result.stderr == remote.UNCONTAINED + "\n"
     assert not (Path(target.job_dir) / remote.scope_record(target.tag)).exists()
+
+
+AFFINITY = (
+    "import os, subprocess, sys\n"
+    "print(sorted(os.sched_getaffinity(0)))\n"
+    "grandchild = 'import os; print(sorted(os.sched_getaffinity(0)))'\n"
+    "subprocess.run(['sh', '-c', f'{sys.executable} -c \"{grandchild}\"'], check=True)\n"
+)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the Linux start only")
+@pytest.mark.parametrize(
+    ("cap", "contained"),
+    [(None, False), (1, False), (1, True)],
+    ids=["default-cap", "cap-1", "cap-1-in-a-scope"],
+)
+def test_a_remote_linux_worker_and_its_grandchild_run_on_the_capped_cpu_window(
+    tmp_path: Path, cap: int | None, contained: bool
+) -> None:
+    allowed = sorted(os.sched_getaffinity(0))
+    if allowed != list(range(len(allowed))):
+        pytest.skip(f"this test's CPUs are {allowed}, not 0..n-1")
+    if len(allowed) <= (cap or CPU_CAP):
+        pytest.skip(f"{len(allowed)} CPUs fit a cap of {cap or CPU_CAP}")
+    if contained and (refusal := scope_refusal(stripped=True)):
+        pytest.skip(refusal)
+    target = remote.RemoteTarget(
+        device="pc",
+        alias="fakepc-codex-bot",
+        user="codex-bot",
+        workdir_root=str(tmp_path / "work"),
+        job_id="abc123",
+        tag=uuid.uuid4().hex,
+    )
+    capped = {} if cap is None else {"cpu_cap": cap}
+    script = remote.start_script(target, [sys.executable, "-c", AFFINITY], {}, **capped)
+    result = subprocess.run(
+        ["setsid", "sh", "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=30,
+        env={"PATH": fake_linger(tmp_path, "yes" if contained else "no"), "HOME": str(tmp_path)},
+    )
+    assert result.returncode == 0, result.stderr
+    window = sorted(cpu_window(allowed, cap or CPU_CAP, target.tag))
+    assert result.stdout == f"{window}\n{window}\n"
+    assert result.stderr == ("" if contained else remote.UNCONTAINED + "\n")
+    assert (Path(target.job_dir) / remote.scope_record(target.tag)).exists() == contained
+
+
+def without_cpu_tools(tmp_path: Path, **fakes: str) -> str:
+    """The test's PATH, linked into one directory without nproc or taskset,
+    with loginctl saying no linger and each named fake in place."""
+    farm = tmp_path / "farm-bin"
+    farm.mkdir()
+    for directory in os.environ["PATH"].split(os.pathsep):
+        if not os.path.isdir(directory):
+            continue
+        for entry in os.scandir(directory):
+            link = farm / entry.name
+            if entry.name not in {"nproc", "taskset"} and not os.path.lexists(link):
+                link.symlink_to(entry.path)
+    for name, body in {"loginctl": "echo no", **fakes}.items():
+        (farm / name).unlink(missing_ok=True)
+        (farm / name).write_text(f"#!/bin/sh\n{body}\n")
+        (farm / name).chmod(0o755)
+    return str(farm)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the Linux start only")
+@pytest.mark.parametrize(
+    ("fakes", "why"),
+    [
+        ({}, "no nproc"),
+        ({"nproc": "echo many"}, "no nproc"),
+        ({"nproc": "echo 24"}, "no taskset"),
+        ({"nproc": "echo 24", "taskset": "exit 1"}, "taskset -pc 22,23,0,1 failed"),
+        ({"nproc": "echo 4"}, None),
+    ],
+    ids=["no-nproc", "nproc-not-a-number", "no-taskset", "taskset-fails", "cpus-fit-the-cap"],
+)
+def test_a_remote_linux_start_without_affinity_says_so_and_runs_under_the_env_cap(
+    tmp_path: Path, fakes: dict[str, str], why: str | None
+) -> None:
+    target = remote.RemoteTarget(
+        device="pc",
+        alias="fakepc-codex-bot",
+        user="codex-bot",
+        workdir_root=str(tmp_path / "work"),
+        job_id="abc123",
+        tag="00000016" + uuid.uuid4().hex[8:],
+    )
+    script = remote.start_script(
+        target,
+        [sys.executable, "-c", "import os; print(os.environ['ORCH_CPU_CAP'])"],
+        cpu_cap_env(),
+    )
+    result = subprocess.run(
+        ["sh", "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=30,
+        env={"PATH": without_cpu_tools(tmp_path, **fakes)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"{CPU_CAP}\n"
+    skipped = (
+        f"orch: cpu cap: affinity skipped ({why}); env cap ORCH_CPU_CAP={CPU_CAP} still applies\n"
+        if why
+        else ""
+    )
+    assert result.stderr == remote.UNCONTAINED + "\n" + skipped
 
 
 @pytest.mark.parametrize(
