@@ -92,6 +92,21 @@ def test_a_drift_fail_wakes_skill_maintenance_and_not_qa_failed(tmp_path: Path) 
     assert json.loads(wakes[0][3])["drift"] == [drift]
 
 
+def test_a_mixed_fail_wakes_qa_failed_and_skill_maintenance_once_each(tmp_path: Path) -> None:
+    run = Harness(tmp_path, qa_config())
+    _approved(run)
+    drift = "[drift] qa-2 (ac-2): the verify skill or its map no longer matches the app"
+    run.post("q1", qa_report(HEAD_A, "FAIL", body=f"{BLOCKING}- {drift}\n", cause="product"))
+    run.poll(12)
+
+    failed = _wakes(run)
+    assert [row[:3] for row in failed] == [("grok", HEAD_A, "q1")]
+    assert json.loads(failed[0][3])["finding"] == "[blocking] f-1 the saved draft is gone after reload"
+    wakes = run.rows("SELECT recipient, head, source_comment_id, detail FROM jobs WHERE action = 'qa-skill-drift'")
+    assert [row[:3] for row in wakes] == [("grok", HEAD_A, "q1")]
+    assert json.loads(wakes[0][3])["drift"] == [drift]
+
+
 def test_a_fail_without_a_blocking_line_wakes_nobody(tmp_path: Path) -> None:
     run = Harness(tmp_path, qa_config())
     _approved(run)
