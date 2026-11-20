@@ -144,7 +144,7 @@ def prepare(
         if checkout.path.exists():
             if not checkout.record.is_file() or not (checkout.path / ".git").is_file():
                 raise WorktreeError(f"{checkout.path} exists and is not this job's worktree")
-            reused = replace(checkout, start=_recorded_start(checkout.record))
+            reused = replace(checkout, start=recorded_start(checkout.record))
             _write_record(reused, pid)
             return reused
         if adopt is not None:
@@ -507,7 +507,7 @@ def _write_record(checkout: JobCheckout, pid: int | None) -> None:
     os.replace(tmp, checkout.record)
 
 
-def _recorded_start(record: Path) -> str | None:
+def recorded_start(record: Path) -> str | None:
     try:
         return _valid_start(json.loads(record.read_text(encoding="utf-8")).get("start"))
     except (OSError, ValueError, AttributeError):
@@ -537,6 +537,12 @@ def _live_owner(data: dict) -> int | None:
     if recorded is not None and (stat is None or stat.start != recorded):
         return None  # the pid was reused by an unrelated process
     return pid
+
+
+def record_owner_live(record: Path) -> bool | None:
+    """Whether the process that owns a `<job-id>.json` record still runs; None when unreadable."""
+    data = _read_record(record)
+    return None if data is None else _live_owner(data) is not None
 
 
 def process_start(pid: int) -> str | None:
