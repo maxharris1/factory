@@ -631,19 +631,22 @@ def test_a_remote_deadline_kills_tagged_children_left_after_the_wrapper_exits(
     )
     rundir = Path(remote.run_dir(target)) / target.tag
     try:
-        subprocess.run(["sh", "-c", launch], input=b"x", capture_output=True, check=True)
+        subprocess.run(
+            ["sh", "-c", launch], input=b"x", capture_output=True, check=True,
+            start_new_session=True,
+        )
         deadline = time.monotonic() + 10
         while not pid_file.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
         assert pid_file.exists()
+        # #1210: the wrapper would kill the child itself; without it only the deadline can.
+        os.kill(int((rundir / "pid").read_text().split()[0]), signal.SIGKILL)
         end = time.monotonic() + 8
-        while time.monotonic() < end and not (
-            (rundir / "exit").exists() and not _alive(int(pid_file.read_text()))
-        ):
+        while time.monotonic() < end and _alive(int(pid_file.read_text())):
             _reap_children()
             time.sleep(0.05)
         _reap_children()
-        assert (rundir / "exit").read_text().strip() == str(128 + signal.SIGTERM)
+        assert not (rundir / "exit").exists(), "no wrapper wrote the exit"
         assert not _still_writes(ticks), "a tagged child outlived the budget and its grace"
     finally:
         if pid_file.exists():
@@ -685,14 +688,22 @@ def test_stops_that_reach_a_run_while_it_finishes_still_leave_its_exit_status(
     launch = remote.launch_script(target, start, size=1, not_after=int(time.time()) + 60)
     env = {**os.environ, "PATH": f"{shims}{os.pathsep}{os.environ['PATH']}"}
     rundir = Path(remote.run_dir(target)) / target.tag
-    subprocess.run(["sh", "-c", launch], input=b"x", env=env, capture_output=True, check=True)
+    subprocess.run(
+        ["sh", "-c", launch], input=b"x", env=env, capture_output=True, check=True,
+        start_new_session=True,
+    )
     deadline = time.monotonic() + 20
     while not ended.exists() and time.monotonic() < deadline:
         time.sleep(0.05)
     assert ended.exists()
+    wrapper = int((rundir / "pid").read_text().split()[0])
     check = ["sh", "-c", remote.check_script(target)]
-    while subprocess.run(check).returncode != 0 and time.monotonic() < deadline:
+    while not (rundir / "exit").exists() and time.monotonic() < deadline:
         subprocess.run(["sh", "-c", remote.stop_script(target)], check=True)
+        try:
+            os.kill(wrapper, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
         time.sleep(0.1)
     assert subprocess.run(check).returncode == 0
     assert (rundir / "exit").read_text().strip() == "3"
