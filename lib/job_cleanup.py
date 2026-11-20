@@ -3,19 +3,24 @@
 A placed job's checkout is `<workdir_root>/jobs/<job-id>/` on its device.
 Its log, handoff and exit code live beside it in `jobs/<job-id>.run/`, with
 `jobs/<job-id>.launched` and `jobs/<job-id>.brief.md`; telemetry and
-transcripts are never under the work root. So removing the checkout keeps
-everything the weekly eval and the dashboards read.
+transcripts are never under the work root.
 
 The orch host decides and the device acts. `orch cleanup run` reads orch.db
 once and names the finished jobs: done, failed or cancelled before the
 cutoff (now minus the grace period), except a failed job whose ticket still
 has a queued or running job (a retry may still need it). It sends that list
 to every device target over ssh. `orch cleanup device` then moves each
-named folder aside to `<job-id>.cleanup` unless `_live_reason` or a held
-lock keeps it. The host reads orch.db again and confirms only the ids
-still finished, so a job requeued and claimed since the first read is moved
-back. The device empties each confirmed folder, keeping only its
-`.orch-worker*` records, and moves it back. A device that cannot scan for
+named folder aside to `<job-id>.cleanup` unless `_live_reason`, a held lock
+or a `jobs-kept/` on another device keeps it. The host reads orch.db again
+and confirms only the ids still finished, so a job requeued and claimed
+since the first read is moved back. For each confirmed folder the device
+renames `<job-id>.cleanup` to `<job-id>.gone`, the commit point, then moves
+its logs, results and worker records with the `.run/`, `.brief.md` and
+`.launched` beside it to `jobs-kept/<job-id>/` (lib/job_leftovers.py),
+deletes the folder and `.claimed`, and writes `kept.json` last. The
+`.lock` stays. A `<job-id>.gone` already there puts the folder back with
+an error, and one left by a failure after the commit stays for a later
+pass to settle. A device that cannot scan for
 processes of this user with a cwd or open file in a folder removes
 nothing. A process of this user whose cwd or open files the scan cannot
 read (a non-dumpable one: ssh, an agent, a sandboxed shell) could be in any
@@ -24,7 +29,7 @@ job folder. So while one lives, every folder is kept as held-open.
 The runner's checkout and start claim the job first under `flock` on
 `jobs/<job-id>.lock`: they touch `jobs/<job-id>.claimed` and move a
 set-aside folder back (lib/remote.py `_CLAIM`). Each move aside and each
-empty here holds the same lock. A device whose login PATH has no `flock`
+archive here holds the same lock. A device whose login PATH has no `flock`
 claims unlocked, so it removes nothing. A folder the host did not name is
 never touched; the host labels each one live, recent, retry-held or
 unknown.
@@ -49,14 +54,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from lib import health, remote, scratch, worktrees
+from lib import health, job_leftovers, remote, worktrees
 from lib.device_deploy import PICK_PYTHON, Target, targets
+from lib.job_leftovers import GONE, WORKER_RECORD
 from lib.remote import SSH_UNREACHABLE, CaptureTransport, SshTransport, _login, _marked, ssh_argv
 
 DEFAULT_GRACE_HOURS = 6.0
 TIMEOUT_SECONDS = 3600.0
 MARK = "orch-cleanup:"
-WORKER_RECORD = ".orch-worker"
 FINISHED = ("done", "failed", "cancelled")
 ACTIVE = ("queued", "running")
 LIVE = "live"
@@ -390,36 +395,20 @@ def _live_reason(folder: Path, job_id: str, own_finish: float,
     if any(_changed_after(jobs / f"{job_id}{mark}", own_finish) for mark in (CLAIMED, LAUNCHED)):
         return CLAIMED_SINCE
     return (_worktree_reason(folder, job_id) or _worker_reason(folder, job_id)
-            or _in_use(folder, scan))
+            or _in_use(folder, job_id, scan))
 
 
-def _in_use(folder: Path, scan: Callable[[Path], set[str] | None]) -> str | None:
+def _in_use(folder: Path, job_id: str, scan: Callable[[Path], set[str] | None]) -> str | None:
     held = scan(folder.parent)
     if held is None:
         return CANNOT_SCAN
-    if folder.name in held:
+    if folder.name in held or f"{job_id}.run" in held:
         return HELD_OPEN
     return None
 
 
-def _removable(folder: Path) -> list[Path]:
-    return [entry for entry in folder.iterdir() if not entry.name.startswith(WORKER_RECORD)]
-
-
-def _empty(entries: Iterable[Path]) -> str | None:
-    for entry in entries:
-        if entry.is_dir() and not entry.is_symlink():
-            failed = scratch.remove(entry)
-            if failed is not None:
-                return failed
-            continue
-        try:
-            entry.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            return f"could not remove {entry}: {exc}"
-    return None
+def _deleted_bytes(folder: Path) -> int:
+    return disk_bytes([folder]) - disk_bytes(job_leftovers.kept_entries(folder))
 
 
 def _job_folders(jobs: Path, suffix: str = "") -> dict[str, Path]:
@@ -446,12 +435,17 @@ def _hold(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None]) -> Re
     kept: dict[str, str] = {}
     held = list(_job_folders(jobs, SET_ASIDE))
     locks = runner_locks()
-    for job_id, folder in _job_folders(jobs).items():
+    folders = _job_folders(jobs)
+    away = job_leftovers.cross_device(root) if folders else None
+    for job_id, folder in folders.items():
         if job_id not in plan.finished:
             kept[job_id] = NOT_NAMED
             continue
         if not locks:
             kept[job_id] = CANNOT_LOCK
+            continue
+        if away is not None:
+            kept[job_id] = away
             continue
         try:
             with _claim_lock(jobs, job_id, wait=False, create=not plan.dry_run) as locked:
@@ -460,7 +454,7 @@ def _hold(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None]) -> Re
                 if reason is not None:
                     kept[job_id] = reason
                 elif plan.dry_run:
-                    removed[job_id] = disk_bytes(_removable(folder))
+                    removed[job_id] = _deleted_bytes(folder)
                 elif job_id in held:
                     kept[job_id] = f"error: {job_id}{SET_ASIDE} is still there"
                 else:
@@ -486,29 +480,26 @@ def _finish(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None]) -> 
     jobs = root / "jobs"
     locks = runner_locks()
     for job_id, aside in _job_folders(jobs, SET_ASIDE).items():
+        gone = jobs / f"{job_id}{GONE}"
         try:
             with _claim_lock(jobs, job_id):
                 if not aside.is_dir():
                     kept[job_id] = RECENT
                     continue
-                reason = _finish_reason(aside, job_id, plan, locks, scan)
-                size = failed = None
-                if reason is None:
-                    entries = _removable(aside)
-                    size = disk_bytes(entries)
-                    failed = _empty(entries)
-                back = _put_back(aside, job_id)
+                reason = (_finish_reason(aside, job_id, plan, locks, scan)
+                          or job_leftovers.cross_device(root)
+                          or (f"error: {gone.name} is still there"
+                              if os.path.lexists(gone) else None))
+                if reason is not None or os.path.lexists(jobs / job_id):
+                    kept[job_id] = _put_back(aside, job_id) or reason
+                    continue
+                size = _deleted_bytes(aside)
+                aside.rename(gone)
+                job_leftovers.retire(root, job_id, gone, siblings=True,
+                                     finished_at=plan.own_finish(job_id), removed_bytes=size)
+                removed[job_id] = size
         except OSError as exc:
-            failed = f"could not read {aside}: {exc}"
-            back = None
-        if failed is not None:
-            kept[job_id] = f"error: {failed.splitlines()[0]}"
-        elif back is not None:
-            kept[job_id] = back
-        elif reason is not None:
-            kept[job_id] = reason
-        else:
-            removed[job_id] = size
+            kept[job_id] = f"error: {exc}".splitlines()[0]
     return Report(removed, kept, False)
 
 

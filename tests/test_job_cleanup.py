@@ -20,7 +20,7 @@ from types import MappingProxyType
 
 import pytest
 
-from lib import job_cleanup, remote, worktrees
+from lib import job_cleanup, job_leftovers, remote, worktrees
 from lib.job_cleanup import Plan
 from lib.machines_yml import Device, MachinesConfig
 from lib.queue import SQLiteJobQueue
@@ -245,7 +245,9 @@ def cleanup(argv: list[str], transport, capsys) -> tuple[int, str]:
 def test_finished_checkout_goes_and_its_logs_and_records_stay(tmp_path: Path) -> None:
     root = work_root(tmp_path)
     folder = job_folder(root, "done1")
+    jobs = root / "jobs"
     before = kept_files(root, "done1")
+    records = {path.name: path.read_bytes() for path in folder.glob(".orch-worker*")}
     db = database(tmp_path, [("done1", "t1", "done", OLD)])
     outcomes = job_cleanup.run(db, machines(tmp_path, "pc"), ShellTransport(tmp_path),
                                now=NOW, grace_hours=6, dry_run=False)
@@ -253,10 +255,11 @@ def test_finished_checkout_goes_and_its_logs_and_records_stay(tmp_path: Path) ->
     [(_, report)] = outcomes
     assert not isinstance(report, str), report
     assert set(report.removed) == {"done1"} and report.kept == {}
-    assert sorted(path.name for path in folder.iterdir()) == [
-        ".orch-worker-abc.tree.pid", ".orch-worker.pid"]
-    assert kept_files(root, "done1") == before
-    assert len(before) == 5
+    assert not folder.exists()
+    kept = root / "jobs-kept" / "done1"
+    assert {path: (kept / Path(path).relative_to(jobs)).read_bytes() for path in before} == before
+    assert {name: (kept / "done1" / name).read_bytes() for name in records} == records
+    assert len(before) == 5 and len(records) == 2
     assert (root.parent / "outside" / "keep").exists()
 
 
@@ -410,7 +413,10 @@ def test_backlog_sweep_of_mixed_folders_removes_only_finished_checkouts(
         "running1": "live", "held1": "retry-held", "stray1": "unknown",
         "wt1": "worktree-record", "recent1": "recent",
     }
-    freed = {job_id: sizes[job_id] - du(jobs / job_id) for job_id in finished}
+    assert not any((jobs / job_id).exists() for job_id in finished)
+    freed = {job_id: sizes[job_id] - sum(
+        path.lstat().st_blocks * 512 for path in (root / "jobs-kept" / job_id / job_id).rglob("*")
+        if path.is_file()) for job_id in finished}
     assert report.removed == freed == dry.removed
     assert report.bytes_freed == sum(freed.values()) > sum(finished.values())
     for job_id in ("running1", "held1", "stray1", "wt1", "recent1"):
@@ -491,8 +497,9 @@ def test_a_launch_after_the_confirming_read_gets_a_fresh_folder_the_finish_leave
     tmp_path: Path,
 ) -> None:
     root = work_root(tmp_path)
-    job_folder(root, "j")
+    folder = job_folder(root, "j")
     jobs = root / "jobs"
+    contents = sorted(path.relative_to(folder) for path in folder.rglob("*"))
     plan = Plan(frozenset({"j"}), NOW - 6 * HOUR, False)
     hold = job_cleanup.device_step(root, plan)
     assert hold.held == ("j",) and not (jobs / "j").exists()
@@ -504,8 +511,9 @@ def test_a_launch_after_the_confirming_read_gets_a_fresh_folder_the_finish_leave
 
     assert (jobs / "j" / "new-run").read_text() == "work of the next run\n"
     assert done.removed == {} and done.kept["j"].startswith("error: j was made again")
-    assert sorted(path.name for path in (jobs / "j.cleanup").iterdir()) == [
-        ".orch-worker-abc.tree.pid", ".orch-worker.pid"]
+    aside = jobs / "j.cleanup"
+    assert sorted(path.relative_to(aside) for path in aside.rglob("*")) == contents
+    assert not (jobs / "j.gone").exists() and not (root / "jobs-kept").exists()
 
 
 def test_a_folder_left_aside_by_an_interrupted_pass_is_settled_by_the_next(tmp_path: Path) -> None:
@@ -992,8 +1000,24 @@ def test_leftover_claimed_and_lock_from_the_jobs_own_run_do_not_block(tmp_path: 
     [(_, report)] = job_cleanup.run(db, machines(tmp_path, "pc"), InProcessTransport(root),
                                     now=NOW, grace_hours=6, dry_run=False)
 
+    jobs = root / "jobs"
     assert set(report.removed) == {"j"} and report.kept == {}
-    assert not (folder / "repo").exists() and not (folder / "top-file").exists()
+    assert not folder.exists()
+    assert not (jobs / "j.claimed").exists() and not (jobs / "j.launched").exists()
+    assert (jobs / "j.lock").exists()
+
+
+def test_a_collected_job_leaves_only_its_lock_under_jobs(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    finished_with_leftovers(root, "j")
+    db = database(tmp_path, [("j", "t1", "done", OLD)])
+
+    [(_, report)] = job_cleanup.run(db, machines(tmp_path, "pc"), InProcessTransport(root),
+                                    now=NOW, grace_hours=6, dry_run=False)
+
+    assert set(report.removed) == {"j"}
+    assert [path.name for path in (root / "jobs").iterdir()
+            if path.name == "j" or path.name.startswith("j.")] == ["j.lock"]
 
 
 def stale_worktree(tmp_path: Path, root: Path, job_id: str = "j") -> Path:
@@ -1070,8 +1094,11 @@ def test_a_dead_owners_clean_worktree_no_longer_keeps_the_folder(tmp_path: Path)
     [(_, report)] = job_cleanup.run(db, machines(tmp_path, "pc"), InProcessTransport(root),
                                     now=NOW, grace_hours=6, dry_run=False)
 
+    jobs = root / "jobs"
     assert set(report.removed) == {"j"} and report.kept == {}
-    assert not (folder / "tracked.txt").exists()
+    assert not folder.exists()
+    assert not (jobs / "j.claimed").exists() and not (jobs / "j.launched").exists()
+    assert (jobs / "j.lock").exists() and (jobs / "j.json").exists()
 
 
 def test_a_held_lock_keeps_the_folder_without_waiting(tmp_path: Path) -> None:
@@ -1195,3 +1222,185 @@ def test_a_dry_run_reports_a_held_lock_and_writes_nothing(tmp_path: Path) -> Non
 
     assert dry.kept == {"held": "lock-held"} and set(dry.removed) == {"free"}
     assert sorted(path.name for path in jobs.iterdir()) == before
+
+
+def files_under(top: Path) -> list[str]:
+    return sorted(Path(base, name).relative_to(top).as_posix()
+                  for base, _, names in os.walk(top) for name in names)
+
+
+def git_checkout(path: Path) -> None:
+    (path / "src").mkdir(parents=True)
+    (path / "README.md").write_bytes(os.urandom(64))
+    (path / "src" / "x.py").write_bytes(os.urandom(64))
+    for args in (["init", "-q", "-b", "main"], ["add", "README.md", "src/x.py"],
+                 ["commit", "-qm", "one"]):
+        subprocess.run(["git", "-C", str(path), *args], env={**os.environ, **GIT_ENV},
+                       check=True, capture_output=True)
+
+
+def write_random(path: Path) -> bytes:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(os.urandom(256))
+    return path.read_bytes()
+
+
+@pytest.mark.parametrize("layout", ["remote", "local"])
+def test_archive_mirrors_jobs_and_drops_the_trees(tmp_path: Path, layout: str) -> None:
+    root = work_root(tmp_path)
+    jobs = root / "jobs"
+    folder = jobs / "j"
+    git_checkout(folder if layout == "remote" else folder / "repo")
+    untracked = (["handoff.md", "gate.log", "prbody.md"] if layout == "remote"
+                 else ["repo/handoff.md", "handoff.md"])
+    originals = {f"j/{name}": write_random(folder / name) for name in untracked}
+    record = folder / f".orch-worker-{TAG}.pid"
+    record.write_text(f"99999 {DEAD_BOOT} {TAG} Mon Jan  1 00:00:00 2024\n")
+    originals[f"j/{record.name}"] = record.read_bytes()
+    for name in ("venv/bin/python", "interrogate-a/f"):
+        write_random(folder / name)
+    for name in (f"j.run/{TAG}/log", f"j.run/{TAG}/handoff", f"j.run/{TAG}/exit",
+                 "j.brief.md", "j.launched"):
+        originals[name] = write_random(jobs / name)
+    for name in ("j.claimed", "j.lock"):
+        (jobs / name).touch()
+    for path in jobs.iterdir():
+        age(path, OLD - HOUR)
+    db = database(tmp_path, [("j", "t1", "done", OLD)])
+
+    [(_, report)] = job_cleanup.run(db, machines(tmp_path, "pc"), InProcessTransport(root),
+                                    now=NOW, grace_hours=6, dry_run=False)
+
+    assert set(report.removed) == {"j"} and report.kept == {}
+    kept = root / "jobs-kept" / "j"
+    check_lock = [f"j/.orch-worker-{TAG}.tree.pid.lock"] if sys.platform == "linux" else []
+    archived = sorted([*originals, *check_lock])
+    assert files_under(kept) == sorted([*archived, "kept.json"])
+    assert {name: (kept / name).read_bytes() for name in originals} == originals
+    assert not [path for path in (root / "jobs-kept").rglob("*")
+                if path.name in ("README.md", "src", ".git", "venv")
+                or path.name.startswith("interrogate-")]
+    written = json.loads((kept / "kept.json").read_text())
+    assert written["archived"] == archived
+    assert (written["id"], written["finished_at"]) == ("j", OLD)
+    assert written["removed_bytes"] == report.removed["j"]
+    for name in ("j", "j.claimed", "j.launched", "j.gone", "j.cleanup"):
+        assert not os.path.lexists(jobs / name), name
+    assert (jobs / "j.lock").exists()
+
+
+@pytest.mark.parametrize("layout", ["remote", "local"])
+def test_scratch_trees_with_their_own_git_are_not_archived(tmp_path: Path, layout: str) -> None:
+    root = work_root(tmp_path)
+    folder = root / "jobs" / "j"
+    checkout = folder if layout == "remote" else folder / "repo"
+    git_checkout(checkout)
+    subprocess.run(["git", "-C", str(checkout), "worktree", "add", "-q", "--detach",
+                    str(folder / "interrogate-a"), "HEAD"],
+                   env={**os.environ, **GIT_ENV}, check=True, capture_output=True)
+    git_checkout(folder / "venv")
+    for tree in ("interrogate-a", "venv"):
+        write_random(folder / tree / "review.log")
+    handoff = write_random(folder / "handoff.md")
+    gone = folder.with_name("j.gone")
+    folder.rename(gone)
+
+    job_leftovers.retire(root, "j", gone, siblings=True, finished_at=OLD, removed_bytes=0)
+
+    kept = root / "jobs-kept" / "j"
+    assert files_under(kept) == ["j/handoff.md", "kept.json"]
+    assert (kept / "j" / "handoff.md").read_bytes() == handoff
+    assert json.loads((kept / "kept.json").read_text())["archived"] == ["j/handoff.md"]
+
+
+def test_kept_json_is_written_last(tmp_path: Path, monkeypatch) -> None:
+    root = work_root(tmp_path)
+    finished_with_leftovers(root, "j")
+    jobs = root / "jobs"
+    monkeypatch.setattr(job_leftovers.scratch, "remove",
+                        lambda path: f"could not remove {path}: refused")
+    db = database(tmp_path, [("j", "t1", "done", OLD)])
+
+    [(_, report)] = job_cleanup.run(db, machines(tmp_path, "pc"), InProcessTransport(root),
+                                    now=NOW, grace_hours=6, dry_run=False)
+
+    kept = root / "jobs-kept" / "j"
+    assert report.removed == {} and report.kept["j"].startswith("error:")
+    assert (kept / "j" / "top-file").exists() and (kept / "j.run" / "tag" / "log").exists()
+    assert not (kept / "kept.json").exists()
+    assert (jobs / "j.gone").is_dir() and not (jobs / "j").exists()
+
+
+def test_archiving_the_same_id_twice_keeps_both_copies(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    jobs = root / "jobs"
+    gone = jobs / "j.gone"
+    written = {}
+    for suffix in ("", ".1"):
+        gone.mkdir(parents=True)
+        written[f"j/handoff.md{suffix}"] = write_random(gone / "handoff.md")
+        written[f"j.run{suffix}/tag/log"] = write_random(jobs / "j.run" / "tag" / "log")
+        written[f"j.brief.md{suffix}"] = write_random(jobs / "j.brief.md")
+        job_leftovers.archive(root, "j", gone, siblings=True)
+        gone.rmdir()
+
+    kept = root / "jobs-kept" / "j"
+    assert files_under(kept) == sorted(written)
+    assert {name: (kept / name).read_bytes() for name in written} == written
+
+
+def test_a_cross_device_jobs_kept_keeps_the_folder_with_an_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = work_root(tmp_path)
+    finished_with_leftovers(root, "j")
+    jobs = root / "jobs"
+    assert job_leftovers.cross_device(root) is None
+    real_stat = os.stat
+
+    def stat(path, *args, **kwargs):
+        found = real_stat(path, *args, **kwargs)
+        if Path(path) != jobs:
+            return found
+        return os.stat_result((*found[:2], found.st_dev + 1, *found[3:]))
+
+    with monkeypatch.context() as patched:
+        patched.setattr(os, "stat", stat)
+        away = job_leftovers.cross_device(root)
+    assert away == f"error: {root} is on another device than {jobs}"
+
+    monkeypatch.setattr(job_leftovers, "cross_device", lambda _: away)
+    live_cases_unchanged(root, "j", away, [("j", "t1", "done", OLD)], tmp_path)
+    assert not (jobs / "j.cleanup").exists() and not (jobs / "j.gone").exists()
+
+
+def test_finish_refuses_to_commit_onto_an_existing_gone(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    finished_with_leftovers(root, "j")
+    jobs = root / "jobs"
+    before = snapshot(jobs, "j")
+    plan = Plan(frozenset({"j"}), NOW - 6 * HOUR, False, finished_at={"j": OLD})
+    assert job_cleanup.device_step(root, plan).held == ("j",)
+    (jobs / "j.gone").mkdir()
+
+    done = job_cleanup.device_step(
+        root, Plan(frozenset({"j"}), plan.cutoff, False, job_cleanup.FINISH, {"j": OLD}))
+
+    assert done.removed == {} and done.kept == {"j": "error: j.gone is still there"}
+    assert snapshot(jobs, "j") == {**before, "j.gone": None}
+    assert not (root / "jobs-kept").exists()
+
+
+def test_an_open_file_under_run_keeps_the_folder(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    finished_with_leftovers(root, "j")
+    jobs = root / "jobs"
+    sleeper = subprocess.Popen(["sleep", "60"], cwd=jobs / "j.run" / TAG)
+    try:
+        report = device_pass(root, Plan(frozenset({"j"}), NOW - 6 * HOUR, False))
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+
+    assert report.removed == {} and report.kept == {"j": "held-open"}
+    assert (jobs / "j" / "repo" / "README").exists() and not (root / "jobs-kept").exists()

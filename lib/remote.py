@@ -166,6 +166,7 @@ from typing import Protocol, runtime_checkable
 
 from lib.github_app_token import TOKEN_VARIABLES
 from lib.handoff_marker import MARKER_LINE_LIMIT, MARKER_PREFIX, MARKER_SEARCH_LINES, RUNNER_LOG_PREFIX
+from lib.oom import raise_sh
 from lib.ssh_mux import Multiplexer
 
 SSH_BINARY = "ssh"
@@ -748,6 +749,7 @@ def start_script(
         f'if [ "${{s%% *}}" = "$$" ]; then k=$(sh -c {shlex.quote(KEEPER)} orch-keeper '
         f'< /dev/null 2> /dev/null &); [ -n "$k" ] || exit {START_REFUSED}; fi; '
         f"{_contain(tag)}"
+        f"{raise_sh()}"
         f'exec "$@" {login}'
     )
     return f"exec env {TAG_ENV}={tag} sh -c {shlex.quote(inner)}"
