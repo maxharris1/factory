@@ -136,22 +136,17 @@ def scope_prefix(tag: str, env: Mapping[str, str], log: Log) -> list[str]:
     return [*scope, f"--unit={scope_unit(tag)}", "--"]
 
 
-def await_scope(child: subprocess.Popen[bytes], tag: str, log: Log) -> str | None:
-    """The scope unit once child, spawned behind scope_prefix, is in it; else None.
+def entered_scope(pid: int, tag: str, log: Log) -> str | None:
+    """The run's scope unit if pid, started behind scope_prefix, is in it.
 
-    None with no log line when child exits first (systemd-run failed), or
-    with the uncontained line when it is not in the scope in time.
+    systemd-run moves itself into the scope before it execs the run, so a
+    started run is already there; else None and the uncontained line.
     """
     unit = scope_unit(tag)
-    deadline = time.monotonic() + CONTAIN_SECONDS
-    while scope_of(child.pid) != unit:
-        if child.poll() is not None:
-            return None
-        if time.monotonic() >= deadline:
-            log(f"the run is uncontained (no systemd scope): pid {child.pid} did not enter {unit}")
-            return None
-        time.sleep(0.01)
-    return unit
+    if scope_of(pid) == unit:
+        return unit
+    log(f"the run is uncontained (no systemd scope): pid {pid} did not enter {unit}")
+    return None
 
 
 class _Uncontained(Exception):
