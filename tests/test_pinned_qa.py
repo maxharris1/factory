@@ -1,8 +1,13 @@
 from pathlib import Path
 
+import pytest
+
+from lib import cli
 from lib.device_pool import DevicePool
+from lib.orch_yml import OrchConfig, ProjectPins
+from lib.queue import SQLiteJobQueue
 from tests.qa_support import REPO
-from tests.test_pinned_placement import CONFIG, enqueue, state
+from tests.test_pinned_placement import CONFIG, FREE, PINNED, enqueue, state, write_orch
 from tests.test_qa_cloud import Lab
 
 
@@ -44,3 +49,26 @@ def test_an_unpinned_projects_qa_job_is_claimed_while_other_devices_are_full(tmp
     lab.worker._claim()
 
     assert state(lab.run.queue, job_id) == "running"
+
+
+def test_the_qa_worker_runtime_reads_its_pins_from_orch_yml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ORCH_NO_LOCAL_OVERLAY", "1")
+    monkeypatch.setattr(cli, "_machines_config", lambda path, *, required: CONFIG)
+    monkeypatch.setattr(cli, "_machines_path", lambda path: None)
+    orch = tmp_path / "orch.yml"
+    write_orch(orch, "[pc]")
+    database = tmp_path / "orch.db"
+    queue = SQLiteJobQueue(database, clock=lambda: 100.0)
+    pool = DevicePool(queue, CONFIG, pins=ProjectPins(orch))
+    holder = enqueue(queue, PINNED, "holder")
+    assert pool.claim("claude")[1].device == "pc"
+
+    worker = cli._qa_runtime(database, OrchConfig(poll_seconds=60, projects=()), orch)
+
+    assert worker.placeable("Owner/Pinned") is False
+    assert worker.placeable(FREE) is True
+    queue.finish(holder.id, owner="claude", handoff_comment_id="ready-1")
+    assert pool.release(holder.id, owner="claude") is True
+    assert worker.placeable("Owner/Pinned") is True
