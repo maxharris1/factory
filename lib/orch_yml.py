@@ -539,6 +539,26 @@ def load_orch_yml(
     return _validate(data, allow_placeholders=allow_placeholders)
 
 
+class ProjectPins:
+    """A broken orch.yml keeps the last good pins, or None before any, so it never drops a pin (#1172)."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.last: dict[str, frozenset[str]] | None = None
+
+    def __call__(self) -> dict[str, frozenset[str]] | None:
+        if not self.path.exists():
+            return {}
+        config, findings = load_orch_yml(self.path, allow_placeholders=True)
+        if config is not None and not any(item.severity == "error" for item in findings):
+            self.last = {
+                project.repo.lower(): project.devices
+                for project in config.projects
+                if project.devices is not None
+            }
+        return self.last
+
+
 def _read(path: Path, *, overlay: bool = True) -> tuple[dict | None, list[Finding]]:
     if not path.is_file():
         return None, [Finding("error", "file not found")]

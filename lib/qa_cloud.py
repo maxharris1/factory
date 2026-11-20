@@ -435,6 +435,7 @@ class QaWorker:
     free_bytes: Callable[[Path], int] = lambda path: shutil.disk_usage(path).free
     linear: LinearClient | None = None
     upload_cap: int = UPLOAD_CAP_BYTES
+    place: Callable[[sqlite3.Connection, str, str], bool] = lambda connection, job_id, repo: True
     _plans: dict[str, RunPlan] = field(default_factory=dict)
     _low_disk: set[str] = field(default_factory=set)
     _skips_logged: set[tuple[str, str]] = field(default_factory=set)
@@ -556,6 +557,8 @@ class QaWorker:
                 connection.execute("BEGIN IMMEDIATE")
                 if _open_count(connection, runner) >= self.max_cloud_lanes:
                     waiting[runner] += 1
+                    _restart_wait(connection, job.id, now)
+                elif not self.place(connection, job.id, job.request.repo):
                     _restart_wait(connection, job.id, now)
                 elif _take(connection, job.id, now) and plan.slices:
                     _reserve(connection, job, plan, plan.slices[0], runner, attempt=1, now=now)

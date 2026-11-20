@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -229,23 +229,41 @@ class JobsMixin:
                 connection, job, "handed-off", "Max handed the ticket off; no T6 retry", now
             )
 
-    def _busy_recipients(self) -> frozenset[str]:
-        """#18: harnesses whose every schedulable slot is in use.
-
-        Read from the device monitor's machines.yml. With none, or for a
-        harness no schedulable device lists, nothing counts as busy.
-        """
+    def _no_free_slot(self) -> Callable[[Job], bool]:
         config = getattr(self.devices, "config", None)
         if config is None:
-            return frozenset()
+            return lambda job: False
         used = used_slots(self.queue, config)
         blocked = placement_blocks(self.queue, config, self._head())
-        return frozenset(
-            harness
-            for harness in HARNESSES
-            if any(device.eligible(harness) for device in config.devices)
-            and free_slots(config, harness, used, blocked) == 0
-        )
+        pins = self._pins()
+
+        def full(job: Job) -> bool:
+            harness = job.request.recipient
+            allowed = pins.get(job.request.repo.lower())
+            if allowed is None:
+                serves = any(device.eligible(harness) for device in config.devices)
+            else:
+                serves = any(
+                    harness in device.harnesses for device in config.devices if device.name in allowed
+                )
+            return (
+                harness in HARNESSES
+                and serves
+                and free_slots(config, harness, used, blocked, allowed=allowed) == 0
+            )
+
+        return full
+
+    def _pins(self) -> Mapping[str, frozenset[str]]:
+        pool = getattr(self.devices, "pool", None)
+        pins = None if pool is None else pool.pins()
+        if pins is not None:
+            return pins
+        return {
+            repo: project.devices
+            for repo, project in self.wake_routes.items()
+            if project.devices is not None
+        }
 
     def _head(self) -> str | None:
         pool = getattr(self.devices, "pool", None)
@@ -325,7 +343,7 @@ class JobsMixin:
         self._check_job_states()
         self._close_abandoned_jobs()
         now = self.queue.now()
-        busy = self._busy_recipients()
+        no_free_slot = self._no_free_slot()
         lag_blocked = self._lag_blocked_recipients()
         serving = self._serving()
         with self._connect() as connection:
@@ -359,7 +377,7 @@ class JobsMixin:
             ):
                 continue
             if now - waited_since >= job.request.timeout_seconds:
-                if job.state == "queued" and job.request.recipient in busy:
+                if job.state == "queued" and no_free_slot(job):
                     self._restart_queue_wait(job, now)
                     continue
                 if not self.queue.mark_timed_out(job) and job.state == "running":
