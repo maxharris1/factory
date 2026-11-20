@@ -35,7 +35,7 @@ def render(case: str, extra: dict[str, object], *, factory_md: str = snapshots.F
 
 
 def task(brief: str) -> str:
-    return brief.split("## What to do\n", 1)[1].split("\n## ", 1)[0]
+    return brief.split("## Method\n", 1)[1].split("\n## ", 1)[0]
 
 
 def header_templates(brief: str) -> list[str]:

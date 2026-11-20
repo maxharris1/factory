@@ -46,7 +46,7 @@ def unfenced(text: str) -> str:
 
 
 def task(text: str) -> str:
-    return section(text, "What to do") or ""
+    return section(text, "Method") or ""
 
 
 def job_data(text: str) -> dict:
@@ -58,7 +58,7 @@ def test_ticket_section_lists_each_criterion_id_and_text_after_the_task_steps() 
     text = brief("review-evidence")
     criteria = section(text, "Ticket")
     assert criteria is not None
-    assert text.index("\n## What to do\n") < text.index("\n## Ticket\n")
+    assert text.index("\n## Method\n") < text.index("\n## Ticket\n")
     assert "\n## Acceptance criteria\n" not in unfenced(text)
     quoted = fences(criteria)[-1][1]
     assert "ac-1: The pricing page shows a `Start free` button above the plans." in quoted
@@ -71,7 +71,7 @@ def test_round_two_lists_open_findings_with_id_rule_state_and_the_last_reviewed_
     text = brief("review-round-2-evidence")
     earlier = section(text, "Earlier rounds")
     assert earlier is not None
-    assert text.index("\n## Earlier rounds\n") < text.index("\n## What to do\n")
+    assert text.index("\n## Method\n") < text.index("\n## Job\n") < text.index("\n## Earlier rounds\n")
     assert f"`{'a' * 40}`" in earlier
     assert f"`{'e' * 40}`" in earlier
     quoted = fences(earlier)[0][1]
@@ -114,7 +114,7 @@ def test_no_criteria_says_so_and_points_at_the_ticket(evidence: object) -> None:
 def test_steps_name_the_sections() -> None:
     round_two = task(brief("review-round-2-evidence"))
     assert "in the Ticket section below" in round_two
-    assert "**Earlier rounds** above" in round_two
+    assert "**Earlier rounds** below" in round_two
     assert "**Earlier rounds**" not in task(brief("review-evidence"))
 
 

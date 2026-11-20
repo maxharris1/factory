@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from lib.brief.common import (
     QUESTIONS_LINES,
+    Lead,
     answers_lines,
     detail_of,
     live_lines,
@@ -17,9 +18,9 @@ from lib.queue import Job
 PLAN_HANDOFF_LIMIT = 60_000
 
 
-def task_lines(job: Job, facts: dict) -> list[str]:
-    return [
-        "This is a plan job. Follow the router in Skills above.",
+def lead(job: Job, facts: dict) -> Lead:
+    return Lead((
+        "This is a plan job. Follow the router in Skills below.",
         f"1. {read_ticket_line(facts)} Start with an architect scaffold.",
         *_first_plan_lines(facts),
         "2. Map every acceptance criterion to the work that meets it, and name each criterion's "
@@ -44,7 +45,7 @@ def task_lines(job: Job, facts: dict) -> list[str]:
         *answers_lines(detail_of(job)),
         *resume_lines(detail_of(job)),
         *QUESTIONS_LINES,
-    ]
+    ))
 
 
 def _first_plan_lines(facts: dict) -> list[str]:
