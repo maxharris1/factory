@@ -7,4 +7,6 @@ ExecStart=%h/factory/deploy/self-heal.sh once
 SuccessExitStatus=79
 # Services self-heal restarts must outlive this oneshot run.
 KillMode=process
+# 0 lands at the user manager's floor.
+OOMScoreAdjust=0
 Environment=PYTHONUNBUFFERED=1
