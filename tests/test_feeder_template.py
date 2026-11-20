@@ -923,6 +923,24 @@ def test_a_brief_for_a_ticket_with_journeys_carries_the_qa_plan(tmp_path: Path) 
     assert "- ac-2 [search, start-free]: The button opens the sign-up form." in brief
 
 
+@pytest.mark.parametrize(
+    "criterion",
+    [
+        "- [ ] qa(search,\n  create-note): The note is found by its title.",
+        "- [ ] qa:\n  The note is found by its title.",
+        "- [ ] qa(search): The note is found\nby its title.",
+        "- qa(create-note): The note\n  is found by its title.",
+    ],
+)
+def test_a_wrapped_qa_criterion_briefs_the_whole_tag_and_instruction(tmp_path: Path, criterion: str) -> None:
+    ticket = journey_ticket("search, create-note", "- [ ] The API returns 201.", criterion)
+    (accepted,) = parse_intake(ticket, ()).qa_criteria
+    assert accepted.text == "The note is found by its title."
+    plan = QaPlan.parse(fed_brief(tmp_path, ticket))
+    assert plan is not None
+    assert plan.checks == (QaCheck("ac-2", accepted.journeys or ("search", "create-note"), accepted.text),)
+
+
 def test_journeys_with_no_qa_criteria_brief_the_journeys_only(tmp_path: Path) -> None:
     brief = fed_brief(tmp_path, journey_ticket("search"))
     assert "### QA journeys" in brief and "### QA criteria" not in brief

@@ -122,8 +122,8 @@ def criteria_evidence(
 
 
 def numbered(body: str) -> tuple[Criterion, ...]:
-    """The criteria in body that criteria_evidence keeps, with the ids it gives them."""
-    return _criteria(body, TEXT_LIMIT)[1]
+    """The evidence ids criteria_evidence gives body's criteria, each with its whole leading paragraph."""
+    return _criteria(body, TEXT_LIMIT, whole=True)[1]
 
 
 def canonical_brief(
@@ -147,20 +147,20 @@ def canonical_brief(
     return latest
 
 
-def _criteria(body: str, limit: int) -> tuple[str, tuple[Criterion, ...], str | None]:
+def _criteria(body: str, limit: int, *, whole: bool = False) -> tuple[str, tuple[Criterion, ...], str | None]:
     lines = body.splitlines()
     section = _section(lines)
     if section is None:
         text, checkboxes = _trim(lines), True
     else:
         text, checkboxes = _trim(section), False
-    total = _items(text, checkboxes)
+    total = _items(text, checkboxes, whole=whole)
     cut = None
     if len(text) > limit:
         budget = max(limit - _NOTE_ROOM, 0)
         end = text.rfind("\n", 0, budget + 1)
         kept = text[: end if end > 0 else budget].rstrip()
-        items = _items(kept, checkboxes)
+        items = _items(kept, checkboxes, whole=whole)
         cut = f"[cut {len(text) - len(kept)} characters and {len(total) - len(items)} criteria from the end]"
         text = f"{kept}\n{cut}"
     else:
@@ -235,7 +235,7 @@ def _section(lines: list[str]) -> list[str] | None:
     return lines[start:]
 
 
-def _items(text: str, checkboxes: bool) -> list[str]:
+def _items(text: str, checkboxes: bool, *, whole: bool = False) -> list[str]:
     lines = text.splitlines()
     tokens = _parse(lines)
     items = []
@@ -250,12 +250,14 @@ def _items(text: str, checkboxes: bool) -> list[str]:
             continue
         seen.add(token.map[0])
         if block.type == "paragraph_open":
-            first = tokens[index + 2].content.split("\n", 1)[0].strip()
+            content = tokens[index + 2].content
+            first = content.split("\n", 1)[0].strip()
         else:
+            content = None
             first = _MARKER.sub("", lines[token.map[0]], count=1).strip()
-        box = _CHECKBOX.match(first)
-        if box is not None:
-            items.append(box.group(1).strip())
-        elif not checkboxes and first:
-            items.append(first)
+        if _CHECKBOX.match(first) is None and (checkboxes or not first):
+            continue
+        item = " ".join(line.strip() for line in content.split("\n")) if whole and content is not None else first
+        box = _CHECKBOX.match(item)
+        items.append(box.group(1).strip() if box is not None else item)
     return items

@@ -655,4 +655,19 @@ def test_numbered_gives_only_the_ids_the_cut_evidence_keeps():
     evidence = criteria_evidence(issue_key="#1", issue_url=None, brief=None, issue_body=body,
                                  pr_body=None, ready_starts_review=False)
     assert evidence.cut is not None
-    assert numbered(body) == evidence.criteria
+    assert [c.id for c in numbered(body)] == [c.id for c in evidence.criteria]
+
+
+def test_numbered_gives_each_criterion_its_whole_leading_paragraph():
+    body = (
+        "## Acceptance criteria\n\n"
+        "- [ ] qa(search,\n  create-note): The note is found\n  by its title.\n"
+        "- [ ] qa:\n  Described below.\n"
+    )
+    assert numbered(body) == (
+        Criterion("ac-1", "qa(search, create-note): The note is found by its title."),
+        Criterion("ac-2", "qa: Described below."),
+    )
+    evidence = criteria_evidence(issue_key="#1", issue_url=None, brief=None, issue_body=body,
+                                 pr_body=None, ready_starts_review=False)
+    assert evidence.criteria == (Criterion("ac-1", "qa(search,"), Criterion("ac-2", "qa:"))
