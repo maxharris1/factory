@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from typing import Literal
 
 from lib.dispatch.constants import UNANNOUNCED_AFTER_CAP
@@ -17,6 +18,8 @@ class ResumeMixin:
         self,
         ticket: TrackedTicket,
         comment: Comment,
+        *,
+        building: bool = False,
     ) -> tuple[bool, str] | None:
         """A trusted go on a capped ticket: Max's OK for one more round (#105).
 
@@ -25,20 +28,23 @@ class ResumeMixin:
         queues exactly one fix. A handed-off ticket whose next round T2
         would flag ready-after-cap resumes the same way (#118): the approved
         round counts as completed and the approval is cleared, as a T2
-        re-entry does. None when neither holds. A go _may_lift_cap refuses
-        wakes Grok once with go-not-from-approver and changes nothing
-        (#122, #174).
+        re-entry does. Inside the cap a building go on a ship: handoff
+        ticket reopens it the same way, without cap_extra (#1197). None
+        when none of these holds. A go _may_lift_cap refuses wakes Grok
+        once with go-not-from-approver and changes nothing (#122, #174).
         """
-        lifted = self._lift_cap(ticket, comment)
+        lifted = self._lift_cap(ticket, comment, building=building)
         if lifted is None:
             return None
-        outcome, queued = lifted
+        outcome, queued, reopened = lifted
         if outcome == "go-not-from-approver":
             self._wake_comment_problem(ticket, comment, outcome, outcome)
             return True, outcome
         if queued:
             self.clear_attention(ticket.repo, ticket.ticket_id, "ready-after-cap")
             self.clear_attention(ticket.repo, ticket.ticket_id, UNANNOUNCED_AFTER_CAP)
+        if reopened:
+            self._reopen_linear(ticket)
         self._write_state_label(ticket, "fixing")
         return True, outcome
 
@@ -46,7 +52,9 @@ class ResumeMixin:
         self,
         ticket: TrackedTicket,
         comment: Comment,
-    ) -> tuple[str, bool] | None:
+        *,
+        building: bool,
+    ) -> tuple[str, bool, bool] | None:
         scope = _scope(ticket.repo, ticket.ticket_id)
         ticket = self._fresh_issue(ticket)
         with self._connect() as connection:
@@ -60,7 +68,7 @@ class ResumeMixin:
             ).fetchone()
             if prior is not None:
                 connection.commit()
-                return str(prior["outcome"]), False
+                return str(prior["outcome"]), False, False
             row = connection.execute(
                 """
                 SELECT workflow_state, review_round, cap_extra, generation
@@ -74,15 +82,18 @@ class ResumeMixin:
                 return None
             handed_off = row["workflow_state"] == "handed-off"
             completed = int(row["review_round"])
+            reopen = False
             if handed_off:
                 completed = _approved_round(self._shipped_approval(ticket), completed)
                 if completed + 1 <= self._effective_cap(ticket, connection):
-                    connection.commit()
-                    return None
+                    if not building or ticket.factory.ship != "handoff":
+                        connection.commit()
+                        return None
+                    reopen = True
             if not self._may_lift_cap(comment.author):
                 connection.commit()
-                return "go-not-from-approver", False
-            cap_extra = int(row["cap_extra"]) + 1
+                return "go-not-from-approver", False, False
+            cap_extra = int(row["cap_extra"]) + (0 if reopen else 1)
             capping = connection.execute(
                 """
                 SELECT comment_id FROM review_events
@@ -123,32 +134,45 @@ class ResumeMixin:
                         cap=self._config_cap(ticket, connection) + cap_extra,
                         instruction=verdict,
                         resume=True,
+                        kind="reopen" if reopen else None,
                         ci_failure=red_checks(ticket, ticket.current_head),
                         connection=connection,
                     ),
                 ),
                 dedupe_key=f"t1:{scope}:fix:{comment.id}",
             )
-            write_workflow_state(
-                connection,
-                ticket.repo,
-                ticket.ticket_id,
-                "fixing",
-                source="cap-resume",
-                at=self.queue.now(),
-                also={"cap_extra": cap_extra} | (
-                    {
-                        "review_round": completed,
-                        "approved_head": None,
-                        "approved_at": None,
-                        "approve_comment_id": None,
-                        "update_failures": 0,
-                        "update_from_head": None,
-                    }
-                    if handed_off
-                    else {}
-                ),
+            cleared = {"cap_extra": cap_extra} | (
+                {
+                    "review_round": completed,
+                    "approved_head": None,
+                    "approved_at": None,
+                    "approve_comment_id": None,
+                    "update_failures": 0,
+                    "update_from_head": None,
+                }
+                if handed_off
+                else {}
             )
+            if reopen:
+                write_workflow_state(
+                    connection,
+                    ticket.repo,
+                    ticket.ticket_id,
+                    "fixing",
+                    source="handoff-reopen",
+                    at=self.queue.now(),
+                    also=cleared | {"reopen_hold": _reopen_hold(connection, ticket)},
+                )
+            else:
+                write_workflow_state(
+                    connection,
+                    ticket.repo,
+                    ticket.ticket_id,
+                    "fixing",
+                    source="cap-resume",
+                    at=self.queue.now(),
+                    also=cleared,
+                )
             connection.execute(
                 """
                 INSERT INTO review_events (repo, ticket_id, comment_id, outcome)
@@ -157,7 +181,7 @@ class ResumeMixin:
                 (ticket.repo.lower(), ticket.ticket_id, comment.id),
             )
             connection.commit()
-        return "queued-fix", True
+        return "queued-fix", True, reopen
 
     def _resume_after_blocked(
         self,
@@ -443,3 +467,11 @@ class ResumeMixin:
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchone()
         return None if parked is None else "unsat" if parked["outcome"] == "waiting-max-unsat" else "repeat"
+
+
+def _reopen_hold(connection: sqlite3.Connection, ticket: TrackedTicket) -> str:
+    row = connection.execute(
+        "SELECT state_name FROM linear_states WHERE repo = ? AND ticket_id = ?",
+        (ticket.repo.lower(), ticket.ticket_id),
+    ).fetchone()
+    return "-" if row is None or row["state_name"] is None else str(row["state_name"])

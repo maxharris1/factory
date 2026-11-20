@@ -3,3 +3,5 @@
 - **Source:** https://github.com/maxharris1/factory/issues/118
 
 This replaces the "Known limits" sentence of the frozen #108 row (Nov 13) in the [docs/SPEC.md decision log](../SPEC.md#decisions-on-2026-11-10-et): Max can now raise the cap of a handed-off ticket through the factory, and a go after handoff at the cap queues a fix. A second go needs a second handoff at the raised cap; a go while the ticket is `fixing` keeps the capped ticket's behavior. A `merge-queue` ticket keeps #130's normal go path.
+
+Issue #1197 replaces "a go inside the cap still changes nothing": inside the cap an approver's `state=building` go on a `ship: handoff` ticket reopens it for one normal round. See [1197-reopen-handed-off-under-cap.md](1197-reopen-handed-off-under-cap.md). A go at or over the cap still follows this decision.
