@@ -422,12 +422,20 @@ def run(
             )
 
         if gated:
-            unstarted = _await_gate(child, report_read, budget, pending)
-            if unstarted is not None:
+
+            def unstart() -> None:
                 os.close(write_end)
                 os.close(report_read)
                 tree_of(None).end(log)
                 child.wait()
+
+            try:
+                unstarted = _await_gate(child, report_read, budget, pending)
+            except BaseException:
+                unstart()
+                raise
+            if unstarted is not None:
+                unstart()
                 log(f"not starting {argv[0]}: {unstarted}")
                 return 128 + pending[0] if pending else 127
         scope = entered_scope(child.pid, tag, log) if prefix else None
@@ -557,8 +565,7 @@ def _await_gate(
             budget.expired = True
             budget.signum = signal.SIGKILL
             return f"the gate did not start within the {budget.describe()}"
-        ready, _, _ = select.select([report], [], [], 0.1 if left is None else min(0.1, left))
-        if ready:
+        if _readable(report, 0.1 if left is None else min(0.1, left)):
             if os.read(report, 1) == b"g":
                 return None
             return f"the gate never started: its launcher exited {child.wait()}"
