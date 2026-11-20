@@ -89,6 +89,14 @@ class CycleClock:
     _ended: tuple[float, float] | None = None
     _calls: CallLedger = field(default_factory=CallLedger)
 
+    @property
+    def open_phase(self) -> str | None:
+        return self._open
+
+    @property
+    def billed_calls(self) -> int:
+        return self._calls.billed.total()
+
     def start(self) -> str:
         self._rows = []
         self._calls = CallLedger()

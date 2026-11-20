@@ -75,6 +75,30 @@ def test_the_clock_refuses_a_phase_outside_the_fixed_table() -> None:
     assert "process" in PHASES
 
 
+def test_the_clock_names_the_open_phase() -> None:
+    clock = CycleClock()
+    clock.start()
+    assert clock.open_phase is None
+    with clock.phase("github-candidates"):
+        assert clock.open_phase == "github-candidates"
+    assert clock.open_phase is None
+
+
+def test_billed_calls_counts_only_billed_core_calls() -> None:
+    clock = CycleClock()
+    clock.start()
+    clock.add_call("GET pulls", "billed", 3)
+    clock.add_call("GET issues", "billed")
+    clock.add_call("GET pulls", "304", 5)
+    clock.add_call("GET pulls", "cached")
+    clock.add_call("POST graphql", "graphql", 2)
+    assert clock.billed_calls == 4
+    clock.end()
+    assert clock.billed_calls == 4
+    clock.start()
+    assert clock.billed_calls == 0
+
+
 def test_a_running_cycle_reports_its_start_until_it_ends() -> None:
     clock = CycleClock(wall=Ticks())
     clock.start()

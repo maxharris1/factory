@@ -674,9 +674,10 @@ class PollLoop:
     ) -> None:
         """Poll forever (or `max_polls` times), sleeping between cycles.
 
-        The sleep (`interval_seconds`, orch.yml poll_seconds) starts after a
-        cycle finishes, so cycle start to cycle start is the cycle's own work
-        plus the interval.
+        The sleep (`interval_seconds`, orch.yml poll_seconds, stretched by the
+        source's `pacing` when GitHub quota runs low) starts after a cycle
+        finishes, so cycle start to cycle start is the cycle's own work plus
+        the interval.
 
         `after_poll` (the dashboard push, when configured) runs after every
         cycle, including one whose error went to `on_error`. It must not block; if it raises, one line
@@ -687,8 +688,9 @@ class PollLoop:
         polls = 0
         if hasattr(after_poll, "cycle_clock"):
             after_poll.cycle_clock = self.clock
+        asked = self.interval_seconds
         while True:
-            slow = self.clock.between(self.interval_seconds)
+            slow = self.clock.between(asked)
             if slow is not None:
                 print(slow, flush=True)
             print(self.clock.start(), flush=True)
@@ -713,7 +715,17 @@ class PollLoop:
             polls += 1
             if max_polls is not None and polls >= max_polls:
                 return
-            self.sleep(self.interval_seconds)
+            pacing = getattr(self.source, "pacing", None)
+            if pacing is not None:
+                paced = pacing(
+                    self.interval_seconds,
+                    self.clock.billed_calls,
+                    self.clock.last_cycle_seconds or 0.0,
+                )
+                asked = paced.interval_seconds
+                if paced.reason != "normal":
+                    print(f"orch poll: pacing {paced.reason}, next cycle in {asked:g}s", flush=True)
+            self.sleep(asked)
 
 
 def _write_reads(
