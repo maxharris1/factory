@@ -34,6 +34,7 @@ from lib.job_state import (
     JobStateConfig,
 )
 from lib.load import Finding, is_strict_int, load_yaml
+from lib.machines_yml import MachinesConfig
 from lib.remote import RemoteError, plain_branch
 from lib.schema import HARNESSES
 
@@ -116,6 +117,7 @@ _PROJECT_KEYS = {
     "driver_inbox",
     "grok_webhook",
     "qa_storage",
+    "devices",
 }
 _QA_STORAGE_KEYS = {
     "bucket", "region", "endpoint", "access_key_env", "secret_key_env", "evidence_root",
@@ -209,6 +211,7 @@ class Project:
     driver_inbox: DriverInbox | None = None
     grok_webhook: bool = True
     qa_storage: QaStorage | None = None
+    devices: frozenset[str] | None = None
 
     def base_for(self, linear_project_id: str | None) -> str | None:
         if self.intake is not None and linear_project_id in self.intake.base_branches:
@@ -482,6 +485,30 @@ def qa_storage_findings(
             )
         ]
     return []
+
+
+def project_device_findings(config: OrchConfig, machines: MachinesConfig) -> list[Finding]:
+    findings: list[Finding] = []
+    for project in config.projects:
+        for name in sorted(project.devices or ()):
+            device = machines.device(name)
+            if device is None:
+                findings.append(
+                    Finding(
+                        "error",
+                        f"projects[{project.repo}].devices names {name}, "
+                        "which machines.yml does not list",
+                    )
+                )
+            elif not device.enabled:
+                findings.append(
+                    Finding(
+                        "warning",
+                        f"projects[{project.repo}].devices names {name}, "
+                        "which is disabled (enabled: false)",
+                    )
+                )
+    return findings
 
 
 def resolve_job_timeout(config: OrchConfig, repo: str) -> int:
@@ -878,6 +905,23 @@ def _projects(
             if qa_storage is None:
                 ok = False
                 continue
+        devices = None
+        if "devices" in item:
+            names = item["devices"]
+            if not (
+                isinstance(names, list)
+                and names
+                and all(isinstance(name, str) and name.strip() for name in names)
+            ):
+                findings.append(
+                    Finding(
+                        "error",
+                        f"projects[{index}].devices must be a non-empty list of device names",
+                    )
+                )
+                ok = False
+                continue
+            devices = frozenset(names)
         projects.append(
             Project(
                 repo=repo,
@@ -893,6 +937,7 @@ def _projects(
                 driver_inbox=driver_inbox,
                 grok_webhook=grok_webhook,
                 qa_storage=qa_storage,
+                devices=devices,
             )
         )
     if not ok:

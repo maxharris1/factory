@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -805,3 +806,37 @@ def test_qa_shares_usage_with_refuses_an_unknown_recipient(tmp_path: Path) -> No
     assert "qa.shares_usage_with.claude-cloud has unknown harness 'grok'; expected one of claude, codex, cursor" in [
         finding.message for finding in findings if finding.severity == "error"
     ]
+
+
+def _devices_config(tmp_path: Path, devices: str | None):
+    path = tmp_path / "orch.yml"
+    line = "" if devices is None else f"    devices: {devices}\n"
+    path.write_text(
+        "poll_seconds: 30\nprojects:\n  - repo: acme/widgets\n    job_timeout: 15\n" + line,
+        encoding="utf-8",
+    )
+    return load_orch_yml(path)
+
+
+@pytest.mark.parametrize(
+    "devices, expected",
+    [("[pc]", frozenset({"pc"})), ("[pc, mac]", frozenset({"pc", "mac"}))],
+)
+def test_project_devices_lists_the_devices_it_runs_on(
+    tmp_path: Path, devices: str, expected: frozenset[str]
+) -> None:
+    config, findings = _devices_config(tmp_path, devices)
+
+    assert findings == []
+    assert config is not None
+    assert config.projects[0].devices == expected
+
+
+def test_project_without_devices_runs_on_every_device(tmp_path: Path) -> None:
+    config, findings = _devices_config(tmp_path, None)
+    pinned, _ = _devices_config(tmp_path, "[pc]")
+
+    assert findings == []
+    assert config is not None and pinned is not None
+    assert config.projects[0].devices is None
+    assert replace(pinned.projects[0], devices=None) == config.projects[0]
