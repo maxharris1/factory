@@ -845,11 +845,19 @@ class LivePollSource:
                         listed.add(number)
                         if (project.repo.lower(), number) in exclude:
                             continue
-                        comments = self._comments_for(project.repo, number, issue)
-                        if not labelled and not _has_ready(comments):
+                        comments = (
+                            None
+                            if labelled
+                            else self._comments_for(project.repo, number, issue)
+                        )
+                        if comments is not None and not _has_ready(comments):
                             continue
                         ticket = self._github_ticket(
-                            project, factory, number, comments=comments
+                            project,
+                            factory,
+                            number,
+                            comments=comments,
+                            listed=issue,
                         )
                         if not labelled:
                             # Not cached: the flag describes this
@@ -1849,6 +1857,7 @@ class LivePollSource:
         fresh: bool = False,
         allow_merged: bool = False,
         comments: tuple[Comment, ...] | None = None,
+        listed: dict[str, Any] | None = None,
         probed: str | None = None,
         uncached: bool = False,
     ) -> TrackedTicket:
@@ -1886,7 +1895,11 @@ class LivePollSource:
             comments, ci, hold_inputs = last.comments, last.ci, last.hold_inputs
         else:
             if comments is None:
-                comments = self.github.list_comments(project.repo, number)
+                comments = (
+                    self.github.list_comments(project.repo, number)
+                    if listed is None
+                    else self._comments_for(project.repo, number, listed)
+                )
             hold_inputs = self._hold_inputs(project.repo, number, factory, pull)
             ci = self.github.ci_status(project.repo, head)
             if not fresh and None not in hold_inputs.values():
@@ -2378,7 +2391,7 @@ class LivePollSource:
         return pages
 
     def _gh_list(self, endpoint: str) -> list[object]:
-        body, has_next = self._gh_response(endpoint)
+        body, has_next = self._gh_response(endpoint, _replayed=f"{endpoint}&page=1")
         try:
             pages = [json.loads(body)]
         except json.JSONDecodeError as exc:
@@ -2395,6 +2408,7 @@ class LivePollSource:
         *args: str,
         fresh: bool = False,
         _unconditional: bool = False,
+        _replayed: str | None = None,
     ) -> tuple[str, bool]:
         conditional = "--paginate" not in args and not fresh
         cache_key = tuple(args)
@@ -2412,7 +2426,7 @@ class LivePollSource:
         if conditional and result.stdout.startswith("HTTP/"):
             included = _included_response(result.stdout)
             if included[0] == 304:
-                return self._not_modified(args, _unconditional)
+                return self._not_modified(args, _unconditional, _replayed)
         if result.returncode != 0:
             status = (
                 included[0]
@@ -2429,7 +2443,7 @@ class LivePollSource:
             included if included is not None else _included_response(result.stdout)
         )
         if status == 304:
-            return self._not_modified(args, _unconditional)
+            return self._not_modified(args, _unconditional, _replayed)
         has_next = 'rel="next"' in headers.get("link", "")
         etag = headers.get("etag")
         if etag is not None:
@@ -2437,7 +2451,7 @@ class LivePollSource:
         return body, has_next
 
     def _not_modified(
-        self, args: tuple[str, ...], unconditional: bool
+        self, args: tuple[str, ...], unconditional: bool, replayed: str | None
     ) -> tuple[str, bool]:
         """Serve a 304 from the ETag cache, or refetch once when it is empty.
 
@@ -2445,13 +2459,22 @@ class LivePollSource:
         can replay a 304 it stored for the previous process's conditional
         request (gh does not key its cache on If-None-Match). Refetch once
         with neither --cache nor If-None-Match, which cannot return 304.
+        A list refetches its explicit page=1 URL instead: gh caches that URL
+        apart from the replayed one and it never carries If-None-Match, so
+        later restarts within gh's 60s reuse it rather than bill again.
         """
         cached = self._etag_cache.get(tuple(args))
         if cached is not None and not unconditional:
             return cached[1], cached[2]
         if unconditional:
             raise PollSourceError("gh returned 304 without a cached response")
-        return self._gh_response(*args, _unconditional=True)
+        if replayed is None:
+            return self._gh_response(*args, _unconditional=True)
+        response = self._gh_response(replayed)
+        stored = self._etag_cache.pop((replayed,), None)
+        if stored is not None:
+            self._etag_cache[tuple(args)] = stored
+        return response
 
     def _adapter_runner(self, argv: Sequence[str], timeout: float) -> GhResult:
         call = list(argv)

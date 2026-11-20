@@ -1414,6 +1414,123 @@ def test_intake_list_304_makes_no_events_call() -> None:
     assert 'If-None-Match: "intake-v1"' in cycle_two[0]
 
 
+class GoneGh(ListGh):
+    def __init__(self) -> None:
+        super().__init__()
+        self.pull_gone = False
+
+    def __call__(self, argv, timeout):
+        if self.pull_gone and list(argv)[-1] == "repos/acme/widgets/pulls/12":
+            self.calls.append(list(argv))
+            return GhResult(1, "", "gh: Not Found (HTTP 404)\n")
+        return super().__call__(argv, timeout)
+
+
+@pytest.mark.parametrize("ending", ["merged", "pull-404"])
+def test_labelled_candidate_ending_on_the_pull_read_reads_no_comments(ending: str) -> None:
+    gh = GoneGh()
+    gh.issues = [open_pull(12, labels=("orch:state/intake",))]
+    gh.list_etags = ["list-v1"]
+    gh.pull = {"merged": True, "state": "closed"}
+    gh.pull_gone = ending == "pull-404"
+    source = LivePollSource(config(), gh_runner=gh)
+
+    tickets, cycle = candidate_cycle(source, gh)
+
+    assert tickets == ()
+    assert not any("/comments" in call[-1] for call in cycle)
+    assert [next(part for part in call if part.startswith("repos/")) for call in cycle] == [
+        "repos/acme/widgets/contents/factory.md",
+        OPEN_LIST,
+        "repos/acme/widgets/pulls/12",
+    ]
+
+
+class DiskCachedGh:
+    """gh api against three unchanging pages, with gh's --cache on disk.
+
+    gh keys its disk cache on the URL alone, so it replays a stored 304 to a
+    later request that sent no If-None-Match.
+    """
+
+    def __init__(self, endpoint: str) -> None:
+        self.endpoint = endpoint
+        self.now = 0.0
+        self.disk: dict[str, tuple[float, int, str]] = {}
+        self.billed = 0
+
+    def page(self, url: str) -> int:
+        match = re.search(r"&page=([0-9]+)$", url)
+        return int(match.group(1)) if match else 1
+
+    def respond(self, url: str, if_none_match: str | None, cache: bool) -> tuple[int, str]:
+        stored = self.disk.get(url)
+        if cache and stored is not None and self.now - stored[0] < 60:
+            return stored[1], stored[2]
+        page = self.page(url)
+        etag = f'"page-{page}"'
+        link = f'Link: <{self.endpoint}&page={page + 1}>; rel="next"\n' if page < 3 else ""
+        if if_none_match == etag:
+            status, text = 304, "HTTP/2.0 304 Not Modified\n\n"
+        else:
+            self.billed += 1
+            body = json.dumps([open_pull(page, labels=("orch:state/intake",))])
+            status, text = 200, f"HTTP/2.0 200 OK\nETag: {etag}\n{link}\n{body}"
+        if cache:
+            self.disk[url] = (self.now, status, text)
+        return status, text
+
+    def __call__(self, argv, timeout):
+        del timeout
+        call = list(argv)
+        cache = "--cache" in call
+        header = next(
+            (part for part in call if part.startswith("If-None-Match: ")), None
+        )
+        if_none_match = None if header is None else header.removeprefix("If-None-Match: ")
+        url = call[-1]
+        if "--paginate" not in call:
+            status, text = self.respond(url, if_none_match, cache)
+            if "--include" not in call:
+                text = text.split("\n\n", 1)[1]
+            return GhResult(0 if status == 200 else 1, text, "" if status == 200 else "gh: HTTP 304\n")
+        bodies = []
+        while url is not None:
+            status, text = self.respond(url, None, cache)
+            if status != 200:
+                return GhResult(1, "", f"gh: HTTP {status}\n")
+            headers, body = text.split("\n\n", 1)
+            bodies.append(body)
+            found = re.search(r"<([^>]+)>; rel=\"next\"", headers)
+            url = found.group(1) if found else None
+        return GhResult(0, "".join(bodies), "")
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [OPEN_LIST, "repos/acme/widgets/issues?state=open&labels=factory%3Aqueue&per_page=100"],
+    ids=["candidates", "intake"],
+)
+def test_restarts_after_a_cached_304_bill_no_more_than_paginated_reads(endpoint: str) -> None:
+    def billed(read) -> tuple[int, list[list[object]]]:
+        gh = DiskCachedGh(endpoint)
+        source = LivePollSource(config(), gh_runner=gh)
+        results = [read(source)]
+        gh.now = 61
+        results.append(read(source))
+        for restart in (62, 63, 64):
+            gh.now = restart
+            results.append(read(LivePollSource(config(), gh_runner=gh)))
+        return gh.billed, results
+
+    conditional, listed = billed(lambda source: source._gh_list(endpoint))
+    paginated, pages = billed(lambda source: source._gh_pages(endpoint))
+
+    assert listed == pages
+    assert [len(read) for read in listed] == [3] * 5
+    assert conditional <= paginated, (conditional, paginated)
+
+
 def test_fresh_ticket_bypasses_ticket_and_gh_caches() -> None:
     gh = FakeGh(FACTORY.format(tickets="github", ship="after:approver"))
     gh.comments = [
