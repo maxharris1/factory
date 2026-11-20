@@ -1207,7 +1207,7 @@ class Feeder:
         if row is not None:
             cursor = float(row[0])
         else:
-            started = self._start_split_cursor(key, now)
+            started = self._start_split_cursor_noting_merged(key, now)
             if started is None:
                 return 0
             cursor = started
@@ -1275,27 +1275,22 @@ class Feeder:
         bookkeeping_write(self.queue.connect, work, site="_close_split_parents", ledger=self.ledger)
         return errors
 
-    def _start_split_cursor(self, key: str, now: float) -> float | None:
-        """Start the repo's split cursor at the last intake read, noting every
-        part merged before then so only later merges trigger; None when deferred."""
-        started: list[float] = []
+    def _start_split_cursor_noting_merged(self, key: str, now: float) -> float | None:
+        with self.queue.connect() as connection:
+            last = last_feeder_poll(connection)
+        at = now if last is None else last
 
         def work(connection: sqlite3.Connection) -> None:
-            at = last_feeder_poll(connection)
-            started[:] = [now if at is None else at]
-            connection.execute(
-                f"INSERT INTO {SPLIT_CURSOR_TABLE} (repo, at) VALUES (?, ?)", (key, started[0])
-            )
+            connection.execute(f"INSERT INTO {SPLIT_CURSOR_TABLE} (repo, at) VALUES (?, ?)", (key, at))
             connection.executemany(
                 f"UPDATE {FEEDER_TABLE} SET split_noted = 1 WHERE repo = ? AND issue = ?",
                 [(key, str(issue)) for issue in _merged_issues(connection, key, unnoted=True)],
             )
 
-        if not bookkeeping_write(
+        written = bookkeeping_write(
             self.queue.connect, work, site="_start_split_cursor", ledger=self.ledger
-        ):
-            return None
-        return started[0]
+        )
+        return at if written else None
 
     def _merged_issues(self, repo: str, *, unnoted: bool = False) -> frozenset[int]:
         with self.queue.connect() as connection:
