@@ -43,7 +43,13 @@ from lib.dispatcher import (
     scrub_detail,
     trusted_bots,
 )
-from lib.dispatch.types import LinearState, LinearStateRead, ci_on_base, no_ci_base
+from lib.dispatch.types import (
+    AlreadyDeferred,
+    LinearState,
+    LinearStateRead,
+    ci_on_base,
+    no_ci_base,
+)
 from lib.brief_comment import before_factory_md
 from lib.dispatch.constants import STOPPED_POLL_SECONDS
 from lib.dispatch.errors_text import kept_name, redacted_fragment
@@ -234,6 +240,13 @@ class RetryablePollSourceError(PollSourceError, RetryableStateError):
 
 class QuotaDeferred(RetryablePollSourceError):
     pass
+
+
+class HangSkipped(RetryablePollSourceError, AlreadyDeferred):
+    def __init__(self, service: str) -> None:
+        super().__init__(
+            f"{service} skipped for the rest of this cycle after {HANG_STRIKES} timed-out reads"
+        )
 
 
 @dataclass(frozen=True)
@@ -1336,6 +1349,10 @@ class LivePollSource:
                 ).get("nodes")
                 if not isinstance(nodes, list):
                     raise PollSourceError("Linear issues has no nodes")
+            except HangSkipped:
+                if self._linear_states_cursor is None:
+                    self._linear_states_cursor = page[0]
+                continue
             except Exception as exc:
                 reason = _safe_reason(exc)
                 errors.update({numbered[key].ticket_id: reason for key in page})
@@ -2714,29 +2731,34 @@ class LivePollSource:
 
     def _check_hangs(self, service: str) -> None:
         if self._hangs.get(service, 0) >= HANG_STRIKES:
-            raise RetryablePollSourceError(
-                f"{service} skipped for the rest of this cycle after "
-                f"{HANG_STRIKES} timed-out reads"
-            )
+            self._defer(f"{service} hang-skip")
+            raise HangSkipped(service)
 
     def _hung(self, service: str) -> None:
         self._hangs[service] = self._hangs.get(service, 0) + 1
-        if self._hangs[service] == HANG_STRIKES and self.warning_sink is not None:
+        if self._hangs[service] != HANG_STRIKES:
+            return
+        self._error(service, "-", HangSkipped(service))
+        if self.warning_sink is not None:
             self.warning_sink(
                 f"{service} skipped for the rest of this cycle after "
                 f"{HANG_STRIKES} timed-out reads; read again next cycle"
             )
 
     def _defer(self, reason: str) -> None:
-        """A budget or page-limit cutoff is expected load shedding, not an error."""
         self._cycle_deferrals[reason] = self._cycle_deferrals.get(reason, 0) + 1
+        if self.cycle_clock is not None:
+            self.cycle_clock.add_deferral(reason)
 
     def _record(self, repo: str, ticket_id: str, exc: Exception) -> None:
-        if isinstance(exc, _BudgetSpent):
+        if isinstance(exc, (_BudgetSpent, HangSkipped)):
             return
         if isinstance(exc, QuotaDeferred):
             self._defer("github quota")
             return
+        self._error(repo, ticket_id, exc)
+
+    def _error(self, repo: str, ticket_id: str, exc: Exception) -> None:
         reason = _safe_reason(exc)
         for name in self.config.secret_env_names:
             value = self.environ.get(name)

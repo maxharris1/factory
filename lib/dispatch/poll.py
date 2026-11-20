@@ -34,7 +34,13 @@ from lib.dispatch.cycle_clock import (
 )
 from lib.dispatch.errors_text import poll_error_detail, poll_error_text
 from lib.dispatch.helpers import _matching_head
-from lib.dispatch.types import PollCycleFailed, PollSource, TicketRef, TrackedTicket
+from lib.dispatch.types import (
+    AlreadyDeferred,
+    PollCycleFailed,
+    PollSource,
+    TicketRef,
+    TrackedTicket,
+)
 from lib.handoff import HandoffError, parse_comment
 from lib.orch_yml import POLL_SECONDS
 from lib.queue import Job, _job
@@ -406,6 +412,8 @@ class PollMixin:
 
         The same traceback goes to stderr, the poller's log.
         """
+        if isinstance(exc, AlreadyDeferred):
+            return
         error = f"{prefix}{type(exc).__name__}"
         detail = poll_error_detail(exc)
         print(f"orch poll: {repo} {ticket_id} {error}\n{detail}", file=sys.stderr, flush=True)
@@ -532,6 +540,8 @@ class PollMixin:
     def _record_poll_error(self, ticket: TrackedTicket, exc: BaseException) -> None:
         """Record a ticket's failed poll; the POLL_ERROR_STREAK-th failure
         in a row flags poll-errors attention."""
+        if isinstance(exc, AlreadyDeferred):
+            return
         self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
         self._advance_poll_error_streak(
             ticket.repo.lower(), ticket.ticket_id, type(exc).__name__
