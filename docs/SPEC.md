@@ -1174,6 +1174,7 @@ in two steps:
 Placement does not read the key yet. Until the placement part of issue #1082
 lands, `devices` is accepted and checked but has no effect on which device
 runs a job. Once it lands, placement honours it.
+
 ### QA storage and evidence intake
 
 A QA lane runs pull-request code on a machine that is thrown away when the
