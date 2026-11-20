@@ -1622,6 +1622,7 @@ class Session:
         worker_env: bool = False,
         device: str = DEFAULT_ORCH_HOST,
         account: str | None = None,
+        own_login: bool = True,
         rollout_home: str | None = None,
         text: bool = True,
         guard: Guard | None = None,
@@ -1631,6 +1632,7 @@ class Session:
         self.guard = guard
         self.device = device
         self.account = account
+        self.own_login = own_login
         self.rollout_home = rollout_home  # a box Codex run's CODEX_HOME (#151)
         self.usage: dict[str, Reading] = {}
         self.job_id = job_id
@@ -1814,6 +1816,7 @@ class Session:
                         job_id=self.job_id,
                         readings=readings,
                         account=self.account,
+                        own_login=self.own_login,
                     )
                     self._record_limit(connection)
                     was = None if model is None else exposure.replace_model(connection, self.job_id, model)
@@ -1904,6 +1907,7 @@ def start_session(
     worker_env: bool = False,
     device: str = DEFAULT_ORCH_HOST,
     account: str | None = None,
+    own_login: bool = True,
     guard: Guard | None = None,
     skills_root: str | None = None,
 ) -> Session | None:
@@ -1948,6 +1952,7 @@ def start_session(
         worker_env=worker_env,
         device=device,
         account=account,
+        own_login=own_login,
         rollout_home=codex_home(dict(env)) if harness == "codex" and not worker_env else None,
         text=text_enabled(env),
         guard=guard,

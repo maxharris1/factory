@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import exposure, job_run, process_tree
+from lib import exposure, job_run, process_tree, usage_readings
 from lib.brief.skills import Router, resolve, section
 from lib.harness_env import CPU_CAP, cpu_cap_env
 from lib.job_state import JobStateConfig
@@ -1407,7 +1407,8 @@ def _plant_rollout(home: Path, lines: int | None = None) -> None:
 @pytest.mark.parametrize("account", ["placed", "default"])
 @pytest.mark.parametrize("owner", ["claude", "codex"])
 def test_cli_job_run_runs_a_box_job_as_its_slots_account(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner: str, account: str
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch, owner: str,
+    account: str,
 ) -> None:
     bot = f"{owner}-bot"
     placed = f"{owner}-max-2"
@@ -1425,6 +1426,9 @@ def test_cli_job_run_runs_a_box_job_as_its_slots_account(
     account_home = tmp_path / "homes" / bot / ".factory-accounts" / placed
     login = tmp_path / "login"
     queue = _queue(tmp_path)
+    assert usage_readings.migrate(
+        queue.path, lambda: sqlite3.connect(queue.path), directory=tmp_path_factory.mktemp("manual")
+    )
     job = _running_job(queue, recipient=owner, machines=machines)
     if account == "placed":
         with queue.connect() as connection:
@@ -1464,10 +1468,14 @@ def test_cli_job_run_runs_a_box_job_as_its_slots_account(
             }
     with sqlite3.connect(tmp_path / "orch.db") as connection:
         rows = connection.execute(
+            "SELECT account, window, used FROM usage_account_readings ORDER BY window"
+        ).fetchall()
+        login_rows = connection.execute(
             "SELECT account, window, used FROM usage_readings ORDER BY window"
         ).fetchall()
     expected = placed if account == "placed" else f"{owner}-default"
     assert rows == [(expected, "five_hour", 0.125), (expected, "seven_day", 0.345)]
+    assert login_rows == ([] if account == "placed" else rows), "only the device's login writes the old row"
 
 
 CAPPED_ENV = {
