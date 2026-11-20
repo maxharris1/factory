@@ -24,6 +24,22 @@ from lib.handoff import HandoffError, parse_comment, plan_estimate
 from lib.queue import JobRequest
 
 
+def _split_issue_number(ticket: TrackedTicket) -> str:
+    return (ticket.source_issue or ticket.ticket_id).removeprefix("#")
+
+
+def _intake_split(ticket: TrackedTicket, plan_text: str) -> tuple[SplitPart, ...]:
+    from lib.feeder import parse_intake
+
+    parts = split_parts(plan_text)
+    for number, part in enumerate(parts, 1):
+        _, body = split_issue(_split_issue_number(ticket), "", "", number, part, ticket.risk, ())
+        child = parse_intake(body, (ticket.intake_label,))
+        if child.defects or child.criteria != part.criteria:
+            return ()
+    return parts
+
+
 @dataclass(frozen=True)
 class _PendingSplit:
     comment_id: str
@@ -281,7 +297,7 @@ class PlanMixin:
     ) -> tuple[SplitPart, ...]:
         if ticket.factory.tickets != "github" or not ticket.intake_label:
             return ()
-        return split_parts(plan_text)
+        return _intake_split(ticket, plan_text)
 
     def _pending_split(self, ticket: TrackedTicket) -> _PendingSplit | None:
         key = (ticket.repo.lower(), ticket.ticket_id)
@@ -320,8 +336,8 @@ class PlanMixin:
         if pending is None:
             return
         comment_id = pending.comment_id
-        parts = split_parts(pending.plan_text)
-        issue = (ticket.source_issue or ticket.ticket_id).removeprefix("#")
+        parts = _intake_split(ticket, pending.plan_text)
+        issue = _split_issue_number(ticket)
         plan_url = next(
             (
                 _comment_link(comment)

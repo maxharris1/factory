@@ -133,7 +133,7 @@ SPLIT_LIMIT = 4_000
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*(?:(?<=\s)#+\s*)?$")
 _SPLIT_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s*)?(.*?)\s*$")
 _SPLIT_CRITERION = re.compile(r"ac-\w+:", re.IGNORECASE)
-_SPLIT_FIELD = re.compile(r"^\s*(?:estimate|depends\s+on):", re.IGNORECASE)
+_SPLIT_FIELD = re.compile(r"^(?:estimate|depends\s+on):", re.IGNORECASE)
 _SPLIT_DEPENDS = re.compile(r"\bdepends\s+on:\s*(.*?)\s*\.?\s*$", re.IGNORECASE)
 _SPLIT_REFS = re.compile(r"(?:parts?\s*)?\d+(?:\s*(?:,|and|&)\s*(?:parts?\s*)?\d+)*", re.IGNORECASE)
 

@@ -9,6 +9,7 @@ import pytest
 from lib.brief import render_brief
 from lib.evidence import TEXT_LIMIT
 from lib.factory_md import padded_estimate
+from lib.feeder import parse_intake
 from lib.dispatch.types import TrackedTicket
 from lib.followups import has_marker, proposed_split, split_link_marker
 from lib.queue import Job
@@ -435,3 +436,45 @@ def test_a_split_files_each_wrapped_criterion_whole(tmp_path: Path) -> None:
     assert "- ac-1: The parser returns values. Invalid inputs must return HTTP 400.\n" in first
     assert "Estimate: 100" in first and "Depends on: none" in first
     assert "Depends on: #300" in second
+
+
+INTAKE_HEAD = "Risk: high\nPlan first: no\nDepends on: none\n\n## Acceptance criteria\n"
+FIELD_CONTINUATION = (
+    "- ac-1: The summary renders these literal lines.\n"
+    "  Estimate: unavailable when the input is missing.\n"
+    "  Invalid inputs must return HTTP 400.\n"
+)
+WRAPPED = "- ac-1: The parser returns values.\n  Invalid inputs must return HTTP 400.\n"
+SECOND = "- ac-2: Use the summary.\n"
+
+
+@pytest.mark.parametrize("criterion", [WRAPPED, FIELD_CONTINUATION], ids=["wrapped", "field-continuation"])
+def test_each_child_carries_the_criteria_intake_reads_from_the_plan(tmp_path: Path, criterion: str) -> None:
+    plan = (
+        "## Proposed split\n### Summary\n" + criterion + "Estimate: 100\nDepends on: none\n"
+        "### Integration\n" + SECOND + "Estimate: 100\n"
+    )
+    flow = SplitFlow(tmp_path)
+
+    assert flow.plan("500", "ac=met", estimated(600, plan)) == "auto-split"
+
+    assert flow.state()["workflow_state"] == "abandoned"
+    children = [parse_intake(body, labels) for _, body, labels in flow.actions.issues.values()]
+    parents = [parse_intake(INTAKE_HEAD + text, ("factory:ready",)) for text in (criterion, SECOND)]
+    assert [child.defects for child in children] == [(), ()]
+    assert [child.criteria for child in children] == [parent.criteria for parent in parents]
+    assert "Estimate: 100" in flow.actions.issues[300][1]
+
+
+def test_a_split_whose_child_intake_would_drop_a_criterion_parks_instead(tmp_path: Path) -> None:
+    plan = (
+        "## Proposed split\n### Restart\n- ac-1: The operator restarts the service on the box.\nEstimate: 100\n"
+        "### Integration\n" + SECOND + "Estimate: 100\n"
+    )
+    flow = SplitFlow(tmp_path)
+
+    assert flow.plan("500", "ac=met", estimated(600, plan)) == "waiting-max-size"
+
+    assert flow.actions.issues == {}
+    assert flow.state()["workflow_state"] == "waiting-max"
+    assert len(size_wakes(flow)) == 1
