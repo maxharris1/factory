@@ -35,6 +35,7 @@ from lib import (
     job_run,
     job_token,
     linear_webhook,
+    oom,
     placed_run,
     skill_preflight,
     telemetry,
@@ -2261,6 +2262,8 @@ def _job_run_command(argv: list[str]) -> int:
     def log(message: str) -> None:
         print(f"{prog}: {message}", file=sys.stderr, flush=True)
 
+    if sys.platform.startswith("linux"):
+        oom.lower_to_floor(log)
     if args.interval is not None and interval < args.interval:
         log(f"--interval {args.interval:g} capped to {interval:g} seconds")
 
