@@ -455,3 +455,51 @@ def test_a_container_started_after_the_listing_stops_the_removal_before_networks
 def test_remove_script_refuses_a_hostile_name_or_id(hostile):
     with pytest.raises(ValueError):
         remove_script(hostile)
+
+
+SECOND = "aut0-aut2130-pc"
+NEWER = "2027-06-01 00:00:00 +0000 UTC"
+
+
+def labelled_helper(docker):
+    docker.start(**{KINDS["compose"]: NAME, "factory.job": "live-job"})
+
+
+def newer_compose_container(docker):
+    docker.start(NEWER, **{KINDS["compose"]: NAME})
+
+
+def unfinished_supabase_in_the_same_compose_project(docker):
+    docker.start(**{KINDS["compose"]: NAME, KINDS["supabase"]: SECOND})
+
+
+@pytest.mark.parametrize(
+    "sibling, reason",
+    [
+        pytest.param(labelled_helper, "a container is labelled factory.job", id="labelled helper"),
+        pytest.param(newer_compose_container, f"newer than {OWNER[1]}'s last finish", id="newer container"),
+        pytest.param(
+            unfinished_supabase_in_the_same_compose_project, "AUT-2130 has an unfinished job", id="through compose"
+        ),
+    ],
+)
+def test_a_supabase_project_is_kept_when_a_project_sharing_its_containers_is_kept(
+    tmp_path, monkeypatch, sibling, reason
+):
+    docker = Docker(tmp_path)
+    monkeypatch.setenv("PATH", docker.path())
+    database = docker.start_stack(NAME, "supabase")
+    sibling(docker)
+    started = docker.ids()
+    finished = ledger(
+        {OWNER: facts(last=epoch(2027, 1, 1)), ("aut0-code/aut0", "AUT-2130"): facts(finished=False)}, {}
+    )
+
+    lines = sweep(containers.local_runner(), lambda: finished, "pc", ROOTS)
+
+    assert database in docker.ids()
+    assert docker.ids() == started
+    assert docker.networks() == [f"{NAME}_default"]
+    assert docker.volumes() == [f"{NAME}_db"]
+    assert f"kept supabase project {NAME} on pc: a project sharing its containers is kept ({reason})" in lines
+    assert not any(line.startswith("removed") for line in lines)

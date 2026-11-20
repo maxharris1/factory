@@ -235,14 +235,26 @@ def remove_script(project: Project) -> str:
     )
 
 
+def _groups(projects: list[Project]) -> list[int]:
+    group = list(range(len(projects)))
+
+    def root(index: int) -> int:
+        while group[index] != index:
+            index = group[index]
+        return index
+
+    first: dict[str, int] = {}
+    for index, project in enumerate(projects):
+        for container in project.containers:
+            group[root(index)] = root(first.setdefault(container.id, index))
+    return [root(index) for index in range(len(projects))]
+
+
 def sweep(
     runner: Runner, ledger: Callable[[], Ledger | None], device: str, roots: Collection[str]
 ) -> list[str]:
     lines: list[str] = []
     projects: list[Project] = []
-    seen: set[str] = set()
-    # The Supabase CLI also puts the compose label on everything it starts, so its stacks
-    # are listed by their own label first and skipped when the compose listing repeats them.
     for kind in ("supabase", "compose"):
         listed = runner(list_script(kind))
         if (failed := failure(listed)) is not None:
@@ -251,15 +263,25 @@ def sweep(
         found, unreadable = parse_listing(kind, listed.stdout)
         if unreadable:
             lines.append(f"kept {unreadable} {kind} container(s) on {device}: unreadable")
-        ids = [{container.id for container in project.containers} for project in found]
-        projects.extend(project for project, own in zip(found, ids) if not own & seen)
-        seen.update(*ids)
+        projects.extend(found)
     if not projects or (facts := ledger()) is None:
         return lines
-    for project in projects:
+    verdicts = [decide(project, facts, device, roots) for project in projects]
+    groups = _groups(projects)
+    kept = {group: verdict for group, verdict in zip(groups, verdicts) if isinstance(verdict, Keep)}
+    seen: set[str] = set()
+    # The Supabase CLI also puts the compose label on everything it starts, so its stacks
+    # are listed by their own label first and skipped when the compose listing repeats them.
+    for project, verdict, group in zip(projects, verdicts, groups):
+        own = {container.id for container in project.containers}
+        if own & seen:
+            continue
+        seen |= own
         name = project.name if _NAME.fullmatch(project.name) else repr(project.name)
         where = f"{project.kind} project {name} on {device}"
-        match decide(project, facts, device, roots):
+        if isinstance(verdict, Remove) and group in kept:
+            verdict = Keep(f"a project sharing its containers is kept ({kept[group].reason})")
+        match verdict:
             case Remove(owner):
                 removed = runner(remove_script(project))
                 if removed.code == NEW_CONTAINER:
