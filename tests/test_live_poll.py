@@ -7,12 +7,14 @@ import subprocess
 import time
 from collections import Counter
 from dataclasses import replace
+from email.utils import formatdate
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
 from lib import cli
+from lib.dispatch.cycle_clock import CycleClock
 from lib.dispatcher import (
     LINEAR_HANDOFF_QUERY,
     Comment,
@@ -3321,3 +3323,205 @@ def test_one_factory_states_request_reads_every_open_ticket(tmp_path: Path) -> N
         ("Ready for Review", "started", 5000.0)
     }
     assert handed_off == 20
+
+
+class LedgerGh(FakeGh):
+    def __init__(self, wall: float) -> None:
+        super().__init__(FACTORY.format(tickets="github", ship="merge"))
+        self.wall = wall
+        self.factory_reply: GhResult | None = None
+
+    def __call__(self, argv, timeout):
+        call = list(argv)
+        if "POST" in call and "graphql" not in call:
+            self.calls.append(call)
+            return GhResult(0, json.dumps({"id": 5}), "")
+        if any(
+            part.startswith(("repos/acme/widgets/pulls?head=", "repos/acme/widgets/git/ref/"))
+            for part in call
+        ):
+            self.calls.append(call)
+            return GhResult(0, "[]", "")
+        if any(part.endswith("/contents/factory.md") for part in call) and self.factory_reply:
+            self.calls.append(call)
+            return self.factory_reply
+        return super().__call__(argv, timeout)
+
+    def headers(self, status: str, date_age: float, **extra: object) -> str:
+        lines = [f"HTTP/2.0 {status}", f"Date: {formatdate(self.wall - date_age, usegmt=True)}"]
+        lines += [f"{name}: {value}" for name, value in extra.items()]
+        return "\r\n".join(lines) + "\r\n\r\n"
+
+
+def ledger_source(gh: LedgerGh) -> tuple[LivePollSource, CycleClock]:
+    source = LivePollSource(config(), gh_runner=gh, wall=lambda: gh.wall)
+    clock = CycleClock(wall=lambda: gh.wall)
+    source.cycle_clock = clock
+    clock.start()
+    return source, clock
+
+
+def test_the_end_line_counts_adapter_reads_gh_call_reads_and_writes() -> None:
+    gh = LedgerGh(1_800_000_000.0)
+    gh.factory_reply = GhResult(
+        0,
+        gh.headers(
+            "200 OK",
+            0,
+            **{
+                "ETag": '"v1"',
+                "X-RateLimit-Limit": 5000,
+                "X-RateLimit-Remaining": 4321,
+                "X-RateLimit-Reset": int(gh.wall) + 299,
+            },
+        )
+        + json.dumps(gh.factory),
+        "",
+    )
+    source, clock = ledger_source(gh)
+
+    source.github.list_comments("acme/widgets", "12")
+    source._gh_call("repos/acme/widgets/contents/factory.md")
+    source.github.post_issue_comment("acme/widgets", 12, "hello")
+    source._gh_call("repos/acme/widgets/pulls?head=acme:factory/issue-7")
+    source._gh_call("repos/acme/widgets/git/ref/heads/feature/login")
+    source.github.pull_states("acme/widgets", ["12"])
+
+    line = clock.end()
+    assert line.endswith(
+        "; github core 5 [GET contents/factory.md 1, GET git/ref/heads/<value> 1, "
+        "GET issues/<value>/comments 1, GET pulls 1, POST issues/<value>/comments 1], "
+        "free 0 (304 0, cached 0), graphql 1; core 4321/5000 resets 5m"
+    )
+    for value in ("acme", "factory/issue-7", "feature", "login"):
+        assert value not in line
+
+
+@pytest.mark.parametrize(("date_age", "kind"), [(0, "304 1, cached 0"), (600, "304 0, cached 1")])
+def test_a_not_modified_read_counts_as_free(date_age: float, kind: str) -> None:
+    gh = LedgerGh(1_800_000_000.0)
+    gh.factory_reply = GhResult(
+        0, gh.headers("200 OK", 0, ETag='"v1"') + json.dumps(gh.factory), ""
+    )
+    source, clock = ledger_source(gh)
+    source._gh_call("repos/acme/widgets/contents/factory.md")
+    clock.end()
+
+    clock.start()
+    gh.factory_reply = GhResult(1, gh.headers("304 Not Modified", date_age), "gh: HTTP 304\n")
+    source._gh_call("repos/acme/widgets/contents/factory.md")
+
+    assert clock.end().endswith(f"; github core 0, free 1 ({kind}), graphql 0")
+
+
+def comment_rows(count: int) -> list[dict[str, object]]:
+    return [
+        {"id": i, "user": {"login": "tester"}, "body": "", "created_at": "2026-11-20T00:00:00Z"}
+        for i in range(1, count + 1)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stderr"), [(0, ""), (1, "gh: Server Error (HTTP 502)\n")]
+)
+def test_each_page_of_a_paginated_read_counts_as_one_billed_call(
+    returncode: int, stderr: str
+) -> None:
+    rows = comment_rows(101)
+    pages = json.dumps(rows[:100]) + ("\n" + json.dumps(rows[100:]) if returncode == 0 else "")
+
+    def runner(argv, timeout):
+        assert "--paginate" in argv
+        return GhResult(returncode, pages, stderr)
+
+    source = LivePollSource(config(), gh_runner=runner, wall=lambda: 1_800_000_000.0)
+    source.cycle_clock = clock = CycleClock(wall=lambda: 1_800_000_000.0)
+    clock.start()
+    if returncode == 0:
+        assert len(source.github.list_comments("acme/widgets", "12")) == 101
+        assert len(source._gh_pages("repos/acme/widgets/pulls/12/files?per_page=100")) == 2
+    else:
+        with pytest.raises(GitHubAdapterError):
+            source.github.list_comments("acme/widgets", "12")
+        with pytest.raises(PollSourceError):
+            source._gh_pages("repos/acme/widgets/pulls/12/files?per_page=100")
+
+    assert clock.end().endswith(
+        "; github core 4 [GET issues/<value>/comments 2, GET pulls/<value>/files 2], "
+        "free 0 (304 0, cached 0), graphql 0"
+    )
+
+
+@pytest.mark.parametrize(
+    ("read", "route", "pages"),
+    [
+        (lambda source: source.github.list_runners("acme/widgets"), "GET actions/runners", 1),
+        (
+            lambda source: source._gh_pages("repos/acme/widgets/pulls/12/files?per_page=100"),
+            "GET pulls/<value>/files",
+            2,
+        ),
+    ],
+)
+def test_a_read_gh_replays_from_its_cache_counts_as_cached(read, route, pages) -> None:
+    now = [1_800_000_000.0]
+    body = "\n".join(['{"runners":[]}'] * pages)
+
+    def runner(argv, timeout):
+        assert "--cache" in argv and "--include" not in argv
+        return GhResult(0, body, "")
+
+    source = LivePollSource(config(), gh_runner=runner, wall=lambda: now[0])
+    source.cycle_clock = clock = CycleClock(wall=lambda: now[0])
+    lines = []
+    for wait in (0, 30, 31):
+        now[0] += wait
+        clock.start()
+        read(source)
+        lines.append(clock.end())
+
+    billed = f"; github core {pages} [{route} {pages}], free 0 (304 0, cached 0), graphql 0"
+    assert lines[0].endswith(billed)
+    assert lines[1].endswith(f"; github core 0, free {pages} (304 0, cached {pages}), graphql 0")
+    assert lines[2].endswith(billed)
+
+
+def test_a_restarted_poller_counts_a_read_gh_still_caches_as_cached(tmp_path: Path) -> None:
+    database = tmp_path / "orch.db"
+    orch = tmp_path / "orch.yml"
+    orch.write_text(
+        "poll_seconds: 60\n"
+        "grok:\n  webhook_url_env: U\n  webhook_key_env: K\n"
+        "trusted_logins:\n  grok-login: [grok-bot]\n"
+        "projects:\n  - repo: acme/widgets\n    factory_ref: main\n",
+        encoding="utf-8",
+    )
+    cli._runtime(database, orch, create=True)
+    now = [1_800_000_000.0]
+    gh_cache: dict[tuple[str, ...], float] = {}
+    requests: list[list[str]] = []
+
+    def gh(argv, timeout):
+        assert "--cache" in argv
+        if gh_cache.get(tuple(argv), 0.0) <= now[0]:
+            requests.append(list(argv))
+            gh_cache[tuple(argv)] = now[0] + 60
+        return GhResult(0, '{"runners":[]}', "")
+
+    def restarted_cycle() -> str:
+        _, source = cli._runtime(database, orch, create=False)
+        source.gh_runner = gh
+        source.wall = lambda: now[0]
+        source.cycle_clock = clock = CycleClock(wall=lambda: now[0])
+        clock.start()
+        source.github.list_runners("acme/widgets")
+        return clock.end()
+
+    billed = "; github core 1 [GET actions/runners 1], free 0 (304 0, cached 0), graphql 0"
+    assert restarted_cycle().endswith(billed)
+    now[0] += 30
+    assert restarted_cycle().endswith("; github core 0, free 1 (304 0, cached 1), graphql 0")
+    assert len(requests) == 1
+    now[0] += 31
+    assert restarted_cycle().endswith(billed)
+    assert len(requests) == 2

@@ -218,3 +218,81 @@ def test_a_no_change_cycle_over_seven_prs_fits_the_90s_budget() -> None:
 
     assert first > 90
     assert all(seconds < 90 for seconds in later), later
+
+
+class Wall:
+    def __init__(self) -> None:
+        self.now = 1_700_000_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_the_end_line_counts_github_calls_by_route() -> None:
+    wall = Wall()
+    clock = CycleClock(wall=wall)
+    clock.start()
+    with clock.phase("feed"):
+        for route, count in (
+            ("POST issues/<value>/comments", 1),
+            ("GET pulls/<value>", 3),
+            ("GET issues/<value>/comments", 3),
+        ):
+            for _ in range(count):
+                clock.add_call(route, "billed")
+        clock.add_call("GET contents/factory.md", "304")
+        clock.add_call("GET contents/factory.md", "cached")
+        clock.add_call("GET graphql", "graphql")
+        clock.add_call("GET graphql", "graphql")
+        clock.note_core(4990, 5000, wall.now + 601)
+
+    assert clock.end().endswith(
+        " ET (0.0s): feed 0.0s; github core 7 [GET issues/<value>/comments 3, "
+        "GET pulls/<value> 3, POST issues/<value>/comments 1], "
+        "free 2 (304 1, cached 1), graphql 2; core 4990/5000 resets 11m"
+    )
+
+
+def test_the_end_line_names_the_top_eight_routes_and_sums_the_rest() -> None:
+    clock = CycleClock(wall=Wall())
+    clock.start()
+    for index in range(10):
+        for _ in range(index + 1):
+            clock.add_call(f"GET route-{index}", "billed")
+
+    routes = ", ".join(f"GET route-{index} {index + 1}" for index in range(9, 1, -1))
+    assert clock.end().endswith(
+        f"; github core 55 [{routes}, other 3], free 0 (304 0, cached 0), graphql 0"
+    )
+
+
+def test_a_cycle_with_no_github_calls_keeps_the_end_line_unchanged() -> None:
+    clock = CycleClock(wall=Ticks())
+    clock.start()
+    with clock.phase("feed"):
+        pass
+
+    assert clock.end().endswith(" ET (4.5s): feed 1.5s")
+
+
+def test_free_calls_alone_print_no_route_brackets() -> None:
+    clock = CycleClock(wall=Wall())
+    clock.start()
+    clock.add_call("GET contents/factory.md", "304")
+
+    assert clock.end().endswith("; github core 0, free 1 (304 1, cached 0), graphql 0")
+
+
+def test_each_cycle_counts_only_its_own_calls() -> None:
+    wall = Wall()
+    clock = CycleClock(wall=wall)
+    clock.start()
+    clock.add_call("GET pulls/<value>", "billed")
+    clock.note_core(4990, 5000, wall.now + 60)
+    clock.end()
+
+    clock.start()
+    with clock.phase("feed"):
+        pass
+
+    assert "github" not in clock.end()

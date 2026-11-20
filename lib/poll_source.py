@@ -15,10 +15,11 @@ import threading
 import time
 from bisect import bisect_left, bisect_right
 from collections import Counter
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from http.client import HTTPConnection, HTTPException, HTTPSConnection
 from pathlib import Path
 from typing import Any, NamedTuple, Protocol
@@ -46,7 +47,7 @@ from lib.dispatch.types import LinearState, LinearStateRead, ci_on_base, no_ci_b
 from lib.brief_comment import before_factory_md
 from lib.dispatch.constants import STOPPED_POLL_SECONDS
 from lib.dispatch.errors_text import kept_name, redacted_fragment
-from lib.dispatch.cycle_clock import CycleClock
+from lib.dispatch.cycle_clock import CallKind, CycleClock
 from lib.feeder import FEEDER_TABLE
 from lib.factory_md import (
     FactoryConfig,
@@ -154,6 +155,7 @@ RATE_RESET_GRACE_SECONDS = 5.0
 GH_CALL_TIMEOUT_SECONDS = 20.0
 GH_CALL_ATTEMPTS = 3
 GH_RETRY_BACKOFF_SECONDS = 2.0
+CACHE_REPLAY_SLACK_SECONDS = 2.0
 READ_DEADLINE_SECONDS = 30.0
 TRACKED_READ_BUDGET_SECONDS = 120.0
 CYCLE_ERROR_DETAILS = 5
@@ -274,8 +276,14 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
+_NUMBERED_PART = re.compile(r"[^/ ]*[0-9][^/ ]*")
+_BRANCH_TAIL = re.compile(r"([ /](?:heads|compare)/).+")
 _REPO_ROUTE = re.compile(r"repos/([^/?]+/[^/?]+)")
 _TICKET_ROUTE = re.compile(r"repos/[^/?]+/[^/?]+/(?:issues|pulls)/([0-9]+)")
+_WHITESPACE = re.compile(r"\s*")
+_TTL_PART = re.compile(r"([0-9]+)([hms])")
+_TTL = re.compile(r"(?:[0-9]+[hms])+")
+_TTL_UNIT_SECONDS = {"s": 1.0, "m": 60.0, "h": 3600.0}
 _GH_READ_SUBCOMMANDS = (("run", "view"),)
 _REVIEW_ACTIONS = tuple(name for name in vars(ReviewActions) if not name.startswith("_"))
 
@@ -479,6 +487,30 @@ class FedPulls:
         return None if row is None or row[0] is None else str(row[0])
 
 
+class GhCacheExpiries:
+    def __init__(self, path: Path | None = None):
+        self._connection = sqlite3.connect(
+            ":memory:" if path is None else str(path), timeout=30, isolation_level=None
+        )
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS gh_cache_expiry (key TEXT PRIMARY KEY, expiry REAL NOT NULL)"
+        )
+
+    def replays(self, key: tuple[str, ...], now: float) -> bool:
+        row = self._connection.execute(
+            "SELECT expiry FROM gh_cache_expiry WHERE key = ?", (json.dumps(key),)
+        ).fetchone()
+        return row is not None and row[0] > now
+
+    def keep(self, key: tuple[str, ...], expiry: float, now: float) -> None:
+        self._connection.execute("DELETE FROM gh_cache_expiry WHERE expiry <= ?", (now,))
+        self._connection.execute(
+            "INSERT INTO gh_cache_expiry (key, expiry) VALUES (?, ?) "
+            "ON CONFLICT (key) DO UPDATE SET expiry = excluded.expiry",
+            (json.dumps(key), expiry),
+        )
+
+
 class LastRead(NamedTuple):
     probe_before_read: str | None
     read_at: float
@@ -517,10 +549,12 @@ class LivePollSource:
         tracked_read_budget_seconds: float = TRACKED_READ_BUDGET_SECONDS,
         risks: IntakeRisks | None = None,
         fed_pulls: FedPulls | None = None,
+        gh_cache: GhCacheExpiries | None = None,
     ):
         self.config = config
         self.risks = IntakeRisks() if risks is None else risks
         self.fed_pulls = FedPulls() if fed_pulls is None else fed_pulls
+        self.gh_cache = GhCacheExpiries() if gh_cache is None else gh_cache
         self.environ = environ
         self.gh_runner = gh_runner
         self.linear_transport = linear_transport
@@ -2317,19 +2351,10 @@ class LivePollSource:
 
     def _gh_pages(self, endpoint: str) -> list[object]:
         text = self._gh_call("--paginate", endpoint)
-        decoder = json.JSONDecoder()
-        pages: list[object] = []
-        index = 0
-        while index < len(text):
-            while index < len(text) and text[index].isspace():
-                index += 1
-            if index == len(text):
-                break
-            try:
-                page, index = decoder.raw_decode(text, index)
-            except json.JSONDecodeError as exc:
-                raise PollSourceError("gh returned malformed JSON") from exc
-            pages.append(page)
+        try:
+            pages = list(_json_documents(text))
+        except json.JSONDecodeError as exc:
+            raise PollSourceError("gh returned malformed JSON") from exc
         if not pages:
             raise PollSourceError("gh returned no JSON")
         return pages
@@ -2405,13 +2430,17 @@ class LivePollSource:
         name = _gh_source(call)
         began = self.clock()
         try:
-            return self.gh_runner(call, timeout)
+            result = self.gh_runner(call, timeout)
         except subprocess.TimeoutExpired:
             name = self._write_ticket or _gh_ticket(call)
             raise
         finally:
             if self.cycle_clock is not None:
                 self.cycle_clock.add_source(name, self.clock() - began)
+        if self.cycle_clock is not None:
+            route = _call_route(call)
+            self.cycle_clock.add_call(route, "graphql" if route.endswith(" graphql") else "billed")
+        return result
 
     def _run_gh_read(self, argv: list[str]) -> GhResult:
         left = self._backoff_until - self.clock()
@@ -2425,6 +2454,7 @@ class LivePollSource:
             while True:
                 left = deadline - self.clock()
                 timeout = min(self.gh_call_timeout_seconds, left, self._require_budget())
+                started_wall = self.wall()
                 try:
                     result = self.gh_runner(argv, timeout)
                 except subprocess.TimeoutExpired:
@@ -2441,12 +2471,13 @@ class LivePollSource:
                         f"{route} could not run: {type(exc).__name__}"
                     ) from exc
                 else:
-                    self._observe_quota(route.removeprefix("gh api "), result)
+                    self._observe_quota(argv, result, started_wall)
                     return result
                 self.sleep(pause)
                 attempt += 1
 
-    def _observe_quota(self, route: str, result: GhResult) -> None:
+    def _observe_quota(self, argv: list[str], result: GhResult, started_wall: float) -> None:
+        route = _call_route(argv)
         status = _status_code(result.stderr)
         headers: dict[str, str] = {}
         if result.stdout.startswith("HTTP/"):
@@ -2454,6 +2485,10 @@ class LivePollSource:
                 status, headers, _ = _included_response(result.stdout)
             except PollSourceError:
                 pass
+        cacheable = result.returncode == 0 or (
+            status is not None and status < 500 and status != 403
+        )
+        replayed = self._replayed_from_gh_cache(argv, cacheable, started_wall)
         own = _rate_window(
             headers.get("x-ratelimit-limit"),
             headers.get("x-ratelimit-remaining"),
@@ -2461,6 +2496,15 @@ class LivePollSource:
         )
         if own is not None:
             self._rate_window = _merged_window(self._rate_window, own)
+        if self.cycle_clock is not None:
+            self.cycle_clock.add_call(
+                route,
+                _call_kind(route, headers, status, started_wall, replayed),
+                _request_count(argv, result),
+            )
+            if own is not None:
+                window = self._rate_window
+                self.cycle_clock.note_core(window.remaining, window.limit, window.reset_epoch)
         if result.returncode == 0 or not rate_limited(status, result.stdout, result.stderr):
             self._throttled = False
             return
@@ -2482,6 +2526,19 @@ class LivePollSource:
             f"github throttle: {http}rate limit on {route}{core}; "
             f"github reads paused {minutes}m{secs:02d}s until {until} ET ({basis})"
         )
+
+    def _replayed_from_gh_cache(
+        self, argv: Sequence[str], cacheable: bool, started_wall: float
+    ) -> bool:
+        cached = _gh_cache_key(argv)
+        if cached is None:
+            return False
+        key, ttl = cached
+        if self.gh_cache.replays(key, started_wall):
+            return True
+        if cacheable:
+            self.gh_cache.keep(key, started_wall + ttl, started_wall)
+        return False
 
     def _quota_wait(self, retry_after: str | None) -> tuple[float, str]:
         try:
@@ -2624,6 +2681,82 @@ def _gh_source(argv: Sequence[str]) -> str:
         if part == "--repo" and index + 1 < len(argv):
             return argv[index + 1].lower()
     return "github"
+
+
+def _call_route(argv: Sequence[str]) -> str:
+    if "api" in argv:
+        route = _route(argv[argv.index("api") + 1 :])
+        return _NUMBERED_PART.sub("<value>", _BRANCH_TAIL.sub(r"\1<value>", route))
+    at = argv.index("gh") if "gh" in argv else -1
+    return " ".join(["gh", *argv[at + 1 : at + 3]])
+
+
+def _call_kind(
+    route: str,
+    headers: Mapping[str, str],
+    status: int | None,
+    started_wall: float,
+    replayed: bool,
+) -> CallKind:
+    if route.endswith(" graphql"):
+        return "graphql"
+    try:
+        sent = parsedate_to_datetime(headers["date"]).timestamp()
+        replayed = sent < started_wall - CACHE_REPLAY_SLACK_SECONDS
+    except (KeyError, TypeError, ValueError):
+        pass
+    if replayed:
+        return "cached"
+    return "304" if status == 304 else "billed"
+
+
+def _json_documents(text: str) -> Iterator[object]:
+    decoder = json.JSONDecoder()
+    index = _WHITESPACE.match(text).end()
+    while index < len(text):
+        document, index = decoder.raw_decode(text, index)
+        yield document
+        index = _WHITESPACE.match(text, index).end()
+
+
+def _request_count(argv: Sequence[str], result: GhResult) -> int:
+    if "--paginate" not in argv:
+        return 1
+    pages = 0
+    try:
+        for _ in _json_documents(result.stdout):
+            pages += 1
+    except json.JSONDecodeError:
+        pass
+    return max(1, pages + (result.returncode != 0))
+
+
+def _gh_cache_key(argv: Sequence[str]) -> tuple[tuple[str, ...], float] | None:
+    """gh keys its cache on the request alone, ignoring --include and If-None-Match."""
+    if "--cache" not in argv:
+        return None
+    key: list[str] = []
+    ttl = None
+    index = 0
+    while index < len(argv):
+        part = argv[index]
+        value = argv[index + 1] if index + 1 < len(argv) else ""
+        if part == "--cache":
+            ttl = _cache_ttl(value)
+            index += 2
+        elif part == "-H" and value.lower().startswith("if-none-match:"):
+            index += 2
+        else:
+            if part != "--include":
+                key.append(part)
+            index += 1
+    return None if ttl is None else (tuple(key), ttl)
+
+
+def _cache_ttl(text: str) -> float | None:
+    if not _TTL.fullmatch(text):
+        return None
+    return sum(int(amount) * _TTL_UNIT_SECONDS[unit] for amount, unit in _TTL_PART.findall(text))
 
 
 def _gh_ticket(argv: Sequence[str]) -> str:

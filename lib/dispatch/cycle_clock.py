@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import time
+from collections import Counter
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -35,6 +37,44 @@ POLLER_REPO = "orch"
 POLLER_TICKET = "poller"
 SLOW_CYCLE = "slow-cycle"
 LOCK_ERRORS = "lock-errors"
+TOP_ROUTES = 8
+
+CallKind = Literal["billed", "304", "cached", "graphql"]
+
+
+@dataclass
+class CallLedger:
+    billed: Counter[str] = field(default_factory=Counter)
+    free: Counter[str] = field(default_factory=Counter)
+    graphql: int = 0
+    core: tuple[int, int, float] | None = None
+
+    def add(self, route: str, kind: CallKind, count: int = 1) -> None:
+        if kind == "graphql":
+            self.graphql += count
+        elif kind == "billed":
+            self.billed[route] += count
+        else:
+            self.free[kind] += count
+
+    def summary(self, now: float) -> str:
+        if not (self.billed or self.free or self.graphql):
+            return ""
+        line = f"; github core {self.billed.total()}"
+        if self.billed:
+            ranked = sorted(self.billed.items(), key=lambda row: (-row[1], row[0]))
+            routes = [f"{route} {count}" for route, count in ranked[:TOP_ROUTES]]
+            if len(ranked) > TOP_ROUTES:
+                routes.append(f"other {sum(count for _, count in ranked[TOP_ROUTES:])}")
+            line += " [" + ", ".join(routes) + "]"
+        line += (
+            f", free {self.free.total()} (304 {self.free['304']}, cached {self.free['cached']}),"
+            f" graphql {self.graphql}"
+        )
+        if self.core is not None:
+            remaining, limit, reset = self.core
+            line += f"; core {remaining}/{limit} resets {max(0, math.ceil((reset - now) / 60))}m"
+        return line
 
 
 @dataclass
@@ -47,9 +87,11 @@ class CycleClock:
     _parts: dict[str, dict[str, float]] = field(default_factory=dict)
     _open: str | None = None
     _ended: tuple[float, float] | None = None
+    _calls: CallLedger = field(default_factory=CallLedger)
 
     def start(self) -> str:
         self._rows = []
+        self._calls = CallLedger()
         self._parts = {}
         self._open = None
         self._ended = None
@@ -92,6 +134,12 @@ class CycleClock:
         finally:
             self.add_source(name, self.wall() - began)
 
+    def add_call(self, route: str, kind: CallKind, count: int = 1) -> None:
+        self._calls.add(route, kind, count)
+
+    def note_core(self, remaining: int, limit: int, reset_epoch: float) -> None:
+        self._calls.core = (remaining, limit, reset_epoch)
+
     def _add(self, phase: str, name: str, seconds: float) -> None:
         parts = self._parts.setdefault(phase, {})
         parts[name] = parts.get(name, 0.0) + seconds
@@ -113,6 +161,7 @@ class CycleClock:
         return (
             f"orch poll: cycle end {et(ended)} ({self.last_cycle_seconds:.1f}s): "
             + ", ".join(parts)
+            + self._calls.summary(ended)
         )
 
     def between(self, asked: float) -> str | None:

@@ -92,7 +92,13 @@ from lib.orch_yml import (
     load_orch_yml,
     parse_bind,
 )
-from lib.poll_source import FedPulls, IntakeRisks, LivePollSource, PollSourceError
+from lib.poll_source import (
+    FedPulls,
+    GhCacheExpiries,
+    IntakeRisks,
+    LivePollSource,
+    PollSourceError,
+)
 from lib.linear_upload import HttpLinear
 from lib.qa_cloud import QaWorker
 from lib.qa_storage import S3Storage
@@ -1365,6 +1371,7 @@ def _runtime(
         config,
         risks=None if create else IntakeRisks(path),
         fed_pulls=None if create else FedPulls(path),
+        gh_cache=None if create else GhCacheExpiries(path),
     )
     devices = None
     machines = None
