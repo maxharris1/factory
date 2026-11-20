@@ -89,6 +89,15 @@ time.sleep(120)
     return int(marker.read_text()), int(leaf_pid.read_text())
 
 
+def kill_wrapper(target: remote.RemoteTarget) -> int:
+    """SIGKILL the run's wrapper so its #1210 kill never runs and only a check
+    or stop can find what the run left. Returns the start's pid."""
+    wrapper, start = map(int, Path(remote.run_file(target, "pid")).read_text().split())
+    os.kill(wrapper, signal.SIGKILL)
+    wait_until(lambda: not pid_alive(wrapper, None) or zombie(wrapper), "the wrapper died", 5.0)
+    return start
+
+
 def kill_leftover(tmp_path: Path) -> None:
     leaf_pid = tmp_path / "leaf.pid"
     if leaf_pid.exists():
@@ -114,6 +123,7 @@ def test_a_lost_remote_orphan_is_kept_while_a_descendant_of_its_run_executes(
         worker_pid, leaf = launch_with_descendant(
             tmp_path, target, clean_environment=clean_environment
         )
+        kill_wrapper(target)
         disable_pc(tmp_path)
         poll_at(now, dispatcher, 0.0)
         assert orphans(queue), "the lost job leaves an orphan on the device"
@@ -139,6 +149,7 @@ def test_a_kill_reaches_a_descendant_that_left_the_runs_session_and_environment(
     try:
         worker_pid, leaf = launch_with_descendant(tmp_path, target, clean_environment=True)
         assert remote.check_worker(shell, target) == remote.RUNNING
+        kill_wrapper(target)
         os.kill(worker_pid, signal.SIGKILL)
         wait_until(lambda: not pid_alive(worker_pid, None), "the worker was killed", 5.0)
         assert remote.check_worker(shell, target) == remote.RUNNING, (
@@ -242,7 +253,7 @@ def test_a_lost_remote_runs_untagged_orphan_born_before_any_check_is_killed(
     monitor.alive = lambda *_: False
     target = device_monitor.remote_target(monitor.config.device("pc"), "claude", job.id, tag)
     assert target is not None
-    tick, leaf_pid = tmp_path / "tick", tmp_path / "leaf.pid"
+    tick, leaf_pid, release = tmp_path / "tick", tmp_path / "leaf.pid", tmp_path / "release"
     leaf = f"""import os, signal, time
 from pathlib import Path
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -252,7 +263,8 @@ while True:
     time.sleep(.02)
 """
     worker = (
-        "import os, subprocess, sys\n"
+        "import os, subprocess, sys, time\n"
+        f"while not os.path.exists({str(release)!r}): time.sleep(.02)\n"
         f"subprocess.Popen([sys.executable, '-c', {leaf!r}], env={{'PATH': os.environ['PATH']}})\n"
     )
     start = remote.start_script(target, [sys.executable, "-c", worker], {})
@@ -265,7 +277,11 @@ while True:
             ["sh", "-c", launch], stdin=subprocess.DEVNULL, capture_output=True, timeout=30
         )
         assert result.returncode == 0, result.stderr
-        wait_until(lambda: Path(remote.run_file(target, "exit")).exists(), "the worker ended")
+        started = kill_wrapper(target)
+        release.touch()
+        wait_until(
+            lambda: not pid_alive(started, None) or zombie(started), "the worker ended", 10.0
+        )
         wait_until(tick.exists, "the orphan started")
         orphan = int(leaf_pid.read_text())
         assert pid_alive(orphan, None)
@@ -326,6 +342,7 @@ def test_a_kill_before_the_wrapper_records_still_stops_the_untagged_child(
     assert target is not None
     shell = LocalShell()
     paused, release, child_pid = tmp_path / "paused", tmp_path / "release", tmp_path / "child.pid"
+    go = tmp_path / "go"
     shims = tmp_path / "shims"
     pause_untagged_scans(shims, paused, release)
     child = f"""import os, signal, time
@@ -336,14 +353,14 @@ while True:
     time.sleep(.05)
 """
     worker = (
-        "import os, subprocess, sys\n"
+        "import os, subprocess, sys, time\n"
+        f"while not os.path.exists({str(go)!r}): time.sleep(.02)\n"
         f"subprocess.Popen([sys.executable, '-c', {child!r}], env={{'PATH': os.environ['PATH']}})\n"
     )
     start = remote.start_script(target, [sys.executable, "-c", worker], {})
     launch = remote.launch_script(
         target, start, size=0, not_after=int(time.time()) + 600, budget=120, grace=1
     )
-    exit_file = Path(remote.run_file(target, "exit"))
     wrapper = None
     try:
         result = subprocess.run(
@@ -355,11 +372,12 @@ while True:
         )
         assert result.returncode == 0, result.stderr
         wrapper = int(Path(remote.run_file(target, "pid")).read_text().split()[0])
+        started = kill_wrapper(target)
+        go.touch()
         wait_until(child_pid.exists, "the worker started its untagged child")
         orphan = int(child_pid.read_text())
         wait_until(
-            lambda: exit_file.exists() or paused.exists(),
-            "the start ended and the wrapper wrote its exit or began an untagged record",
+            lambda: not pid_alive(started, None) or zombie(started), "the start ended", 10.0
         )
 
         assert remote.stop_worker(shell, target, kill=True)
@@ -683,6 +701,94 @@ def test_a_contained_runs_descendant_that_left_its_session_and_tag_is_kept_and_k
 
 
 @linux_path
+@pytest.mark.parametrize("kill", [True, False], ids=["kill", "term"])
+def test_the_kill_writes_cgroup_kill_of_the_runs_scope_before_its_rounds(
+    tmp_path: Path, kill: bool
+) -> None:
+    """#1210: the stop that kills writes `1` to the scope's cgroup.kill, found
+    from a member's `0::` path; the SIGSTOP/SIGKILL rounds still follow."""
+    device = SyntheticDevice(tmp_path)
+    target = device.target
+    unit = f"orch-run-{target.tag}.scope"
+    (device.job / remote.scope_record(target.require_tag())).write_text(f"{unit}\n")
+    cgroup = tmp_path / "cgroup"
+    kill_file = cgroup / SCOPE_SLICE.lstrip("/") / unit / "cgroup.kill"
+    kill_file.parent.mkdir(parents=True)
+    kill_file.write_text("")
+    victim = subprocess.Popen(["sleep", "60"])
+    device.show(victim, session=victim.pid, cgroup=f"{SCOPE_SLICE}/{unit}")
+    try:
+        device.run(remote.stop_script(target, kill=kill).replace("/sys/fs/cgroup", str(cgroup)))
+        if kill:
+            assert kill_file.read_text() == "1\n", "the scope's cgroup.kill was written"
+            assert victim.wait(timeout=5) == -signal.SIGKILL, "the rounds kill it as well"
+            return
+        assert kill_file.read_text() == "", "a stop that only terminates leaves cgroup.kill alone"
+        assert victim.wait(timeout=5) == -signal.SIGTERM
+    finally:
+        victim.kill()
+        victim.wait()
+
+
+HARNESS_KILLS_ITSELF = """\
+import os, signal, subprocess, sys, time
+from pathlib import Path
+vite = '''import os, signal, time
+from pathlib import Path
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+Path(%r).write_text(str(os.getpid()))
+time.sleep(120)
+'''
+subprocess.Popen([sys.executable, '-c', vite % sys.argv[1]], start_new_session=True)
+watchdog = subprocess.Popen(['sh', '-c', 'trap "" TERM; while :; do sleep 1; done'])
+Path(sys.argv[2]).write_text(str(watchdog.pid))
+while not Path(sys.argv[1]).exists():
+    time.sleep(.02)
+os.kill(os.getpid(), signal.SIGKILL)
+"""
+
+
+@linux_path
+@pytest.mark.parametrize("budget", [None, 120], ids=["no-budget", "budget"])
+def test_a_harness_killed_by_sigkill_leaves_no_process_once_exit_appears(
+    tmp_path: Path, budget: int | None
+) -> None:
+    """#1210: the 4f441ac6 case. The harness leaves a vite-like child (its tag
+    kept, its own session, SIGTERM ignored) and a watchdog sh, then dies by
+    SIGKILL. No box follows the run: the wrapper kills them itself before it
+    writes `exit`."""
+    config = config_of(machines_file(tmp_path))
+    target = device_monitor.remote_target(config.device("pc"), "claude", "job-1", uuid.uuid4().hex)
+    assert target is not None
+    vite, watchdog = tmp_path / "vite.pid", tmp_path / "watchdog.pid"
+    start = remote.start_script(
+        target, [sys.executable, "-c", HARNESS_KILLS_ITSELF, str(vite), str(watchdog)], {}
+    )
+    launch = remote.launch_script(
+        target, start, size=0, not_after=int(time.time()) + 600, budget=budget, grace=1
+    )
+    exit_file = Path(remote.run_file(target, "exit"))
+    try:
+        result = subprocess.run(
+            ["sh", "-c", launch], stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
+            start_new_session=True,
+        )
+        assert result.stdout.decode().strip() == f"{remote.LAUNCH_MARK} started", result.stderr
+        wait_until(exit_file.exists, "the wrapper wrote exit", 30.0)
+        leftovers = [int(path.read_text()) for path in (vite, watchdog)]
+        assert exit_file.read_text().strip() == str(128 + signal.SIGKILL)
+        assert [pid for pid in leftovers if pid_alive(pid, None) and not zombie(pid)] == [], (
+            "the vite-like child and the watchdog sh are gone once exit appears"
+        )
+        assert remote.check_worker(LocalShell(), target) == remote.GONE
+    finally:
+        remote.stop_worker(LocalShell(), target, kill=True)
+        for path in (vite, watchdog):
+            if path.exists():
+                kill_quietly(int(path.read_text()))
+
+
+@linux_path
 def test_a_contained_run_never_counts_its_recorded_session(tmp_path: Path) -> None:
     """#817 ac-3: a contained run's members are its scope's processes, so a
     process in the recorded session number but another cgroup is not one,
@@ -802,13 +908,11 @@ time.sleep(120)
         assert record.exists() and record.read_text() == f"{unit}\n", said
         assert cgroup.startswith("0::/") and cgroup.endswith(f"/{unit}"), cgroup
 
+        kill_wrapper(target)
         assert remote.stop_worker(box.transport, target)
         leaf = int(wait_file(leaf_pid))
         wait_file(tick)
         assert wait_gone(worker_pid), "the worker exited on SIGTERM"
-        box.wait_exit()
-        wrapper = int((box.run_dir() / "pid").read_text().split()[0])
-        assert wait_gone(wrapper), "the wrapper exited after its start"
         assert remote.check_worker(box.transport, target, fence=False) == remote.RUNNING, (
             "an untagged descendant in its own session keeps the contained run alive"
         )

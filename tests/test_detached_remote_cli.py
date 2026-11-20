@@ -23,7 +23,7 @@ from lib import placed_run, remote
 from lib.device_pool import DevicePool
 from lib.machines_yml import load_machines_yml
 from lib.queue import SQLiteJobQueue
-from lib.remote_follow import EXITED, KILL_AFTER_SECONDS, STOPPED, FollowEnd
+from lib.remote_follow import EXITED, GONE, KILL_AFTER_SECONDS, LOST, STOPPED, FollowEnd
 from lib.waiter import HarnessCommand, Waiter
 from tests.fake_docker import Docker
 from tests.handoff_store import serve_job
@@ -403,9 +403,18 @@ def test_finish_kills_a_cancelled_worker_that_ignores_sigterm(tmp_path: Path) ->
     assert poller.pool.placement(job_id) is None
 
 
-def test_finish_never_kills_a_leftover_of_a_run_that_was_not_cancelled(tmp_path: Path) -> None:
-    poller, job_id, placed, transport = placed_for_finish(tmp_path, FollowEnd(EXITED, 0))
-    assert placed.finish(0) is False
+@pytest.mark.parametrize("kind", [EXITED, GONE])
+def test_finish_kills_a_leftover_of_a_run_that_exited_or_is_gone(tmp_path: Path, kind: str) -> None:
+    """#1210: a leftover that ignores SIGTERM never outlives its harness."""
+    poller, job_id, placed, transport = placed_for_finish(tmp_path, FollowEnd(kind, 0))
+    assert placed.finish(0) is True
+    assert transport.stops == ["TERM", "KILL"]
+    assert poller.pool.placement(job_id) is None
+
+
+def test_finish_never_kills_a_leftover_of_a_run_whose_link_was_lost(tmp_path: Path) -> None:
+    poller, job_id, placed, transport = placed_for_finish(tmp_path, FollowEnd(LOST, None))
+    assert placed.finish(None) is False
     assert transport.stops == ["TERM"]
     assert poller.pool.placement(job_id) is not None
 

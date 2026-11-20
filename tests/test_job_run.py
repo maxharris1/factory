@@ -535,6 +535,76 @@ def test_macos_run_kills_a_setsid_grandchild_whose_parent_exited_and_the_anchor(
         _kill_if_alive(grandchild)
 
 
+KILLS_ITSELF_AFTER_A_SETSID_CHILD = """\
+import os, signal, subprocess, sys, time
+subprocess.Popen([sys.executable, "-c", sys.argv[1], sys.argv[2]], start_new_session=True)
+while not os.path.exists(sys.argv[2]):
+    time.sleep(0.02)
+os.kill(os.getpid(), signal.SIGKILL)
+"""
+
+
+def test_a_setsid_child_of_a_command_killed_by_sigkill_is_gone_once_run_returns(
+    tmp_path: Path,
+) -> None:
+    """#1210: a vite-like child keeps the run's tag, leaves the session and
+    ignores SIGTERM; the command that started it dies by SIGKILL."""
+    child = tmp_path / "child.pid"
+    try:
+        code = job_run.run(
+            [sys.executable, "-c", KILLS_ITSELF_AFTER_A_SETSID_CHILD, SETSID_GRANDCHILD, str(child)],
+            beat=lambda: None,
+            interval=1,
+            log=lambda _m: None,
+            started=lambda _pid: None,
+        )
+        assert code == 128 + signal.SIGKILL
+        assert child.exists(), "the child started before the command was killed"
+        assert _gone_within(int(child.read_text()), 2), "the child died with the run"
+    finally:
+        _kill_if_alive(child)
+
+
+SCOPE_SLICE = "/user.slice/user-1000.slice/user@1000.service/app.slice"
+
+
+@pytest.mark.parametrize("has_kill_file", [True, False], ids=["cgroup-kill", "no-cgroup-kill"])
+def test_a_scoped_trees_kill_round_writes_cgroup_kill_then_kills_each_member(
+    tmp_path: Path, has_kill_file: bool
+) -> None:
+    """#1210: cgroup.kill of the run's scope comes first; the SIGSTOP/SIGKILL
+    rounds follow, and stand alone where the kernel has no cgroup.kill."""
+    unit = process_tree.scope_unit("a" * 32)
+    scope_dir = tmp_path / "cgroup" / SCOPE_SLICE.lstrip("/") / unit
+    scope_dir.mkdir(parents=True)
+    kill_file = scope_dir / "cgroup.kill"
+    if has_kill_file:
+        kill_file.write_text("")
+    live = {
+        41: process_tree.Process(41, 1, "s41", False, 41, unit, f"{SCOPE_SLICE}/{unit}"),
+        42: process_tree.Process(42, 41, "s42", False, 41, unit, f"{SCOPE_SLICE}/{unit}"),
+        43: process_tree.Process(43, 1, "s43", False, 43, "session-4.scope", "/user.slice/session-4.scope"),
+    }
+    signals: list[tuple[int, int]] = []
+
+    def signal_pid(pid: int, signum: int) -> None:
+        signals.append((pid, signum))
+        if signum == signal.SIGKILL:
+            live.pop(pid, None)
+
+    tree = process_tree.Tree(
+        41, None, scan=lambda _tag: dict(live), signal_pid=signal_pid, known={},
+        scope=unit, cgroup_root=tmp_path / "cgroup",
+    )
+    tree.end(lambda _m: None)
+    if has_kill_file:
+        assert kill_file.read_text() == "1", "the scope's cgroup.kill was written"
+    else:
+        assert not kill_file.exists(), "no cgroup.kill is made where the kernel has none"
+    assert sorted(pid for pid, signum in signals if signum == signal.SIGKILL) == [41, 42]
+    assert 43 in live, "a process outside the scope is never signalled"
+
+
 @MACOS_ANCHOR
 def test_macos_a_command_past_its_budget_that_ignores_sigterm_is_killed_with_the_anchor(
     tmp_path: Path,

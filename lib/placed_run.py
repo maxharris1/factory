@@ -117,6 +117,7 @@ from lib.remote import (
     stop_worker,
 )
 from lib.remote_follow import (
+    EXITED,
     FOLLOW_GRACE_SECONDS,
     LAUNCH_TTL_SECONDS,
     LOST,
@@ -478,6 +479,10 @@ class PlacedRun:
         deleted, since the slot holds the autostart claim and run token
         that keep other callers from finishing the job (#99 round 2), or
         while it stays held.
+
+        A worker that still runs gets SIGTERM; one that ignores it gets
+        SIGKILL when its harness exited, was cancelled or is gone (#1210),
+        never when the link to its device was lost.
         """
         job_id = self.placement.job_id
         if self.requeued:
@@ -491,13 +496,13 @@ class PlacedRun:
         end = self.follow_end
         fence = end is None or end.kind != REFUSED or end.in_transit
         status = check_worker(self.transport, self.target, fence=fence)
-        cancelled = end is not None and end.kind == STOPPED
+        ended = end is not None and end.kind in (EXITED, WORKER_GONE, STOPPED)
         checks = 0
         while status == RUNNING and checks < STOP_CHECKS:
             if checks == 0:
                 self.log(f"job {job_id} worker still runs on {self.device.name}; stopping it")
                 stop_worker(self.transport, self.target)
-            elif cancelled and checks == KILL_CHECK:
+            elif ended and checks == KILL_CHECK:
                 self.log(f"job {job_id} worker ignored SIGTERM on {self.device.name}; killing it")
                 stop_worker(self.transport, self.target, kill=True)
             self.sleep(STOP_PAUSE_SECONDS)

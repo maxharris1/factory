@@ -29,6 +29,7 @@ import pytest
 
 from lib import remote
 from lib.device_monitor import DeviceMonitor
+from lib.worktrees import pid_alive
 from tests.test_remote_start import (
     Ssh,
     config_of,
@@ -620,10 +621,11 @@ def test_darwin_remote_job_runs_and_releases_its_slot_once_the_worker_is_gone(
     assert state(queue, job_id) == "running"  # it ran: no unstarted requeue
 
 
-def test_darwin_remote_child_left_in_the_group_is_stopped_before_the_slot_is_released(
+def test_darwin_remote_child_left_in_the_group_is_gone_before_the_slot_is_released(
     tmp_path: Path,
 ) -> None:
-    """Codex PR #129 r3: as on Linux, the keeper ties the leaderless group to the start."""
+    """Codex PR #129 r3: as on Linux, the keeper ties the leaderless group to the
+    start, so #1210's wrapper kills the child before it writes `exit`."""
     machines, queue, pool, job_id, ssh = remote_setup(tmp_path, "codex")
     mac = Mac(tmp_path)
     child_pid = tmp_path / "child.pid"
@@ -638,8 +640,7 @@ def test_darwin_remote_child_left_in_the_group_is_stopped_before_the_slot_is_rel
         _, err = proc.communicate(timeout=60)
         child = int(wait_file(child_pid))
         assert proc.returncode == 0, err
-        assert "stopping it" in err, err  # the leftover child was found running
-        assert wait_gone(child)
+        assert not pid_alive(child, None), "the leftover child died before orch job run returned"
         assert pool.placement(job_id) is None, err
     finally:
         kill_quietly(child)

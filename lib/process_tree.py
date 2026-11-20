@@ -15,14 +15,16 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 from lib.job_state import KILL_GRACE_SECONDS
 
 # #199 r1: every process of a local run carries this tag in its environment.
 RUN_TAG_ENV = "ORCH_RUN_TAG"
 CONTAIN_SECONDS = 2.0
+CGROUP_ROOT = Path("/sys/fs/cgroup")
 
 Log = Callable[[str], None]
 
@@ -39,6 +41,7 @@ class Process:
     tagged: bool
     group: int | None = None
     scope: str | None = None
+    cgroup: str | None = None
 
 
 def processes(tag: str | None) -> dict[int, Process]:
@@ -47,8 +50,8 @@ def processes(tag: str | None) -> dict[int, Process]:
     From /proc where there is one, else from `ps` (macOS: no tag is read,
     so only the process tree counts there). With no tag, none is tagged.
     Each process's `group` is its session on Linux, its process group on
-    macOS (whose `ps` cannot name a session). Its `scope` (Linux) is the
-    last component of its cgroup v2 path.
+    macOS (whose `ps` cannot name a session). Its `cgroup` (Linux) is its
+    cgroup v2 path, and its `scope` that path's last component.
     """
     if os.path.isdir("/proc/self"):
         return _proc_processes(tag)
@@ -80,14 +83,15 @@ def _proc_processes(tag: str | None) -> dict[int, Process]:
                     tagged = mark in handle.read().split(b"\0")
             except OSError:
                 pass
+        cgroup = cgroup_of(int(name))
         found[int(name)] = Process(
-            int(name), int(fields[1]), fields[19], tagged, int(fields[3]), scope_of(int(name))
+            int(name), int(fields[1]), fields[19], tagged, int(fields[3]), _last(cgroup), cgroup
         )
     return found
 
 
-def scope_of(pid: int) -> str | None:
-    """The last component of pid's cgroup v2 path, None when it cannot be read."""
+def cgroup_of(pid: int) -> str | None:
+    """pid's cgroup v2 path (its `0::` line), None when it cannot be read."""
     try:
         with open(f"/proc/{pid}/cgroup", "rb") as handle:
             lines = handle.read().decode(errors="replace").splitlines()
@@ -95,8 +99,36 @@ def scope_of(pid: int) -> str | None:
         return None
     for line in lines:
         if line.startswith("0::"):
-            return line[3:].rstrip("/").rsplit("/", 1)[-1] or None
+            return line[3:].rstrip("/") or None
     return None
+
+
+def scope_of(pid: int) -> str | None:
+    """The last component of pid's cgroup v2 path, None when it cannot be read."""
+    return _last(cgroup_of(pid))
+
+
+def _last(cgroup: str | None) -> str | None:
+    return None if cgroup is None else cgroup.rsplit("/", 1)[-1] or None
+
+
+def cgroup_kill(unit: str, members: Iterable[Process], root: Path = CGROUP_ROOT) -> None:
+    """Write 1 to the cgroup.kill of scope `unit`, found from a member's cgroup path.
+
+    The kernel then kills every process in the scope at once. Nothing is
+    written when no member is in the scope or the file is absent (a kernel
+    before 5.14), or the write fails; the caller's kill rounds do the work then.
+    """
+    for process in members:
+        if process.scope != unit or process.cgroup is None:
+            continue
+        kill = root / process.cgroup.lstrip("/") / "cgroup.kill"
+        if kill.exists():
+            try:
+                kill.write_text("1")
+            except OSError:
+                pass
+        return
 
 
 def scope_unit(tag: str) -> str:
@@ -221,7 +253,8 @@ class Tree:
     belongs to it: the root is the run's anchor (#846, lib/job_run.py), which
     outlives every process that names it until the kill round. `responsible` returns None for a process that is
     gone or not this user's, and raises ProcessesUnknown when it cannot say.
-    With `scope`, every process in that systemd scope belongs to it.
+    With `scope`, every process in that systemd scope belongs to it, and each
+    kill round first writes the scope's cgroup.kill under `cgroup_root` (#1210).
     With `session`, a process whose `group` it is belongs to it while a member
     is in that session: a session number is reused once its last process
     exits, so it names the run only alongside a member proven otherwise.
@@ -244,6 +277,7 @@ class Tree:
         known: Mapping[int, str] | None = None,
         session: int | None = None,
         scope: str | None = None,
+        cgroup_root: Path = CGROUP_ROOT,
     ):
         self.root = root
         self.responsible = responsible
@@ -257,6 +291,7 @@ class Tree:
         self.foreign: set[int] = set()
         self.session = session
         self.scope = scope
+        self.cgroup_root = cgroup_root
 
     def track(self) -> dict[int, Process]:
         """Look again: the run's live processes, the root's own process included."""
@@ -338,8 +373,11 @@ class Tree:
             time.sleep(0.05)
 
     def kill_round(self) -> dict[int, Process]:
-        """Stop every member, look again until none is new, kill them all; the members."""
+        """Kill the scope's cgroup, then stop every member, look again until none
+        is new, and kill them all; the members."""
         members = self.track()
+        if self.scope is not None:
+            cgroup_kill(self.scope, members.values(), self.cgroup_root)
         stopped: set[int] = set()
         while set(members) - stopped:
             for pid in set(members) - stopped:
