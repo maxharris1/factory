@@ -37,7 +37,9 @@ def lead(job: Job, facts: dict) -> Lead:
         "criteria as `- ac-<n>: ...` lines, its expected lines as `Estimate: <n>`, and "
         "`Depends on: part <k>` naming the earlier parts it builds on, or `Depends on: none`. "
         "A part with no `Depends on:` line depends on the part before it. "
-        "Such a plan does not start the build: it waits for Max, who answers or splits the ticket.",
+        "Such a plan does not start the build. On a GitHub-ticket repo the dispatcher files each "
+        "part of a split it can parse as a ticket and closes this one. A split it cannot parse "
+        "waits for Max, who answers or splits the ticket.",
         f"5. Post the plan handoff below with `round={facts['plan_round']}/2`: "
         "`ac=met` when every criterion is mapped, `ac=unmet` when one is not. With `ac=unmet`, "
         "name the unmapped criterion as `unsat=<ac-n>`; leave `unsat=` out otherwise.",

@@ -194,6 +194,7 @@ CHART_TRANSITIONS = frozenset(
         ("plan-check", "building"),
         ("plan-check", "stuck"),
         ("plan-check", "waiting-max"),
+        ("plan-check", "abandoned"),
         ("building", "review"),
         ("building", "building"),
         ("building", "stuck"),
