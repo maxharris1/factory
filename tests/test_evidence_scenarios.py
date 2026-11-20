@@ -4,6 +4,7 @@ from dataclasses import replace
 
 import pytest
 
+from lib.brief.common import LIVE_SECTION_CUTOFF
 from lib.dispatcher import Comment
 from lib.evidence.criteria import Criterion
 from lib.evidence.scenarios import (
@@ -13,9 +14,12 @@ from lib.evidence.scenarios import (
     NotLive,
     Scenario,
     from_plan,
+    live_section_refusal,
     qa_scenarios,
 )
 from lib.journeys import Journey, QaCheck, QaPlan
+
+CUTOFF = LIVE_SECTION_CUTOFF.timestamp()
 
 PLAN_HEADER = "<!-- orch:v1 kind=plan from=claude-bot role=builder ac=met round=1/2 -->"
 READY_HEADER = "<!-- orch:v1 kind=ready from=claude-bot role=builder head=" + "a" * 40 + " -->"
@@ -350,3 +354,47 @@ def test_a_ticket_that_adds_a_journey_keeps_its_scenarios_out_of_base_regression
 def test_journeys_with_no_qa_criteria_give_no_scenarios() -> None:
     plan = comment("10", PLAN_HEADER + "\n" + ONE_SCENARIO.format(n=1), 2.0)
     assert qa_scenarios(brief(), (Criterion("ac-1", "no tag"),), [plan]) == LiveScenarios(source_url=brief().url)
+
+
+READY_BODY = f"{READY_HEADER}\nWhat changed.\n\n{ONE_SCENARIO.format(n=1)}"
+
+
+@pytest.mark.parametrize("body", [PLAN_BODY, READY_BODY])
+def test_a_section_posted_just_before_the_cutoff_is_read(body: str) -> None:
+    found = qa_scenarios(None, None, [comment("1", body, CUTOFF - 1)])
+    assert isinstance(found, LiveScenarios)
+    assert found.scenarios
+    assert found.source_url == "https://github.com/o/r/issues/1#issuecomment-1"
+
+
+@pytest.mark.parametrize("body", [PLAN_BODY, READY_BODY])
+def test_a_section_posted_at_the_cutoff_is_ignored(body: str) -> None:
+    assert qa_scenarios(None, None, [comment("1", body, CUTOFF)]) == LiveScenarios()
+
+
+def test_a_ready_before_the_cutoff_is_read_under_a_plan_after_it() -> None:
+    found = qa_scenarios(None, None, [comment("1", READY_BODY, CUTOFF - 1), comment("2", PLAN_BODY, CUTOFF)])
+    assert found == LiveScenarios(scenarios=(opens(1),), source_url="https://github.com/o/r/issues/1#issuecomment-1")
+
+
+@pytest.mark.parametrize(
+    ("body", "created_at", "refused"),
+    [
+        ("## Plan\nNo live scenarios.\n", CUTOFF, False),
+        ("```\n## Verify, live\n- qa-1 (ac-1): x Pass: y\n```\n", CUTOFF, False),
+        ("## Verify, live\n\n## Risks\n", CUTOFF, True),
+        ("Run ```npm test``` first.\n\n## Verify, live\n- qa-1 (ac-1): x Pass: y\n", CUTOFF, True),
+        ("```npm test```\n\n## Verify, live\n- qa-1 (ac-1): x Pass: y\n", CUTOFF, True),
+        ("~~~ not `closed`\n## Verify, live\n~~~\n", CUTOFF, False),
+        (ONE_SCENARIO.format(n=1), CUTOFF - 1, False),
+    ],
+)
+def test_live_section_refusal(body: str, created_at: float, refused: bool) -> None:
+    reason = live_section_refusal(body, created_at)
+    assert (reason is not None) == refused
+    assert reason is None or "Features:" in reason
+
+
+def test_an_inline_triple_backtick_span_does_not_hide_the_section() -> None:
+    body = f"{PLAN_HEADER}\n```npm test```\n\n{ONE_SCENARIO.format(n=1)}"
+    assert qa_scenarios(None, None, [comment("1", body, CUTOFF - 1)]).scenarios == (opens(1),)

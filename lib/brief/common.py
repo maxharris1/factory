@@ -495,7 +495,12 @@ _LIVE_ASK = {
 }
 
 
-def live_lines(where: str) -> list[str]:
+LIVE_SECTION_CUTOFF = datetime(2026, 12, 15, tzinfo=timezone.utc)
+
+
+def live_lines(where: str, queued_at: float) -> list[str]:
+    if queued_at >= LIVE_SECTION_CUTOFF.timestamp():
+        return []
     return [
         f"{_LIVE_ASK[where]}: the live scenarios a QA agent will run against the real UI, each with "
         "its pass test written now, before the code exists. Its shape, with placeholder names:",
