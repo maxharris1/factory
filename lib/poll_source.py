@@ -15,7 +15,7 @@ import threading
 import time
 from bisect import bisect_left, bisect_right
 from collections import Counter
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -156,6 +156,7 @@ GH_CALL_TIMEOUT_SECONDS = 20.0
 GH_CALL_ATTEMPTS = 3
 GH_RETRY_BACKOFF_SECONDS = 2.0
 CACHE_REPLAY_SLACK_SECONDS = 2.0
+GH_CACHE_ENTRIES = 512
 READ_DEADLINE_SECONDS = 30.0
 TRACKED_READ_BUDGET_SECONDS = 120.0
 CYCLE_ERROR_DETAILS = 5
@@ -280,6 +281,10 @@ _NUMBERED_PART = re.compile(r"[^/ ]*[0-9][^/ ]*")
 _BRANCH_TAIL = re.compile(r"([ /](?:heads|compare)/).+")
 _REPO_ROUTE = re.compile(r"repos/([^/?]+/[^/?]+)")
 _TICKET_ROUTE = re.compile(r"repos/[^/?]+/[^/?]+/(?:issues|pulls)/([0-9]+)")
+_WHITESPACE = re.compile(r"\s*")
+_GO_DURATION_PART = re.compile(r"([0-9]+(?:\.[0-9]*)?|\.[0-9]+)(ns|us|µs|ms|s|m|h)")
+_GO_DURATION = re.compile(f"(?:{_GO_DURATION_PART.pattern})+")
+_GO_UNIT_SECONDS = {"ns": 1e-9, "us": 1e-6, "µs": 1e-6, "ms": 1e-3, "s": 1.0, "m": 60.0, "h": 3600.0}
 _GH_READ_SUBCOMMANDS = (("run", "view"),)
 _REVIEW_ACTIONS = tuple(name for name in vars(ReviewActions) if not name.startswith("_"))
 
@@ -556,6 +561,7 @@ class LivePollSource:
         self._head_read_last_used: dict[tuple[str, str, str], float] = {}
         self._linear_issue_cache: dict[str, dict[str, Any] | None] = {}
         self._etag_cache: dict[tuple[str, ...], tuple[str, str]] = {}
+        self._gh_cache_expiry: dict[tuple[str, ...], float] = {}
         self._last_reads: dict[tuple[str, str], LastRead] = {}
         self._linear_branches: dict[str, str] = {}
         self._linear_branch_pulls: dict[str, str | None] = {}
@@ -2321,19 +2327,10 @@ class LivePollSource:
 
     def _gh_pages(self, endpoint: str) -> list[object]:
         text = self._gh_call("--paginate", endpoint)
-        decoder = json.JSONDecoder()
-        pages: list[object] = []
-        index = 0
-        while index < len(text):
-            while index < len(text) and text[index].isspace():
-                index += 1
-            if index == len(text):
-                break
-            try:
-                page, index = decoder.raw_decode(text, index)
-            except json.JSONDecodeError as exc:
-                raise PollSourceError("gh returned malformed JSON") from exc
-            pages.append(page)
+        try:
+            pages = list(_json_documents(text))
+        except json.JSONDecodeError as exc:
+            raise PollSourceError("gh returned malformed JSON") from exc
         if not pages:
             raise PollSourceError("gh returned no JSON")
         return pages
@@ -2450,12 +2447,13 @@ class LivePollSource:
                         f"{route} could not run: {type(exc).__name__}"
                     ) from exc
                 else:
-                    self._observe_quota(_call_route(argv), result, started_wall)
+                    self._observe_quota(argv, result, started_wall)
                     return result
                 self.sleep(pause)
                 attempt += 1
 
-    def _observe_quota(self, route: str, result: GhResult, started_wall: float) -> None:
+    def _observe_quota(self, argv: list[str], result: GhResult, started_wall: float) -> None:
+        route = _call_route(argv)
         status = _status_code(result.stderr)
         headers: dict[str, str] = {}
         if result.stdout.startswith("HTTP/"):
@@ -2463,6 +2461,10 @@ class LivePollSource:
                 status, headers, _ = _included_response(result.stdout)
             except PollSourceError:
                 pass
+        cacheable = result.returncode == 0 or (
+            status is not None and status < 500 and status != 403
+        )
+        replayed = self._replayed_from_gh_cache(argv, cacheable, started_wall)
         own = _rate_window(
             headers.get("x-ratelimit-limit"),
             headers.get("x-ratelimit-remaining"),
@@ -2471,7 +2473,11 @@ class LivePollSource:
         if own is not None:
             self._rate_window = _merged_window(self._rate_window, own)
         if self.cycle_clock is not None:
-            self.cycle_clock.add_call(route, _call_kind(route, headers, status, started_wall))
+            self.cycle_clock.add_call(
+                route,
+                _call_kind(route, headers, status, started_wall, replayed),
+                _request_count(argv, result),
+            )
             if own is not None:
                 window = self._rate_window
                 self.cycle_clock.note_core(window.remaining, window.limit, window.reset_epoch)
@@ -2496,6 +2502,25 @@ class LivePollSource:
             f"github throttle: {http}rate limit on {route}{core}; "
             f"github reads paused {minutes}m{secs:02d}s until {until} ET ({basis})"
         )
+
+    def _replayed_from_gh_cache(
+        self, argv: Sequence[str], cacheable: bool, started_wall: float
+    ) -> bool:
+        cached = _gh_cache_key(argv)
+        if cached is None:
+            return False
+        key, ttl = cached
+        if self._gh_cache_expiry.get(key, 0.0) > started_wall:
+            return True
+        if cacheable:
+            if len(self._gh_cache_expiry) >= GH_CACHE_ENTRIES:
+                self._gh_cache_expiry = {
+                    k: expiry
+                    for k, expiry in self._gh_cache_expiry.items()
+                    if expiry > started_wall
+                }
+            self._gh_cache_expiry[key] = started_wall + ttl
+        return False
 
     def _quota_wait(self, retry_after: str | None) -> tuple[float, str]:
         try:
@@ -2649,17 +2674,74 @@ def _call_route(argv: Sequence[str]) -> str:
 
 
 def _call_kind(
-    route: str, headers: Mapping[str, str], status: int | None, started_wall: float
+    route: str,
+    headers: Mapping[str, str],
+    status: int | None,
+    started_wall: float,
+    replayed: bool,
 ) -> CallKind:
     if route.endswith(" graphql"):
         return "graphql"
     try:
-        sent = parsedate_to_datetime(headers.get("date", "")).timestamp()
-    except (TypeError, ValueError):
-        sent = started_wall
-    if sent < started_wall - CACHE_REPLAY_SLACK_SECONDS:
+        sent = parsedate_to_datetime(headers["date"]).timestamp()
+        replayed = sent < started_wall - CACHE_REPLAY_SLACK_SECONDS
+    except (KeyError, TypeError, ValueError):
+        pass
+    if replayed:
         return "cached"
     return "304" if status == 304 else "billed"
+
+
+def _json_documents(text: str) -> Iterator[object]:
+    decoder = json.JSONDecoder()
+    index = _WHITESPACE.match(text).end()
+    while index < len(text):
+        document, index = decoder.raw_decode(text, index)
+        yield document
+        index = _WHITESPACE.match(text, index).end()
+
+
+def _request_count(argv: Sequence[str], result: GhResult) -> int:
+    if "--paginate" not in argv:
+        return 1
+    pages = 0
+    try:
+        for _ in _json_documents(result.stdout):
+            pages += 1
+    except json.JSONDecodeError:
+        pass
+    return max(1, pages + (result.returncode != 0))
+
+
+def _gh_cache_key(argv: Sequence[str]) -> tuple[tuple[str, ...], float] | None:
+    """gh keys its cache on the request alone, ignoring --include and If-None-Match."""
+    if "--cache" not in argv:
+        return None
+    key: list[str] = []
+    ttl = None
+    index = 0
+    while index < len(argv):
+        part = argv[index]
+        value = argv[index + 1] if index + 1 < len(argv) else ""
+        if part == "--cache":
+            ttl = _go_duration(value)
+            index += 2
+        elif part == "-H" and value.lower().startswith("if-none-match:"):
+            index += 2
+        else:
+            if part != "--include":
+                key.append(part)
+            index += 1
+    return None if ttl is None else (tuple(key), ttl)
+
+
+def _go_duration(text: str) -> float | None:
+    if not _GO_DURATION.fullmatch(text):
+        return None
+    return sum(
+        float(amount) * _GO_UNIT_SECONDS[unit]
+        for amount, unit in _GO_DURATION_PART.findall(text)
+    )
 
 
 def _gh_ticket(argv: Sequence[str]) -> str:

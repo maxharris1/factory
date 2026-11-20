@@ -49,13 +49,13 @@ class CallLedger:
     graphql: int = 0
     core: tuple[int, int, float] | None = None
 
-    def add(self, route: str, kind: CallKind) -> None:
+    def add(self, route: str, kind: CallKind, count: int = 1) -> None:
         if kind == "graphql":
-            self.graphql += 1
+            self.graphql += count
         elif kind == "billed":
-            self.billed[route] += 1
+            self.billed[route] += count
         else:
-            self.free[kind] += 1
+            self.free[kind] += count
 
     def summary(self, now: float) -> str:
         if not (self.billed or self.free or self.graphql):
@@ -134,8 +134,8 @@ class CycleClock:
         finally:
             self.add_source(name, self.wall() - began)
 
-    def add_call(self, route: str, kind: CallKind) -> None:
-        self._calls.add(route, kind)
+    def add_call(self, route: str, kind: CallKind, count: int = 1) -> None:
+        self._calls.add(route, kind, count)
 
     def note_core(self, remaining: int, limit: int, reset_epoch: float) -> None:
         self._calls.core = (remaining, limit, reset_epoch)
