@@ -1411,6 +1411,122 @@ def test_a_failed_main_read_files_and_retires_nothing_and_green_ends_the_streak(
     assert main_fixes(github) == [900, 901]
 
 
+UNTRUSTED_ORCH = GITHUB_ORCH.replace(
+    "      label: factory:ready\n", "      label: factory:ready\n      trusted: [teammate]\n"
+)
+
+
+def green_main(github: FakeGitHub) -> None:
+    github.main_checks[MAIN] = {"test (2/3)": BaseCheck("test (2/3)", "success", "950", "1", "d" * 40)}
+
+
+def unfed_main_fix(tmp_path: Path, **kwargs):
+    now = [10_000.0]
+    feeder, _, github, _ = make_feeder(
+        tmp_path, orch=UNTRUSTED_ORCH, factory_text=REQUIRED_MD, now=now, **kwargs
+    )
+
+    def poll() -> int:
+        now[0] += 60
+        return feeder.feed_once().errors
+
+    red_main(github)
+    assert poll() == 0
+    assert main_fixes(github) == [900]
+    assert "900" not in rows(tmp_path / "orch.db")
+    green_main(github)
+    return github, poll
+
+
+def test_green_main_closes_a_never_fed_main_fix_with_one_comment(tmp_path: Path) -> None:
+    github, poll = unfed_main_fix(tmp_path)
+
+    assert poll() == 0
+    assert poll() == 0
+
+    assert github.filed[MAIN[0], 900]["state"] == "closed"
+    [comment] = issue_comments(github)
+    assert "`main` is green" in comment
+    assert main_fix_rows(tmp_path / "orch.db") == [("closed", 900)]
+
+
+def test_green_main_closes_a_main_fix_still_waiting_for_capacity(tmp_path: Path) -> None:
+    now = [10_000.0]
+    feeder, queue, github, _ = make_feeder(tmp_path, box=1, factory_text=REQUIRED_MD, now=now)
+    queue.enqueue(JobRequest(repo="other/repo", ticket_id="r", action="build",
+                             recipient="claude", source_comment_id="r", timeout_seconds=600),
+                  dedupe_key="r")
+    DevicePool(queue, feeder.machines).claim("claude")
+    red_main(github)
+    feeder.feed_once()
+    assert rows(tmp_path / "orch.db")["900"]["state"] == "waiting-capacity"
+    green_main(github)
+    now[0] += 60
+
+    assert feeder.feed_once().errors == 0
+
+    assert github.filed[MAIN[0], 900]["state"] == "closed"
+    assert len(issue_comments(github)) == 1
+    assert main_fix_rows(tmp_path / "orch.db") == [("closed", 900)]
+
+
+def test_green_main_leaves_a_fed_main_fix_open_with_no_comment(tmp_path: Path) -> None:
+    now = [10_000.0]
+    feeder, _, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD, now=now)
+    red_main(github)
+    feeder.feed_once()
+    assert rows(tmp_path / "orch.db")["900"]["state"] == "fed"
+    green_main(github)
+    for _ in range(2):
+        now[0] += 60
+        assert feeder.feed_once().errors == 0
+
+    assert github.filed[MAIN[0], 900]["state"] == "open"
+    assert issue_comments(github) == []
+    assert main_fix_rows(tmp_path / "orch.db") == [("closed", 900)]
+
+
+def test_an_unreadable_issue_state_on_green_closes_nothing_until_it_reads(tmp_path: Path) -> None:
+    github, poll = unfed_main_fix(tmp_path)
+
+    def unreadable(repo: str, number: int) -> str:
+        raise RuntimeError("issue unreadable")
+
+    github.issue_state = unreadable
+    poll()
+    assert github.filed[MAIN[0], 900]["state"] == "open"
+    assert issue_comments(github) == []
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
+    del github.issue_state
+
+    assert poll() == 0
+    assert github.filed[MAIN[0], 900]["state"] == "closed"
+    assert main_fix_rows(tmp_path / "orch.db") == [("closed", 900)]
+
+
+def test_a_failure_between_the_close_comment_and_the_close_leaves_one_comment(
+    tmp_path: Path,
+) -> None:
+    github, poll = unfed_main_fix(tmp_path)
+    close = github.close_issue
+
+    def comment_posted_then_fail(*args: object) -> None:
+        raise RuntimeError("lost the PATCH")
+
+    github.close_issue = comment_posted_then_fail
+    assert poll() == 1
+    assert len(issue_comments(github)) == 1
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
+    github.close_issue = close
+
+    assert poll() == 0
+    assert poll() == 0
+
+    assert github.filed[MAIN[0], 900]["state"] == "closed"
+    assert len(issue_comments(github)) == 1
+    assert main_fix_rows(tmp_path / "orch.db") == [("closed", 900)]
+
+
 def red_head(github: FakeGitHub, n: int) -> str:
     head = f"{n:x}" * 40
     red_main(github, head=head[:40], run_id=str(900 + n))
