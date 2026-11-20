@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import socket
 import socketserver
@@ -22,6 +23,7 @@ from lib.orch_yml import LinearConfig, OrchConfig, Project
 from lib.poll_source import (
     HANG_STRIKES,
     HTTPResult,
+    LINEAR_STATES_QUERY,
     LivePollSource,
     PollCycleError,
     RetryablePollSourceError,
@@ -129,8 +131,9 @@ def test_a_hanging_gh_read_ends_the_cycle_within_the_bound_and_is_read_next_cycl
         "timed-out reads; read again next cycle"
     ]
     with dispatcher._connect() as connection:
-        errored = {row[0] for row in connection.execute("SELECT ticket_id FROM poll_errors")}
-    assert set(GITHUB) <= errored
+        errors = [row[0] for row in connection.execute("SELECT error FROM poll_errors")]
+    assert len(errors) == HANG_STRIKES + 1, errors
+    assert sum("skipped for the rest of this cycle" in error for error in errors) == 1
 
     hanging[0] = False
     dispatcher.poll_once(source)
@@ -164,7 +167,7 @@ def test_a_hanging_linear_read_ends_the_cycle_within_the_bound_and_github_goes_o
 
     began = time.monotonic()
     try:
-        with pytest.raises(PollCycleError, match="acme/linear x4"):
+        with pytest.raises(PollCycleError, match=r"recorded 2 source error\(s\): linear x2;"):
             dispatcher.poll_once(source)
     finally:
         never.set()
@@ -610,3 +613,74 @@ def test_an_address_whose_socket_cannot_be_made_falls_through_to_the_next(
         result = post_json("http://dual-stack.invalid/graphql", {}, b"{}", DEADLINE)
 
     assert result.status == 200
+
+
+def test_a_linear_hang_trip_records_its_timeouts_and_one_trip_row_and_defers_the_rest(
+    tmp_path: Path,
+) -> None:
+    keys = tuple(f"AUT-{number}" for number in range(1, 63))
+    dispatcher = tracked_dispatcher(
+        tmp_path, [("acme/linear", key, "linear") for key in keys]
+    )
+    never = threading.Event()
+    hanging = [True]
+    linear_calls: list[float] = []
+
+    def transport(url, headers, body, timeout):
+        request = json.loads(body)
+        if request["query"] == LINEAR_STATES_QUERY:
+            nodes = [
+                {"identifier": f"AUT-{number}", "state": {"name": "Doing", "type": "started"}}
+                for number in request["variables"]["numbers"]
+            ]
+            return HTTPResult(200, json.dumps({"data": {"issues": {"nodes": nodes}}}))
+        linear_calls.append(timeout)
+        if hanging[0]:
+            never.wait()
+        return HTTPResult(200, HEALTHY.decode())
+
+    source = LivePollSource(
+        mixed_config(),
+        environ={"LINEAR_KEY": "key"},
+        gh_runner=FakeGh(FACTORY.format(tickets="github", ship="merge")),
+        linear_transport=transport,
+        error_sink=dispatcher.record_poll_error,
+        deferral_sink=dispatcher.record_poll_deferral,
+        read_deadline_seconds=DEADLINE,
+    )
+    clock = CycleClock()
+    dispatcher.cycle_clock = clock
+    clock.start()
+    try:
+        with pytest.raises(PollCycleError) as raised:
+            dispatcher.poll_once(source)
+    finally:
+        never.set()
+    line = clock.end()
+
+    with dispatcher._connect() as connection:
+        rows = connection.execute(
+            "SELECT error FROM poll_errors WHERE repo IN ('linear', 'acme/linear')"
+        ).fetchall()
+        deferrals = [row[0] for row in connection.execute("SELECT detail FROM poll_deferrals")]
+    trip = f"linear skipped for the rest of this cycle after {HANG_STRIKES} timed-out reads"
+    skipped = len(keys)
+    assert len(linear_calls) == HANG_STRIKES
+    assert len(rows) <= HANG_STRIKES + 1, rows
+    assert sum(trip in error for (error,) in rows) == 1, rows
+    assert str(raised.value).startswith("poll cycle recorded 3 source error(s)"), raised.value
+    assert f"linear hang-skip {skipped}" in line, line
+    assert deferrals == [f"linear hang-skip x{skipped}"]
+
+    hanging[0] = False
+    with pytest.raises(PollCycleError):
+        dispatcher.poll_once(source)
+
+    assert len(linear_calls) > HANG_STRIKES
+    with dispatcher._connect() as connection:
+        tracked = {row[0] for row in connection.execute("SELECT ticket_id FROM tracked_tickets")}
+        trips = connection.execute(
+            "SELECT COUNT(*) FROM poll_errors WHERE error LIKE '%skipped for the rest%'"
+        ).fetchone()[0]
+    assert set(keys) <= tracked
+    assert trips == 1

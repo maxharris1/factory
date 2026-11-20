@@ -88,10 +88,12 @@ class CycleClock:
     _open: str | None = None
     _ended: tuple[float, float] | None = None
     _calls: CallLedger = field(default_factory=CallLedger)
+    _deferrals: Counter[str] = field(default_factory=Counter)
 
     def start(self) -> str:
         self._rows = []
         self._calls = CallLedger()
+        self._deferrals = Counter()
         self._parts = {}
         self._open = None
         self._ended = None
@@ -137,6 +139,9 @@ class CycleClock:
     def add_call(self, route: str, kind: CallKind, count: int = 1) -> None:
         self._calls.add(route, kind, count)
 
+    def add_deferral(self, reason: str) -> None:
+        self._deferrals[reason] += 1
+
     def note_core(self, remaining: int, limit: int, reset_epoch: float) -> None:
         self._calls.core = (remaining, limit, reset_epoch)
 
@@ -162,6 +167,13 @@ class CycleClock:
             f"orch poll: cycle end {et(ended)} ({self.last_cycle_seconds:.1f}s): "
             + ", ".join(parts)
             + self._calls.summary(ended)
+            + (
+                "; deferred " + ", ".join(
+                    f"{reason} {count}" for reason, count in sorted(self._deferrals.items())
+                )
+                if self._deferrals
+                else ""
+            )
         )
 
     def between(self, asked: float) -> str | None:

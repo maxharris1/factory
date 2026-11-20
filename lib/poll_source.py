@@ -232,6 +232,14 @@ class QuotaDeferred(RetryablePollSourceError):
     pass
 
 
+class HangSkipped(RetryablePollSourceError):
+    def __init__(self, service: str) -> None:
+        super().__init__(
+            f"{service} skipped for the rest of this cycle after {HANG_STRIKES} timed-out reads"
+        )
+        self.service = service
+
+
 @dataclass(frozen=True)
 class RateWindow:
     limit: int
@@ -2639,10 +2647,7 @@ class LivePollSource:
 
     def _check_hangs(self, service: str) -> None:
         if self._hangs.get(service, 0) >= HANG_STRIKES:
-            raise RetryablePollSourceError(
-                f"{service} skipped for the rest of this cycle after "
-                f"{HANG_STRIKES} timed-out reads"
-            )
+            raise HangSkipped(service)
 
     def _hung(self, service: str) -> None:
         self._hangs[service] = self._hangs.get(service, 0) + 1
@@ -2655,6 +2660,8 @@ class LivePollSource:
     def _defer(self, reason: str) -> None:
         """A budget or page-limit cutoff is expected load shedding, not an error."""
         self._cycle_deferrals[reason] = self._cycle_deferrals.get(reason, 0) + 1
+        if self.cycle_clock is not None:
+            self.cycle_clock.add_deferral(reason)
 
     def _record(self, repo: str, ticket_id: str, exc: Exception) -> None:
         if isinstance(exc, _BudgetSpent):
@@ -2662,6 +2669,11 @@ class LivePollSource:
         if isinstance(exc, QuotaDeferred):
             self._defer("github quota")
             return
+        if isinstance(exc, HangSkipped):
+            skips = f"{exc.service} hang-skip"
+            self._defer(skips)
+            if self._cycle_deferrals[skips] > 1:
+                return
         reason = _safe_reason(exc)
         for name in self.config.secret_env_names:
             value = self.environ.get(name)
