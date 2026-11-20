@@ -92,14 +92,14 @@ def review_rules(facts: dict) -> str:
 
 
 CONTAINER_RULE = "Label each container or compose stack `factory.job=$ORCH_JOB_ID` and remove it in an EXIT trap."
+LOAD_RULE = "Run JS tests with `--maxWorkers=2` and one typecheck at a time."
 SECRET_RULE = "Never read credentials, runner tokens, `.env`, `auth.json`, `.runner`, `.credentials*` or `FACTORY_WEBHOOK_*` values."
 
 
 def rules(remote_device: str | None = None, *, follow_ups: bool = False) -> str:
     scratch = (
-        "- Put every scratch file and directory (venvs, pytest `--basetemp`, review checkouts, "
-        "comment drafts) under `$TMPDIR`. It is this job's own directory and is removed when "
-        "the job ends. Write nothing else under /tmp.\n"
+        "- Put all scratch files (venvs, pytest `--basetemp`, review checkouts, comment drafts) "
+        "under `$TMPDIR`. It is removed when the job ends. Write nothing else under /tmp.\n"
         if remote_device is None
         else ""
     )
@@ -110,6 +110,7 @@ def rules(remote_device: str | None = None, *, follow_ups: bool = False) -> str:
         f"- {SECRET_RULE}\n"
         f"{scratch}"
         f"- {CONTAINER_RULE}\n"
+        f"- {LOAD_RULE}\n"
         "- Message no other bot. Everything you hand on goes in the one handoff comment.\n"
         f"{follow_up}"
         "- Post only this job's handoff, or a `questions` handoff. Never post `go`, `ok`, `answers`, "
@@ -149,6 +150,7 @@ RULE_PHRASES = {
     "rule-secrets": SECRET_RULE,
     "rule-scratch": "under `$TMPDIR`.",
     "rule-containers": "`factory.job=$ORCH_JOB_ID`",
+    "rule-load": LOAD_RULE,
     "rule-one-channel": "Message no other bot.",
     "rule-no-follow-up-fixes": "Builders do not fix `[follow-up]` findings.",
     "rule-post-only": "Post only this job's handoff, or a `questions` handoff.",
