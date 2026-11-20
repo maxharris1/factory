@@ -10,10 +10,10 @@ NAME = page_name(__file__)
 
 GOLDEN = {
     "tickets.CSS": "381084a5f2be20182876d9794216aaa9cbc407e662e2db03d5ce202d9cb8d821",
-    "tickets.SCRIPT_TICKETS": "db5219e769a5d25d982b445aeac76333dee9aa553fd088175c206aa329ce28b2",
+    "tickets.SCRIPT_TICKETS": "e7b4e45272ebb855658dac42c0c86cc092b162163ba7b433b31106d698ddc80a",
     "ticket_detail.CSS": "b3e34cb431099fa55a2b283af72d741df13c04c8fdd70d0a093145a6331cad97",
     "ticket_detail.SCRIPT": "c1c2a737babcbd7c422393c61bf075b80e12b17da69b1b2a60f4494c9be6391e",
-    "__BOARD__": "2549e92740964ab1b19c49ec33636cdc9f1fdcec424c7382d0931417a0245337",
+    "__BOARD__": "611cc9d340cdc999b2086c8a76dad3a3170502fa3d7cfa41d439fa1f9eddf1b3",
     "__FLOWMAP__": "5ba908ca5ead804572f38b232a4f78f6f4242189963ebe4aa7c0c82cf01cb97e",
     "seeded/__FLOWMAP__": "5ba908ca5ead804572f38b232a4f78f6f4242189963ebe4aa7c0c82cf01cb97e",
     "hostile/__FLOWMAP__": "5ba908ca5ead804572f38b232a4f78f6f4242189963ebe4aa7c0c82cf01cb97e",

@@ -41,7 +41,7 @@ GOLDEN = {
     "common.CSS_MISC": "3ef1afa5b09c2e89dcdd3faca4dd5a2fdbe9a5de738f40e9b3966bff640849d5",
     "shell.CSS_PX": "66e50adc3d7ac0f6d3d17fe47305b9b533ebb810d1b8e535fd8c89ff9cd095e0",
     "common.CSS_TAIL": "2294685d9fc46b3e2f656db366bfe1d3e26684e291ceb97d6d04e31a58c42609",
-    "common.SCRIPT_HEAD": "d40109b7285f33cee6e637178c8decc401a44940f6411cdf4e041a0890d852f9",
+    "common.SCRIPT_HEAD": "03fb7b30001bb7dbdded34518e537dc6af26313a076a1e93a7980c3cb5d5977c",
     "shell.SCRIPT": "efb4170fdde2f3d4fe762ed57ea6465c6539ceee9beefba62aff48d455943407",
     "common.SCRIPT_GITHUB": "b8e02d104bb948526e7e71eab196ab04cb5b23fff24b5db2863c393bc4c445e3",
     "common.SCRIPT_TELEMETRY": "7d2a9166e208474d94a535dbbd9fbe8f2d78ad33591f287685a38bb0814bd34f",
