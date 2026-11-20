@@ -23,7 +23,8 @@ the model's context and never from what the model says.
 
 The probe opens only the canary skill, the waiter config, machines.yml, its
 run and output directories, and the harness transcripts of its own runs
-(`~/.claude/projects/<slug>/`, `$CODEX_HOME/sessions/`).
+(`~/.claude/projects/<slug>/`, `$CODEX_HOME/sessions/`, or with `--account`
+the same folders under `<home>/.factory-accounts/<id>/`).
 
 Codex record names (`spawn_agent`, the rollout layout) follow the Codex CLI
 rollout format and are provisional until a live codex-bot run on the box
@@ -52,7 +53,7 @@ from typing import Literal
 
 from lib.codex_sandbox import for_device
 from lib.device_monitor import remote_target
-from lib.harness_env import harness_env
+from lib.harness_env import account_tokens, harness_env
 from lib.machines_yml import BOT_USERS, MachinesConfig, load_machines_yml
 from lib.remote import LOGIN_SHELL, RemoteError, RemoteTarget, new_tag, ssh_argv, start_script
 from lib.waiter import WaiterError, default_harness_config, load_harness_command
@@ -134,6 +135,7 @@ class Launch:
     guarded_dirs: tuple[str, ...] = ()
     insert_at: int = 0
     cd: str | None = None
+    account_home: str | None = None
 
     @property
     def name(self) -> str:
@@ -424,13 +426,15 @@ def plan_launches(
     skill_md: str | None = None,
     only_device: str | None = None,
     plugin_dir: str | None = None,
+    account: str | None = None,
 ) -> list[Launch]:
     """One launch per enabled device x applicable style for bot's harness.
 
     homes maps a device name to the bot's home there (for the installed
     SKILL.md path); skill_md, when given, is used on every device instead.
     plugin_dir puts `--plugin-dir <plugin_dir>` in every argv, and the
-    read-path style then names the tree's own SKILL.md.
+    read-path style then names the tree's own SKILL.md. account runs every
+    launch as that signed-in account and skips a device it is not on.
     """
     harness = harness_of(bot, machines)
     if harness not in PARSERS:
@@ -446,16 +450,20 @@ def plan_launches(
             continue
         if not device.eligible(harness) or device.harnesses[harness] != bot:
             continue
+        try:
+            home = machines.account_home(device.name, harness, account) if account else None
+        except ValueError:
+            continue
         path = skill_md or str(Path(homes.get(device.name, "~"), *INSTALLED[harness]))
         for spec in STYLES:
             if harness not in spec.harnesses:
                 continue
             job_id = f"{run_id}-{harness}-{spec.style.value}"
-            env = harness_env(harness)
+            env = harness_env(harness, home)
             if device.local:
                 launches.append(
                     Launch(device.name, harness, spec.style, tuple(command), env,
-                           str(Path(local_root, job_id)), path)
+                           str(Path(local_root, job_id)), path, account_home=home)
                 )
                 continue
             target = remote_target(device, harness, job_id, new_tag())
@@ -464,7 +472,8 @@ def plan_launches(
             neutral = for_device(command)
             launches.append(
                 Launch(device.name, harness, spec.style, neutral.argv, env, target.job_dir,
-                       path, target, neutral.guarded_dirs, neutral.insert_at, neutral.cd)
+                       path, target, neutral.guarded_dirs, neutral.insert_at, neutral.cd,
+                       home)
             )
     return launches
 
@@ -488,6 +497,7 @@ def launch_argv(launch: Launch) -> list[str]:
             guarded_dirs=launch.guarded_dirs,
             insert_at=launch.insert_at,
             cd=launch.cd,
+            unset=account_tokens(launch.harness, launch.account_home),
         ),
     )
 
@@ -540,11 +550,15 @@ def codex_transcript(codex_home: Path, run_dir: str, since: float) -> Path | Non
     return newest
 
 
-def fetch_script(harness: str, run_dir: str) -> str:
-    """Under the bot's login shell, cat the one transcript of the run in run_dir."""
+def fetch_script(harness: str, run_dir: str, home: str | None = None) -> str:
+    """Under the bot's login shell, cat the one transcript of the run in run_dir.
+
+    home, an account folder, is the transcript root in place of the login's.
+    """
     if harness == "claude":
+        root = "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" if home is None else "$2"
         script = (
-            'p="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"; '
+            f'p="{root}/projects"; '
             'r=$(cd -P -- "$p" 2>/dev/null && pwd -P) || exit 3; '
             'd=$(cd -P -- "$p/$1" 2>/dev/null && pwd -P) || exit 3; '
             'case "$d" in "$r"/*) ;; *) exit 3 ;; esac; '
@@ -555,8 +569,9 @@ def fetch_script(harness: str, run_dir: str) -> str:
         )
         args = [claude_slug(run_dir)]
     else:
+        root = "${CODEX_HOME:-$HOME/.codex}" if home is None else "$2"
         script = (
-            's="${CODEX_HOME:-$HOME/.codex}/sessions"; [ -d "$s" ] || exit 3; '
+            f's="{root}/sessions"; [ -d "$s" ] || exit 3; '
             'f=$(find -H "$s" -type f -name "rollout-*.jsonl" -newer "$1" | while read -r f; do '
             'm=$(head -n 1 "$f"); '
             'printf "%s" "$m" | grep -qF -e "\\"cwd\\":\\"$1\\"" -e "\\"cwd\\": \\"$1\\"" '
@@ -565,6 +580,8 @@ def fetch_script(harness: str, run_dir: str) -> str:
             '[ -n "$f" ] && exec cat -- "$f"; exit 3'
         )
         args = [run_dir]
+    if home is not None:
+        args.append(home)
     quoted = " ".join(shlex.quote(arg) for arg in args)
     return f"exec {LOGIN_SHELL} -lc {shlex.quote(script)} skill-probe {quoted}"
 
@@ -618,29 +635,34 @@ def run_launch(
     started = clock()
     if launch.remote is None:
         Path(launch.run_dir).mkdir(parents=True, exist_ok=False)
+    dropped = account_tokens(launch.harness, launch.account_home)
     code = run(
         launch_argv(launch),
         stdin=prompt.encode("utf-8"),
         log=log_path,
         cwd=launch.run_dir if launch.remote is None else None,
-        env={**os.environ, **launch.env},
+        env={**{k: v for k, v in os.environ.items() if k not in dropped}, **launch.env},
         timeout=timeout,
     )
     note = f"timed out after {timeout:g}s" if code is None else (f"exit {code}" if code else "")
     if launch.remote is not None:
         try:
-            fetched = fetch(ssh_argv(launch.remote, fetch_script(launch.harness, launch.run_dir)))
+            script = fetch_script(launch.harness, launch.run_dir, launch.account_home)
+            fetched = fetch(ssh_argv(launch.remote, script))
         except subprocess.TimeoutExpired:
             return "", note or "transcript fetch timed out"
         text = fetched.stdout.decode("utf-8", "replace") if fetched.returncode == 0 else ""
         return text, note or ("" if text else "no transcript")
+    account = Path(launch.account_home) if launch.account_home else None
     if launch.harness == "claude":
-        base = claude_dir or Path(
+        base = account or claude_dir or Path(
             os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude"
         )
         path = claude_transcript(base, launch.run_dir)
     else:
-        base = codex_home or Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+        base = account or codex_home or Path(
+            os.environ.get("CODEX_HOME") or Path.home() / ".codex"
+        )
         path = codex_transcript(base, launch.run_dir, started - 1)
     if path is None:
         return "", note or "no transcript"
@@ -717,6 +739,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--plugin-dir",
         help="absolute pstack tree to load in place with claude --plugin-dir (Claude only)",
     )
+    run_p.add_argument(
+        "--account", help="run as this signed-in account, only on devices it is signed in on"
+    )
     run_p.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     run_p.add_argument("--dry-run", action="store_true", help="print launches; start nothing")
     render_p = sub.add_parser("render", help="print the results table as markdown")
@@ -758,9 +783,11 @@ def _run(args: argparse.Namespace) -> int:
         machines, args.bot, command.command, run_id=run_id, local_root=str(work),
         homes={d.name: str(Path.home()) for d in machines.devices if d.local},
         skill_md=args.skill_md, only_device=args.device, plugin_dir=args.plugin_dir,
+        account=args.account,
     )
     if not launches:
-        raise ProbeError(f"no enabled device runs {args.bot}")
+        signed_in = f" signed in as {args.account}" if args.account else ""
+        raise ProbeError(f"no enabled device runs {args.bot}{signed_in}")
     canary_md = _pinned_skill()
     plugin = args.plugin_dir is not None
     if plugin and any(launch.remote is None for launch in launches):

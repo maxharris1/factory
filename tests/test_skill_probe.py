@@ -9,12 +9,13 @@ import shlex
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 from lib import skill_probe as sp
-from lib.harness_env import harness_env
+from lib.harness_env import ACCOUNT_ISOLATION, harness_env
 from lib.machines_yml import load_machines_yml
 from tests.pool_helpers import LOCAL_BOX_MACHINES
 
@@ -543,6 +544,129 @@ def test_remote_claude_fetch_skips_a_newer_link_for_the_real_session(tmp_path):
     (folder / "newer.jsonl").symlink_to(outside)
     assert local_fetch("claude", home, run_dir) == '{"type":"user"}\n'
     assert remote_fetch("claude", home, run_dir).stdout == '{"type":"user"}\n'
+
+
+# A signed-in account other than the device's login (#1184)
+
+
+def account_machines(tmp_path: Path, signed_in_on: str = "box"):
+    return machines(tmp_path, (
+        "accounts:\n"
+        f"  - {{id: claude-max-2, harness: claude, signed_in_on: [{signed_in_on}]}}\n"
+        f"  - {{id: codex-max-2, harness: codex, signed_in_on: [{signed_in_on}]}}\n"
+        "devices:\n"
+        "  - name: box\n    local: true\n    slot_max: 3\n"
+        f"    home: {tmp_path}/homes/{{bot}}\n"
+        "    harnesses: {claude: claude-bot, codex: codex-bot}\n"
+        "  - name: mac\n    tailscale_name: mac.example.ts.net\n    slot_max: 2\n"
+        "    harnesses: {claude: claude-bot, codex: codex-bot}\n"
+        "    workdir_root: /Users/{bot}/factory-work\n    ssh_alias: mac-{bot}\n"
+        "    factory_root: /Users/{bot}/factory\n    home: /Users/{bot}\n"
+    ))
+
+
+def plant_transcript(harness: str, root: Path, run_dir: str, text: str, mtime: float) -> None:
+    if harness == "claude":
+        path = root / "projects" / sp.claude_slug(run_dir) / "s.jsonl"
+    else:
+        path = root / "sessions" / "2026" / "11" / "20" / "rollout-s.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    os.utime(path, (mtime, mtime))
+
+
+ISOLATION = {"claude": ("CLAUDE_CONFIG_DIR", ".claude"), "codex": ("CODEX_HOME", ".codex")}
+
+
+@pytest.mark.parametrize(("harness", "command"), [("claude", CLAUDE_CMD), ("codex", CODEX_CMD)])
+def test_local_account_run_reads_the_accounts_own_transcript(tmp_path, monkeypatch, harness,
+                                                             command):
+    bot, account = f"{harness}-bot", f"{harness}-max-2"
+    home_var, dot_dir = ISOLATION[harness]
+    account_home = tmp_path / "homes" / bot / ".factory-accounts" / account
+    login = tmp_path / "login"
+    monkeypatch.setenv("HOME", str(login))
+    monkeypatch.setenv(home_var, str(tmp_path / "env-home"))
+    tokens = ACCOUNT_ISOLATION[harness].tokens
+    for name in tokens:
+        monkeypatch.setenv(name, "planted")
+    launch = next(l for l in sp.plan_launches(
+        account_machines(tmp_path), bot, command, run_id="skill-probe-0000",
+        local_root=str(tmp_path / "work"), homes={}, account=account,
+    ) if l.remote is None)
+    meta = json.dumps({"type": "session_meta", "payload": {"cwd": launch.run_dir}}) + "\n"
+    seen = {}
+
+    def run(argv, *, env, **_):
+        seen.update(env)
+        now = time.time()
+        plant_transcript(harness, account_home, launch.run_dir, meta + '{"mine":1}\n', now)
+        for decoy in (tmp_path / "env-home", login / dot_dir):
+            plant_transcript(harness, decoy, launch.run_dir, meta + '{"decoy":1}\n', now + 60)
+        return 0
+
+    text, note = sp.run_launch(launch, "p", timeout=5, log_path=tmp_path / "log", run=run)
+    assert (text, note) == (meta + '{"mine":1}\n', "")
+    assert seen[home_var] == str(account_home)
+    assert not [name for name in tokens if name in seen]
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex"])
+def test_account_fetch_script_cats_the_account_homes_transcript(tmp_path, harness):
+    home_var, dot_dir = ISOLATION[harness]
+    account_home = tmp_path / "it's $HOME" / ".factory-accounts" / f"{harness}-max-2"
+    login = tmp_path / "login"
+    run_dir = str(tmp_path / "jobs" / "run")
+    Path(run_dir).mkdir(parents=True)
+    os.utime(run_dir, (1, 1))
+    meta = json.dumps({"type": "session_meta", "payload": {"cwd": run_dir}}) + "\n"
+    plant_transcript(harness, account_home, run_dir, meta + '{"mine":1}\n', 1000)
+    for decoy in (tmp_path / "env-home", login / dot_dir):
+        plant_transcript(harness, decoy, run_dir, meta + '{"decoy":1}\n', 2000)
+    done = subprocess.run(
+        ["sh", "-c", sp.fetch_script(harness, run_dir, str(account_home))],
+        env={"HOME": str(login), "PATH": os.environ["PATH"], home_var: str(tmp_path / "env-home")},
+        capture_output=True, text=True, check=False,
+    )
+    assert (done.returncode, done.stdout) == (0, meta + '{"mine":1}\n')
+
+
+def test_account_launches_go_only_to_devices_it_is_signed_in_on(tmp_path):
+    launches = sp.plan_launches(
+        account_machines(tmp_path, signed_in_on="mac"), "claude-bot", CLAUDE_CMD,
+        run_id="skill-probe-0000", local_root=str(tmp_path / "work"), homes={},
+        account="claude-max-2",
+    )
+    home = "/Users/claude-bot/.factory-accounts/claude-max-2"
+    assert launches and {(l.device, l.account_home) for l in launches} == {("mac", home)}
+    script = sp.launch_argv(launches[0])[-1]
+    unsets = re.findall(r"unset ([A-Z_ ]+) \|\|", script)
+    assert unsets
+    assert all(set(ACCOUNT_ISOLATION["claude"].tokens) <= set(u.split()) for u in unsets)
+    assert f"CLAUDE_CONFIG_DIR={home}" in script
+    fetched = []
+
+    def fetch(argv):
+        fetched.append(argv)
+        return subprocess.CompletedProcess(argv, 3, b"", b"")
+
+    sp.run_launch(launches[0], "p", timeout=5, log_path=tmp_path / "log",
+                  run=lambda argv, **_: 0, fetch=fetch)
+    assert home in shlex.split(fetched[0][-1])
+
+
+def test_probe_run_account_flag_plans_the_accounts_launches(tmp_path, capsys):
+    machines_path = tmp_path / "machines.yml"
+    account_machines(tmp_path, signed_in_on="mac")
+    config = _waiter_config(tmp_path, ["claude", "-p"])
+    base = ["run", "--bot", "claude-bot", "--machines", str(machines_path),
+            "--config", str(config), "--dry-run"]
+    assert sp.main([*base, "--account", "claude-max-2"]) == 0
+    out = capsys.readouterr().out
+    assert "CLAUDE_CONFIG_DIR=/Users/claude-bot/.factory-accounts/claude-max-2" in out
+    assert "# box-" not in out and "# mac-claude-run-as" in out
+    assert sp.main(base) == 0
+    assert "factory-accounts" not in capsys.readouterr().out
 
 
 # End to end through the CLI, and the credential guard (criterion 3)
