@@ -159,6 +159,8 @@ mutation FactoryReadyForReview($issue: String!, $state: String!) {
 }
 """.strip()
 BACKOFF_SECONDS = 300.0
+SECONDARY_BACKOFF_SECONDS = 60.0
+SECONDARY_BACKOFF_MAX_SECONDS = 300.0
 RATE_RESET_GRACE_SECONDS = 5.0
 RATE_SHED_FRACTION = 0.20
 RATE_PAUSE_REMAINING = 50
@@ -654,6 +656,9 @@ class LivePollSource:
         self._backoffs: dict[Account, float] = {}
         self._rate_windows: dict[Account, RateWindow] = {}
         self._throttled = False
+        self._floor_lifted: set[Account] = set()
+        self._secondary_waits: dict[Account, float] = {}
+        self._secondary_calm_at: dict[Account, float] = {}
         self._linear_backoff_until = 0.0
         self._linear_requests = 0
         self._linear_complexity = 0
@@ -2594,7 +2599,7 @@ class LivePollSource:
         left = self._backoffs.get(account, 0.0) - self.clock()
         if left > 0:
             raise QuotaDeferred(f"GitHub rate-limit backoff is active ({left:.0f}s left)")
-        window = self._rate_windows.get(account)
+        window = self._gate_window(account)
         state = quota_state(window, self.wall())
         if state == "pause":
             if not self._throttled:
@@ -2672,6 +2677,7 @@ class LivePollSource:
         requests = _request_count(argv, result)
         if own is not None:
             self._rate_windows[account] = _merged_window(self._rate_windows.get(account), own)
+            self._floor_lifted.discard(account)
         if self.cycle_clock is not None:
             self.cycle_clock.add_call(route, kind, requests)
             if own is not None:
@@ -2682,8 +2688,14 @@ class LivePollSource:
         if result.returncode == 0 or not rate_limited(status, result.stdout, result.stderr):
             self._throttled = False
             return
-        seconds, basis = self._quota_wait(headers.get("retry-after"), account)
+        seconds, basis = self._quota_wait(
+            headers.get("retry-after"), account, f"{result.stdout}\n{result.stderr}"
+        )
         self._backoffs[account] = max(self._backoffs.get(account, 0.0), self.clock() + seconds)
+        if basis == "retry-after":
+            self._floor_lifted.add(account)
+        else:
+            self._floor_lifted.discard(account)
         if self._throttled:
             return
         self._throttled = True
@@ -2717,7 +2729,9 @@ class LivePollSource:
             self.gh_cache.keep(key, started_wall + ttl, started_wall)
         return False
 
-    def _quota_wait(self, retry_after: str | None, account: Account) -> tuple[float, str]:
+    def _quota_wait(
+        self, retry_after: str | None, account: Account, text: str
+    ) -> tuple[float, str]:
         try:
             seconds = float(retry_after)
         except (TypeError, ValueError):
@@ -2730,9 +2744,18 @@ class LivePollSource:
             self._probe_rate_window(account)
             basis = "probe"
             window = self._live_window(account)
-        if window is None:
+        if window is not None and window.remaining <= RATE_PAUSE_REMAINING:
+            return window.reset_epoch - self.wall() + RATE_RESET_GRACE_SECONDS, basis
+        if window is None and "secondary rate limit" not in text.lower():
             return BACKOFF_SECONDS, "default"
-        return window.reset_epoch - self.wall() + RATE_RESET_GRACE_SECONDS, basis
+        now = self.clock()
+        if now < self._secondary_calm_at.get(account, 0.0):
+            wait = min(2 * self._secondary_waits[account], SECONDARY_BACKOFF_MAX_SECONDS)
+        else:
+            wait = SECONDARY_BACKOFF_SECONDS
+        self._secondary_waits[account] = wait
+        self._secondary_calm_at[account] = now + wait + SECONDARY_BACKOFF_MAX_SECONDS
+        return wait, "secondary"
 
     def _spend(self, kind: CallKind, requests: int, account: Account) -> None:
         window = self._live_window(account)
@@ -2742,13 +2765,20 @@ class LivePollSource:
             )
 
     def pacing(self, base_interval: float, recent_billed: int, cycle_seconds: float) -> Pacing:
+        windows = [self._gate_window(account) for account in self._rate_windows] or [None]
         paces = [
             pace(window, self.wall(), base_interval, recent_billed, cycle_seconds)
-            for window in self._rate_windows.values() or [None]
+            for window in windows
         ]
         return max(
             paces, key=lambda p: (p.interval_seconds, p.shed_low_priority, p.reason == "pause")
         )
+
+    def _gate_window(self, account: Account) -> RateWindow | None:
+        window = self._rate_windows.get(account)
+        if account in self._floor_lifted and quota_state(window, self.wall()) == "pause":
+            return None
+        return window
 
     def _live_window(self, account: Account) -> RateWindow | None:
         window = self._rate_windows.get(account)

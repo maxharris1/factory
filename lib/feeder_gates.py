@@ -47,8 +47,9 @@ ATTENTION_CYCLE = "blocker-cycle"
 ATTENTION_CLOSED = "blocker-closed"
 ATTENTION_MISSING = "blocker-missing"
 ATTENTION_CRITICAL_PATH = "critical-path-blocker"
+ATTENTION_IDLE_BLOCKED = "idle-blocked-ready"
 WAIT_REASONS = (ATTENTION_CYCLE, ATTENTION_CLOSED, ATTENTION_MISSING)
-ATTENTION_REASONS = (*WAIT_REASONS, ATTENTION_CRITICAL_PATH)
+ATTENTION_REASONS = (*WAIT_REASONS, ATTENTION_CRITICAL_PATH, ATTENTION_IDLE_BLOCKED)
 
 FILE_PATH = re.compile(
     r"(?<![\w/.-])((?:[\w.-]+/)*[\w-][\w.-]*\.(?:py|md|mmd|yml|yaml|json|toml|ini|cfg|txt|"
@@ -227,6 +228,7 @@ def linear_status(state_type: str | None) -> RefStatus:
 class Wait:
     reason: str
     attention: str | None = None
+    open_blockers: tuple[Ref, ...] = ()
 
 
 def blocker_waits(
@@ -260,6 +262,7 @@ def blocker_waits(
             continue
         parts: list[str] = []
         attention: str | None = None
+        open_blockers: list[Ref] = []
         for blocker in sorted(
             lines.blocked_by, key=lambda item: (item.repo != ref.repo, item.sort_key())
         ):
@@ -269,6 +272,7 @@ def blocker_waits(
                 parts.append(f"{label} (status unreadable)")
             elif status.progress is Progress.OPEN:
                 parts.append(label)
+                open_blockers.append(blocker)
             elif status.progress is Progress.UNFINISHED:
                 parts.append(f"{label} ({status.detail or 'closed without finishing'})")
                 attention = ATTENTION_CLOSED
@@ -276,7 +280,7 @@ def blocker_waits(
                 parts.append(f"{label} (not found)")
                 attention = attention or ATTENTION_MISSING
         if parts:
-            waits[ref] = Wait("waiting on " + ", ".join(parts), attention)
+            waits[ref] = Wait("waiting on " + ", ".join(parts), attention, tuple(open_blockers))
     return waits
 
 

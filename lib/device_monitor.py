@@ -70,6 +70,14 @@ mistake.
 Sign-ins. After reconcile, `check_sign_ins` runs the account doctor
 (lib/account_doctor.py) on the first poll, every `INTERVAL_SECONDS` after,
 and once on the poll after reload adopts a changed machines.yml.
+
+Memory. After reconcile and before `check_sign_ins`, `check_memory` reads
+/proc/meminfo and /proc/pressure/memory on each enabled device not
+draining (#1226): on the orch host directly, on any other device in one SSH
+call, all before it opens the database. A device over lib/device_memory.py's
+limits is held `memory-wait` for `HOLD_SECONDS` from when the reads finish,
+renewed each poll; any other reading clears the hold. A read that fails, or
+a device with no /proc (macOS), fails open.
 """
 
 from __future__ import annotations
@@ -82,7 +90,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lib import account_doctor, live_settings
-from lib.device_pool import DevicePool, HeldSlot, Orphan, Placement
+from lib.device_memory import HOLD_SECONDS, READ_TIMEOUT_SECONDS, over_limit
+from lib.device_pool import (
+    DevicePool,
+    HeldSlot,
+    Orphan,
+    Placement,
+    clear_memory_hold,
+    hold_memory,
+    memory_held,
+)
 from lib.job_state import Liveness, liveness, never_started
 from lib.machines_yml import Device, MachinesConfig
 from lib.process_tree import Process, ProcessesUnknown, Tree, _responsible_pid, processes, run_tag
@@ -90,11 +107,14 @@ from lib.remote import (
     GONE,
     RUNNING,
     UNREACHABLE,
+    CaptureTransport,
     RemoteError,
     RemoteTarget,
     Transport,
+    _sh,
     check_worker,
     probe_device,
+    ssh_argv,
     stop_worker,
 )
 from lib.worktrees import pid_alive
@@ -103,6 +123,11 @@ Log = Callable[[str], None]
 OnLost = Callable[[str, str, str], None]  # job_id, device, reason
 Alive = Callable[[int | None, str | None], bool]
 SignIns = Callable[[MachinesConfig, float], object]
+Reading = tuple[str | None, str | None]
+MemoryRead = Callable[[Device, bool], Reading]
+
+_MEMORY_FILES = ("meminfo", "pressure/memory")
+_MEMORY_MARK = "#orch-memory"
 
 
 @dataclass(frozen=True)
@@ -139,6 +164,48 @@ def remote_target(
         return None
 
 
+def read_memory(
+    transport: CaptureTransport, device: Device, on_host: bool, proc: Path = Path("/proc")
+) -> Reading:
+    """Device's /proc/meminfo and /proc/pressure/memory, each None when missing."""
+    if on_host:
+        return _read_text(proc / "meminfo"), _read_text(proc / "pressure/memory")
+    target = next(
+        filter(None, (remote_target(device, harness, "memory") for harness in device.harnesses)),
+        None,
+    )
+    if target is None:
+        raise RemoteError(f"no ssh target names {device.name}")
+    script = "; ".join(
+        f'echo "{_MEMORY_MARK} {name}"; cat /proc/{name} 2>/dev/null'
+        f' || echo "{_MEMORY_MARK} missing"'
+        for name in _MEMORY_FILES
+    )
+    result = transport.call(ssh_argv(target, _sh(script)), timeout=READ_TIMEOUT_SECONDS)
+    if result.code != 0:
+        last = (result.stderr.strip().splitlines() or [""])[-1]
+        raise ConnectionError(f"exited {result.code}: {last}")
+    texts: dict[str, str | None] = {}
+    current = ""
+    for line in result.stdout.splitlines(keepends=True):
+        word = line[len(_MEMORY_MARK):].strip() if line.startswith(_MEMORY_MARK) else None
+        if word in _MEMORY_FILES:
+            current = word
+            texts[current] = ""
+        elif word == "missing":
+            texts[current] = None
+        elif (text := texts.get(current)) is not None:
+            texts[current] = text + line
+    return texts.get("meminfo"), texts.get("pressure/memory")
+
+
+def _read_text(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
 def stranded(
     device: Device, failing_since: float | None, now: float, limit: float
 ) -> str | None:
@@ -168,6 +235,7 @@ class DeviceMonitor:
         scan: Callable[[str | None], dict[int, Process]] = processes,
         machines_path: Path | None = None,
         sign_ins: SignIns | None = None,
+        memory: MemoryRead | None = None,
     ):
         self.pool = pool
         self.config = config
@@ -177,6 +245,9 @@ class DeviceMonitor:
         self.scan = scan
         self.machines_path = machines_path
         self.sign_ins = sign_ins
+        self.memory = memory
+        self._memory_held: set[str] = set()
+        self._memory_notes: dict[str, str] = {}
         self._stamp: str | None = None
         self._signed: tuple[float, str | None] | None = None
 
@@ -208,6 +279,61 @@ class DeviceMonitor:
         self._signed = (now, self._stamp)
         self.sign_ins(self.config, now)
         return True
+
+    def check_memory(self, log: Log) -> tuple[tuple[str, str], ...]:
+        """Hold each over-limit device `memory-wait`, clear the rest; the held, in order."""
+        if self.memory is None:
+            return ()
+        judged: list[tuple[str, str | None]] = []
+        for device in self.config.devices:
+            if not device.enabled or device.drain:
+                continue
+            try:
+                meminfo, pressure = self.memory(device, device.name == self.config.orch_host)
+            except Exception as exc:
+                self._memory_note(device.name, f"{type(exc).__name__}: {exc}", log)
+                judged.append((device.name, None))
+                continue
+            missing = [
+                f"/proc/{name}"
+                for name, text in zip(_MEMORY_FILES, (meminfo, pressure))
+                if text is None
+            ]
+            problem = " and ".join(missing) + " missing" if missing else None
+            self._memory_note(device.name, problem, log)
+            judged.append((device.name, over_limit(meminfo, pressure)))
+        if not judged:
+            return ()
+        now = self.pool.queue.now()
+        with self.pool.queue.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            was_held = {
+                name
+                for name, _ in judged
+                if name in self._memory_held or memory_held(connection, name, now)
+            }
+            for name, reason in judged:
+                if reason is None:
+                    clear_memory_hold(connection, name)
+                else:
+                    hold_memory(connection, name, until=now + HOLD_SECONDS, reason=reason)
+            connection.commit()
+        held = tuple((name, reason) for name, reason in judged if reason is not None)
+        for name, reason in judged:
+            if reason is not None and name not in was_held:
+                log(f"memory-wait on {name}: {reason}")
+            elif reason is None and name in was_held:
+                log(f"memory-wait off {name}")
+        self._memory_held = {name for name, _ in held}
+        return held
+
+    def _memory_note(self, name: str, problem: str | None, log: Log) -> None:
+        """Log a device's read problem once, until it changes or a good read ends it."""
+        if problem is None:
+            self._memory_notes.pop(name, None)
+        elif self._memory_notes.get(name) != problem:
+            self._memory_notes[name] = problem
+            log(f"memory read {name}: {problem}")
 
     def reconcile(self, now: float, lost_after: float, on_lost: OnLost) -> MonitorResult:
         released: list[str] = []
