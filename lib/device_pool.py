@@ -150,6 +150,7 @@ class Placement:
     worker_tag: str | None = None
     autostart_pid: int | None = None
     autostart_start: str | None = None
+    run_tag: str | None = None
     run_scope: str | None = None
     account: str | None = None
 
@@ -940,6 +941,7 @@ def _placement(row: sqlite3.Row) -> Placement:
         worker_tag=_text(row["worker_tag"]),
         autostart_pid=_int(row["autostart_pid"]),
         autostart_start=_text(row["autostart_start"]),
+        run_tag=_text(row["run_tag"]),
         run_scope=_text(row["run_scope"]),
         account=_text(row["account"]),
     )

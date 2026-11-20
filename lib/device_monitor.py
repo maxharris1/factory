@@ -36,7 +36,11 @@ whose job is no longer running (done, failed or timed out) and whose
 * a slot no worker was ever started for (no runner, or a local runner
   that died before its command, or a remote start never attempted) is
   released;
-* on the box, the slot is released once the recorded command pid is gone;
+* on the box, the slot is released once the run's tree (its tag, scope
+  and recorded worker) has no live member. For a finished job whose
+  runner is dead the tree is killed first (cgroup.kill, then the kill
+  rounds), one round per poll. A running job's tree is never scanned or
+  signalled;
 * on a remote device, the device is asked over SSH, by the start's worker
   tag (lib/remote.py). The check first fences the tag's launch, so one
   still in transit from a runner since lost can never start after it.
@@ -85,7 +89,7 @@ from __future__ import annotations
 import os
 import signal
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -102,7 +106,15 @@ from lib.device_pool import (
 )
 from lib.job_state import Liveness, liveness, never_started
 from lib.machines_yml import Device, MachinesConfig
-from lib.process_tree import Process, ProcessesUnknown, Tree, _responsible_pid, processes, run_tag
+from lib.process_tree import (
+    CGROUP_ROOT,
+    Process,
+    ProcessesUnknown,
+    Tree,
+    _responsible_pid,
+    processes,
+    run_tag,
+)
 from lib.remote import (
     GONE,
     RUNNING,
@@ -236,6 +248,7 @@ class DeviceMonitor:
         machines_path: Path | None = None,
         sign_ins: SignIns | None = None,
         memory: MemoryRead | None = None,
+        cgroup_root: Path = CGROUP_ROOT,
     ):
         self.pool = pool
         self.config = config
@@ -246,6 +259,7 @@ class DeviceMonitor:
         self.machines_path = machines_path
         self.sign_ins = sign_ins
         self.memory = memory
+        self.cgroup_root = cgroup_root
         self._memory_held: set[str] = set()
         self._memory_notes: dict[str, str] = {}
         self._stamp: str | None = None
@@ -389,7 +403,7 @@ class DeviceMonitor:
         forgotten: list[str],
     ) -> None:
         for slot in slots:
-            if self._local_gone(slot):
+            if self._local_slot_free(slot, stopped):
                 self._release(slot, released)
             elif (
                 not device.enabled
@@ -406,7 +420,7 @@ class DeviceMonitor:
         self, orphan: Orphan, now: float, stopped: list[str], forgotten: list[str]
     ) -> None:
         try:
-            tree = self._tree(orphan)
+            tree = self._tree(orphan, orphan.members)
             members = tree.track() if tree is not None else {}
             if tree is not None and members:
                 self.pool.remember_run(orphan.job_id, tree.tag, tree.known)
@@ -428,25 +442,25 @@ class DeviceMonitor:
                     continue
         stopped.append(orphan.job_id)
 
-    def _tree(self, orphan: Orphan) -> Tree | None:
-        """The lost run as its row names it: its tag, every member seen so far,
+    def _tree(self, run: Orphan | Placement, members: Mapping[int, str]) -> Tree | None:
+        """The run as its row names it: its tag, every member seen so far,
         each recorded parent still live, and its scope, else the runner's
         session; None when nothing names it."""
-        listing = self.scan(orphan.run_tag)
-        known = dict(orphan.members)
+        listing = self.scan(run.run_tag)
+        known = dict(members)
         for pid, start in (
-            (orphan.runner_pid, orphan.runner_start),
-            (orphan.worker_pid, orphan.worker_start),
+            (run.runner_pid, run.runner_start),
+            (run.worker_pid, run.worker_start),
         ):
             if pid in listing and start in (None, listing[pid].start):
                 known[pid] = listing[pid].start
-        tag = orphan.run_tag
-        worker = orphan.worker_pid
-        if tag is None and worker is not None and known.get(worker) == orphan.worker_start:
+        tag = run.run_tag
+        worker = run.worker_pid
+        if tag is None and worker is not None and known.get(worker) == run.worker_start:
             tag = run_tag(worker)
-        root = worker if worker is not None else orphan.runner_pid
-        scope = orphan.run_scope
-        session = None if scope else _runner_session(orphan, listing, known)
+        root = worker if worker is not None else run.runner_pid
+        scope = run.run_scope
+        session = None if scope else _runner_session(run.runner_pid, listing, known)
         if root is None or (tag is None and not known and session is None and scope is None):
             return None
         return Tree(
@@ -458,13 +472,23 @@ class DeviceMonitor:
             known=known,
             session=session,
             scope=scope,
+            cgroup_root=self.cgroup_root,
         )
 
-    def _local_gone(self, slot: HeldSlot) -> bool:
+    def _local_slot_free(self, slot: HeldSlot, stopped: list[str]) -> bool:
         if slot.job_state == "running":
             return False
         placement = slot.placement
         if self.alive(placement.runner_pid, placement.runner_start):
+            return False
+        try:
+            tree = self._tree(placement, {})
+            if tree is not None and tree.track():
+                tree.kill_round()
+                stopped.append(placement.job_id)
+                if tree.track():
+                    return False
+        except ProcessesUnknown:
             return False
         return not self.alive(placement.worker_pid, placement.worker_start)
 
@@ -550,7 +574,7 @@ class DeviceMonitor:
 
 
 def _runner_session(
-    orphan: Orphan, listing: dict[int, Process], known: dict[int, str]
+    pid: int | None, listing: dict[int, Process], known: dict[int, str]
 ) -> int | None:
     """The session the waiter started the runner in, which its pid names, while a
     proven process of the run is in it: one carrying the run's tag (the
@@ -559,7 +583,6 @@ def _runner_session(
     A session number is not reused while a process is in it, but once the
     last proven one leaves, the number names nothing of the run (#827 f-5).
     """
-    pid = orphan.runner_pid
     for process in listing.values():
         if process.group == pid and (process.tagged or known.get(process.pid) == process.start):
             return pid

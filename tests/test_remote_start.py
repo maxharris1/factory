@@ -2558,11 +2558,10 @@ def test_r1_f13_box_takeover_is_refused_while_the_dead_runners_worker_lives(
 
         queue.finish(job_id, owner="claude", handoff_comment_id="c1")
         monitor = DeviceMonitor(pool, config_of(machines), FakeTransport())
-        assert monitor.reconcile(time.time(), 600.0, lambda *_: None).released == ()
-        assert pool.placement(job_id) is not None
-        kill_quietly(worker)
+        result = monitor.reconcile(time.time(), 600.0, lambda *_: None)
+        assert (result.stopped, result.released) == ((job_id,), (job_id,))
         assert wait_gone(worker)
-        assert monitor.reconcile(time.time(), 600.0, lambda *_: None).released == (job_id,)
+        assert pool.placement(job_id) is None
     finally:
         kill_quietly(worker)
         if first.poll() is None:
