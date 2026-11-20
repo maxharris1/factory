@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 
 import pytest
 
@@ -10,6 +11,7 @@ from lib.feeder import BODY_LIMIT, parse_intake
 from lib.feeder_gates import MAIN_FIX_LABEL, GateLines, parse_gate_lines
 from lib.followups import has_marker
 from lib.main_fix import (
+    Close,
     Comment,
     File,
     MainFixRow,
@@ -22,6 +24,8 @@ from lib.main_fix import (
     issue_body,
     issue_title,
     marked_issue_fate,
+    close_comment,
+    close_marker,
     marker,
 )
 
@@ -37,6 +41,7 @@ RED_READ = MainRead(RED, False)
 GREEN = MainRead(None, False)
 FILING = MainFixRow(REPO, "main", "m", "filing", None, HEAD, 1.0, "t", "b")
 OPEN = MainFixRow(REPO, "main", "m", "open", 7, HEAD, 1.0, "t", "b")
+CLOSING = MainFixRow(REPO, "main", "m", "closing", 7, HEAD, 1.0, "t", "b")
 LATER = MainRed("d" * 40, CHECKS)
 LATER_READ = MainRead(LATER, False)
 
@@ -59,12 +64,39 @@ LATER_READ = MainRead(LATER, False)
         (OPEN, LATER_READ, None, ()),
         (OPEN, LATER_READ, False, (Retire(OPEN), File(LATER))),
         (FILING, LATER_READ, True, (Resume(FILING),)),
-        (OPEN, GREEN, True, (Retire(OPEN),)),
-        (OPEN, GREEN, None, (Retire(OPEN),)),
+        (OPEN, GREEN, True, (Close(OPEN),)),
+        (OPEN, GREEN, False, (Retire(OPEN),)),
+        (OPEN, GREEN, None, ()),
+        (CLOSING, GREEN, None, (Close(CLOSING),)),
+        (CLOSING, GREEN, False, (Close(CLOSING),)),
+        (CLOSING, RED_READ, True, (Close(CLOSING),)),
+        (CLOSING, FAILED, True, ()),
     ],
 )
 def test_decide(row, read, issue_open, actions) -> None:
-    assert decide(row, read, issue_open=issue_open) == actions
+    assert decide(row, read, issue_open=issue_open, feed_begun=False) == actions
+
+
+@pytest.mark.parametrize(
+    ("row", "read", "issue_open", "actions"),
+    [
+        (OPEN, GREEN, True, (Retire(OPEN),)),
+        (OPEN, GREEN, False, (Retire(OPEN),)),
+        (OPEN, GREEN, None, (Retire(OPEN),)),
+        (FILING, GREEN, None, (Retire(FILING),)),
+        (OPEN, LATER_READ, True, (Comment(OPEN, LATER),)),
+        (OPEN, FAILED, True, ()),
+    ],
+)
+def test_decide_leaves_an_issue_whose_feed_began_open(row, read, issue_open, actions) -> None:
+    assert decide(row, read, issue_open=issue_open, feed_begun=True) == actions
+
+
+def test_the_close_comment_carries_its_marker_and_names_the_base() -> None:
+    body = close_comment(OPEN)
+    assert has_marker(body, close_marker(OPEN))
+    assert "`main`" in body
+    assert close_marker(OPEN) != close_marker(replace(OPEN, filed_at=2.0))
 
 
 @pytest.mark.parametrize(

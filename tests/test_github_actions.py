@@ -2409,6 +2409,16 @@ def test_close_issue_comments_then_closes() -> None:
     assert gh.keys() == [comment, close]
 
 
+def test_close_issue_with_no_comment_only_closes() -> None:
+    actions, gh = adapter()
+    close = ("-X", "PATCH", f"{REPO}/issues/307", "-f", "state=closed")
+    gh.route(close, GhResult(0, "{}", ""))
+
+    actions.close_issue("owner/repo", 307, None)
+
+    assert gh.keys() == [close]
+
+
 @pytest.mark.parametrize("state", ["open", "closed"])
 def test_issue_state_reads_the_issue(state: str) -> None:
     actions, gh = adapter()
