@@ -809,8 +809,6 @@ def test_the_map_is_read_once_per_base_in_a_poll(tmp_path: Path) -> None:
     assert len(github.dir_reads) == 1
 
 
-# --- assumed environment and out of scope (F-14, #1033) ------------------------
-
 
 def bounded(*, criteria=("- [ ] It works.",), sections: str = "") -> str:
     return body(criteria=criteria) + sections
