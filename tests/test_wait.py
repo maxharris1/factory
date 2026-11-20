@@ -621,22 +621,29 @@ def test_job_run_execs_exactly_the_bots_command_and_only_git_besides(
     assert harness_probes[0][2].rstrip().endswith('exec "$1" --version') and harness_probes[0][4] == command[0]
 
     def ungated(argv: list[str]) -> list[str]:
+        if argv[0] == "systemd-run":
+            argv = argv[argv.index("--") + 1:]
         gate = [sys.executable, "-I", "-S", "-c", job_run._GATE]
         assert argv[:5] == gate and argv[5].isdigit() and argv[6].isdigit(), argv
         return argv[7:]
 
+    scope = ("systemd-run", "--user", "--scope", "--quiet", "--collect")
     containment = {
         ("loginctl", "show-user", str(os.getuid()), "-p", "Linger", "--value"),
-        ("busctl", "--user", "call"),
+        ("systemd-run", "--help"),
+        (*scope, "true"),
+        (*scope, "--expand-environment=no", "true"),
     }
-    contained = [argv for argv in started if argv[0] in ("loginctl", "busctl")]
-    assert all(
-        tuple(argv) in containment or tuple(argv[:3]) in containment for argv in contained
-    ), contained
+    contained = [
+        argv for argv in started
+        if argv[0] == "loginctl" or (argv[0] == "systemd-run" and "--" not in argv)
+    ]
+    assert all(tuple(argv) in containment for argv in contained), contained
     teardown = ["sh", "-c", containers.remove_script(job.id)]
     assert [argv for argv in started if argv[0] == "sh"] == [teardown]
     assert [
-        ungated(argv) for argv in started if argv[0] not in ("git", "loginctl", "busctl", "sh")
+        ungated(argv) for argv in started
+        if argv[0] not in ("git", "sh") and argv not in contained
     ] == [command]
     assert code == 0
     git_calls = [argv for argv in started if argv[0] == "git"]

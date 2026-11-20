@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import exposure, job_run
+from lib import exposure, job_run, process_tree
 from lib.brief.skills import Router, resolve, section
 from lib.job_state import JobStateConfig
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
@@ -308,12 +308,62 @@ def test_macos_a_command_that_cannot_start_is_127_and_never_execed() -> None:
     assert len(workers) == 1 and not _alive(workers[0]), "nothing of the run is left"
 
 
+SLOW_LAUNCHER = """\
+#!/bin/sh
+for word; do last=$word; done
+case " $* " in *" --help "*) echo "  --expand-environment=BOOL"; exit 0;; esac
+[ "$last" = true ] && exit 0
+sleep "$FAKE_LAUNCH_SECONDS"
+exit 1
+"""
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="systemd scopes are Linux only")
+@pytest.mark.parametrize(
+    "launch_seconds, budget_seconds", [(process_tree.CONTAIN_SECONDS + 0.5, None), (60, 1.0)]
+)
+def test_a_launcher_that_never_starts_the_gate_leaves_the_command_unstarted(
+    tmp_path: Path, launch_seconds: float, budget_seconds: float | None
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for name, body in (("loginctl", "#!/bin/sh\necho yes\n"), ("systemd-run", SLOW_LAUNCHER)):
+        (fake_bin / name).write_text(body)
+        (fake_bin / name).chmod(0o755)
+    marker = tmp_path / "ran"
+    workers: list[int] = []
+    execed: list[bool] = []
+    budget = job_run.Budget(budget_seconds) if budget_seconds is not None else None
+    began = time.monotonic()
+    code = job_run.run(
+        [sys.executable, "-c", f"open({str(marker)!r}, 'w')"],
+        beat=lambda: None,
+        interval=60,
+        log=lambda _m: None,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+            "FAKE_LAUNCH_SECONDS": str(launch_seconds),
+        },
+        started=workers.append,
+        execed=lambda: execed.append(True),
+        budget=budget,
+    )
+    assert code == 127
+    assert not marker.exists(), "the command never ran"
+    assert execed == [], "a launcher's exit is never taken for the command's exec"
+    assert workers == [], "a launcher that never started the gate is never recorded as the worker"
+    assert time.monotonic() - began < 30, "the wait for the gate ends within the budget"
+    if budget is not None:
+        assert budget.expired
+
+
 @pytest.fixture
 def descriptors_past_1023():
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    needed = 1025
+    needed = 1100
     if hard != resource.RLIM_INFINITY and hard < needed:
-        pytest.skip(f"the hard RLIMIT_NOFILE {hard} cannot hold fd 1024")
+        pytest.skip(f"the hard RLIMIT_NOFILE {hard} is below the {needed} a pipe past fd 1023 needs")
     if soft != resource.RLIM_INFINITY and soft < needed:
         resource.setrlimit(resource.RLIMIT_NOFILE, (needed, hard))
     try:
@@ -337,6 +387,64 @@ def test_a_status_pipe_past_fd_1023_still_reports_the_exit_code() -> None:
         child.wait()
         os.close(write)
         os.close(high)
+
+
+@pytest.mark.usefixtures("descriptors_past_1023")
+def test_a_gated_run_whose_report_pipe_is_past_fd_1023_runs_its_command(tmp_path: Path) -> None:
+    filler = []
+    while (fd := os.open(os.devnull, os.O_RDONLY)) < 1024:
+        filler.append(fd)
+    os.close(fd)
+    marker = tmp_path / "ran"
+    workers: list[int] = []
+    execed: list[bool] = []
+    try:
+        code = job_run.run(
+            [sys.executable, "-c", f"open({str(marker)!r}, 'w')"],
+            beat=lambda: None,
+            interval=60,
+            log=lambda _m: None,
+            started=workers.append,
+            execed=lambda: execed.append(True),
+            budget=job_run.Budget(60),
+        )
+    finally:
+        for fd in filler:
+            os.close(fd)
+    assert code == 0
+    assert marker.exists(), "the command ran"
+    assert execed == [True]
+    assert len(workers) == 1 and not _alive(workers[0]), "nothing of the run is left"
+
+
+def test_a_startup_wait_that_raises_leaves_no_launcher_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launched: list[subprocess.Popen[bytes]] = []
+    real_popen = subprocess.Popen
+
+    def recording_popen(*args, **kwargs):
+        launched.append(real_popen(*args, **kwargs))
+        return launched[-1]
+
+    def refusing(_fd: int, _timeout: float) -> bool:
+        raise OSError("the report pipe cannot be polled")
+
+    monkeypatch.setattr(job_run.subprocess, "Popen", recording_popen)
+    monkeypatch.setattr(job_run, "_readable", refusing)
+    marker = tmp_path / "ran"
+    with pytest.raises(OSError, match="cannot be polled"):
+        job_run.run(
+            [sys.executable, "-c", f"open({str(marker)!r}, 'w')"],
+            beat=lambda: None,
+            interval=60,
+            log=lambda _m: None,
+            started=lambda _pid: None,
+            budget=job_run.Budget(60),
+        )
+    assert launched, "the launcher was spawned"
+    assert all(child.returncode is not None for child in launched), "the launcher was reaped"
+    assert not marker.exists(), "the command never ran"
 
 
 ANCHOR_SIGNALLED_BEFORE_ITS_COMMAND = """\

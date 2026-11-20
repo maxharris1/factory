@@ -37,6 +37,7 @@ from tests.test_remote_start import (
     wait_file,
     wait_gone,
 )
+from tests.user_manager import scope_refusal
 
 linux_path = pytest.mark.skipif(
     sys.platform != "linux", reason="runs the Linux path's scripts against /proc"
@@ -743,15 +744,8 @@ def test_an_uncontained_runs_reused_session_number_is_never_killed(tmp_path: Pat
         kill_quietly(sleeper)
 
 
-def scope_usable() -> bool:
-    if sys.platform != "linux" or shutil.which("systemd-run") is None:
-        return False
-    probe = ["systemd-run", "--user", "--scope", "--quiet", "--collect", "true"]
-    return subprocess.run(probe, capture_output=True, timeout=30).returncode == 0
-
-
 contained_path = pytest.mark.skipif(
-    not scope_usable(), reason="needs a Linux user manager that starts scopes"
+    scope_refusal(stripped=True) is not None, reason=scope_refusal(stripped=True) or ""
 )
 
 
@@ -805,7 +799,7 @@ time.sleep(120)
             assert not cgroup.endswith(unit)
             assert remote.check_worker(box.transport, target, fence=False) == remote.RUNNING
             return
-        assert record.read_text() == f"{unit}\n"
+        assert record.exists() and record.read_text() == f"{unit}\n", said
         assert cgroup.startswith("0::/") and cgroup.endswith(f"/{unit}"), cgroup
 
         assert remote.stop_worker(box.transport, target)

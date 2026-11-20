@@ -41,8 +41,8 @@ was attempted, so the device must confirm the worker gone) and
 `worker_tag` (the random tag every process of that remote start carries,
 lib/remote.py, so a check never trusts a stored process number). #722
 adds `run_tag`: the tag every process of a box job's run carries, and #817
-`run_scope`: the systemd user scope the run was moved into on Linux (NULL
-for an uncontained run, lib/process_tree.py contain). #80 adds
+`run_scope`: the systemd user scope the run was spawned into on Linux (NULL
+for an uncontained run, lib/process_tree.py scope_prefix). #80 adds
 `autostart_pid` and `autostart_start`: the autostart waiter that claimed
 the job, if one did. #96 adds `run_token_hash`: the hash of the secret
 token the job's current `orch job run` holds (never the token itself). The

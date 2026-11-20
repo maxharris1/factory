@@ -34,8 +34,9 @@ same process that runs the command:
   so a descendant orphaned between two looks, even one that dropped the tag
   and left the session, is reparented to run rather than to init, and is
   killed with the rest;
-* on Linux, a gated command is moved into its own systemd user scope
-  (lib/process_tree.py contain) before `started` records it, so every
+* on Linux, a gated command is spawned by `systemd-run --scope` into its
+  own systemd user scope (lib/process_tree.py scope_prefix), and run waits
+  for the gate to start inside it before `started` records it, so every
   descendant, even one that left the session and dropped the tag, stays
   findable by the scope; a user with no usable user manager or Linger off
   gets a log line saying the run is uncontained, and the command still runs;
@@ -73,8 +74,9 @@ from lib.process_tree import (
     Tree,
     _one_line,
     _responsible_pid,
-    contain,
+    entered_scope,
     processes,
+    scope_prefix,
 )
 from lib.queue import QueueError
 from lib.remote import KEEPER
@@ -101,7 +103,9 @@ Log = Callable[[str], None]
 # a runner that dies, or cannot record it, closes the pipe first and the
 # command never runs. Before the exec it puts back the signal dispositions
 # Python changed at its own start-up, as Popen does for a direct command.
-# argv[2] is a close-on-exec report pipe: EOF with no byte means the exec
+# argv[2] is a close-on-exec report pipe. The gate writes "g" on it first,
+# so EOF before that byte means the gate never ran (#1140 r1 f-1: a
+# systemd-run that failed). After it, EOF with no byte means the exec
 # happened (#99 A2), a byte "x" means the command could not be exec'd.
 # On macOS (#846) the gate instead execs _ANCHOR disclaimed (#329), same
 # pid: the anchor is its own responsible process and starts the command as
@@ -113,6 +117,10 @@ import os, signal, sys
 if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 fd, report = int(sys.argv[1]), int(sys.argv[2])
+try:
+    os.write(report, b"g")
+except OSError:
+    pass
 go = os.read(fd, 3) == b"go\\n"
 os.close(fd)
 if not go:
@@ -372,11 +380,13 @@ def run(
         spawn = list(argv)
         read_end = write_end = report_read = report_write = -1
         gated = started is not None or sys.platform == "darwin"
+        prefix = scope_prefix(tag, tagged, log) if started is not None else []
         if gated:
             read_end, write_end = os.pipe()
             report_read, report_write = os.pipe()
             spawn = [
-                sys.executable, "-I", "-S", "-c", _GATE, str(read_end), str(report_write), *spawn
+                *prefix, sys.executable, "-I", "-S", "-c", _GATE, str(read_end),
+                str(report_write), *spawn,
             ]
         at_gate = gated
         try:
@@ -402,7 +412,33 @@ def run(
                 target=output, args=(child.stdout,), name="orch-output", daemon=True
             )
             reader.start()
-        scope = contain(child.pid, tag, log) if started is not None else None
+
+        def tree_of(scope: str | None) -> Tree:
+            assert child is not None
+            return Tree(
+                child.pid, tag, adopts=reaper is not None, others=others,
+                responsible=_responsible_pid if sys.platform == "darwin" else None,
+                scope=scope,
+            )
+
+        if gated:
+
+            def unstart() -> None:
+                os.close(write_end)
+                os.close(report_read)
+                tree_of(None).end(log)
+                child.wait()
+
+            try:
+                unstarted = _await_gate(child, report_read, budget, pending)
+            except BaseException:
+                unstart()
+                raise
+            if unstarted is not None:
+                unstart()
+                log(f"not starting {argv[0]}: {unstarted}")
+                return 128 + pending[0] if pending else 127
+        scope = entered_scope(child.pid, tag, log) if prefix else None
         if gated:
             gate = write_end
 
@@ -457,11 +493,7 @@ def run(
         for signum in pending:  # arrived while the command was being spawned
             if child.poll() is None:
                 child.send_signal(signum)
-        tree = Tree(
-            child.pid, tag, adopts=reaper is not None, others=others,
-            responsible=_responsible_pid if sys.platform == "darwin" else None,
-            scope=scope,
-        )
+        tree = tree_of(scope)
         try:
             code = _wait(child, budget, argv[0], log, tree, status)
         finally:
@@ -519,6 +551,25 @@ def _subreaper(on: bool) -> bool | None:
     if prctl(PR_SET_CHILD_SUBREAPER, int(on), 0, 0, 0) != 0:
         return None
     return bool(was.value)
+
+
+def _await_gate(
+    child: subprocess.Popen[bytes], report: int, budget: Budget | None, pending: list[int]
+) -> str | None:
+    """None once the gate says "g", else why it never ran: systemd-run can exit
+    long after spawn without exec'ing the gate (#1140 r1 f-1)."""
+    while not pending:
+        left = None if budget is None else budget.remaining()
+        if left == 0:
+            assert budget is not None
+            budget.expired = True
+            budget.signum = signal.SIGKILL
+            return f"the gate did not start within the {budget.describe()}"
+        if _readable(report, 0.1 if left is None else min(0.1, left)):
+            if os.read(report, 1) == b"g":
+                return None
+            return f"the gate never started: its launcher exited {child.wait()}"
+    return f"got signal {pending[0]}"
 
 
 def _past_budget(code: int, budget: Budget | None) -> int:

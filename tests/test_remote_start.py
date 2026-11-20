@@ -7,7 +7,6 @@ the CLI, or FakeTransport in process. No test reaches a real host.
 from __future__ import annotations
 
 import concurrent.futures
-import functools
 import io
 import json
 import os
@@ -39,6 +38,7 @@ from tests.test_dispatcher import (
     comment,
     ticket,
 )
+from tests.user_manager import scope_refusal
 
 ROOT = Path(__file__).resolve().parents[1]
 ORCH = ROOT / "bin" / "orch"
@@ -1511,19 +1511,6 @@ sys.exit(run([sys.executable, __file__, str(here), "worker", sys.argv[3]], beat=
 """
 
 
-@functools.cache
-def systemd_scopes() -> bool:
-    if not sys.platform.startswith("linux"):
-        return False
-    try:
-        return subprocess.run(
-            ["systemd-run", "--user", "--scope", "--quiet", "--collect", "true"],
-            capture_output=True, timeout=10,
-        ).returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return False
-
-
 FAKE_SYSTEMD_RUN = f"""#!{sys.executable}
 import json, os, re, sys
 
@@ -1576,13 +1563,15 @@ os.execvp(args[0], args)
 
 
 def fake_linger(
-    tmp_path: Path, linger: str, *, busctl_fails: bool = False, systemd_run: bool = False
+    tmp_path: Path, linger: str, *, systemd_run_fails: bool = False, systemd_run: bool = False
 ) -> str:
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir(exist_ok=True)
     fakes = {"loginctl": f"#!/bin/sh\necho {linger}\n"}
-    if busctl_fails:
-        fakes["busctl"] = "#!/bin/sh\necho 'no user bus' >&2\nexit 1\n"
+    if systemd_run_fails:
+        fakes["systemd-run"] = (
+            "#!/bin/sh\necho 'Failed to connect to bus: No such file or directory' >&2\nexit 1\n"
+        )
     if systemd_run:
         fakes["systemd-run"] = FAKE_SYSTEMD_RUN
     for name, body in fakes.items():
@@ -1595,8 +1584,8 @@ def fake_linger(
 def test_a_lost_box_jobs_untagged_orphan_born_after_the_last_look_is_killed(
     tmp_path: Path, leaf_session: str
 ) -> None:
-    if sys.platform != "darwin" and not systemd_scopes():
-        pytest.skip("Linux without a user manager")
+    if sys.platform != "darwin" and (refusal := scope_refusal()):
+        pytest.skip(refusal)
     script = tmp_path / "unrecorded_orphan.py"
     script.write_text(UNRECORDED_ORPHAN)
     runner = subprocess.Popen(
@@ -1737,21 +1726,21 @@ def test_a_box_jobs_slot_records_the_run_tag_its_command_carries(tmp_path: Path)
 
 
 @pytest.mark.parametrize(
-    ("linger", "busctl_fails"),
+    ("linger", "systemd_run_fails"),
     [("yes", False), ("no", False), ("yes", True)],
     ids=["contained", "linger-off", "no-user-bus"],
 )
 def test_a_box_jobs_slot_records_its_scope_or_says_the_run_is_uncontained(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, linger: str, busctl_fails: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, linger: str, systemd_run_fails: bool
 ) -> None:
     from lib import placed_run
 
-    contained = linger == "yes" and not busctl_fails
-    if contained and not systemd_scopes():
-        pytest.skip("needs Linux with a working systemd user manager")
+    contained = linger == "yes" and not systemd_run_fails
+    if contained and (refusal := scope_refusal()):
+        pytest.skip(refusal)
     if not sys.platform.startswith("linux"):
         pytest.skip("systemd scopes are Linux only")
-    monkeypatch.setenv("PATH", fake_linger(tmp_path, linger, busctl_fails=busctl_fails))
+    monkeypatch.setenv("PATH", fake_linger(tmp_path, linger, systemd_run_fails=systemd_run_fails))
     _, queue, pool, dispatcher, job, _ = box_job_setup(tmp_path, alive={})
     with queue.connect() as connection:
         connection.execute(
@@ -1784,11 +1773,76 @@ def test_a_box_jobs_slot_records_its_scope_or_says_the_run_is_uncontained(
         ).fetchone()
     uncontained = [line for line in lines if "the run is uncontained" in line]
     if contained:
-        assert scope == process_tree.scope_unit(tag)
+        assert scope == process_tree.scope_unit(tag), lines
         assert uncontained == []
     else:
         assert scope is None
         assert len(uncontained) == 1, lines
+
+
+NAMESPACED_RUN = """\
+import json, os, sys
+from pathlib import Path
+from lib.job_run import run
+
+here = Path(sys.argv[1])
+
+def started(pid):
+    (here / "worker.pid").write_text(str(pid))
+
+code = run(["sh", "-c", f"echo $$ > {here / 'command.pid'}"], beat=lambda: None, interval=60,
+    log=lambda line: print(line, file=sys.stderr), started=started)
+(here / "code").write_text(str(code))
+"""
+
+LOGGING_CALL = f"""#!{sys.executable}
+import json, os, sys
+with open(os.environ["FAKE_CALLS"], "a") as log:
+    log.write(json.dumps([os.path.basename(sys.argv[0]), os.getpid(), *sys.argv[1:]]) + "\\n")
+args = sys.argv[1:]
+if "--help" in args:
+    print("  --expand-environment=BOOL    Control expansion of environment variables")
+if os.path.basename(sys.argv[0]) == "systemd-run" and "--" in args:
+    command = args[args.index("--") + 1:]
+    os.execvp(command[0], command)
+"""
+
+
+def test_a_run_inside_a_pid_namespace_never_hands_the_user_manager_its_namespace_pid(
+    tmp_path: Path,
+) -> None:
+    """#1140: a pid read inside a PID namespace names another process to the
+    user manager, so the run is contained by the worker's own systemd-run."""
+    if not sys.platform.startswith("linux"):
+        pytest.skip("systemd scopes are Linux only")
+    unshare = ["unshare", "--user", "--map-current-user", "--pid", "--fork", "--mount-proc"]
+    try:
+        usable = subprocess.run([*unshare, "true"], capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        pytest.skip(f"cannot make a PID namespace: {exc}")
+    if usable.returncode != 0:
+        pytest.skip(f"cannot make a PID namespace: {usable.stderr.decode().strip()}")
+    path = fake_linger(tmp_path, "yes")
+    for name in ("busctl", "systemd-run"):
+        (tmp_path / "fake-bin" / name).write_text(LOGGING_CALL)
+        (tmp_path / "fake-bin" / name).chmod(0o755)
+    calls = tmp_path / "calls"
+    script = tmp_path / "namespaced_run.py"
+    script.write_text(NAMESPACED_RUN)
+    result = subprocess.run(
+        [*unshare, sys.executable, str(script), str(tmp_path)],
+        cwd=ROOT, capture_output=True, text=True, timeout=60,
+        env={**os.environ, "PYTHONPATH": str(ROOT), "PATH": path, "FAKE_CALLS": str(calls)},
+    )
+    assert (tmp_path / "code").read_text() == "0", result.stderr
+    worker = int((tmp_path / "worker.pid").read_text())
+    assert int((tmp_path / "command.pid").read_text()) == worker, "the command runs as the worker"
+    logged = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert [call for call in logged if call[0] == "busctl"] == [], (
+        "no pid from inside the namespace reaches the user manager"
+    )
+    scoped = [call for call in logged if call[0] == "systemd-run" and "--" in call]
+    assert [call[1] for call in scoped] == [worker], "the worker itself asks for its scope"
 
 
 def test_an_enabled_box_keeps_its_running_job(tmp_path: Path) -> None:
@@ -2853,9 +2907,9 @@ def test_an_uncontained_start_says_so_in_the_run_log_and_still_runs(tmp_path: Pa
 def test_a_contained_start_reaches_the_command_verbatim_whatever_systemd_run_expands(
     tmp_path: Path, systemd_run: str
 ) -> None:
+    if refusal := scope_refusal(stripped=True):
+        pytest.skip(refusal)
     real = shutil.which("systemd-run")
-    if real is None or not systemd_scopes():
-        pytest.skip("needs Linux with a working systemd user manager")
     if subprocess.run(
         [real, "--user", "--scope", "--quiet", "--collect", "--expand-environment=yes", "true"],
         capture_output=True, timeout=10,
@@ -2884,7 +2938,9 @@ def test_a_contained_start_reaches_the_command_verbatim_whatever_systemd_run_exp
         env={"PATH": path, "HOME": str(tmp_path)},
     )
     assert result.returncode == 0, result.stderr
-    assert (Path(target.job_dir) / remote.scope_record(target.tag)).exists(), "the run is contained"
+    assert (Path(target.job_dir) / remote.scope_record(target.tag)).exists(), (
+        f"the run is contained: {result.stderr}"
+    )
     assert "uncontained" not in result.stderr
     assert json.loads(report.read_text(encoding="utf-8")) == [
         "--add-dir", str(tmp_path), "a b", "$(touch pwn6)", "$HOME", "'"
