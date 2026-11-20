@@ -18,7 +18,7 @@ from lib.handoff import HandoffError, parse_comment, repeat_id
 from lib.markdown_items import MARKDOWN
 from lib.queue import JobRequest
 
-Stop = Literal["repeat", "capped", "unsat"]
+Stop = Literal["repeat", "capped", "stalled", "unsat"]
 
 
 @dataclass(frozen=True)
@@ -28,6 +28,15 @@ class StopOption:
 
 
 _SPLIT = StopOption("Split", "Close this PR and file smaller tickets. No more rounds run here.")
+_CAPPED_OPTIONS = (
+    StopOption("Another round", "An approver's /go adds one round and queues the fix."),
+    StopOption(
+        "Overrule the finding",
+        "An approver's /go that names this option adds the round too. "
+        "Later briefs quote the decision, so the reviewer does not block on it again.",
+    ),
+    _SPLIT,
+)
 STOP_OPTIONS: dict[Stop, tuple[StopOption, ...]] = {
     "repeat": (
         StopOption(
@@ -41,15 +50,8 @@ STOP_OPTIONS: dict[Stop, tuple[StopOption, ...]] = {
         ),
         _SPLIT,
     ),
-    "capped": (
-        StopOption("Another round", "An approver's /go adds one round and queues the fix."),
-        StopOption(
-            "Overrule the finding",
-            "An approver's /go that names this option adds the round too. "
-            "Later briefs quote the decision, so the reviewer does not block on it again.",
-        ),
-        _SPLIT,
-    ),
+    "capped": _CAPPED_OPTIONS,
+    "stalled": _CAPPED_OPTIONS,
     "unsat": (
         StopOption(
             "Change the criterion",
@@ -67,6 +69,7 @@ STOP_OPTIONS: dict[Stop, tuple[StopOption, ...]] = {
 _STOP_OPENINGS: dict[Stop, str] = {
     "repeat": "The reviewer blocked {ids} again in round {round}.",
     "capped": "Round {round} reached the review cap with {ids} still blocking.",
+    "stalled": "Blocking findings did not shrink in rounds {prior} and {round}: {ids} still block.",
     "unsat": "The reviewer called {ids} unsatisfiable in round {round}.",
 }
 _QUOTE_LIMIT = 800
@@ -139,7 +142,8 @@ def stop_question(
     stop: Stop, disputed: frozenset[str], round_number: int, exchanges: Sequence[StopExchange]
 ) -> str:
     named = ", ".join(sorted(disputed)) or "findings"
-    parts = [f"{_STOP_OPENINGS[stop].format(ids=named, round=round_number)} Which option settles it?"]
+    opening = _STOP_OPENINGS[stop].format(ids=named, round=round_number, prior=round_number - 1)
+    parts = [f"{opening} Which option settles it?"]
     for exchange in exchanges:
         parts.append(
             f"Round {exchange.round} verdict ({_comment_link(exchange.verdict)}):\n"
@@ -237,7 +241,7 @@ class RepeatBlockMixin:
         self, ticket: TrackedTicket, verdict: Comment, stop: Stop, disputed: frozenset[str]
     ) -> str:
         round_number = _round_number(_handoff(verdict.body)[0].get("round")) or 0
-        scoped = stop != "capped" and bool(disputed)
+        scoped = stop not in ("capped", "stalled") and bool(disputed)
         rounds = [
             (item.round, item.comment, disputed if scoped else item.blocking)
             for item in reversed(self._accepted_revises(ticket, round_number))
@@ -278,7 +282,7 @@ class RepeatBlockMixin:
         from lib.evidence.findings import blocking_ids
 
         fields, body = _handoff(verdict.body)
-        if stop == "capped":
+        if stop in ("capped", "stalled"):
             return blocking_ids(body)
         if stop == "unsat":
             return frozenset({fields["unsat"]} if fields.get("unsat") else ())
@@ -304,6 +308,14 @@ class RepeatBlockMixin:
             0,
         )
 
+    def _capped_stop(self, ticket: TrackedTicket, verdict: Comment) -> Stop:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT stop FROM review_events WHERE repo = ? AND ticket_id = ? AND comment_id = ?",
+                (ticket.repo.lower(), ticket.ticket_id, verdict.id),
+            ).fetchone()
+        return "stalled" if row is not None and row["stop"] == "stalled" else "capped"
+
     def _held_stop(self, ticket: TrackedTicket) -> tuple[Stop, Comment] | None:
         with self._connect() as connection:
             row = connection.execute(
@@ -326,11 +338,11 @@ class RepeatBlockMixin:
             ).fetchone()
         if row is None:
             return None
-        stop: Stop = {"waiting-max-repeat": "repeat", "waiting-max-unsat": "unsat"}.get(
-            str(row["outcome"]), "capped"
-        )
         verdict = next((item for item in ticket.comments if item.id == row["comment_id"]), None)
-        return None if verdict is None else (stop, verdict)
+        if verdict is None:
+            return None
+        held: dict[str, Stop] = {"waiting-max-repeat": "repeat", "waiting-max-unsat": "unsat"}
+        return held.get(str(row["outcome"])) or self._capped_stop(ticket, verdict), verdict
 
     def _repeat_stops(self, ticket: TrackedTicket, comment: Comment, rule_id: str) -> int:
         with self._connect() as connection:

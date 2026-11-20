@@ -100,7 +100,7 @@ class ResumeMixin:
                         connection,
                         ticket,
                         stop.id,
-                        [self._stop_decision(ticket, stop, "capped", comment, "Another round")],
+                        [self._stop_decision(ticket, stop, self._capped_stop(ticket, stop), comment, "Another round")],
                     )
             self._enqueue_step(
                 connection,

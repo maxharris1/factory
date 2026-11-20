@@ -375,10 +375,12 @@ class SchemaMixin:
                     comment_id TEXT NOT NULL,
                     outcome TEXT NOT NULL,
                     qa_failed TEXT,
+                    stop TEXT,
                     PRIMARY KEY (repo, ticket_id, comment_id)
                 )
                 """
             )
+            _add_missing_columns(connection, "review_events", {"stop": "TEXT"})
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS followup_filings (
