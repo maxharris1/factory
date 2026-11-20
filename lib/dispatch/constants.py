@@ -45,6 +45,7 @@ SETTLE_CLEARS = {
     "paused_head": None,
     "paused_generation": None,
     "paused_question_id": None,
+    "reopen_hold": None,
 }
 # #130: an approved ticket on a finish_line: merge project stays watched,
 # polled every cycle, until its PR merges or closes.

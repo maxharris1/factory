@@ -179,6 +179,7 @@ class DriverInbox:
 
 
 DEFAULT_LINEAR_HANDOFF_STATES = ("Ready for Review", "In Review")
+DEFAULT_LINEAR_REOPEN_STATE = "In Progress"
 
 
 @dataclass(frozen=True)

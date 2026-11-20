@@ -161,6 +161,10 @@ _CHECK_NOT_RUN = ("neutral", "skipped")
 
 
 LINEAR_NO_READY_STATE_NOTE = "linear-not-moved: team has no Ready for Review state"
+LINEAR_NOT_REOPENED_NOTE = (
+    "linear-not-reopened: team has no In Progress or other started state "
+    "before Ready for Review"
+)
 
 
 class GitHubAdapterError(ShipError):
@@ -431,6 +435,10 @@ class GitHubReviewActions:
 
     def handoff(self, ticket: TrackedTicket, head: str) -> str | None:
         self._mark_ready(ticket, head)
+        return None
+
+    def reopen_linear(self, ticket: TrackedTicket) -> str | None:
+        del ticket
         return None
 
     def _mark_ready(self, ticket: TrackedTicket, head: str) -> bool:
@@ -1128,6 +1136,7 @@ class LinearReviewActions(GitHubReviewActions):
         *,
         move_ready_for_review: bool,
         linear_ready: Callable[[TrackedTicket], None],
+        linear_reopen: Callable[[TrackedTicket], None],
         fresh_ticket: Callable[[TicketRef], TrackedTicket | None] | None = None,
         runner: Runner = run_gh,
         timeout_seconds: float = TIMEOUT_SECONDS,
@@ -1142,6 +1151,7 @@ class LinearReviewActions(GitHubReviewActions):
         )
         self.move_ready_for_review = move_ready_for_review
         self.linear_ready = linear_ready
+        self.linear_reopen = linear_reopen
         self.fresh_ticket = fresh_ticket
 
     def set_state(self, ticket: TrackedTicket, state: str) -> None:
@@ -1217,6 +1227,14 @@ class LinearReviewActions(GitHubReviewActions):
                 )
                 error.write_confirmed = marked
                 raise error from None
+        return None
+
+    def reopen_linear(self, ticket: TrackedTicket) -> str | None:
+        if not self.move_ready_for_review:
+            return None
+        if ticket.linear_reopen_state_id is None:
+            return LINEAR_NOT_REOPENED_NOTE
+        self.linear_reopen(ticket)
         return None
 
 

@@ -10,17 +10,20 @@ wake reports that the Linear issue was not moved. It is not a ship error.
 """
 
 import json
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from lib.dispatcher import CIResult, Dispatcher, TrackedTicket
+from lib.dispatch.types import TicketRef
 from lib.github_actions import GhResult, LinearReviewActions
 from lib.poll_source import (
     HTTPResult,
     LivePollSource,
     _linear_ready_state_id,
+    _linear_reopen_state_id,
     _linear_state_phase,
 )
 from lib.queue import SQLiteJobQueue
@@ -123,6 +126,7 @@ def test_handoff_on_a_team_with_no_rfr_state_marks_ready_and_reports(
     actions = LinearReviewActions(
         move_ready_for_review=True,
         linear_ready=lambda ticket: writes.append(ticket.ticket_id),
+        linear_reopen=lambda ticket: None,
         fresh_ticket=lambda ref: linked("no-ready-state"),
         runner=gh,
     )
@@ -149,6 +153,7 @@ def test_handoff_reports_nothing_when_the_linear_move_is_decided(
     actions = LinearReviewActions(
         move_ready_for_review=True,
         linear_ready=lambda ticket: moved.append(ticket.ticket_id),
+        linear_reopen=lambda ticket: None,
         fresh_ticket=lambda ref: linked(phase),
         runner=gh,
     )
@@ -168,6 +173,10 @@ def linear_issue_in(state: dict, *, ready: dict | None) -> dict:
 def t4_setup(
     tmp_path: Path,
     issue: dict,
+    *,
+    move_ready_for_review: bool = True,
+    success: bool = True,
+    fresh_ticket: Callable[[TicketRef], TrackedTicket] | None = None,
 ) -> tuple[Dispatcher, SQLiteJobQueue, RecordedGh, list[dict], TrackedTicket]:
     requests: list[dict] = []
 
@@ -175,7 +184,7 @@ def t4_setup(
         del url, headers, timeout
         requests.append(json.loads(body))
         return HTTPResult(
-            200, json.dumps({"data": {"issueUpdate": {"success": True}}})
+            200, json.dumps({"data": {"issueUpdate": {"success": success}}})
         )
 
     source = LivePollSource(
@@ -200,6 +209,7 @@ def t4_setup(
         pr_number="42",
         linear_issue_id=issue["id"],
         linear_ready_state_id=_linear_ready_state_id(issue),
+        linear_reopen_state_id=_linear_reopen_state_id(issue),
         linear_ready_for_review=True,
         linear_state_phase=_linear_state_phase(issue),
     )
@@ -213,9 +223,10 @@ def t4_setup(
         queue,
         trusted_logins=TRUSTED_LOGINS,
         review_actions=LinearReviewActions(
-            move_ready_for_review=True,
+            move_ready_for_review=move_ready_for_review,
             linear_ready=source._move_linear_ready,
-            fresh_ticket=lambda ref: snapshot,
+            linear_reopen=source._move_linear_reopen,
+            fresh_ticket=fresh_ticket or (lambda ref: snapshot),
             runner=gh,
         ),
         grok_delivery=FakeGrokDelivery(),
@@ -427,3 +438,220 @@ def test_an_approved_rework_issue_moves_back_to_ready_for_review(tmp_path: Path)
     assert intent == ("completed", None)
     assert state == "handed-off"
     assert [action for action, _ in wakes] == ["done"]
+
+
+TODO_STATE = {"id": "todo", "name": "Todo", "type": "unstarted", "position": 1.0}
+STARTED = {"id": "started", "name": "Started", "type": "started", "position": 1.5}
+IN_PROGRESS = {"id": "doing", "name": "In Progress", "type": "started", "position": 2.0}
+IN_REVIEW = {"id": "in-review", "name": "In Review", "type": "started", "position": 2.0}
+BUILDING = {"id": "building", "name": "Building", "type": "started", "position": 2.5}
+IN_QA = {"id": "qa", "name": "In QA", "type": "started", "position": 4.0}
+IN_PROGRESS_AFTER_READY = {**IN_PROGRESS, "position": 4.0}
+
+
+def team_issue(*nodes: dict, ready: dict | None = RFR) -> dict:
+    return {
+        "id": "issue-id",
+        "state": {"id": "rfr", "type": "started", "position": 3.0},
+        "team": {"states": {"nodes": [*nodes, *([ready] if ready is not None else [])]}},
+    }
+
+
+@pytest.mark.parametrize(
+    ("issue", "options", "state_id"),
+    [
+        (phase_issue({"id": "rfr", "type": "started", "position": 3.0}), {}, "doing"),
+        (team_issue(TODO_STATE, BUILDING, STARTED, IN_QA), {}, "started"),
+        (team_issue(TODO_STATE, IN_REVIEW, BUILDING, IN_QA), {}, "building"),
+        (team_issue(TODO_STATE, IN_REVIEW, IN_QA), {}, None),
+        (
+            team_issue(IN_PROGRESS, BUILDING),
+            {"handoff_names": frozenset({RFR_NAME, "In Progress"})},
+            "building",
+        ),
+        (team_issue(TODO_STATE, IN_QA), {}, None),
+        (team_issue(TODO_STATE, BUILDING, ready=None), {}, None),
+        (team_issue(BUILDING, ready={**RFR, "position": None}), {}, None),
+        (team_issue(BUILDING, IN_QA, ready=QA_REVIEW), {"ready_name": "QA Review"}, "building"),
+        ({"state": {"id": "rfr", "type": "started"}}, {}, None),
+        (team_issue(TODO_STATE, BUILDING, IN_PROGRESS_AFTER_READY), {}, "building"),
+        (team_issue(TODO_STATE, IN_PROGRESS_AFTER_READY), {}, None),
+        (team_issue(TODO_STATE, {**IN_PROGRESS, "type": "completed"}), {}, None),
+    ],
+    ids=[
+        "in-progress",
+        "lowest-started-before-ready",
+        "a-handoff-state-before-ready-is-skipped",
+        "only-a-handoff-state-before-ready",
+        "in-progress-named-as-a-handoff-state",
+        "only-started-states-after-ready",
+        "no-ready-state",
+        "ready-state-without-position",
+        "custom-ready-state",
+        "team-not-read",
+        "in-progress-after-ready-falls-back",
+        "only-in-progress-after-ready",
+        "in-progress-not-started",
+    ],
+)
+def test_a_reopen_targets_in_progress_else_the_first_started_state_before_ready(
+    issue: dict,
+    options: dict,
+    state_id: str | None,
+) -> None:
+    assert _linear_reopen_state_id(issue, **options) == state_id
+
+
+def attention(queue: SQLiteJobQueue) -> list[tuple[str, str]]:
+    with queue.connect() as connection:
+        return [
+            (row["reason"], row["detail"])
+            for row in connection.execute(
+                "SELECT reason, detail FROM needs_attention WHERE ticket_id = '42'"
+            )
+        ]
+
+
+def poll_errors(queue: SQLiteJobQueue) -> list[str]:
+    with queue.connect() as connection:
+        return [
+            row["error"]
+            for row in connection.execute(
+                "SELECT error FROM poll_errors WHERE ticket_id = '42' ORDER BY id"
+            )
+        ]
+
+
+@pytest.mark.parametrize(
+    ("issue", "state_id"),
+    [
+        (team_issue(TODO_STATE, IN_PROGRESS, IN_QA), "doing"),
+        (team_issue(TODO_STATE, IN_REVIEW, BUILDING, IN_QA), "building"),
+    ],
+    ids=["in-progress", "first-started-state-before-ready"],
+)
+def test_a_reopen_moves_the_linear_issue_back_before_ready_for_review(
+    tmp_path: Path,
+    issue: dict,
+    state_id: str,
+) -> None:
+    dispatcher, queue, gh, requests, snapshot = t4_setup(tmp_path, issue)
+
+    dispatcher._reopen_linear(snapshot)
+
+    assert [request["variables"] for request in requests] == [
+        {"issue": "issue-id", "state": state_id}
+    ]
+    assert attention(queue) == []
+    assert poll_errors(queue) == []
+
+
+def test_a_reopen_on_a_team_with_no_state_to_return_to_flags_it(tmp_path: Path) -> None:
+    dispatcher, queue, gh, requests, snapshot = t4_setup(
+        tmp_path, team_issue(TODO_STATE, IN_REVIEW, IN_QA)
+    )
+
+    dispatcher._reopen_linear(snapshot)
+
+    assert requests == []
+    assert attention(queue) == [
+        (
+            "linear-not-reopened",
+            "linear-not-reopened: team has no In Progress or other started state "
+            "before Ready for Review",
+        )
+    ]
+
+
+def test_a_reopen_that_linear_does_not_confirm_is_flagged_and_logged(tmp_path: Path) -> None:
+    dispatcher, queue, gh, requests, snapshot = t4_setup(
+        tmp_path, team_issue(TODO_STATE, IN_PROGRESS, IN_QA), success=False
+    )
+
+    dispatcher._reopen_linear(snapshot)
+
+    assert [request["variables"] for request in requests] == [
+        {"issue": "issue-id", "state": "doing"}
+    ]
+    assert [reason for reason, _ in attention(queue)] == ["linear-reopen-failed"]
+    assert poll_errors(queue) == ["linear-reopen:PollSourceError"]
+
+
+def test_a_reopen_leaves_linear_alone_when_the_factory_may_not_move_it(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue, gh, requests, snapshot = t4_setup(
+        tmp_path, team_issue(TODO_STATE, IN_PROGRESS, IN_QA), move_ready_for_review=False
+    )
+
+    dispatcher._reopen_linear(snapshot)
+
+    assert requests == []
+    assert attention(queue) == []
+    assert poll_errors(queue) == []
+
+
+def test_the_next_approve_returns_a_reopened_issue_to_ready_for_review_and_clears_the_hold(
+    tmp_path: Path,
+) -> None:
+    issue = linear_issue_in({"id": "doing", "type": "started", "position": 2.0}, ready=RFR)
+    dispatcher, queue, gh, requests, snapshot = t4_setup(tmp_path, issue)
+    with queue.connect() as connection:
+        held = connection.execute(
+            "UPDATE ticket_state SET reopen_hold = 'Ready for Review' WHERE ticket_id = '42'"
+        ).rowcount
+    assert held == 1
+
+    dispatcher.process(snapshot)
+
+    assert [request["variables"] for request in requests] == [
+        {"issue": "issue-id", "state": "rfr"}
+    ]
+    assert gh.keys() == [PULL, MARK_READY]
+    assert ship_rows(queue)[1] == "handed-off"
+    with queue.connect() as connection:
+        hold = connection.execute(
+            "SELECT reopen_hold FROM ticket_state WHERE ticket_id = '42'"
+        ).fetchone()[0]
+    assert hold is None
+
+
+@pytest.mark.parametrize(
+    ("nodes", "target"),
+    [
+        ((TODO_STATE, IN_PROGRESS, IN_QA), "doing"),
+        ((TODO_STATE, BUILDING, IN_PROGRESS_AFTER_READY), "building"),
+    ],
+    ids=["in-progress-before-ready", "in-progress-after-ready"],
+)
+def test_a_reopened_issue_returns_to_ready_for_review_on_approve_whatever_the_state_order(
+    tmp_path: Path,
+    nodes: tuple[dict, ...],
+    target: str,
+) -> None:
+    issue = team_issue(*nodes)
+    by_id = {node["id"]: node for node in issue["team"]["states"]["nodes"]}
+    linear = {"state": issue["state"]}
+
+    def read(ref: TicketRef) -> TrackedTicket:
+        del ref
+        now = {**issue, "state": linear["state"]}
+        return replace(snapshot, linear_state_phase=_linear_state_phase(now))
+
+    dispatcher, queue, gh, requests, snapshot = t4_setup(tmp_path, issue, fresh_ticket=read)
+    with queue.connect() as connection:
+        connection.execute(
+            "UPDATE ticket_state SET reopen_hold = 'Ready for Review' WHERE ticket_id = '42'"
+        )
+
+    dispatcher._reopen_linear(snapshot)
+    linear["state"] = by_id[requests[-1]["variables"]["state"]]
+    dispatcher.process(read(TicketRef(repo="owner/repo", ticket_id="42", tracker="linear")))
+
+    assert [request["variables"]["state"] for request in requests] == [target, "rfr"]
+    assert ship_rows(queue)[1] == "handed-off"
+    with queue.connect() as connection:
+        hold = connection.execute(
+            "SELECT reopen_hold FROM ticket_state WHERE ticket_id = '42'"
+        ).fetchone()[0]
+    assert hold is None
