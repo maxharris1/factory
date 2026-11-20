@@ -264,3 +264,33 @@ def test_unparseable_rows_never_reach_a_script() -> None:
     assert len(scripts) == 2
     assert "0123456789ad" in scripts[1]
     assert not any(bad in scripts[1] for bad in ("touch", "Bad", "0123456789ab", "0123456789ac", "0123456789ae"))
+
+
+def test_aut0_aut2129_pc_is_removed_on_pc_over_the_bots_own_login(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lib.device_pool import DevicePool
+    from lib.machines_yml import load_machines_yml
+    from tests.test_remote_start import Ssh
+    from tests.test_waiter_remote import remote_machines
+
+    ssh = Ssh(tmp_path)
+    docker = Docker(tmp_path)
+    for name, value in ssh.env().items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("PATH", f"{ssh.bin}:/usr/bin:/bin")
+    monkeypatch.setenv("FAKE_SSH_HOME", str(docker.login_home()))
+    db, queue = make_queue(tmp_path)
+    config, findings = load_machines_yml(remote_machines(tmp_path))
+    assert config is not None, findings
+    finish(db, enqueue(queue, "done", repo=REPO, ticket_id="AUT-2129"))
+    ids = docker.stack("aut0-aut2129-pc", 3, T - 100)
+    log: list[str] = []
+    waiter, now = sweeping_waiter(tmp_path, queue, db, log, pool=DevicePool(queue, config))
+    now[0] = waiter_module.CONTAINER_SWEEP_SECONDS
+    waiter._reap()
+    assert not set(ids) & docker.ids() and not docker.networks() and not docker.volumes()
+    assert [line for line in log if "aut0-aut2129-pc" in line] == [
+        "removed compose stack aut0-aut2129-pc on pc (3 container(s), its networks and volumes)"
+        f" of finished ticket {REPO}#AUT-2129"
+    ]

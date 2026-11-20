@@ -4,8 +4,7 @@ import posixpath
 import re
 import shlex
 import subprocess
-from collections.abc import Callable, Sequence
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
