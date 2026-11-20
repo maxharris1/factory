@@ -232,3 +232,9 @@ def test_a_linear_project_reads_no_closed_issues(tmp_path: Path) -> None:
 
     assert not any(call.startswith("closed-since:") for call in github.calls)
 
+
+
+def test_the_spec_records_the_rule_with_follow_ups() -> None:
+    spec = (Path(__file__).resolve().parents[1] / "docs" / "SPEC.md").read_text(encoding="utf-8")
+    [row] = [line for line in spec.splitlines() if line.startswith("| Nov 20 | A split parent closes")]
+    assert "follow-up" in row and "`Fixes #<part>`" in row and "idempotent" in row
