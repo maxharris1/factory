@@ -66,6 +66,7 @@ RUNNING = "running"
 STALE = "stale"
 DEAD = "dead"
 JOB_STATES = (CLAIMED, RUNNING, STALE, DEAD)
+RUNNER_GONE = "runner-gone"
 
 DEFAULT_STALE_MINUTES = 2
 DEFAULT_RELEASE_CLAIMED_MINUTES = 5
@@ -123,6 +124,12 @@ def derive(
     if now - last_activity_at > stale_seconds:
         return STALE
     return RUNNING
+
+
+def stale_cause(state: str, facts: Liveness) -> str | None:
+    """#1211, display only: RUNNER_GONE for a stale job whose recorded runner
+    is gone while its worker is not confirmed gone, else None."""
+    return RUNNER_GONE if state == STALE and facts.runner_alive is False else None
 
 
 def liveness(

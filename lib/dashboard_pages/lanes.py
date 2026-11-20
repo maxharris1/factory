@@ -9,7 +9,7 @@ import math
 
 from lib.dashboard_pages.activity import _health_link
 from lib.dashboard_pages.common import (
-    _bot, _chip, duration, _e, github_links, _job_label, _panel,
+    _JOB_STATE, _bot, _chip, duration, _e, github_links, _job_label, _panel,
     _short, _span, _ticket, _tile_label, _when, ticket_page_href,
 )
 
@@ -246,7 +246,7 @@ SCRIPT = r"""
     var l1 = add(bodyEl, el('div', 'tile-l1'));
     add(l1, bot(r.recipient));
     add(l1, el('span', 'ticket', tileLabel(r)));
-    var badge = name === 'overdue' ? (LANES.tiles[r.job_state] || {}).chip : spec.chip;
+    var badge = JOB_STATE[r.stale_cause] || (name === 'overdue' ? (LANES.tiles[r.job_state] || {}).chip : spec.chip);
     if (badge) add(l1, chip(badge[0], badge[1]));
     var l2 = add(bodyEl, el('div', 'tile-l2'));
     var verb;
@@ -637,7 +637,9 @@ def _slot(row: dict, seed: int = 1) -> str:
         + (f" · round {row['round']}" if row.get("round") else "")
         + f" (job {row['job']})"
     )
-    badge = TILE_STATE.get(str(row.get("job_state")), {}).get("chip") if name == "overdue" else spec.get("chip")
+    badge = _JOB_STATE.get(str(row.get("stale_cause"))) or (
+        TILE_STATE.get(str(row.get("job_state")), {}).get("chip") if name == "overdue" else spec.get("chip")
+    )
     line1 = _bot(row["recipient"]) + _span("ticket", _tile_label(row)) + (_chip(badge[0], badge[1]) if badge else "")
     if spec.get("verbs"):
         text = verb_at(name, 0, seed)

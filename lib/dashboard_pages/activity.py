@@ -4,7 +4,8 @@ import json
 import re
 
 from lib.dashboard_pages.common import (
-    _BOTS, _chip, _e, github_links, github_refs, _panel, _span, _thread_key, _ticket, duration, ticket_page_href,
+    _BOTS, _JOB_STATE, _chip, _e, github_links, github_refs, _panel, _span, _thread_key, _ticket, duration,
+    ticket_page_href,
 )
 from lib.max_actions import ACTIONS, Why
 
@@ -165,7 +166,8 @@ _SCRIPT = r"""
     var box = nowBox(parent, 'stale');
     nowJob(add(box, el('span', 'rl-blk ' + botClass(r.recipient))), r,
            PX.strip('relay-now-' + r.job, {state: 'stale', bot: r.recipient, still: true, cell: 2, height: 10}));
-    add(box, chip(r.job_state, r.job_state === 'stale' ? 'warn' : 'bad'));
+    var cause = JOB_STATE[r.stale_cause];
+    add(box, chip(cause ? cause[0] : r.job_state, r.job_state === 'stale' ? 'warn' : 'bad'));
     ticking(add(box, el('span', 'rl-late')), r.heartbeat_age_seconds, 'no heartbeat for ', '');
   }
 
@@ -550,10 +552,11 @@ def _now_stale(at: dict) -> str:
     row = at["running"]
     strip = _px().px_strip(f"relay-now-{row['job']}", state="stale", bot=row["recipient"], still=True, cell=2,
                            height=10)
+    cause = _JOB_STATE.get(str(row.get("stale_cause")))
     return (
         f'<span class="rl-now stale"{_NOW_TITLE}><span class="rl-blk {_bot_class(row["recipient"])}">'
         f'{_now_job(row, strip)}</span>'
-        + _chip(row["job_state"], "warn" if row["job_state"] == "stale" else "bad")
+        + _chip(cause[0] if cause else row["job_state"], "warn" if row["job_state"] == "stale" else "bad")
         + _span("rl-late", "no heartbeat for " + duration(row["heartbeat_age_seconds"]))
         + "</span>"
     )
