@@ -243,7 +243,7 @@ from lib.ticket_type import TICKET_TYPES
 FEEDER_TABLE = "feeder_items"
 POLL_TABLE = "feeder_poll"  # one row: when the feeder last read intake
 SPLIT_CURSOR_TABLE = "feeder_split_cursor"
-SPLIT_PARENT_TABLE = "feeder_split_parents"  # parents whose last check was not settled
+SPLIT_UNSETTLED_TABLE = "feeder_split_unsettled"
 SPLIT_CURSOR_OVERLAP_SECONDS = 120  # clock skew between orch and GitHub
 SPLIT_RECHECK_SECONDS = 120  # GitHub search allows 30 reads a minute
 # eligible: seen this poll, not fed yet; waiting-capacity: no room for its
@@ -894,7 +894,7 @@ def ensure_tables(connection: sqlite3.Connection) -> None:
         f"CREATE TABLE IF NOT EXISTS {SPLIT_CURSOR_TABLE} (repo TEXT PRIMARY KEY, at REAL NOT NULL)"
     )
     connection.execute(
-        f"CREATE TABLE IF NOT EXISTS {SPLIT_PARENT_TABLE} "
+        f"CREATE TABLE IF NOT EXISTS {SPLIT_UNSETTLED_TABLE} "
         "(repo TEXT NOT NULL, parent INTEGER NOT NULL, checked_at REAL NOT NULL, "
         "PRIMARY KEY (repo, parent))"
     )
@@ -1152,7 +1152,7 @@ class Feeder:
             ).fetchone()
             cursor = float(row[0]) if row is not None else last_feeder_poll(connection)
             pending = dict(connection.execute(
-                f"SELECT parent, checked_at FROM {SPLIT_PARENT_TABLE} WHERE repo = ?", (key,)
+                f"SELECT parent, checked_at FROM {SPLIT_UNSETTLED_TABLE} WHERE repo = ?", (key,)
             ).fetchall())
         if cursor is None:
             return 0
@@ -1208,9 +1208,9 @@ class Feeder:
                 "ON CONFLICT(repo) DO UPDATE SET at = excluded.at",
                 (key, now - SPLIT_CURSOR_OVERLAP_SECONDS),
             )
-            connection.execute(f"DELETE FROM {SPLIT_PARENT_TABLE} WHERE repo = ?", (key,))
+            connection.execute(f"DELETE FROM {SPLIT_UNSETTLED_TABLE} WHERE repo = ?", (key,))
             connection.executemany(
-                f"INSERT INTO {SPLIT_PARENT_TABLE} (repo, parent, checked_at) VALUES (?, ?, ?)",
+                f"INSERT INTO {SPLIT_UNSETTLED_TABLE} (repo, parent, checked_at) VALUES (?, ?, ?)",
                 [(key, parent, at) for parent, at in sorted(unsettled.items())],
             )
             connection.executemany(

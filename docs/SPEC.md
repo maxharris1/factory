@@ -1148,7 +1148,7 @@ parts have merged (kept to one by a marker), removes the intake label and
 it as completed, last, so a failed step leaves it open. An open or
 `not_planned` sibling keeps the parent open. A parent already closed gets no
 write. A parent whose check did not close it, or failed, stays in
-`feeder_split_parents` and is checked again every 120 seconds until it is
+`feeder_split_unsettled` and is checked again every 120 seconds until it is
 closed, by the feeder or a person, so a stale read is never a permanent miss;
 the 120 seconds keep the sibling search under GitHub's 30 searches a minute,
 and a close the cursor overlap reads again waits for that recheck. The cursor
