@@ -7,12 +7,14 @@ import subprocess
 import time
 from collections import Counter
 from dataclasses import replace
+from email.utils import formatdate
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
 from lib import cli
+from lib.dispatch.cycle_clock import CycleClock
 from lib.dispatcher import (
     LINEAR_HANDOFF_QUERY,
     Comment,
@@ -3321,3 +3323,88 @@ def test_one_factory_states_request_reads_every_open_ticket(tmp_path: Path) -> N
         ("Ready for Review", "started", 5000.0)
     }
     assert handed_off == 20
+
+
+class LedgerGh(FakeGh):
+    def __init__(self, wall: float) -> None:
+        super().__init__(FACTORY.format(tickets="github", ship="merge"))
+        self.wall = wall
+        self.factory_reply: GhResult | None = None
+
+    def __call__(self, argv, timeout):
+        call = list(argv)
+        if "POST" in call and "graphql" not in call:
+            self.calls.append(call)
+            return GhResult(0, json.dumps({"id": 5}), "")
+        if any(part.startswith("repos/acme/widgets/pulls?head=") for part in call):
+            self.calls.append(call)
+            return GhResult(0, "[]", "")
+        if any(part.endswith("/contents/factory.md") for part in call) and self.factory_reply:
+            self.calls.append(call)
+            return self.factory_reply
+        return super().__call__(argv, timeout)
+
+    def headers(self, status: str, date_age: float, **extra: object) -> str:
+        lines = [f"HTTP/2.0 {status}", f"Date: {formatdate(self.wall - date_age, usegmt=True)}"]
+        lines += [f"{name}: {value}" for name, value in extra.items()]
+        return "\r\n".join(lines) + "\r\n\r\n"
+
+
+def ledger_source(gh: LedgerGh) -> tuple[LivePollSource, CycleClock]:
+    source = LivePollSource(config(), gh_runner=gh, wall=lambda: gh.wall)
+    clock = CycleClock(wall=lambda: gh.wall)
+    source.cycle_clock = clock
+    clock.start()
+    return source, clock
+
+
+def test_the_end_line_counts_adapter_reads_gh_call_reads_and_writes() -> None:
+    gh = LedgerGh(1_800_000_000.0)
+    gh.factory_reply = GhResult(
+        0,
+        gh.headers(
+            "200 OK",
+            0,
+            **{
+                "ETag": '"v1"',
+                "X-RateLimit-Limit": 5000,
+                "X-RateLimit-Remaining": 4321,
+                "X-RateLimit-Reset": int(gh.wall) + 299,
+            },
+        )
+        + json.dumps(gh.factory),
+        "",
+    )
+    source, clock = ledger_source(gh)
+
+    source.github.list_comments("acme/widgets", "12")
+    source._gh_call("repos/acme/widgets/contents/factory.md")
+    source.github.post_issue_comment("acme/widgets", 12, "hello")
+    source._gh_call("repos/acme/widgets/pulls?head=acme:factory/issue-7")
+    source.github.pull_states("acme/widgets", ["12"])
+
+    line = clock.end()
+    assert line.endswith(
+        "; github core 4 [GET contents/factory.md 1, GET issues/<value>/comments 1, "
+        "GET pulls 1, POST issues/<value>/comments 1], "
+        "free 0 (304 0, cached 0), graphql 1; core 4321/5000 resets 5m"
+    )
+    assert "factory/issue-7" not in line
+    assert "acme" not in line
+
+
+@pytest.mark.parametrize(("date_age", "kind"), [(0, "304 1, cached 0"), (600, "304 0, cached 1")])
+def test_a_not_modified_read_counts_as_free(date_age: float, kind: str) -> None:
+    gh = LedgerGh(1_800_000_000.0)
+    gh.factory_reply = GhResult(
+        0, gh.headers("200 OK", 0, ETag='"v1"') + json.dumps(gh.factory), ""
+    )
+    source, clock = ledger_source(gh)
+    source._gh_call("repos/acme/widgets/contents/factory.md")
+    clock.end()
+
+    clock.start()
+    gh.factory_reply = GhResult(1, gh.headers("304 Not Modified", date_age), "gh: HTTP 304\n")
+    source._gh_call("repos/acme/widgets/contents/factory.md")
+
+    assert clock.end().endswith(f"; github core 0, free 1 ({kind}), graphql 0")
