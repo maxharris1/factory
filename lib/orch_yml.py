@@ -540,12 +540,7 @@ def load_orch_yml(
 
 
 class ProjectPins:
-    """Lower-cased repo -> projects[].devices, read from orch.yml on each call (#1172).
-
-    A repo absent from the map runs on every device. A missing file pins
-    nothing. A file that fails to load keeps the last good map, and is None
-    until one loads, so a broken orch.yml never drops a pin.
-    """
+    """A broken orch.yml keeps the last good pins, or None before any, so it never drops a pin (#1172)."""
 
     def __init__(self, path: Path):
         self.path = path

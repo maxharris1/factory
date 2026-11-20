@@ -8,8 +8,8 @@ slots held over slot_max; a tie goes to a remote before the local box,
 remotes in machines.yml order; issue #223) that is schedulable, not
 draining, and lists that harness (issue #85). A job of a project pinned
 to devices (orch.yml projects[].devices, #1172) takes only a listed device;
-with none free it stays queued and the next job in claim order is tried,
-and a pool whose pins never loaded claims nothing. Both writes happen
+with none free it stays queued and the next job in claim order is tried.
+Both writes happen
 in one BEGIN IMMEDIATE transaction, so two claims cannot take the same
 last slot. Slots are generic: any free slot on an eligible device takes
 any harness. Inside that transaction a pool given `machines_path` reads
@@ -180,7 +180,7 @@ def choose_device(
     used: Mapping[str, int],
     blocked: Blocked = NOTHING_BLOCKED,
     avoid: Collection[str] = frozenset(),
-    only: Collection[str] | None = None,
+    allowed: Collection[str] | None = None,
 ) -> Device | None:
     """The schedulable, non-draining device listing harness with the lowest utilization, or None.
 
@@ -189,11 +189,11 @@ def choose_device(
     (issue #223). A full device is never chosen, nor one whose factory
     checkout for harness is out of sync or being updated (#297). A device
     in `avoid` is chosen only when no other has a free slot (#218). With
-    `only` (a pinned project's devices, #1172), no device outside it is chosen.
+    `allowed`, no device outside it is chosen.
     """
     candidates = []
     for index, device in enumerate(config.devices):
-        if not _places(device, harness, blocked, only):
+        if not _places(device, harness, blocked, allowed):
             continue
         assert device.slot_max is not None
         held = used.get(device.name, 0)
@@ -210,24 +210,24 @@ def free_slots(
     harness: str,
     used: Mapping[str, int],
     blocked: Blocked = NOTHING_BLOCKED,
-    only: Collection[str] | None = None,
+    allowed: Collection[str] | None = None,
 ) -> int:
     """Free slots, summed over every device listing harness that choose_device may pick."""
     total = 0
     for device in config.devices:
-        if _places(device, harness, blocked, only):
+        if _places(device, harness, blocked, allowed):
             assert device.slot_max is not None
             total += max(0, device.slot_max - used.get(device.name, 0))
     return total
 
 
 def _places(
-    device: Device, harness: str, blocked: Blocked, only: Collection[str] | None
+    device: Device, harness: str, blocked: Blocked, allowed: Collection[str] | None
 ) -> bool:
     return (
         device.takes_new(harness)
         and not blocked.blocks(device.name, harness)
-        and (only is None or device.name in only)
+        and (allowed is None or device.name in allowed)
     )
 
 
@@ -361,8 +361,8 @@ class DevicePool:
             ):
                 if str(row["id"]) in excluded:
                     continue
-                only = pins.get(str(row["repo"]).lower())
-                device = choose_device(config, harness, used, blocked, only=only)
+                allowed = pins.get(str(row["repo"]).lower())
+                device = choose_device(config, harness, used, blocked, allowed=allowed)
                 if device is not None:
                     break
             else:
@@ -371,7 +371,7 @@ class DevicePool:
             dropped = _lost_on(connection, str(row["id"]))
             if dropped == device.name:
                 device = choose_device(
-                    config, harness, used, blocked, avoid={dropped}, only=only
+                    config, harness, used, blocked, avoid={dropped}, allowed=allowed
                 )
                 assert device is not None
             changed = connection.execute(

@@ -84,10 +84,12 @@ def test_a_pinned_job_waits_while_only_unlisted_devices_are_free_then_lands_on_p
 
 
 def test_a_waiting_pinned_job_does_not_hold_back_the_jobs_behind_it(tmp_path: Path) -> None:
-    pool, queue = make_pool(tmp_path)
+    now = [100.0]
+    pool, queue = make_pool(tmp_path, now=now)
     enqueue(queue, PINNED, "1")
     assert pool.claim("claude")[1].device == "pc"
     waiting = enqueue(queue, PINNED, "2")
+    now[0] = 101.0
     behind = enqueue(queue, FREE, "3")
 
     placed = pool.claim("claude")
@@ -278,8 +280,8 @@ def test_the_orch_wait_pool_reads_its_pins_from_orch_yml(tmp_path: Path, no_over
     pool = cli._device_pool(queue, CONFIG, None, orch=orch)
     pool.machines_path = None
     enqueue(queue, PINNED, "1")
+    assert pool.claim("claude")[1].device == "pc"
     waiting = enqueue(queue, PINNED, "2")
 
-    assert pool.claim("claude")[1].device == "pc"
     assert pool.claim("claude") is None
     assert state(queue, waiting.id) == "queued"

@@ -62,7 +62,7 @@ NAMES_BEFORE_SPLIT = (
 DISPATCHER_METHODS = (
     "__init__", "_abandon_closed", "_advance_merge_queue", "_advance_merge_queues",
     "_advance_poll_error_streak", "_after_finish", "_answered_by", "_app_may_post",
-    "_approval_covers", "_approver_go", "_base_update_out", "_busy",
+    "_approval_covers", "_approver_go", "_base_update_out",
     "_cancel_answered", "_cancel_answered_jobs", "_check_devices", "_check_job_states",
     "_classify_update", "_clear_poll_error_streak", "_close_abandoned_jobs", "_closed_unfinished",
     "_complete_redrive", "_complete_ship_intent", "_config_cap", "_connect",
@@ -82,7 +82,7 @@ DISPATCHER_METHODS = (
     "_latest_step", "_leave_merge_queue", "_log_abandoned_jobs", "_log_job_event",
     "_mark_handled", "_mark_ship_intent_failed", "_mark_stuck_and_wake", "_may_approve",
     "_may_approve_go", "_merge_queue_head", "_merge_queue_members", "_merge_turn",
-    "_migrate_ship_intent_redrive", "_note_timeout_held", "_observed",
+    "_migrate_ship_intent_redrive", "_no_free_slot", "_note_timeout_held", "_observed",
     "_open_fix_for_head", "_over_cap", "_paused_between", "_posted_handoff",
     "_prepare_external_ship", "_prepare_ship_intent", "_previewed_head",
     "_process_comments", "_project_wake_detail", "_queue_base_update", "_queue_comment",

@@ -229,34 +229,27 @@ class JobsMixin:
                 connection, job, "handed-off", "Max handed the ticket off; no T6 retry", now
             )
 
-    def _busy(self) -> Callable[[Job], bool]:
-        """#18: whether every slot a queued job could take is in use.
-
-        Read from the device monitor's machines.yml. A pinned project's job
-        (projects[].devices, #1172) counts only its listed devices. With no
-        machines.yml, or when no device it may use lists its harness, nothing
-        counts as busy.
-        """
+    def _no_free_slot(self) -> Callable[[Job], bool]:
         config = getattr(self.devices, "config", None)
         if config is None:
             return lambda job: False
         used = used_slots(self.queue, config)
         blocked = placement_blocks(self.queue, config, self._head())
 
-        def busy(job: Job) -> bool:
+        def full(job: Job) -> bool:
             harness = job.request.recipient
             project = self.wake_routes.get(job.request.repo.lower())
-            only = project.devices if project is not None else None
+            allowed = project.devices if project is not None else None
             return (
                 harness in HARNESSES
                 and any(
-                    device.eligible(harness) and (only is None or device.name in only)
+                    device.eligible(harness) and (allowed is None or device.name in allowed)
                     for device in config.devices
                 )
-                and free_slots(config, harness, used, blocked, only=only) == 0
+                and free_slots(config, harness, used, blocked, allowed=allowed) == 0
             )
 
-        return busy
+        return full
 
     def _head(self) -> str | None:
         pool = getattr(self.devices, "pool", None)
@@ -336,7 +329,7 @@ class JobsMixin:
         self._check_job_states()
         self._close_abandoned_jobs()
         now = self.queue.now()
-        busy = self._busy()
+        no_free_slot = self._no_free_slot()
         lag_blocked = self._lag_blocked_recipients()
         serving = self._serving()
         with self._connect() as connection:
@@ -370,7 +363,7 @@ class JobsMixin:
             ):
                 continue
             if now - waited_since >= job.request.timeout_seconds:
-                if job.state == "queued" and busy(job):
+                if job.state == "queued" and no_free_slot(job):
                     self._restart_queue_wait(job, now)
                     continue
                 if not self.queue.mark_timed_out(job) and job.state == "running":
