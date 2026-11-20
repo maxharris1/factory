@@ -2427,6 +2427,47 @@ def test_close_issue_with_no_comment_only_closes() -> None:
     assert gh.keys() == [close]
 
 
+def test_close_issue_as_completed_sends_the_state_reason() -> None:
+    actions, gh = adapter()
+    close = (
+        "-X", "PATCH", f"{REPO}/issues/307", "-f", "state=closed", "-f", "state_reason=completed",
+    )
+    gh.route(close, GhResult(0, "{}", ""))
+
+    actions.close_issue("owner/repo", 307, None, completed=True)
+
+    assert gh.keys() == [close]
+
+
+LABEL = ("-X", "DELETE", f"{REPO}/issues/307/labels/orch%3Astate%2Fabandoned")
+
+
+def test_remove_issue_label_deletes_the_label() -> None:
+    actions, gh = adapter()
+    gh.route(LABEL, GhResult(0, "[]", ""))
+
+    actions.remove_issue_label("owner/repo", 307, "orch:state/abandoned")
+
+    assert gh.keys() == [LABEL]
+
+
+def test_remove_issue_label_treats_404_as_already_removed() -> None:
+    actions, gh = adapter()
+    gh.route(LABEL, GhResult(1, '{"message": "Label does not exist"}', "gh: Label does not exist (HTTP 404)\n"))
+
+    actions.remove_issue_label("owner/repo", 307, "orch:state/abandoned")
+
+    assert gh.keys() == [LABEL]
+
+
+def test_remove_issue_label_raises_on_other_errors() -> None:
+    actions, gh = adapter()
+    gh.route(LABEL, GhResult(1, '{"message": "Forbidden"}', "gh: Forbidden (HTTP 403)\n"))
+
+    with pytest.raises(GitHubAdapterError):
+        actions.remove_issue_label("owner/repo", 307, "orch:state/abandoned")
+
+
 @pytest.mark.parametrize("state", ["open", "closed"])
 def test_issue_state_reads_the_issue(state: str) -> None:
     actions, gh = adapter()

@@ -586,12 +586,25 @@ class GitHubReviewActions:
                     found.add(_issue_number(raw.get("number")))
         return tuple(sorted(found))
 
-    def close_issue(self, repo: str, number: int, comment: str | None) -> None:
+    def close_issue(
+        self, repo: str, number: int, comment: str | None, *, completed: bool = False
+    ) -> None:
         if comment is not None:
             self.post_issue_comment(repo, number, comment)
-        self._call(
-            "-X", "PATCH", f"{_repo_path(repo)}/issues/{_issue_number(number)}", "-f", "state=closed"
-        )
+        reason = ("-f", "state_reason=completed") if completed else ()
+        path = f"{_repo_path(repo)}/issues/{_issue_number(number)}"
+        self._call("-X", "PATCH", path, "-f", "state=closed", *reason)
+
+    def remove_issue_label(self, repo: str, number: int, label: str) -> None:
+        try:
+            self._call(
+                "-X",
+                "DELETE",
+                f"{_repo_path(repo)}/issues/{_issue_number(number)}/labels/{quote(label, safe='')}",
+            )
+        except GitHubAdapterError as exc:
+            if _status(exc) != 404:
+                raise
 
     def issue_state(self, repo: str, number: int) -> str:
         state = _object(self._json(f"{_repo_path(repo)}/issues/{_issue_number(number)}")).get("state")

@@ -25,7 +25,11 @@ Reads:
   whether GitHub truncated it, to find the verify skill (#1029);
 * dir_names: the file names, and the subfolder names with a trailing `/`,
   in one repo folder at a commit (`contents/`), for the feature map check
-  and the truncated tree walk (#1029).
+  and the truncated tree walk (#1029);
+* closed_issues_since: issues closed at or after a time (`issues?state=closed&since=`);
+* split_children: every issue whose body says `Split from #<parent>` (`search/issues`);
+  a search that returns fewer issues than its total_count, as past the
+  1,000-result ceiling, fails the read rather than returning a partial set.
 
 Writes (each one exactly once per call; the feeder makes them idempotent):
 the empty start commit (git data API: the base commit's tree, one parent),
@@ -37,14 +41,15 @@ from __future__ import annotations
 import re
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, TypeVar
 from urllib.parse import quote
 
 from lib.branch_stack import OpenPull
 from lib.dispatcher import Comment
-from lib.feeder import IntakeIssue
+from lib.feeder import IntakeIssue, IssueRecord
 from lib.feeder_gates import Progress, Ref, RefStatus
+from lib.followups import split_parent
 from lib.github_actions import (
     GitHubAdapterError,
     GitHubReviewActions,
@@ -149,6 +154,32 @@ def _text(value: object) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _issue_items(pages: Sequence[object]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for page in pages:
+        if not isinstance(page, list):
+            raise GitHubAdapterError("issue page is not a list")
+        items.extend(
+            item
+            for item in page
+            if isinstance(item, dict)
+            and "pull_request" not in item
+            and isinstance(item.get("number"), int)
+            and not isinstance(item.get("number"), bool)
+        )
+    return items
+
+
+def _issue_record(item: dict[str, Any]) -> IssueRecord:
+    reason = item.get("state_reason")
+    return IssueRecord(
+        number=item["number"],
+        state=_text(item.get("state")),
+        reason=reason if isinstance(reason, str) else None,
+        body=_text(item.get("body")),
+    )
+
+
 def _github_branch(name: object) -> bool:
     return isinstance(name, str) and name not in ("", "@") and not _NOT_A_BRANCH.search(name)
 
@@ -213,6 +244,40 @@ class GitHubIntakeClient(GitHubReviewActions):
                     )
                 )
         return found
+
+    def closed_issues_since(self, repo: str, since: float) -> tuple[IssueRecord, ...]:
+        stamp = datetime.fromtimestamp(since, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        endpoint = f"{_repo_path(repo)}/issues?state=closed&since={stamp}&per_page=100"
+        items = _issue_items(self._pages(endpoint))
+        return tuple(
+            _issue_record(item) for item in items if _epoch(item.get("closed_at")) >= since
+        )
+
+    def split_children(self, repo: str, parent: int) -> tuple[IssueRecord, ...]:
+        name = _repo_path(repo).removeprefix("repos/")
+        query = quote(f'repo:{name} is:issue in:body "Split from #{parent}"', safe="")
+        pages = self._pages(f"search/issues?q={query}&per_page=100")
+        searches = [page for page in pages if isinstance(page, dict)]
+        if len(searches) != len(pages):
+            raise GitHubAdapterError("issue search page is not an object")
+        if any(search.get("incomplete_results") for search in searches):
+            raise GitHubAdapterError("issue search results are incomplete")
+        totals = [search.get("total_count") for search in searches]
+        if not all(type(total) is int for total in totals):
+            raise GitHubAdapterError("issue search page has no total_count")
+        found = [search.get("items") for search in searches]
+        returned = sum(len(page) for page in found if isinstance(page, list))
+        if returned < max(totals):
+            raise GitHubAdapterError(
+                f"issue search returned {returned} of {max(totals)} issues"
+            )
+        items = _issue_items(found)
+        children = [
+            _issue_record(item)
+            for item in items
+            if split_parent(_text(item.get("body"))) == parent
+        ]
+        return tuple(sorted(children, key=lambda child: child.number))
 
     def _applied_by(self, repo: str, number: int, label: str, updated_at: str) -> str | None:
         key = (repo.lower(), number, label, updated_at)

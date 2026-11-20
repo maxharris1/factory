@@ -24,6 +24,7 @@ from lib.followups import (
     split_issue,
     split_link_marker,
     split_marker,
+    split_parent,
     split_parts,
 )
 from tests import regenerate_brief_snapshots as snapshots
@@ -856,6 +857,39 @@ def test_the_split_comment_links_every_part_once_by_marker() -> None:
     assert "#1201" in text and "#1202" in text
     assert has_marker(text, split_link_marker("77"))
     assert split_link_marker("77") != split_marker("77", 1)
+
+
+def test_split_parent_reads_the_parent_of_an_auto_split_part() -> None:
+    part = SplitPart("Adapter", ("ac-1: a.",), 150, None)
+    body = split_issue("1253", "https://example.test/plan", "77", 1, part, "high", ())[1]
+    assert split_parent(body) == 1253
+
+
+def test_split_parent_reads_a_hand_written_follow_up() -> None:
+    body = "Context first.\n\nSplit from #135\n\n## Acceptance criteria\n\n- ac-1: x.\n"
+    assert split_parent(body) == 135
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "```\nSplit from #135\n```\n",
+        "~~~markdown\nSplit from #135 (plan url).\n~~~\n",
+        "Example:\n\n    Split from #135\n",
+        "We may later say Split from #135 here.\n",
+        "Split from #abc\n",
+        "",
+    ],
+    ids=["backtick-fence", "tilde-fence", "indented-code", "mid-line", "no-number", "empty"],
+)
+def test_split_parent_is_none_without_an_unfenced_split_line(body: str) -> None:
+    assert split_parent(body) is None
+
+
+def test_split_parent_never_reads_a_prefix_of_the_parent_number() -> None:
+    assert split_parent("Split from #123 (plan url).\n") == 123
+    assert split_parent("Split from #123.\n") != 12
+    assert split_parent("Split from #12\n") == 12
 
 
 def test_a_part_without_a_depends_line_depends_on_the_previous_part() -> None:

@@ -558,6 +558,14 @@ def parse_intake(body: str, labels: Collection[str]) -> IntakeTemplate:
 
 
 @dataclass(frozen=True)
+class IssueRecord:
+    number: int
+    state: str
+    reason: str | None
+    body: str
+
+
+@dataclass(frozen=True)
 class IntakeIssue:
     """One ticket an intake source reports as carrying the project's signal."""
 

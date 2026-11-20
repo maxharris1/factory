@@ -22,6 +22,7 @@ from lib.feeder_gates import FILE_PATH
 from lib.handoff import plan_estimate
 
 ISSUE_BODY_LIMIT = 65536
+_SPLIT_FROM = re.compile(r"^Split from #(\d+)\b")
 _MARKDOWN = MarkdownIt("commonmark")
 _TAG = "[follow-up]"
 _CUT_NOTE = "Some findings were cut to fit GitHub's issue size limit; the verdict has them all."
@@ -271,6 +272,21 @@ def split_issue(
         f"## Acceptance criteria\n\n{criteria}\n{estimate}{split_marker(comment_id, number)}"
     )
     return (part.title or f"Part {number} of #{issue}")[:256], body
+
+
+def split_parent(body: str) -> int | None:
+    text = re.sub(r"\r\n?", "\n", body or "")
+    code = {
+        index
+        for token in _MARKDOWN.parse(text)
+        if token.type in ("fence", "code_block") and token.map
+        for index in range(*token.map)
+    }
+    for index, line in enumerate(text.split("\n")):
+        match = None if index in code else _SPLIT_FROM.match(line)
+        if match:
+            return int(match.group(1))
+    return None
 
 
 def split_dependencies(parts: tuple[SplitPart, ...]) -> tuple[tuple[int, ...], ...]:
