@@ -18,7 +18,9 @@ the job has one. A qa job's handoff is a `kind=qa` from grok-bot at exactly
 the job's 40-character head (#763). With no PR number on the job (a Linear
 ticket before its PR is known) the PR is the comment's own: every handoff
 kind, questions included, must be on a PR, and on the job's branch when the
-job names one. A plan needs an `Estimate: <n>` body line (#1021).
+job names one. A plan needs an `Estimate: <n>` body line (#1021). A ready
+for a job whose detail lists `proof` needs a `## Proof` entry for each
+criterion it names (lib/proof.py, #1032).
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ from lib.brief import brief_kind
 from lib.brief.common import BriefError, detail_of, facts_of
 from lib.github_actions import GH
 from lib.handoff import HandoffError, parse_comment, plan_estimate, plan_estimate_text
+from lib.proof import Required, from_detail, missing
 from lib.queue import Job
 
 GH_TIMEOUT_SECONDS = 30.0
@@ -71,6 +74,7 @@ class Expected:
     kind: str
     head: str | None
     round: str | None
+    proof: tuple[Required, ...] | None = None
 
 
 def expected_for(job: Job, bot: str) -> Expected:
@@ -98,6 +102,7 @@ def expected_for(job: Job, bot: str) -> Expected:
         kind=handoff,
         head=facts["head"] if handoff in ("verdict", "qa") else None,
         round=round_text,
+        proof=from_detail(detail.get("proof")) if handoff == "ready" else None,
     )
 
 
@@ -231,6 +236,8 @@ def problems(
             'plan has no "Estimate: <n>" line' if text is None
             else f"plan Estimate {text!r} is not a whole number of lines, 0 to 999999999"
         )
+    if kind == "ready" and expected.proof is not None:
+        found.extend(missing(expected.proof, handoff.body))
     refusal = approve_refusal(fields, handoff.body)
     if refusal is not None:
         found.append(refusal.message)
