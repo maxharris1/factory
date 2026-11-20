@@ -56,15 +56,24 @@ def test_a_missing_or_unparseable_pressure_file_never_cancels_low_memavailable(
     assert reason is not None and "MemAvailable" in reason
 
 
-@pytest.mark.parametrize(
-    "memory",
-    [None, "", "MemAvailable: lots kB\n", "MemTotal: 65536000 kB\nMemFree: 1 kB\n", "garbage"],
-)
+UNREADABLE_MEMINFO = [
+    None,
+    "",
+    "MemAvailable: lots kB\n",
+    "MemAvailable: -5 kB\n",
+    "MemAvailable: \u00b2 kB\n",
+    f"MemAvailable: {'1' * 4301} kB\n",
+    "MemTotal: 65536000 kB\nMemFree: 1 kB\n",
+    "garbage",
+]
+
+
+@pytest.mark.parametrize("memory", UNREADABLE_MEMINFO)
 def test_a_missing_or_unparseable_meminfo_passes_on_its_own(memory: str | None) -> None:
     assert over_limit(memory, CALM) is None
 
 
-@pytest.mark.parametrize("memory", [None, "", "MemAvailable: lots kB\n"])
+@pytest.mark.parametrize("memory", UNREADABLE_MEMINFO)
 def test_high_psi_holds_even_when_meminfo_is_unreadable(memory: str | None) -> None:
     reason = over_limit(memory, STORMY)
     assert reason is not None and "PSI" in reason

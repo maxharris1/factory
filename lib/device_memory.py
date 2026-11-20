@@ -23,7 +23,10 @@ def _available_bytes(meminfo: str | None) -> int | None:
     for line in (meminfo or "").splitlines():
         fields = line.split()
         if fields[:1] == ["MemAvailable:"] and len(fields) > 1 and fields[1].isdigit():
-            return int(fields[1]) * 1024
+            try:
+                return int(fields[1]) * 1024
+            except ValueError:
+                return None
     return None
 
 
