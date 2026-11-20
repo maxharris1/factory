@@ -165,6 +165,7 @@ from lib.dispatch.bookkeeping import LockLedger, bookkeeping_write, must_write
 from lib.dispatch.types import BaseCheck, FailedCheck
 from lib.dispatcher import Comment, TicketRef, TrackedTicket, safe_ship_error
 from lib.evidence.ci import MainRed, ci_evidence, main_red
+from lib.evidence.criteria import numbered
 from lib.factory_md import FactoryContext
 from lib.feeder_gates import (
     ATTENTION_CRITICAL_PATH,
@@ -195,10 +196,12 @@ from lib.journeys import (
     NO_VERIFY,
     JourneyCode,
     QaCriterion,
+    QaPlan,
     map_ids,
     map_problems,
     parse_features,
     problems,
+    qa_plan,
     qa_tag,
 )
 from lib.main_fix import (
@@ -1938,6 +1941,7 @@ class Feeder:
         base_sha = self.github.branch_sha(repo, base)
         if base_sha is None:
             raise _Held(Wait(f"base branch {base} does not exist on {repo}"))
+        tips = {base: base_sha}
         number: int | None = None
         if row["pr_number"]:
             number = int(row["pr_number"])
@@ -2021,9 +2025,17 @@ class Feeder:
         authors = self._orchestrator_authors(issue.tracker)
         brief_id = row["brief_comment_id"] or _existing(existing, "brief", authors)
         if brief_id is None:
+            qa = None
+            verify = config.qa.verify if config.qa else None
+            if template.journeys and verify:
+                sha = tips.get(base) or self.github.branch_sha(repo, base)
+                if sha is None:
+                    raise ValueError(f"base branch {base} has no tip for the brief's QA journeys")
+                criteria = ((criterion.id, criterion.text) for criterion in numbered(issue.body))
+                qa = qa_plan(verify, sha, template.journeys, criteria)
             brief_id = post(
                 _brief(issue, candidate.context, number=number, branch=branch, base=base,
-                       risk=risk, state=state, visible=linear, template=template)
+                       risk=risk, state=state, visible=linear, template=template, qa=qa)
             )
         self._record(candidate, brief_comment_id=brief_id)
         go_id = row["go_comment_id"] or _existing(existing, "go", authors)
@@ -2282,6 +2294,7 @@ def _brief(
     state: str,
     visible: bool,
     template: IntakeTemplate = IntakeTemplate(),
+    qa: QaPlan | None = None,
 ) -> str:
     config = context.config
     body = issue.body.strip() or "(the ticket has no body)"
@@ -2307,6 +2320,8 @@ def _brief(
     ):
         if items:
             sections += ["", f"### {title}", *(f"- {item}" for item in items)]
+    if qa is not None:
+        sections += ["", *qa.render()]
     prose = re.sub(r"^(#{1,5}) ", r"#\1 ", context.body.strip(), flags=re.MULTILINE)
     text = "\n".join(
         [

@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import pytest
 
+from lib.evidence.criteria import numbered
 from lib.journeys import (
     NO_VERIFY,
     Journey,
+    QaCheck,
     QaCriterion,
+    QaPlan,
     map_ids,
     map_problems,
     parse_features,
     problems,
+    qa_plan,
     qa_tag,
     skill_dir,
 )
@@ -135,3 +139,109 @@ def test_a_known_id_and_a_new_one_pass_the_map() -> None:
 def test_no_verify_skill_is_features_no_verify() -> None:
     assert NO_VERIFY[0] == "features-no-verify"
     assert "qa.verify" in NO_VERIFY[1]
+
+
+SHA = "9b8a7c6d5e4f3021fedcba9876543210abcdef01"
+JOURNEYS = (Journey("pricing"), Journey("start-free", new=True))
+
+
+def plan(*checks: QaCheck) -> QaPlan:
+    return QaPlan("verify-cleffy", SHA, JOURNEYS, checks)
+
+
+@pytest.mark.parametrize(
+    "checks",
+    [
+        (),
+        (QaCheck("ac-2", ("pricing", "start-free"), "The button opens the sign-up form."),),
+        (
+            QaCheck("ac-1", ("pricing",), "Prices show in dollars."),
+            QaCheck("ac-4", ("start-free",), "The free plan is chosen: no card asked."),
+        ),
+        (QaCheck("ac-1", ("pricing",), ""),),
+    ],
+)
+def test_a_qa_plan_round_trips_through_its_brief_sections(checks) -> None:
+    assert QaPlan.parse("\n".join(plan(*checks).render())) == plan(*checks)
+
+
+def test_the_rendered_sections_name_the_skill_base_ids_and_new_journeys() -> None:
+    assert plan(QaCheck("ac-2", ("pricing", "start-free"), "It opens.")).render() == [
+        "### QA journeys",
+        "- Verify skill: `verify-cleffy`",
+        f"- Base: `{SHA}`",
+        "- `pricing`",
+        "- `new:start-free` (this PR adds `features/start-free.md` and its README row)",
+        "",
+        "### QA criteria",
+        "- ac-2 [pricing, start-free]: It opens.",
+    ]
+
+
+def test_a_plan_with_no_checks_renders_no_criteria_section() -> None:
+    assert "### QA criteria" not in plan().render()
+
+
+def test_the_plan_is_read_from_around_the_rest_of_a_brief() -> None:
+    text = "\n".join(["**Brief**", "", "### Acceptance criteria", "- It works.", "", *plan().render(),
+                      "", "### Ticket", "```", "body", "```"])
+    assert QaPlan.parse(text) == plan()
+
+
+def test_qa_criteria_count_only_right_under_the_journeys() -> None:
+    checks = plan(QaCheck("ac-2", ("pricing",), "It opens.")).render()
+    moved = [*checks[:5], "", "### Ticket", "body", *checks[5:]]
+    assert QaPlan.parse("\n".join(moved)) == plan()
+
+
+@pytest.mark.parametrize("text", [None, "", "### Ticket\n```\nbody\n```"])
+def test_a_brief_without_qa_journeys_has_no_plan(text) -> None:
+    assert QaPlan.parse(text) is None
+
+
+def test_a_block_inside_a_fence_is_no_plan() -> None:
+    assert QaPlan.parse("\n".join(["### Ticket", "````", *plan().render(), "````"])) is None
+
+
+@pytest.mark.parametrize(
+    ("line", "replacement"),
+    [
+        ("- `pricing`", "- `Pricing Page`"),
+        ("- `pricing`", "- pricing"),
+        (f"- Base: `{SHA}`", "- Base: main"),
+        ("- Verify skill: `verify-cleffy`", "- Verify: `verify-cleffy`"),
+        ("- ac-2 [pricing]: It opens.", "- ac-2: It opens."),
+        ("- ac-2 [pricing]: It opens.", "- ac2 [pricing]: It opens."),
+    ],
+)
+def test_a_malformed_line_makes_the_whole_block_no_plan(line: str, replacement: str) -> None:
+    text = "\n".join(plan(QaCheck("ac-2", ("pricing",), "It opens.")).render())
+    assert line in text
+    assert QaPlan.parse(text.replace(line, replacement)) is None
+
+
+def test_a_block_missing_the_skill_or_base_is_no_plan() -> None:
+    text = "\n".join(plan().render())
+    assert QaPlan.parse(text.replace(f"- Base: `{SHA}`\n", "")) is None
+    assert QaPlan.parse(text.replace("- Verify skill: `verify-cleffy`\n", "")) is None
+
+
+CRITERIA_BODY = "\n".join([
+    "## Acceptance criteria",
+    "- [ ] The API returns 201.",
+    "- [ ] The operator runs `orch migrate` on the box.",
+    "- [ ] qa: The button opens the sign-up form.",
+    "- [ ] qa(start-free): The free plan is chosen.",
+])
+
+
+def test_qa_checks_take_the_evidence_ids_and_resolve_their_journeys() -> None:
+    criteria = [(criterion.id, criterion.text) for criterion in numbered(CRITERIA_BODY)]
+    assert qa_plan("verify-cleffy", SHA, JOURNEYS, criteria) == plan(
+        QaCheck("ac-3", ("pricing", "start-free"), "The button opens the sign-up form."),
+        QaCheck("ac-4", ("start-free",), "The free plan is chosen."),
+    )
+
+
+def test_journeys_with_no_qa_criteria_plan_no_checks() -> None:
+    assert qa_plan("verify-cleffy", SHA, JOURNEYS, [("ac-1", "It works.")]) == plan()
