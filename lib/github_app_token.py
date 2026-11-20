@@ -35,6 +35,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -51,6 +52,7 @@ REFRESH_MARGIN = timedelta(minutes=15)
 JWT_LIFETIME = timedelta(minutes=9)
 JWT_SKEW = timedelta(seconds=60)
 API = "https://api.github.com"
+DEFAULT_TOKEN_ROOT = "~/.local/state/factory/app-tokens"
 REMOTE_DIR = ".config/factory/app-tokens"
 PUSH_TIMEOUT_SECONDS = 30.0
 MINT_TIMEOUT_SECONDS = 30.0
@@ -685,13 +687,34 @@ def gh_env(
     return env
 
 
+def reads_prefix(env_prefix: Sequence[str], bot: str, environ: Mapping[str, str]) -> tuple[str, ...]:
+    """The argv head that runs gh through the `gh` helper with bot's box token
+    directory, in place of a plain `env_prefix gh`."""
+    gh = shutil.which("gh", path=environ.get("PATH"))
+    if gh is None:
+        raise BrokerError("gh is not on PATH")
+    root = Path(environ.get("ORCH_APP_TOKEN_ROOT") or DEFAULT_TOKEN_ROOT).expanduser()
+    return (
+        *env_prefix,
+        sys.executable,
+        "-I",
+        str(Path(__file__).resolve()),
+        "gh",
+        "--dir",
+        str(root / plain_bot(bot)),
+        "--gh",
+        str(Path(gh).absolute()),
+        "--",
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="github_app_token", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     refresh_cmd = sub.add_parser("refresh", help="mint tokens due for renewal (box user)")
     refresh_cmd.add_argument("--orch", required=True)
     refresh_cmd.add_argument("--machines", required=True)
-    refresh_cmd.add_argument("--token-root", default="~/.local/state/factory/app-tokens")
+    refresh_cmd.add_argument("--token-root", default=DEFAULT_TOKEN_ROOT)
     cred = sub.add_parser("credential", help="git credential helper (harness user)")
     cred.add_argument("--dir", required=True)
     cred.add_argument("operation")

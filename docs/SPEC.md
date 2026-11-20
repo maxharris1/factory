@@ -756,6 +756,7 @@ projects:
 #       app_id: 111111
 #       installations: {maxharris1: 1000001}  # when enabled: every project owner
 #       private_key_file: /home/box/.config/factory/apps/factory.pem  # never opened by orch
+# poller_reads_app: claude-bot  # issue #1128, optional, box poller only: its gh reads run through the lib/github_app_token.py gh helper with this bot's App token (ORCH_APP_TOKEN_ROOT, default ~/.local/state/factory/app-tokens); writes stay on the gh login. Needs github_app.apps.<bot>; absent means every call uses the login
 ```
 
 Phase 1 polls from the box, using the existing `gh` login and the Linear key

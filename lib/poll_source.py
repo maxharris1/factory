@@ -76,6 +76,7 @@ from lib.github_actions import (
     rate_limited,
     run_gh,
 )
+from lib.github_app_token import BrokerError, reads_prefix
 from lib.handoff import HandoffError, parse_comment
 from lib.hold import FACTORY_MD
 from lib.intake_risk import INTAKE_RISK_SCHEMA, INTAKE_RISK_TABLE, stored_risk
@@ -699,6 +700,13 @@ class LivePollSource:
             cleared_variables=cleared,
         )
         self.gh = self.github.gh
+        self._read_prefix: tuple[str, ...] = self.gh
+        bot = config.poller_reads_app
+        if bot is not None:
+            try:
+                self._read_prefix = reads_prefix(self.gh[:-1], bot, environ)
+            except BrokerError as exc:
+                raise PollSourceError(f"poller_reads_app {bot}: {exc}") from None
 
     def review_actions_by_repo(self) -> dict[str, ReviewActions]:
         cleared = self.config.secret_env_names
@@ -2606,7 +2614,7 @@ class LivePollSource:
                 timeout = min(self.gh_call_timeout_seconds, left, self._require_budget())
                 started_wall = self.wall()
                 try:
-                    result = self.gh_runner(argv, timeout)
+                    result = self.gh_runner(self._for_reads(argv), timeout)
                 except subprocess.TimeoutExpired:
                     self._require_budget()
                     pause = GH_RETRY_BACKOFF_SECONDS * 2 ** (attempt - 1)
@@ -2625,6 +2633,9 @@ class LivePollSource:
                     return result
                 self.sleep(pause)
                 attempt += 1
+
+    def _for_reads(self, argv: list[str]) -> list[str]:
+        return [*self._read_prefix, *argv[argv.index("gh") + 1 :]]
 
     def _observe_quota(self, argv: list[str], result: GhResult, started_wall: float) -> None:
         route = _call_route(argv)
@@ -2724,7 +2735,9 @@ class LivePollSource:
 
     def _probe_rate_window(self) -> None:
         try:
-            result = self.gh_runner([*self.gh, "api", "rate_limit"], self.gh_call_timeout_seconds)
+            result = self.gh_runner(
+                self._for_reads([*self.gh, "api", "rate_limit"]), self.gh_call_timeout_seconds
+            )
         except (subprocess.TimeoutExpired, OSError):
             return
         if result.returncode != 0:

@@ -527,3 +527,43 @@ def test_two_worker_apps_scope_only_their_own_logins(
     fields = {"kind": kind, "from": bot, "role": role}
 
     assert dispatcher._trusted(ticket(), comment("c-1", "", author=author), fields, bot, role=role) is expected
+
+
+def test_poller_reads_app_is_off_by_default(tmp_path: Path) -> None:
+    config, findings = load(tmp_path, orch_text())
+    assert config is not None, findings
+    assert config.poller_reads_app is None
+
+
+def test_poller_reads_app_accepts_a_listed_bot(tmp_path: Path) -> None:
+    config, findings = load(tmp_path, orch_text(enabled=False) + "poller_reads_app: claude-bot\n")
+    assert config is not None, findings
+    assert config.poller_reads_app == "claude-bot"
+    assert cli._check_config(["--orch", str(tmp_path / "orch.yml")]) == 0
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("nobody", "poller_reads_app nobody is not a bot (grok-bot, claude-bot, codex-bot, cursor-bot)"),
+        ("Claude-Bot", "poller_reads_app Claude-Bot is not a bot (grok-bot, claude-bot, codex-bot, cursor-bot)"),
+        ("42", "poller_reads_app must be a bot name"),
+        ("[claude-bot]", "poller_reads_app must be a bot name"),
+        ("codex-bot", "poller_reads_app codex-bot has no github_app.apps.codex-bot"),
+    ],
+)
+def test_poller_reads_app_rejects_an_invalid_bot_name(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], value: str, message: str
+) -> None:
+    apps = app_block("grok-bot", 100) + app_block("claude-bot", 101)
+    text = orch_text(enabled=False, apps=apps) + f"poller_reads_app: {value}\n"
+    assert errors(tmp_path, text) == [message]
+    assert cli._check_config(["--orch", str(tmp_path / "orch.yml")]) == 1
+    assert "poller_reads_app" in capsys.readouterr().err
+
+
+def test_poller_reads_app_without_any_github_app_is_refused(tmp_path: Path) -> None:
+    text = orch_text(enabled=None) + "poller_reads_app: claude-bot\n"
+    assert errors(tmp_path, text) == [
+        "poller_reads_app claude-bot has no github_app.apps.claude-bot"
+    ]

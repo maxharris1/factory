@@ -4,6 +4,7 @@ import json
 import math
 import re
 import subprocess
+import sys
 import time
 from collections import Counter
 from dataclasses import replace
@@ -13,7 +14,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from lib import cli
+from lib import cli, github_app_token
 from lib.dispatch.cycle_clock import CycleClock
 from lib.dispatcher import (
     LINEAR_HANDOFF_QUERY,
@@ -71,6 +72,7 @@ from lib.poll_source import (
 )
 from lib.queue import Job, JobRequest, SQLiteJobQueue
 from tests.test_dispatcher import FakeReviewActions, setup
+from tests.test_github_actions import pr
 
 FACTORY = """---
 base_branch: main
@@ -3796,3 +3798,150 @@ def test_a_restarted_poller_counts_a_read_gh_still_caches_as_cached(tmp_path: Pa
     now[0] += 31
     assert restarted_cycle().endswith(billed)
     assert len(requests) == 2
+
+
+TOKEN_SENTINEL = "ghs_poller_reads_app_sentinel"
+
+
+def _reads_app_world(tmp_path: Path) -> tuple[dict[str, str], Path, Path]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_gh = bin_dir / "gh"
+    fake_gh.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_gh.chmod(0o755)
+    token_root = tmp_path / "app-tokens"
+    (token_root / "claude-bot").mkdir(parents=True)
+    (token_root / "claude-bot" / "acme.json").write_text(
+        json.dumps(
+            {
+                "token": TOKEN_SENTINEL,
+                "issued_at": "2026-11-20T00:00:00Z",
+                "expires_at": "2099-01-01T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    environ = {"PATH": str(bin_dir), "ORCH_APP_TOKEN_ROOT": str(token_root)}
+    return environ, token_root, fake_gh
+
+
+def _reads_and_writes(source_config: OrchConfig, environ: dict[str, str]):
+    payload = json.dumps(
+        {
+            "encoding": "base64",
+            "content": base64.b64encode(
+                FACTORY.format(tickets="github", ship="merge").encode()
+            ).decode(),
+        }
+    )
+    calls: list[list[str]] = []
+    warnings: list[str] = []
+
+    def runner(argv, timeout):
+        del timeout
+        call = list(argv)
+        calls.append(call)
+        if "rate_limit" in call:
+            return GhResult(0, json.dumps({"resources": {"core": {}}}), "")
+        if any("/contents/factory.md" in part for part in call):
+            return GhResult(0, f'HTTP/2.0 200 OK\nETag: "f1"\n\n{payload}', "")
+        if any(part.endswith("/labels?per_page=100") for part in call):
+            return GhResult(0, json.dumps([{"name": "orch:state/intake"}]), "")
+        if any("/issues/9/" in part for part in call):
+            return GhResult(
+                1,
+                "HTTP/2.0 403 Forbidden\r\nX-RateLimit-Remaining: 0\r\n\r\n",
+                "gh: API rate limit exceeded (HTTP 403)",
+            )
+        return GhResult(0, "[]", "")
+
+    source = LivePollSource(
+        source_config,
+        environ=environ,
+        gh_runner=runner,
+        clock=lambda: 1_000.0,
+        wall=lambda: 1_800_000_000.0,
+        sleep=lambda seconds: None,
+    )
+    source.warning_sink = warnings.append
+    source.cycle_clock = CycleClock(wall=lambda: 1_800_000_000.0, monotonic=lambda: 1_000.0)
+    source.cycle_clock.start()
+    with source.cycle_clock.phase("process"):
+        source.begin_cycle()
+        source._factory(source.config.projects[0])
+        source.github.list_comments("acme/widgets", "7")
+        source.review_actions_by_repo()["acme/widgets"].set_state(
+            pr(repo="acme/widgets", ticket_id="7"), "refused"
+        )
+        with pytest.raises((GitHubAdapterError, PollSourceError)):
+            source.github.list_comments("acme/widgets", "9")
+    line = source.cycle_clock.end()
+    return source, calls, warnings, line
+
+
+def _is_write(call: list[str]) -> bool:
+    return any("/labels" in part for part in call)
+
+
+def _writes(calls: list[list[str]]) -> list[list[str]]:
+    return [call for call in calls if _is_write(call)]
+
+
+def _reads(calls: list[list[str]]) -> list[list[str]]:
+    return [call for call in calls if not _is_write(call)]
+
+
+def test_reads_argv_unchanged_without_poller_reads_app(tmp_path: Path) -> None:
+    environ, _, _ = _reads_app_world(tmp_path)
+    source, calls, _, _ = _reads_and_writes(config(), environ)
+
+    reads = _reads(calls)
+    assert any("rate_limit" in call for call in reads)
+    assert any(any("/contents/factory.md" in part for part in call) for call in reads)
+    assert any(any("/comments" in part for part in call) for call in reads)
+    for call in calls:
+        assert tuple(call[: len(source.gh) + 1]) == (*source.gh, "api"), call
+
+
+def test_poller_reads_app_routes_reads_through_the_helper_and_not_writes(
+    tmp_path: Path,
+) -> None:
+    environ, token_root, fake_gh = _reads_app_world(tmp_path)
+    plain, plain_calls, _, plain_line = _reads_and_writes(config(), environ)
+    source, calls, warnings, line = _reads_and_writes(
+        replace(config(), poller_reads_app="claude-bot"), environ
+    )
+
+    helper = (
+        *source.gh[:-1],
+        sys.executable,
+        "-I",
+        str(Path(github_app_token.__file__).resolve()),
+        "gh",
+        "--dir",
+        str(token_root / "claude-bot"),
+        "--gh",
+        str(fake_gh),
+        "--",
+        "api",
+    )
+    reads = _reads(calls)
+    assert len(reads) == len(_reads(plain_calls))
+    assert any("rate_limit" in call for call in reads)
+    for call, plain_call in zip(reads, _reads(plain_calls)):
+        assert tuple(call[: len(helper)]) == helper, call
+        assert call[len(helper) :] == plain_call[len(plain.gh) + 1 :]
+    writes = _writes(calls)
+    assert writes and writes == _writes(plain_calls)
+    for call in writes:
+        assert tuple(call[: len(source.gh) + 1]) == (*source.gh, "api"), call
+        assert not any("github_app_token" in part for part in call)
+    assert line == plain_line
+    assert not any(TOKEN_SENTINEL in part for call in calls for part in call)
+    assert not any(TOKEN_SENTINEL in warning for warning in warnings)
+
+
+def test_poller_reads_app_without_gh_on_path_fails_at_start(tmp_path: Path) -> None:
+    environ = {"PATH": str(tmp_path), "ORCH_APP_TOKEN_ROOT": str(tmp_path)}
+    with pytest.raises(PollSourceError, match="poller_reads_app"):
+        LivePollSource(replace(config(), poller_reads_app="claude-bot"), environ=environ)
