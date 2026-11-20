@@ -100,6 +100,19 @@ class QaPlan:
             ),
         )
 
+    def edited(self, criteria: Iterable[tuple[str, str]]) -> tuple[str, str] | None:
+        """The first (ac, reason) where the criteria's qa tags no longer match this plan's checks, else None."""
+        every = tuple(journey.id for journey in self.journeys)
+        checks = {check.ac: check for check in self.checks}
+        for ac, text in criteria:
+            tag = qa_tag(text)
+            check = checks.pop(ac, None)
+            if (tag and (tag.journeys or every)) != (check and check.journeys):
+                return ac, f"{ac}'s qa tag changed after the brief"
+        for ac in checks:
+            return ac, f"{ac} is not in the ticket any more"
+        return None
+
 
 def qa_plan(
     verify: str, base_sha: str, journeys: tuple[Journey, ...], criteria: Iterable[tuple[str, str]]

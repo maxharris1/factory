@@ -23,6 +23,7 @@ from lib.factory_md import parse_factory_context
 from lib.dispatch.helpers import _REGISTERING_ACTIONS
 from lib.dispatcher import Comment
 from lib.handoff import HandoffError, parse_comment
+from lib.journeys import QaPlan
 from lib.orchestrate import APPROVAL_TOKEN_VARIABLES, answers_for, go_comment
 from lib.pstack_pin import FACTORY_DIR, PSTACK_DIR, ROOT, load_pin
 from lib.queue import Job
@@ -598,14 +599,36 @@ def test_a_missing_remote_file_fails_the_pin_check(monkeypatch: pytest.MonkeyPat
         test_every_absolute_path_a_brief_names_is_pinned_and_present("review")
 
 
+def promised_files(brief_text: object) -> set[str]:
+    plan = QaPlan.parse(brief_text if isinstance(brief_text, str) else None)
+    new = [journey.id for journey in plan.journeys if journey.new] if plan else []
+    return {f"features/{journey}.md" for journey in new} | ({"features/README.md"} if new else set())
+
+
+def assert_named_files_exist(kind: str, text: str, promised: set[str]) -> None:
+    roots = (ROOT, ROOT / PSTACK_DIR, ROOT / FACTORY_DIR)
+    for rel in NAMED.findall(FENCED.sub("", text)):
+        if rel.startswith(".claude/") or rel in promised:
+            continue
+        assert any((root / rel).is_file() for root in roots), f"{kind} names missing {rel}"
+
+
 @pytest.mark.parametrize("kind", sorted(CASES))
 def test_every_relative_file_a_brief_names_exists(kind: str) -> None:
-    roots = (ROOT, ROOT / PSTACK_DIR, ROOT / FACTORY_DIR)
+    promised = promised_files(CASES[kind][4].get("brief_text"))
     for text in rendered((kind,)):
-        for rel in NAMED.findall(text):
-            if rel.startswith(".claude/"):
-                continue
-            assert any((root / rel).is_file() for root in roots), f"{kind} names missing {rel}"
+        assert_named_files_exist(kind, text, promised)
+
+
+def test_the_file_check_skips_quoted_input_and_promised_journey_files_only() -> None:
+    promised = promised_files(CASES["plan-qa"][4]["brief_text"])
+    assert promised == {"features/start-free.md", "features/README.md"}
+    quoted = quoted_section("Ticket", "Edit `lib/gone.py`.", None, 10_000)
+    assert_named_files_exist("x", f"Add `features/start-free.md`.\n{quoted}\n", promised)
+    with pytest.raises(AssertionError, match="names missing features/other.md"):
+        assert_named_files_exist("x", "Add `features/other.md`.", promised)
+    with pytest.raises(AssertionError, match="names missing lib/gone.py"):
+        assert_named_files_exist("x", f"{quoted}\nEdit `lib/gone.py`.", promised)
 
 
 REVIEW_FACTS = {"round": "2/3", "cap": 3, "head": HEADS[0], "risk": "low", "followup_from": None, "round_number": 2, "block_on": "any-failure"}

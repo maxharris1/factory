@@ -179,6 +179,7 @@ def merge_update_task(verify: str, block_on: str = "user-impact") -> str:
         "no_ci_base": None,
         "local_checks": (),
         "qa_gate": None,
+        "qa_criteria": None,
     }
     return "\n".join(review_lead(facts).method)
 

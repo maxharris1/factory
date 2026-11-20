@@ -7,6 +7,7 @@ from lib.brief.common import (
     Lead,
     answers_lines,
     detail_of,
+    journey_lines,
     live_lines,
     read_ticket_line,
     resume_lines,
@@ -29,7 +30,11 @@ def lead(job: Job, facts: dict) -> Lead:
             "2. Map every acceptance criterion to the work that meets it, and name each criterion's "
             "proof: the test, command or observation that will show it is met. The plan lives in the "
             "plan handoff comment, never in a file in the repo.",
-            *(live_lines("plan", job.created_at) if facts["qa"] else []),
+            *(
+                journey_lines("plan", facts["qa_plan"])
+                if facts["qa_plan"]
+                else live_lines("plan", job.created_at) if facts["qa"] else []
+            ),
             "3. Estimate the changed lines the build will add and remove, tests and docs included. "
             "Put the number on its own line in the plan body as `Estimate: <n>`, before any "
             "`## Proposed split`. `orch job done` refuses a plan without it.",

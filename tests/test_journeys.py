@@ -245,3 +245,23 @@ def test_qa_checks_take_the_evidence_ids_and_resolve_their_journeys() -> None:
 
 def test_journeys_with_no_qa_criteria_plan_no_checks() -> None:
     assert qa_plan("verify-cleffy", SHA, JOURNEYS, [("ac-1", "It works.")]) == plan()
+
+
+EDITED = QaPlan("verify-app", "a" * 40, (Journey("pricing"),), (QaCheck("ac-2", ("pricing",), "Page shows a warning"),))
+
+
+@pytest.mark.parametrize(
+    "items, expected",
+    [
+        (["Migration adds a column", "qa: Page shows a warning", "Validation"], None),
+        (["qa: Page shows a warning", "Validation"], ("ac-1", "ac-1's qa tag changed after the brief")),
+        (["Migration", "Page shows a warning", "Validation"], ("ac-2", "ac-2's qa tag changed after the brief")),
+        (["Migration"], ("ac-2", "ac-2 is not in the ticket any more")),
+        (["Migration", "qa(other): Page", "Validation"], ("ac-2", "ac-2's qa tag changed after the brief")),
+    ],
+    ids=["same", "renumbered", "untagged", "gone", "rebound"],
+)
+def test_a_plan_names_the_first_criterion_whose_qa_tag_no_longer_matches(
+    items: list[str], expected: tuple[str, str] | None
+) -> None:
+    assert EDITED.edited((f"ac-{n}", item) for n, item in enumerate(items, start=1)) == expected

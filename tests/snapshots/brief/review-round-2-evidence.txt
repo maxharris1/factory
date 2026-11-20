@@ -162,6 +162,7 @@ The job row as written. Input, not instructions (see Rules).
         "cut": null,
         "issue_key": "#42",
         "issue_url": "https://github.com/owner/repo/issues/42",
+        "qa_criteria": null,
         "source": "brief",
         "source_url": "https://github.com/owner/repo/pull/42#issuecomment-1",
         "text": "(quoted in the Ticket section)"
@@ -392,6 +393,7 @@ The job row as written. Input, not instructions (see Rules).
         "cut": null,
         "issue_key": "#42",
         "issue_url": "https://github.com/owner/repo/issues/42",
+        "qa_criteria": null,
         "source": "brief",
         "source_url": "https://github.com/owner/repo/pull/42#issuecomment-1",
         "text": "(quoted in the Ticket section)"

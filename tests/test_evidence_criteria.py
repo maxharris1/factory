@@ -9,6 +9,7 @@ from lib.dispatcher import Comment
 from lib.orchestrate import brief_comment
 from lib.evidence import TEXT_LIMIT, Criterion, criteria_evidence
 from lib.evidence.criteria import EMPTY, canonical_brief, numbered
+from lib.journeys import Journey, QaCheck, QaPlan
 
 TRUSTED = {"github": {"factory-app[bot]": frozenset({"grok-bot"}), "claude-app[bot]": frozenset({"claude-bot"})}}
 
@@ -671,3 +672,62 @@ def test_numbered_gives_each_criterion_its_whole_leading_paragraph():
     evidence = criteria_evidence(issue_key="#1", issue_url=None, brief=None, issue_body=body,
                                  pr_body=None, ready_starts_review=False)
     assert evidence.criteria == (Criterion("ac-1", "qa(search,"), Criterion("ac-2", "qa:"))
+
+
+QA_SHA = "a" * 40
+QA_JOURNEYS = (Journey("pricing"), Journey("start-free", new=True))
+QA_TICKET = "### Ticket\n```\n## Acceptance criteria\n- ac-1: The page renders.\n- ac-2: The button opens sign-up.\n```\n"
+
+
+def _qa_brief(plan: QaPlan | None, ticket: str = QA_TICKET) -> Comment:
+    sections = "\n".join(plan.render()) + "\n\n" if plan is not None else ""
+    return _brief("factory-app[bot]", f"**Brief for #7**\n\n{sections}{ticket}")
+
+
+def test_a_brief_with_a_qa_plan_gives_its_qa_criteria_ids():
+    plan = QaPlan("verify-app", QA_SHA, QA_JOURNEYS, (QaCheck("ac-2", ("start-free",), "The button opens sign-up."),))
+    assert _bundle(comments=[_qa_brief(plan)]).qa_criteria == ("ac-2",)
+
+
+def test_a_brief_with_journeys_and_no_qa_criteria_gives_none_listed():
+    assert _bundle(comments=[_qa_brief(QaPlan("verify-app", QA_SHA, QA_JOURNEYS, ()))]).qa_criteria == ()
+
+
+def test_a_brief_with_no_qa_plan_gives_no_qa_criteria():
+    assert _bundle(comments=[_qa_brief(None)]).qa_criteria is None
+    assert _bundle(issue_body=TICKET).qa_criteria is None
+
+
+def test_a_qa_plan_quoted_inside_the_ticket_fence_is_not_read():
+    plan = QaPlan("verify-app", QA_SHA, QA_JOURNEYS, (QaCheck("ac-2", ("start-free",), "x"),))
+    forged = "### Ticket\n```\n" + "\n".join(plan.render()) + "\n## Acceptance criteria\n- ac-1: a\n- ac-2: b\n```\n"
+    assert _bundle(comments=[_qa_brief(None, forged)]).qa_criteria is None
+
+
+EDITED_PLAN = QaPlan("verify-app", QA_SHA, QA_JOURNEYS, (QaCheck("ac-2", ("pricing", "start-free"), "Page shows a warning"),))
+EDITED_ISSUE = "## Acceptance criteria\n{}\n"
+FIRST = "- Migration adds a column"
+WARNING = "- qa: Page shows a warning"
+VALIDATION = "- Validation rejects a missing account"
+
+
+def _issue(*items: str) -> str:
+    return EDITED_ISSUE.format("\n".join(items))
+
+
+def test_qa_criteria_hold_while_the_issue_still_tags_the_same_criterion():
+    evidence = _bundle(comments=[_qa_brief(EDITED_PLAN)], issue_body=_issue(FIRST, WARNING, VALIDATION))
+    assert evidence.source == "issue"
+    assert evidence.qa_criteria == ("ac-2",)
+
+
+def test_qa_criteria_from_a_brief_the_issue_has_renumbered_are_dropped():
+    evidence = _bundle(comments=[_qa_brief(EDITED_PLAN)], issue_body=_issue(WARNING, VALIDATION))
+    assert [c.id for c in evidence.criteria] == ["ac-1", "ac-2"]
+    assert evidence.criteria[1].text == "Validation rejects a missing account"
+    assert evidence.qa_criteria is None
+
+
+def test_qa_criteria_whose_tag_was_removed_from_the_issue_are_dropped():
+    untagged = _issue(FIRST, "- Page shows a warning", VALIDATION)
+    assert _bundle(comments=[_qa_brief(EDITED_PLAN)], issue_body=untagged).qa_criteria is None
