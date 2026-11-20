@@ -289,6 +289,20 @@ T1PPlanOverSize ==
   /\ counts' = [counts EXCEPT !.deaths = 0]
   /\ QaFollowsHead
 
+\* #1117. On a GitHub-ticket repo with an intake label, an over-size plan
+\* whose split parses into 2+ parts is filed as tickets and this one abandoned.
+T1PPlanAutoSplit ==
+  /\ "T1P" \notin Omit
+  /\ state = "plan-check"
+  /\ state' = "abandoned"
+  /\ paused' = "none"
+  /\ external' = external
+  /\ cap' = cap
+  /\ configOk' = configOk
+  /\ flags' = [flags EXCEPT !.planOk = TRUE]
+  /\ counts' = [counts EXCEPT !.deaths = 0]
+  /\ QaFollowsHead
+
 keep ==
   cap' = cap /\ configOk' = configOk /\ paused' = "none" /\ external' = external
 
@@ -923,7 +937,7 @@ Factory ==
   \/ T5Ask \/ T5Answer \/ QaParkAnswered \/ T5Abandon \/ T5Handoff
   \/ T1KindGoPlan \/ T1KindGoBuild
   \/ T1PPlanPosted \/ T1PPlanGapOnce \/ T1PPlanGapStuck \/ T1PPlanMapped
-  \/ T1PPlanOverSize
+  \/ T1PPlanOverSize \/ T1PPlanAutoSplit
   \/ T2ReadyGreen \/ T2CiRed \/ T2CiRedStuck \/ T2ReadyCovered
   \/ T6JobRetry \/ T6JobStuck
   \/ T3Revise \/ T3Unsat \/ T7Blocked
@@ -1013,8 +1027,10 @@ T1PDecided ==
   /\ state = "planning" => ENABLED T1PPlanPosted
   /\ state = "plan-check" /\ counts.planGaps = 0 =>
        ENABLED T1PPlanGapOnce /\ ENABLED T1PPlanMapped /\ ENABLED T1PPlanOverSize
+       /\ ENABLED T1PPlanAutoSplit
   /\ state = "plan-check" /\ counts.planGaps = 1 =>
        ENABLED T1PPlanGapStuck /\ ENABLED T1PPlanMapped /\ ENABLED T1PPlanOverSize
+       /\ ENABLED T1PPlanAutoSplit
 
 T2Decided ==
   /\ state \in {"building", "fixing"} => ENABLED T2ReadyGreen
@@ -1123,8 +1139,10 @@ ChartEdges ==
   /\ state = "planning" => ENABLED T1PPlanPosted
   /\ state = "plan-check" /\ counts.planGaps = 0 =>
        ENABLED T1PPlanGapOnce /\ ENABLED T1PPlanMapped /\ ENABLED T1PPlanOverSize
+       /\ ENABLED T1PPlanAutoSplit
   /\ state = "plan-check" /\ counts.planGaps = 1 =>
        ENABLED T1PPlanGapStuck /\ ENABLED T1PPlanMapped /\ ENABLED T1PPlanOverSize
+       /\ ENABLED T1PPlanAutoSplit
   /\ state = "capped" => ENABLED MaxOkAnotherRound
   /\ state = "blocked" => ENABLED MaxGoAfterBlocked
 

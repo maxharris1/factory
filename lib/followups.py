@@ -131,7 +131,9 @@ def _defuse_gate_lines(text: str) -> str:
 
 SPLIT_LIMIT = 4_000
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*(?:(?<=\s)#+\s*)?$")
-_SPLIT_CRITERION = re.compile(r"^\s*[-*+]\s+(ac-\w+:.*\S)\s*$", re.IGNORECASE)
+_SPLIT_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s*)?(.*?)\s*$")
+_SPLIT_CRITERION = re.compile(r"ac-\w+:", re.IGNORECASE)
+_SPLIT_FIELD = re.compile(r"^(?:estimate|depends\s+on):", re.IGNORECASE)
 _SPLIT_DEPENDS = re.compile(r"\bdepends\s+on:\s*(.*?)\s*\.?\s*$", re.IGNORECASE)
 _SPLIT_REFS = re.compile(r"(?:parts?\s*)?\d+(?:\s*(?:,|and|&)\s*(?:parts?\s*)?\d+)*", re.IGNORECASE)
 
@@ -183,9 +185,9 @@ def split_parts(plan_text: str) -> tuple[SplitPart, ...]:
             blocks[-1][1].append(line)
     kept = {}
     for number, (title, lines) in enumerate(blocks, 1):
-        criteria = tuple(match.group(1) for line in lines if (match := _SPLIT_CRITERION.match(line)))
+        criteria, rest = _split_criteria(lines)
         if criteria:
-            kept[number] = (title, criteria, [line for line in lines if not _SPLIT_CRITERION.match(line)])
+            kept[number] = (title, criteria, rest)
     renumber = {old: new for new, old in enumerate(kept, 1)}
     parts = []
     for old, (title, criteria, lines) in kept.items():
@@ -199,6 +201,33 @@ def split_parts(plan_text: str) -> tuple[SplitPart, ...]:
             depends=None if depends is None else tuple(renumber[number] for number in depends),
         ))
     return tuple(parts) if len(parts) >= 2 else ()
+
+
+def _split_criteria(lines: list[str]) -> tuple[tuple[str, ...], list[str]]:
+    criteria: list[str] = []
+    rest: list[str] = []
+    open_item = blank = False
+    indent = 0
+    for line in lines:
+        item = _SPLIT_ITEM.match(line)
+        depth = len(line) - len(line.lstrip())
+        nested = open_item and item and depth > indent
+        if item and not nested and _SPLIT_CRITERION.match(item.group(1)):
+            criteria.append(item.group(1))
+            open_item, blank, indent = True, False, depth
+            continue
+        if not line.strip():
+            blank = True
+            rest.append(line)
+            continue
+        ends = (item and not nested) or _HEADING.match(line.strip()) or _SPLIT_FIELD.match(line)
+        if open_item and not ends and (not blank or line[:1].isspace()):
+            criteria[-1] = f"{criteria[-1]} {line.strip()}"
+        else:
+            open_item = False
+            rest.append(line)
+        blank = False
+    return tuple(criteria), rest
 
 
 def _split_depends(lines: list[str], number: int) -> tuple[int, ...] | None:
@@ -241,7 +270,14 @@ def split_issue(
         f"Risk: {risk}\nPlan first: no\nDepends on: {depends}\nConflicts with: none\n\n"
         f"## Acceptance criteria\n\n{criteria}\n{estimate}{split_marker(comment_id, number)}"
     )
-    return part.title, body
+    return (part.title or f"Part {number} of #{issue}")[:256], body
+
+
+def split_dependencies(parts: tuple[SplitPart, ...]) -> tuple[tuple[int, ...], ...]:
+    return tuple(
+        (number - 1,) if part.depends is None and number > 1 else part.depends or ()
+        for number, part in enumerate(parts, 1)
+    )
 
 
 def split_comment(comment_id: str, issues: tuple[int, ...]) -> str:

@@ -4,14 +4,47 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from lib.dispatch.helpers import _comment_link, _round_number, _scope
 from lib.dispatch.transitions import write_workflow_state
-from lib.dispatch.types import Comment, TrackedTicket
+from lib.dispatch.types import Comment, RetryableStateError, TrackedTicket
 from lib.factory_md import padded_estimate
-from lib.followups import proposed_split
+from lib.followups import (
+    SplitPart,
+    proposed_split,
+    split_comment,
+    split_dependencies,
+    split_issue,
+    split_link_marker,
+    split_marker,
+    split_parts,
+)
 from lib.handoff import HandoffError, parse_comment, plan_estimate
 from lib.queue import JobRequest
+
+
+def _split_issue_number(ticket: TrackedTicket) -> str:
+    return (ticket.source_issue or ticket.ticket_id).removeprefix("#")
+
+
+def _intake_split(ticket: TrackedTicket, plan_text: str) -> tuple[SplitPart, ...]:
+    from lib.feeder import parse_intake
+
+    parts = split_parts(plan_text)
+    for number, part in enumerate(parts, 1):
+        _, body = split_issue(_split_issue_number(ticket), "", "", number, part, ticket.risk, ())
+        child = parse_intake(body, (ticket.intake_label,))
+        if child.defects or child.criteria != part.criteria:
+            return ()
+    return parts
+
+
+@dataclass(frozen=True)
+class _PendingSplit:
+    comment_id: str
+    plan_text: str
+    since: float
 
 
 class PlanMixin:
@@ -38,7 +71,7 @@ class PlanMixin:
             return True, "rejected-plan-result"
         reported_round = _round_number(fields.get("round"))
         settled = self._open_plan_check(ticket, comment, reported_round)
-        if settled == "stale-plan":
+        if settled in ("stale-plan", "auto-split"):
             return True, settled
         if settled == "waiting-max-size":
             self._write_state_label(ticket, "waiting-max")
@@ -56,6 +89,11 @@ class PlanMixin:
         estimate = plan_estimate(plan_text)
         mapped = ac == "met" and estimate is not None
         over_size = self._plan_over_size(ticket, estimate) if mapped else None
+        parts = (
+            self._auto_split_parts(ticket, plan_text)
+            if mapped and over_size is not None
+            else ()
+        )
         self._write_state_label(ticket, "plan-check")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -76,6 +114,24 @@ class PlanMixin:
             ):
                 connection.commit()
                 return True, "stale-plan"
+            if parts:
+                connection.execute(
+                    """
+                    UPDATE ticket_state SET paused_plan_text = ?, plan_estimate = ?
+                    WHERE repo = ? AND ticket_id = ?
+                    """,
+                    (plan_text, estimate, ticket.repo.lower(), ticket.ticket_id),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO plan_events (
+                        repo, ticket_id, comment_id, outcome
+                    ) VALUES (?, ?, ?, 'auto-split')
+                    """,
+                    (ticket.repo.lower(), ticket.ticket_id, comment.id),
+                )
+                connection.commit()
+                return True, "auto-split"
             gap_count = int(state["plan_gap_count"])
             paused: dict[str, object] = {}
             if mapped and over_size is not None:
@@ -235,6 +291,116 @@ class PlanMixin:
             connection.commit()
         self._write_state_label(ticket, next_state)
         return True, outcome
+
+    def _auto_split_parts(
+        self, ticket: TrackedTicket, plan_text: str
+    ) -> tuple[SplitPart, ...]:
+        if ticket.factory.tickets != "github" or not ticket.intake_label:
+            return ()
+        return _intake_split(ticket, plan_text)
+
+    def _pending_split(self, ticket: TrackedTicket) -> _PendingSplit | None:
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT state.plan_check_comment_id, state.paused_plan_text
+                FROM ticket_state AS state
+                JOIN plan_events AS event
+                  ON event.repo = state.repo AND event.ticket_id = state.ticket_id
+                 AND event.comment_id = state.plan_check_comment_id
+                WHERE state.repo = ? AND state.ticket_id = ?
+                  AND state.workflow_state = 'plan-check'
+                  AND state.paused_plan_text IS NOT NULL
+                  AND event.outcome = 'auto-split'
+                """,
+                key,
+            ).fetchone()
+            if row is None:
+                return None
+            since = connection.execute(
+                """
+                SELECT max(at) FROM ticket_transitions
+                WHERE repo = ? AND ticket_id = ? AND to_state = 'plan-check'
+                """,
+                key,
+            ).fetchone()[0]
+        return _PendingSplit(
+            str(row["plan_check_comment_id"]),
+            str(row["paused_plan_text"]),
+            float(since or 0.0),
+        )
+
+    def _finish_auto_split(self, ticket: TrackedTicket) -> None:
+        pending = self._pending_split(ticket)
+        if pending is None:
+            return
+        comment_id = pending.comment_id
+        parts = _intake_split(ticket, pending.plan_text)
+        issue = _split_issue_number(ticket)
+        plan_url = next(
+            (
+                _comment_link(comment)
+                for comment in ticket.comments
+                if comment.id == comment_id
+            ),
+            f"comment:{comment_id}",
+        )
+        actions = self._review_actions(ticket)
+        numbers: list[int] = []
+        for number, (part, depends) in enumerate(zip(parts, split_dependencies(parts)), 1):
+            title, body = split_issue(
+                issue,
+                plan_url,
+                comment_id,
+                number,
+                part,
+                ticket.risk,
+                tuple(numbers[ref - 1] for ref in depends),
+            )
+            numbers.append(
+                actions.file_issue(
+                    ticket,
+                    title,
+                    body,
+                    (ticket.intake_label,),
+                    split_marker(comment_id, number),
+                    pending.since,
+                )
+            )
+        actions.comment_once(
+            ticket,
+            split_comment(comment_id, tuple(numbers)),
+            split_link_marker(comment_id),
+        )
+        self._abandon_split(ticket, comment_id)
+
+    def _abandon_split(self, ticket: TrackedTicket, comment_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            written = write_workflow_state(
+                connection,
+                ticket.repo,
+                ticket.ticket_id,
+                "abandoned",
+                source="plan-auto-split",
+                at=self.queue.now(),
+                guard="workflow_state = 'plan-check' AND plan_check_comment_id = ?",
+                guard_args=(comment_id,),
+                also={"plan_check_comment_id": None, "paused_plan_text": None},
+            )
+            if not written:
+                connection.rollback()
+                return
+            closed = self._fail_abandoned_queued(connection)
+            connection.commit()
+        self._log_abandoned_jobs(closed)
+        if self.log is not None:
+            self.log(f"abandoned: {ticket.repo}#{ticket.ticket_id} split into intake issues")
+        try:
+            self._write_state_label(ticket, "abandoned")
+        except RetryableStateError:
+            self.record_poll_error(ticket.repo, ticket.ticket_id, "abandoned-label")
 
     def _plan_over_size(self, ticket: TrackedTicket, estimate: int) -> str | None:
         """Why the plan is over the line, or None when it is not."""

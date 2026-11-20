@@ -9,11 +9,14 @@ import pytest
 from lib.brief import render_brief
 from lib.evidence import TEXT_LIMIT
 from lib.factory_md import padded_estimate
-from lib.followups import proposed_split
+from lib.feeder import parse_intake
+from lib.dispatch.types import TrackedTicket
+from lib.followups import has_marker, proposed_split, split_link_marker
 from lib.queue import Job
 from tests.test_approver_credential import APP_BOT, MAX, grok_wakes
 from tests.test_brief import FACTORY_ROOT
-from tests.test_dispatcher import ANSWERS, GO, comment, job_count
+from tests.test_dispatcher import ANSWERS, GO, comment, handled_outcome, job_count
+from tests.test_followup_findings import FollowupActions
 from tests.test_resume_plan import PR, ResumeFlow
 
 SPLIT = "## Proposed split\n1. `brief half` (ac-1, ac-2): about 200 lines.\n2. `dispatch half` (ac-3): about 300 lines.\n"
@@ -233,3 +236,245 @@ def test_the_split_section_ends_at_the_next_heading_of_its_level() -> None:
     assert proposed_split("Plan.") == "no split proposed"
     cut = proposed_split("## Proposed split\n" + "x" * 5000)
     assert len(cut) < 4100 and cut.endswith("read the rest in the plan]")
+
+
+PARTS = (
+    "## Proposed split\n\n"
+    "### Brief half\n- ac-1: the brief renders the parts.\n\nEstimate: 140\n\n"
+    "### Dispatch half\n- ac-2: the dispatcher files the parts.\n\nEstimate: 160\n"
+)
+SPLIT_BODY = f"## Plan\n- ac-1: the brief.\n- ac-2: the dispatcher.\n\n{PARTS}\n## Out of scope\nNothing.\n"
+
+
+class FlakyCreates(FollowupActions):
+    def __init__(self, fail_at: int = 0) -> None:
+        super().__init__()
+        self.fail_at = fail_at
+
+    def file_issue(self, *args) -> int:
+        if self.fail_at and self.creates + 1 == self.fail_at:
+            self.fail_at = 0
+            raise RuntimeError("transient GitHub failure")
+        return super().file_issue(*args)
+
+
+class SplitFlow(SizeFlow):
+    def __init__(
+        self, tmp_path: Path, *, fail_at: int = 0, tickets: str = "github", intake_label: str | None = "factory:ready"
+    ):
+        self.intake_label = intake_label
+        self.closed = False
+        super().__init__(tmp_path)
+        self.actions = FlakyCreates(fail_at)
+        self.dispatcher.review_actions = self.actions
+        self.factory = replace(self.factory, tickets=tickets)
+
+    def snapshot(self) -> TrackedTicket:
+        return replace(super().snapshot(), intake_label=self.intake_label, source_issue="#1117", closed=self.closed)
+
+    def poll(self) -> None:
+        self.now[0] += 10
+        self.dispatcher.process(self.snapshot())
+
+    def links(self) -> list[str]:
+        return [text for text in self.actions.pr_comments if has_marker(text, split_link_marker("500"))]
+
+    def transitions(self, to_state: str) -> list[tuple[str, str]]:
+        with self.queue.connect() as connection:
+            rows = connection.execute(
+                "SELECT from_state, source FROM ticket_transitions WHERE ticket_id = '42' AND to_state = ?",
+                (to_state,),
+            ).fetchall()
+        return [(row["from_state"], row["source"]) for row in rows]
+
+
+def test_an_over_size_parsed_split_files_its_parts_and_abandons(tmp_path: Path) -> None:
+    flow = SplitFlow(tmp_path)
+
+    assert flow.plan("500", "ac=met", estimated(300, SPLIT_BODY)) == "auto-split"
+
+    assert list(flow.actions.issues) == [300, 301]
+    (first_title, first, first_labels), (second_title, second, second_labels) = flow.actions.issues.values()
+    assert (first_title, second_title) == ("Brief half", "Dispatch half")
+    assert first_labels == second_labels == ("factory:ready",)
+    for body in (first, second):
+        assert body.startswith(f"Split from #1117 (plan {PR}500).\n")
+        assert "Risk: high\nPlan first: no\n" in body
+    assert "Depends on: none" in first and "- ac-1: the brief renders the parts." in first
+    assert "Depends on: #300" in second and "Estimate: 160" in second
+    [link] = flow.links()
+    assert "#300" in link and "#301" in link
+    state = flow.state()
+    assert (state["workflow_state"], state["paused_plan_text"], state["plan_check_comment_id"]) == (
+        "abandoned", None, None
+    )
+    assert flow.transitions("abandoned") == [("plan-check", "plan-auto-split")]
+    assert job_count(flow.queue, "build") == 0
+    assert size_wakes(flow) == []
+
+
+def test_a_failed_filing_leaves_the_ticket_at_plan_check_and_the_next_poll_finishes(tmp_path: Path) -> None:
+    flow = SplitFlow(tmp_path, fail_at=2)
+
+    assert flow.plan("500", "ac=met", estimated(300, SPLIT_BODY)) == "auto-split"
+
+    assert list(flow.actions.issues) == [300]
+    assert flow.links() == []
+    assert flow.state()["workflow_state"] == "plan-check"
+    assert any(ref.ticket_id == "42" for ref in flow.dispatcher._tracked_refs(flow.now[0]))
+
+    flow.poll()
+
+    assert list(flow.actions.issues) == [300, 301]
+    assert len(flow.links()) == 1
+    assert flow.state()["workflow_state"] == "abandoned"
+
+
+def test_a_crash_after_the_link_comment_abandons_without_writing_again(tmp_path: Path) -> None:
+    flow = SplitFlow(tmp_path)
+    flow.actions.crash_after_post = True
+
+    with pytest.raises(SystemExit):
+        flow.plan("500", "ac=met", estimated(300, SPLIT_BODY))
+    assert flow.state()["workflow_state"] == "plan-check"
+    flow.actions.crash_after_post = False
+    flow.poll()
+
+    assert flow.actions.creates == 2
+    assert len(flow.links()) == 1
+    assert flow.transitions("abandoned") == [("plan-check", "plan-auto-split")]
+
+
+def test_a_replayed_auto_split_plan_never_builds(tmp_path: Path) -> None:
+    flow = SplitFlow(tmp_path, fail_at=1)
+    assert flow.plan("500", "ac=met", estimated(300, SPLIT_BODY)) == "auto-split"
+    with flow.queue.connect() as connection:
+        connection.execute("DELETE FROM handled_comments WHERE comment_id = '500'")
+
+    flow.poll()
+
+    assert handled_outcome(flow.queue, "500") == "auto-split"
+    assert flow.transitions("building") == []
+    assert list(flow.actions.issues) == [300, 301]
+    assert flow.state()["workflow_state"] == "abandoned"
+    assert job_count(flow.queue, "build") == 0
+
+
+def test_an_edit_after_the_split_decision_does_not_change_the_parts(tmp_path: Path) -> None:
+    flow = SplitFlow(tmp_path, fail_at=1)
+    assert flow.plan("500", "ac=met", estimated(300, SPLIT_BODY)) == "auto-split"
+    flow.comments[-1] = replace(
+        flow.comments[-1],
+        body=plan_header("ac=met") + estimated(300, SPLIT_BODY.replace("Brief half", "REPLACEMENT")),
+        edited_at=flow.now[0] + 1,
+    )
+
+    flow.poll()
+
+    assert [title for title, _, _ in flow.actions.issues.values()] == ["Brief half", "Dispatch half"]
+
+
+def test_max_closing_the_pr_mid_split_stops_the_drain(tmp_path: Path) -> None:
+    flow = SplitFlow(tmp_path, fail_at=2)
+    assert flow.plan("500", "ac=met", estimated(300, SPLIT_BODY)) == "auto-split"
+
+    flow.closed = True
+    flow.poll()
+    flow.closed = False
+    flow.poll()
+
+    assert list(flow.actions.issues) == [300]
+    assert flow.links() == []
+    assert flow.transitions("abandoned") == [("plan-check", "closed-unmerged")]
+
+
+def test_estimate_296_with_a_parsed_split_still_queues_build(tmp_path: Path) -> None:
+    flow = SplitFlow(tmp_path)
+
+    assert flow.plan("500", "ac=met", estimated(296, SPLIT_BODY)) == "queued-plan-build"
+
+    assert flow.actions.issues == {}
+    assert flow.state()["workflow_state"] == "building"
+
+
+@pytest.mark.parametrize(
+    ("body", "tickets", "intake_label"),
+    [
+        (PLAN_BODY, "github", "factory:ready"),
+        (SPLIT_BODY.split("### Dispatch half")[0], "github", "factory:ready"),
+        (SPLIT_BODY, "linear", "factory:ready"),
+        (SPLIT_BODY, "github", None),
+    ],
+    ids=["numbered-list", "one-part", "linear", "no-intake-label"],
+)
+def test_a_split_that_does_not_parse_or_a_linear_or_unlabelled_repo_still_parks(
+    tmp_path: Path, body: str, tickets: str, intake_label: str | None
+) -> None:
+    flow = SplitFlow(tmp_path, tickets=tickets, intake_label=intake_label)
+
+    assert flow.plan("500", "ac=met", estimated(300, body)) == "waiting-max-size"
+
+    assert flow.actions.issues == {}
+    assert flow.state()["workflow_state"] == "waiting-max"
+    assert len(size_wakes(flow)) == 1
+
+
+WRAPPED_PARTS = (
+    "## Proposed split\n"
+    "### Parser\n- ac-1: The parser returns values.\n  Invalid inputs must return HTTP 400.\nEstimate: 100\nDepends on: none\n"
+    "### Integration\n- ac-2: The app uses the parser.\nEstimate: 100\n"
+)
+
+
+def test_a_split_files_each_wrapped_criterion_whole(tmp_path: Path) -> None:
+    flow = SplitFlow(tmp_path)
+
+    assert flow.plan("500", "ac=met", estimated(600, WRAPPED_PARTS)) == "auto-split"
+
+    assert flow.state()["workflow_state"] == "abandoned"
+    (_, first, _), (_, second, _) = flow.actions.issues.values()
+    assert "- ac-1: The parser returns values. Invalid inputs must return HTTP 400.\n" in first
+    assert "Estimate: 100" in first and "Depends on: none" in first
+    assert "Depends on: #300" in second
+
+
+INTAKE_HEAD = "Risk: high\nPlan first: no\nDepends on: none\n\n## Acceptance criteria\n"
+FIELD_CONTINUATION = (
+    "- ac-1: The summary renders these literal lines.\n"
+    "  Estimate: unavailable when the input is missing.\n"
+    "  Invalid inputs must return HTTP 400.\n"
+)
+WRAPPED = "- ac-1: The parser returns values.\n  Invalid inputs must return HTTP 400.\n"
+SECOND = "- ac-2: Use the summary.\n"
+
+
+@pytest.mark.parametrize("criterion", [WRAPPED, FIELD_CONTINUATION], ids=["wrapped", "field-continuation"])
+def test_each_child_carries_the_criteria_intake_reads_from_the_plan(tmp_path: Path, criterion: str) -> None:
+    plan = (
+        "## Proposed split\n### Summary\n" + criterion + "Estimate: 100\nDepends on: none\n"
+        "### Integration\n" + SECOND + "Estimate: 100\n"
+    )
+    flow = SplitFlow(tmp_path)
+
+    assert flow.plan("500", "ac=met", estimated(600, plan)) == "auto-split"
+
+    assert flow.state()["workflow_state"] == "abandoned"
+    children = [parse_intake(body, labels) for _, body, labels in flow.actions.issues.values()]
+    parents = [parse_intake(INTAKE_HEAD + text, ("factory:ready",)) for text in (criterion, SECOND)]
+    assert [child.defects for child in children] == [(), ()]
+    assert [child.criteria for child in children] == [parent.criteria for parent in parents]
+    assert "Estimate: 100" in flow.actions.issues[300][1]
+
+
+def test_a_split_whose_child_intake_would_drop_a_criterion_parks_instead(tmp_path: Path) -> None:
+    plan = (
+        "## Proposed split\n### Restart\n- ac-1: The operator restarts the service on the box.\nEstimate: 100\n"
+        "### Integration\n" + SECOND + "Estimate: 100\n"
+    )
+    flow = SplitFlow(tmp_path)
+
+    assert flow.plan("500", "ac=met", estimated(600, plan)) == "waiting-max-size"
+
+    assert flow.actions.issues == {}
+    assert flow.state()["workflow_state"] == "waiting-max"
+    assert len(size_wakes(flow)) == 1
