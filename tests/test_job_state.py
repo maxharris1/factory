@@ -825,3 +825,41 @@ def test_orch_status_falls_back_to_defaults_when_the_checkout_orch_yml_is_bad(
     assert code == 0
     assert "review -> codex claimed " in out.getvalue()
     assert "using the default job_states" in capsys.readouterr().err
+
+
+
+# --- #1227: memory-wait resets no lag or usage history ---------------------------
+
+
+@pytest.mark.parametrize(
+    ("events", "read"),
+    [
+        (("preflight-lagging",), "lagging_end"),
+        (("preflight-lagging", "requeued-lagging"), "lagging_requeue"),
+        (("usage-limit",), "usage_limit_end"),
+        (("link-drop",), "link_drop_end"),
+        (("released-unstarted", "requeued-early-exit"), "free_requeues"),
+    ],
+)
+def test_a_memory_wait_leaves_every_lag_usage_and_requeue_reading_as_it_was(
+    tmp_path: Path, events: tuple[str, ...], read: str
+) -> None:
+    from lib import job_state
+    from lib.device_memory import MEMORY_WAIT
+    from lib.device_pool import link_drop_detail
+
+    poller = Poller(tmp_path)
+    job_id = poller.review()
+    reader = getattr(job_state, read)
+    dropped = link_drop_detail("pc", "3 min", "a" * 32)
+    with poller.queue.connect() as connection:
+        for at, event in enumerate(events):
+            detail = dropped if event == "link-drop" else f"{event} on pc"
+            job_state.record_job_event(connection, job_id, event, detail, CLAIMED_AT + at)
+        before = reader(connection, job_id)
+        job_state.record_job_event(
+            connection, job_id, MEMORY_WAIT, "queued; memory-held: pc", CLAIMED_AT + 10
+        )
+        after = reader(connection, job_id)
+    assert before not in (None, 0)
+    assert after == before

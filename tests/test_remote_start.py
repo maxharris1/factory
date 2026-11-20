@@ -3549,7 +3549,9 @@ PRESSED = "some avg10=42.00 avg60=20.00 avg300=5.00 total=9\nfull avg10=1.00 avg
 def memory_rows(queue: SQLiteJobQueue) -> dict[str, tuple[float, str]]:
     with queue.connect() as connection:
         try:
-            rows = connection.execute("SELECT device, until, reason FROM device_memory_holds").fetchall()
+            rows = connection.execute(
+                "SELECT device, until, reason FROM device_memory_holds WHERE until > ?", (queue.now(),)
+            ).fetchall()
         except sqlite3.OperationalError:
             return {}
     return {str(row[0]): (float(row[1]), str(row[2])) for row in rows}

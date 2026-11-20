@@ -1094,7 +1094,7 @@ def memory_hold(queue: SQLiteJobQueue, device_name: str, until: float) -> None:
 
 def clear_memory(queue: SQLiteJobQueue, device_name: str) -> None:
     with queue.connect() as connection:
-        device_pool.clear_memory_hold(connection, device_name)
+        device_pool.clear_memory_hold(connection, device_name, queue.now())
 
 
 def test_a_memory_held_device_takes_no_claim_until_the_hold_clears(tmp_path: Path) -> None:
@@ -1181,6 +1181,7 @@ def test_a_memory_hold_and_an_unreachable_backoff_each_block_to_their_own_deadli
     now[0] = 450.0
     assert blocked(queue, pool) is (held_until > 450.0)
 
+    now[0] = 300.0
     clear_memory(queue, "pc")
     now[0] = 399.0
     assert blocked(queue, pool)

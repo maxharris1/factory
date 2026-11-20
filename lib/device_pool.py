@@ -337,13 +337,16 @@ class DevicePool:
         live = live_settings.recorded(connection, self.machines_path)
         return live.placement_config(self.config), live
 
-    def serving(self, harness: str) -> frozenset[str]:
-        """The accounts of harness on devices placement may use."""
+    def placement_config(self) -> MachinesConfig:
         with self.queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             config, _ = self._placement(connection)
             connection.commit()
-        return config.serving(harness)
+        return config
+
+    def serving(self, harness: str) -> frozenset[str]:
+        """The accounts of harness on devices placement may use."""
+        return self.placement_config().serving(harness)
 
     def place_qa(self, connection: sqlite3.Connection, job_id: str, repo: str) -> bool:
         """Hold a slot for a pinned project's QA job on a listed device.
@@ -1011,9 +1014,22 @@ def memory_held(connection: sqlite3.Connection, device: str, now: float) -> bool
     return row is not None
 
 
-def clear_memory_hold(connection: sqlite3.Connection, device: str) -> None:
+def clear_memory_hold(connection: sqlite3.Connection, device: str, now: float) -> None:
+    """End device's hold at now; the row stays so the queue-wait clock sees when it ended."""
     _memory_holds_table(connection)
-    connection.execute(f"DELETE FROM {MEMORY_HOLDS_TABLE} WHERE device = ?", (device,))
+    connection.execute(
+        f"UPDATE {MEMORY_HOLDS_TABLE} SET until = MIN(until, ?) WHERE device = ?", (now, device)
+    )
+
+
+def memory_holds(queue: SQLiteJobQueue) -> dict[str, str]:
+    with queue.connect() as connection:
+        if not _has_table(connection, MEMORY_HOLDS_TABLE):
+            return {}
+        rows = connection.execute(
+            f"SELECT device, reason FROM {MEMORY_HOLDS_TABLE} WHERE until > ?", (queue.now(),)
+        ).fetchall()
+    return {str(row[0]): str(row[1]) for row in rows}
 
 
 _ORPHAN_PIDS = (
@@ -1065,6 +1081,8 @@ def placement_blocked(
     now: float,
     config: MachinesConfig | None,
     head: str | None,
+    *,
+    memory: bool = True,
 ) -> Blocked:
     blocked = device_sync.checkout_blocks(device_sync.read(connection), head, orch_host(config))
     limited = lane_limit.account_limits(connection, now)
@@ -1074,9 +1092,10 @@ def placement_blocked(
         for harness in device.harnesses
         if device.account_for(harness) in limited
     }
+    tables = (BACKOFF_TABLE, MEMORY_HOLDS_TABLE) if memory else (BACKOFF_TABLE,)
     backed_off = {
         str(row[0])
-        for table in (BACKOFF_TABLE, MEMORY_HOLDS_TABLE)
+        for table in tables
         if _has_table(connection, table)
         for row in connection.execute(f"SELECT device FROM {table} WHERE until > ?", (now,))
     }
@@ -1084,10 +1103,10 @@ def placement_blocked(
 
 
 def placement_blocks(
-    queue: SQLiteJobQueue, config: MachinesConfig | None, head: str | None
+    queue: SQLiteJobQueue, config: MachinesConfig | None, head: str | None, *, memory: bool = True
 ) -> Blocked:
     with queue.connect() as connection:
-        return placement_blocked(connection, queue.now(), config, head)
+        return placement_blocked(connection, queue.now(), config, head, memory=memory)
 
 
 def backed_off_through(queue: SQLiteJobQueue, config: MachinesConfig) -> dict[str, float]:
