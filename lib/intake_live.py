@@ -162,8 +162,14 @@ def _branch_path(branch: str) -> str:
 class GitHubIntakeClient(GitHubReviewActions):
     """The feeder's GitHub reads and writes, on the adapter's gh seam."""
 
-    def __init__(self, *args: Any, **kwargs: Any):
+    def __init__(
+        self,
+        *args: Any,
+        list_pages: Callable[[str], list[object]] | None = None,
+        **kwargs: Any,
+    ):
         super().__init__(*args, **kwargs)
+        self.list_pages = list_pages
         self._applied: dict[tuple[str, int, str, str], str | None] = {}
         self.clock: Callable[[], float] = time.monotonic
         self._open_pull_pages: dict[
@@ -175,7 +181,7 @@ class GitHubIntakeClient(GitHubReviewActions):
         path = _repo_path(repo)
         found: list[IntakeIssue] = []
         endpoint = f"{path}/issues?state=open&labels={quote(label, safe='')}&per_page=100"
-        for page in self._pages(endpoint):
+        for page in (self.list_pages or self._pages)(endpoint):
             if not isinstance(page, list):
                 raise GitHubAdapterError("issue page is not a list")
             for item in page:

@@ -1485,7 +1485,9 @@ def _feeder(
         config,
         machines,
         github=GitHubIntakeClient(
-            runner=source._adapter_runner, cleared_variables=config.secret_env_names
+            runner=source._adapter_runner,
+            cleared_variables=config.secret_env_names,
+            list_pages=source._gh_list,
         ),
         linear=linear,
         factory_for=source.factory_context,

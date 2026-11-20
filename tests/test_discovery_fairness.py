@@ -156,11 +156,15 @@ def test_tracked_reserve_keeps_its_reads_when_discovery_is_saturated(
 class PagedGh(FakeGh):
     def __call__(self, argv, timeout):
         call = list(argv)
-        if any(part.endswith("/issues?state=open&per_page=100") for part in call):
+        if call[-1].endswith("/issues?state=open&per_page=100"):
+            self.calls.append(call)
+            link = '<https://api.github.com/repositories/1/issues?state=open&per_page=100&page=2>; rel="next"'
+            return GhResult(0, f"HTTP/2.0 200 OK\nLink: {link}\n\n{json.dumps(self.issues[:100])}", "")
+        if call[-1].endswith("/issues?state=open&per_page=100&page=2"):
             self.calls.append(call)
             pages = "".join(
                 json.dumps(self.issues[start : start + 100])
-                for start in range(0, len(self.issues), 100)
+                for start in range(100, len(self.issues), 100)
             )
             return GhResult(0, pages, "")
         return super().__call__(argv, timeout)
