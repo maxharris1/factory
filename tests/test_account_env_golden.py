@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from lib import remote, skill_probe, usage_probe
-from lib.harness_env import harness_env
+from lib.harness_env import cpu_cap_env, harness_env
 
 GOLDEN = Path(__file__).parent / "fixtures" / "account_env"
 TARGET = remote.RemoteTarget(
@@ -67,7 +67,7 @@ def test_default_account_script_is_unchanged(name: str) -> None:
     ],
 )
 def test_default_account_harness_env_is_unchanged(harness: str, expected: dict) -> None:
-    assert harness_env(harness) == expected
+    assert harness_env(harness) == {**cpu_cap_env(), **expected}
 
 
 def test_no_extra_unset_names_leave_the_start_script_unchanged() -> None:

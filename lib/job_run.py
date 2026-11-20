@@ -47,7 +47,11 @@ same process that runs the command:
   responsible process (#329, #846), an identity every descendant inherits;
   the anchor keeps the worker pid and lives until the run's kill round, so
   a descendant reparented to launchd, even after its parent exited, is
-  killed with the rest.
+  killed with the rest;
+* with a `cpu_cap` (#1221), a gated command's pid is pinned before its gate
+  opens to cpu_cap CPUs (lib/harness_env.py cpu_window), which the command
+  and every descendant inherit; where affinity is unavailable a log line
+  says so, and the env cap the caller passed still applies.
 
 `run` never finishes the job: `orch job done` stays the bot's call.
 """
@@ -71,6 +75,7 @@ from types import FrameType
 from typing import IO
 
 from lib import oom
+from lib.harness_env import cpu_window
 from lib.job_state import HEARTBEAT_SECONDS, KILL_GRACE_SECONDS, MAX_HEARTBEAT_SECONDS
 from lib.process_tree import (
     RUN_TAG_ENV,
@@ -304,6 +309,7 @@ def run(
     output: Callable[[IO[bytes]], None] | None = None,
     execed: Callable[[], None] | None = None,
     budget: Budget | None = None,
+    cpu_cap: int | None = None,
 ) -> int:
     """Beat once, run argv with a heartbeat, and return its exit status.
 
@@ -342,6 +348,9 @@ def run(
     `budget` (#199): a command still running when it runs out gets SIGTERM,
     then SIGKILL after budget.grace seconds; run returns once it is reaped,
     with budget.expired set and budget.signum the last signal sent.
+
+    `cpu_cap` (#1221): a gated command is pinned to that many of the CPUs it
+    may use before its gate opens, so every descendant inherits the pin.
     """
     beat()
     heartbeat = Heartbeat(beat, interval, log)
@@ -449,6 +458,8 @@ def run(
                 log(f"not starting {argv[0]}: {unstarted}")
                 return 128 + pending[0] if pending else 127
         scope = entered_scope(child.pid, tag, log) if prefix else None
+        if gated and cpu_cap is not None:
+            _cap_cpus(child.pid, tag, cpu_cap, log)
         if gated:
             gate = write_end
 
@@ -526,6 +537,22 @@ def run(
         if prepared and teardown is not None:
             teardown()
     return code
+
+
+def _cap_cpus(pid: int, tag: str, cap: int, log: Log) -> None:
+    try:
+        window = cpu_window(os.sched_getaffinity(pid), cap, tag)
+        if window is None:
+            return
+        os.sched_setaffinity(pid, window)
+    except AttributeError:
+        why = "no affinity API"
+    except OSError as exc:
+        why = _one_line(exc)
+    else:
+        log(f"cpu cap: worker pid {pid} on CPUs {sorted(window)}")
+        return
+    log(f"cpu cap: affinity path skipped ({why}); env cap ORCH_CPU_CAP={cap} still applies")
 
 
 def _session_keeper(env: Mapping[str, str]) -> subprocess.Popen[bytes] | None:
