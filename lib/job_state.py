@@ -161,6 +161,7 @@ _PLACEMENT_COLUMNS = (
     "worker_start",
     "remote_started",
     "worker_tag",
+    "account",
 )
 
 
@@ -197,6 +198,7 @@ def read_placements(connection: sqlite3.Connection) -> dict[str, Placement]:
             worker_start=_text(values["worker_start"]),
             remote_started=bool(values["remote_started"]),
             worker_tag=_text(values["worker_tag"]),
+            account=_text(values["account"]),
         )
     return placements
 

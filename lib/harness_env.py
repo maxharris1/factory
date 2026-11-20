@@ -16,7 +16,8 @@ import os
 import stat
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING
+from types import MappingProxyType
+from typing import TYPE_CHECKING, NamedTuple
 
 from lib.github_app_token import TOKEN_VARIABLES
 
@@ -28,8 +29,37 @@ CLAUDE_BG_WAIT_ENV = "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"
 _BY_HARNESS = {"claude": {CLAUDE_BG_WAIT_ENV: "0"}}
 
 
-def harness_env(harness: str) -> dict[str, str]:
-    return dict(_BY_HARNESS.get(harness, {}))
+class AccountIsolation(NamedTuple):
+    home: str
+    tokens: tuple[str, ...]
+
+
+ACCOUNT_ISOLATION = MappingProxyType(
+    {
+        "claude": AccountIsolation(
+            "CLAUDE_CONFIG_DIR",
+            ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
+        ),
+        "codex": AccountIsolation("CODEX_HOME", ("OPENAI_API_KEY", "CODEX_API_KEY")),
+    }
+)
+
+
+def harness_env(harness: str, home: str | None = None) -> dict[str, str]:
+    env = dict(_BY_HARNESS.get(harness, {}))
+    if home is not None:
+        env[_isolation(harness).home] = home
+    return env
+
+
+def account_tokens(harness: str, home: str | None = None) -> tuple[str, ...]:
+    return () if home is None else _isolation(harness).tokens
+
+
+def _isolation(harness: str) -> AccountIsolation:
+    if harness not in ACCOUNT_ISOLATION:
+        raise ValueError(f"harness {harness!r} cannot run from an account folder")
+    return ACCOUNT_ISOLATION[harness]
 
 
 class ApproverProfileExposed(Exception):

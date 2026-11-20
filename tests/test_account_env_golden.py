@@ -68,3 +68,8 @@ def test_default_account_script_is_unchanged(name: str) -> None:
 )
 def test_default_account_harness_env_is_unchanged(harness: str, expected: dict) -> None:
     assert harness_env(harness) == expected
+
+
+def test_no_extra_unset_names_leave_the_start_script_unchanged() -> None:
+    expected = (GOLDEN / "start_plain.txt").read_text(encoding="utf-8")
+    assert remote.start_script(TARGET, ["claude", "-p"], ENV, unset=()) == expected

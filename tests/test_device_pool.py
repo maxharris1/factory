@@ -9,7 +9,8 @@ from types import MappingProxyType
 import pytest
 
 from lib import device_pool, device_sync, live_settings
-from lib.device_pool import DevicePool, Orphan, choose_device
+from lib.device_pool import DevicePool, Orphan, choose_device, placed_account
+from lib.job_state import read_placements
 from lib.machines_yml import Device, MachinesConfig, load_machines_yml
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
 from lib.wait import wait_for_job
@@ -893,6 +894,101 @@ def test_a_slot_table_from_before_run_scope_gains_it_and_records_the_scope(
     pool.attach_worker(job.id, owner="claude", pid=12, start="w", run_scope=SCOPE)
 
     assert pool.placement(job.id).run_scope == SCOPE
+
+
+PRE_1077_SLOTS = (
+    "CREATE TABLE device_slots (job_id TEXT PRIMARY KEY, device TEXT NOT NULL, "
+    "harness TEXT NOT NULL, os_user TEXT NOT NULL, placed_at REAL NOT NULL, "
+    "runner_pid INTEGER, runner_start TEXT, worker_pid INTEGER, worker_start TEXT, "
+    "remote_started INTEGER NOT NULL DEFAULT 0, worker_tag TEXT, autostart_pid INTEGER, "
+    "autostart_start TEXT, run_token_hash TEXT, run_tag TEXT, run_scope TEXT)"
+)
+LOGIN_ACCOUNTS = [
+    pytest.param("{claude: claude-bot}", "", "claude-default", id="bot-user"),
+    pytest.param(
+        "{claude: {bot: claude-bot, account: claude-max}}",
+        "accounts:\n  - {id: claude-max, harness: claude}\n",
+        "claude-max",
+        id="legacy-bot-and-account",
+    ),
+]
+
+
+def account_config(tmp_path: Path, harnesses: str, accounts: str) -> MachinesConfig:
+    path = tmp_path / "machines.yml"
+    path.write_text(
+        "orch_host: pc\n"
+        + accounts
+        + "devices:\n"
+        "  - name: pc\n"
+        "    tailscale_name: pc.example.ts.net\n"
+        "    slot_max: 2\n"
+        f"    harnesses: {harnesses}\n"
+        "    workdir_root: /home/work\n"
+        "    ssh_alias: pc-{bot}\n"
+        "    factory_root: /srv/factory\n",
+        encoding="utf-8",
+    )
+    config, findings = load_machines_yml(path, overlay=False)
+    assert config is not None, findings
+    return config
+
+
+@pytest.mark.parametrize(("harnesses", "accounts", "login"), LOGIN_ACCOUNTS)
+def test_a_slot_row_from_before_the_account_column_gains_it_in_place(
+    tmp_path: Path, harnesses: str, accounts: str, login: str
+) -> None:
+    config = account_config(tmp_path, harnesses, accounts)
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 100.0)
+    with queue.connect() as connection:
+        connection.execute(PRE_1077_SLOTS)
+        connection.execute(
+            "CREATE TABLE device_health (device TEXT PRIMARY KEY, last_ok_at REAL, failing_since REAL)"
+        )
+        connection.execute(
+            "INSERT INTO device_slots (job_id, device, harness, os_user, placed_at, "
+            "autostart_pid, autostart_start) VALUES ('old-1', 'pc', 'claude', 'claude-bot', 50.0, 7, 's')"
+        )
+        connection.commit()
+        before = [tuple(row) for row in connection.execute("SELECT rowid, * FROM device_slots")]
+        assert read_placements(connection)["old-1"].account is None
+
+    pool = DevicePool(queue, config)
+
+    with queue.connect() as connection:
+        columns = [str(row["name"]) for row in connection.execute("PRAGMA table_info(device_slots)")]
+        after = [tuple(row) for row in connection.execute("SELECT rowid, * FROM device_slots")]
+        (sql,) = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'device_slots'"
+        ).fetchone()
+    assert "account" in columns
+    assert after == [(*before[0], None)]
+    assert sql.startswith(PRE_1077_SLOTS.removesuffix(")"))
+    placement = pool.placement("old-1")
+    assert placement.account is None
+    assert placed_account(config, placement) == login
+
+
+@pytest.mark.parametrize(("harnesses", "accounts", "login"), LOGIN_ACCOUNTS)
+def test_a_claim_records_the_devices_login_account_on_the_slot(
+    tmp_path: Path, harnesses: str, accounts: str, login: str
+) -> None:
+    config = account_config(tmp_path, harnesses, accounts)
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 100.0)
+    pool = DevicePool(queue, config)
+    enqueue(queue, "claude", "1")
+
+    job, placement = pool.claim("claude")
+
+    assert placement.account == login
+    assert pool.placement(job.id).account == login
+    assert placed_account(config, pool.placement(job.id)) == login
+    with queue.connect() as connection:
+        assert read_placements(connection)[job.id].account == login
+        (stored,) = connection.execute(
+            "SELECT account FROM device_slots WHERE job_id = ?", (job.id,)
+        ).fetchone()
+    assert stored == login
 
 
 def target_pool(tmp_path: Path) -> tuple[DevicePool, SQLiteJobQueue]:
