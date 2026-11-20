@@ -162,6 +162,7 @@ def test_a_later_user_impact_round_never_orders_the_full_pass(update: dict | Non
     facts = {
         "base": "main",
         "head": "d" * 40,
+        "pr": 42,
         "verify": verify,
         "verify_unavailable": False,
         "round_number": 2,
@@ -175,7 +176,9 @@ def test_a_later_user_impact_round_never_orders_the_full_pass(update: dict | Non
         "local_checks": (),
         "qa_gate": None,
     }
-    text = "\n".join(review_brief.lead(facts).method)
+    lead = review_brief.lead(facts)
+    assert lead.goal.startswith(f"Review PR #42 at {'d' * 40} ")
+    text = "\n".join(lead.method)
     assert not [phrase for phrase in UNCONDITIONAL_PASS if phrase in text]
     assert "Do not run interrogate or blast-radius: the dispatcher picked `fix-check`." in text
     assert "blast-radius only when" not in text
