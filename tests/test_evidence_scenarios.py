@@ -4,6 +4,7 @@ from dataclasses import replace
 
 import pytest
 
+from lib.brief.common import LIVE_SECTION_CUTOFF
 from lib.dispatcher import Comment
 from lib.evidence.criteria import Criterion
 from lib.evidence.scenarios import (
@@ -16,7 +17,6 @@ from lib.evidence.scenarios import (
     live_section_refusal,
     qa_scenarios,
 )
-from lib.brief.common import LIVE_SECTION_CUTOFF
 from lib.journeys import Journey, QaCheck, QaPlan
 
 CUTOFF = LIVE_SECTION_CUTOFF.timestamp()

@@ -20,7 +20,6 @@ From 2026-12-15T00:00Z (LIVE_SECTION_CUTOFF) QA journeys come from the
 ticket's `Features:` line and `qa:` criteria. A plan or ready posted at or
 after the cutoff with a `## Verify, live` heading, even an empty section,
 reads as having no section, so a later plan falls back to an earlier ready.
-`orch job done` refuses such a comment with `live_section_refusal`'s reason.
 
 The section starts at the first line that is exactly `## Verify, live`
 (trailing spaces allowed) outside a ``` or ~~~ code fence, and runs to the
