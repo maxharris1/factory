@@ -135,7 +135,7 @@ from typing import Protocol
 import yaml
 
 from lib.brief import BriefError, render_brief
-from lib.device_pool import UNREACHABLE_BACKOFF_SECONDS, DevicePool, Placement
+from lib.device_pool import UNREACHABLE_BACKOFF_SECONDS, DevicePool, Placement, run_account
 from lib.factory_md import FactoryContext, parse_factory_context
 from lib.load import load_yaml
 from lib.machines_yml import Device, MachinesConfig, orch_host
@@ -843,6 +843,8 @@ class Waiter:
             skill_preflight.preflight(
                 self.queue, job, bot=self.bot, placement=placement, device=device,
                 checkout=factory_root, held=self._box_held(), host=orch_host(self.pool.config),
+                account_home=run_account(self.pool.config, placement)[1]
+                if placement is not None and device is not None else None,
             )
             job_dir = self._job_dir(job.id)
             argv = job_run_argv(
