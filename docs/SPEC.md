@@ -1092,8 +1092,12 @@ that fails. After a POST the feeder lists the issues carrying the marker,
 keeps the lowest, closes any other as its duplicate and records the kept one
 in the row, which covers a POST still in flight when its lease ran out. A green
 read ends the streak; an issue closed while main is still red starts a new
-one. A ticket that waits is `waiting-blocked` with its reason, takes no
-room and is re-checked every poll; a blocker cycle, a blocker closed without finishing and a blocker that
+one. While the issue is open, each later red head adds one comment to it
+carrying that head's red checks, failing tests and log tails, cut to the same
+limit. A head marker in the comment and the row's claim keep it to one comment
+per head, and a crash after the post finds the marker and posts nothing more.
+The streak's first head gets no comment. A ticket that waits is
+`waiting-blocked` with its reason, takes no room and is re-checked every poll; a blocker cycle, a blocker closed without finishing and a blocker that
 does not exist are flagged needs-attention (`blocker-cycle`,
 `blocker-closed`, `blocker-missing`). An open issue in a tracked repo that a
 candidate names in `Blocked by` or `Depends on` but that is not itself a

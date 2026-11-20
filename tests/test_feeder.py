@@ -327,6 +327,12 @@ class FakeGitHub:
         self._maybe_fail("run_logs")
         return dict(self.run_logs.get((repo, run_id), {}))
 
+    def post_issue_comment_once(self, repo: str, number: int, body: str, marker: str) -> str:
+        for item in self.posted.get((repo, number), []):
+            if has_marker(item.body, marker):
+                return item.id
+        return self.post_comment(repo, number, body)
+
     def post_comment(self, repo: str, number: int, body: str) -> str:
         self._maybe_fail("comment")
         self._next_comment += 1
@@ -1403,6 +1409,97 @@ def test_a_failed_main_read_files_and_retires_nothing_and_green_ends_the_streak(
     red_main(github, head="e" * 40, run_id="960")
     poll()
     assert main_fixes(github) == [900, 901]
+
+
+def red_head(github: FakeGitHub, n: int) -> str:
+    head = f"{n:x}" * 40
+    red_main(github, head=head[:40], run_id=str(900 + n))
+    github.run_logs[("owner/app", str(900 + n))] = {
+        "test (2/3)": f"collected 1 item\nFAILED tests/test_x.py::test_{n} - HEAD-{n}"
+    }
+    return head[:40]
+
+
+def issue_comments(github: FakeGitHub, number: int = 900) -> list[str]:
+    return [item.body for item in github.posted.get((MAIN[0], number), [])]
+
+
+def test_each_later_red_head_adds_its_log_to_the_open_main_fix_once(tmp_path: Path) -> None:
+    now = [10_000.0]
+    feeder, _, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD, now=now)
+
+    def poll() -> None:
+        now[0] += 60
+        assert feeder.feed_once().errors == 0
+
+    red_main(github)
+    poll()
+    assert main_fixes(github) == [900]
+    assert issue_comments(github) == []
+
+    second = red_head(github, 2)
+    for _ in range(3):
+        poll()
+    [comment] = issue_comments(github)
+    assert second in comment
+    assert "FAILED tests/test_x.py::test_2 - HEAD-2" in comment
+    assert RED_SHA not in comment
+
+    third = red_head(github, 3)
+    poll()
+    poll()
+    assert len(issue_comments(github)) == 2
+    assert third in issue_comments(github)[1]
+    assert "HEAD-3" in issue_comments(github)[1]
+    assert main_fixes(github) == [900]
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
+
+
+def test_a_failure_after_the_head_comment_posts_leaves_one_comment(tmp_path: Path) -> None:
+    now = [10_000.0]
+    feeder, _, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD, now=now)
+    red_main(github)
+    feeder.feed_once()
+    red_head(github, 2)
+    post = github.post_issue_comment_once
+
+    def post_then_fail(*args: object) -> str:
+        post(*args)
+        raise RuntimeError("lost the response")
+
+    github.post_issue_comment_once = post_then_fail
+    now[0] += 60
+    assert feeder.feed_once().errors == 1
+    del github.post_issue_comment_once
+    for _ in range(2):
+        now[0] += 60
+        assert feeder.feed_once().errors == 0
+
+    assert len(issue_comments(github)) == 1
+
+
+def test_a_second_feeder_adds_no_head_comment_while_the_first_holds_the_row(
+    tmp_path: Path,
+) -> None:
+    now = [10_000.0]
+    feeder, queue, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD, now=now)
+    other = another_feeder(feeder, queue, github)
+    red_main(github)
+    feeder.feed_once()
+    red_head(github, 2)
+    post = github.post_issue_comment_once
+    raced: list[int] = []
+
+    def racing(*args: object) -> str:
+        raced.append(other.feed_once().errors)
+        return post(*args)
+
+    github.post_issue_comment_once = racing
+    now[0] += 60
+    assert feeder.feed_once().errors == 0
+
+    assert raced == [0]
+    assert len(issue_comments(github)) == 1
 
 
 def another_feeder(feeder: Feeder, queue, github: FakeGitHub) -> Feeder:
