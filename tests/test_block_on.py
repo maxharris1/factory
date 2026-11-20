@@ -175,6 +175,7 @@ def test_a_later_user_impact_round_never_orders_the_full_pass(update: dict | Non
         "no_ci_base": None,
         "local_checks": (),
         "qa_gate": None,
+        "qa_criteria": None,
     }
     lead = review_brief.lead(facts)
     assert lead.goal.startswith(f"Review PR #42 at {'d' * 40} ")

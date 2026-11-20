@@ -26,6 +26,7 @@ from lib.evidence.ci import ci_evidence  # noqa: E402
 from lib.evidence.criteria import canonical_brief  # noqa: E402
 from lib.evidence.findings import findings_evidence  # noqa: E402
 from lib.factory_md import QaEvidence, QaLane, parse_factory_context  # noqa: E402
+from lib.journeys import Journey, QaCheck, QaPlan  # noqa: E402
 from lib.qa_storage import DownloadLink, LaneLinks, UploadLink  # noqa: E402
 from lib.queue import Job, JobRequest  # noqa: E402
 
@@ -199,6 +200,46 @@ ROUND_ONE_VERDICT = Comment(
 )
 
 
+QA_PLAN = QaPlan(
+    "verify-cleffy",
+    "c0ffee" + "0" * 34,
+    (Journey("pricing"), Journey("start-free", new=True)),
+    (QaCheck("ac-2", ("pricing", "start-free"), "The button opens the sign-up form with the free plan chosen."),),
+)
+QA_BRIEF_COMMENT = "\n".join([
+    "**Brief for #42: Start free button**",
+    "",
+    *QA_PLAN.render(),
+    "",
+    "### Ticket",
+    "```",
+    "## Acceptance criteria",
+    "- ac-1: The pricing page shows a `Start free` button above the plans.",
+    "- ac-2: The button opens the sign-up form with the free plan chosen.",
+    "```",
+    "",
+])
+QA_BRIEF = Comment(
+    id="1",
+    author="factory-app[bot]",
+    created_at=1.0,
+    url="https://github.com/owner/repo/pull/42#issuecomment-1",
+    body="<!-- orch:v1 kind=brief from=grok-bot role=orchestrator risk=high -->\n" + QA_BRIEF_COMMENT,
+)
+QA_EVIDENCE = {
+    "criteria": asdict(criteria_evidence(
+        issue_key="#42",
+        issue_url="https://github.com/owner/repo/issues/42",
+        brief=canonical_brief([QA_BRIEF], TRUSTED),
+        issue_body=None,
+        pr_body=None,
+        ready_starts_review=False,
+    )),
+    "findings": {"findings": [], "reviewed_head": None, "reviewed_base": None, "verdict_url": None},
+    "ci": None,
+}
+
+
 def evidence_bundle(current_round: int) -> dict[str, object]:
     criteria = criteria_evidence(
         issue_key="#42",
@@ -221,7 +262,7 @@ def evidence_bundle(current_round: int) -> dict[str, object]:
 # kind: (action, recipient, attempt, head, detail extras)
 CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
     "plan": ("plan", "claude", 1, None, {}),
-    "plan-qa": ("plan", "claude", 1, None, {}),
+    "plan-qa": ("plan", "claude", 1, None, {"brief_text": QA_BRIEF_COMMENT}),
     "plan-round-2": ("plan", "claude", 1, None, {
         "plan_round": 2,
         "instruction": "round=2/2; previous plan https://github.com/owner/repo/pull/42#issuecomment-5",
@@ -239,7 +280,11 @@ CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
         "gitBranchName": "factory/issue-42",
         "instruction": "https://github.com/owner/repo/pull/42#issuecomment-5",
     }),
-    "build-qa": ("build", "claude", 1, None, {"gitBranchName": "factory/issue-42", "proof": PROOF}),
+    "build-qa": ("build", "claude", 1, None, {
+        "gitBranchName": "factory/issue-42",
+        "proof": PROOF,
+        "brief_text": QA_BRIEF_COMMENT,
+    }),
     "resume": ("build", "claude", 1, HEAD, {
         "gitBranchName": "factory/issue-42",
         "instruction": ANSWERS_URL,
@@ -286,7 +331,7 @@ CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
     }),
     "merge-only": ("fix", "claude", 1, HEAD, {"kind": "merge-only", "round": "1/3"}),
     "review": ("review", "codex", 1, HEAD, {"round": "1/3", "risk": "low"}),
-    "review-qa-block": ("review", "codex", 1, HEAD, {"round": "1/3", "risk": "low"}),
+    "review-qa-block": ("review", "codex", 1, HEAD, {"round": "1/3", "risk": "low", "evidence": QA_EVIDENCE}),
     "review-qa-report": ("review", "codex", 1, HEAD, {"round": "1/3", "risk": "low"}),
     "review-round-3": ("review", "codex", 1, HEAD, {"round": "3/3"}),
     "review-evidence": ("review", "codex", 1, HEAD, {"round": "1/3", "evidence": evidence_bundle(1)}),

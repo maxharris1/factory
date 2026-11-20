@@ -739,6 +739,7 @@ JOURNEYS_BRIEF = "**Brief for #41**\n\n" + "\n".join(QA_PLAN.render()) + "\n"
 FEATURE_FILE = "`.claude/skills/verify-cleffy/features/start-free.md`"
 FEATURE_ROW = "`.claude/skills/verify-cleffy/features/README.md`"
 QA_RUNS = "QA runs the brief's `### QA journeys` with `verify-cleffy` against its `### QA criteria`."
+LIVE_ASK = "with a `## Verify, live` section"
 
 
 def test_journey_lines_name_each_new_journeys_file_and_readme_row():
@@ -773,19 +774,19 @@ def test_a_journeys_brief_asks_for_the_journeys_and_no_live_section(action: str,
     task = _task_under(QA_FACTORY_MD, action, {"brief_text": JOURNEYS_BRIEF, **extra})
     assert QA_RUNS in task
     assert FEATURE_FILE in task
-    assert "## Verify, live" not in task
+    assert LIVE_ASK not in task
 
 
 def test_a_journeys_brief_asks_for_the_journeys_with_no_factory_md():
     task = _task(_render("build", 1, None, {"brief_text": JOURNEYS_BRIEF}, remote=True))
     assert QA_RUNS in task
-    assert "## Verify, live" not in task
+    assert LIVE_ASK not in task
 
 
 def test_a_malformed_qa_block_falls_back_to_the_live_section():
     broken = JOURNEYS_BRIEF.replace("- Base: `", "- Base: not-a-sha `")
     task = _task_under(QA_FACTORY_MD, "plan", {"brief_text": broken})
-    assert "## Verify, live" in task
+    assert LIVE_ASK in task
     assert QA_RUNS not in task
 
 

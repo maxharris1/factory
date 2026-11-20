@@ -43,6 +43,9 @@ A longer text is cut from the end, at a line break when there is one, and
 ends with a note of how many characters and criteria were cut.
 
 When no source has any text, the source is "none" and the text is EMPTY.
+
+qa_criteria holds the ids under the brief's `### QA criteria`, () when its QA
+plan lists none, and None when there is no brief or it has no valid QA plan.
 """
 
 from __future__ import annotations
@@ -57,6 +60,7 @@ from markdown_it.token import Token
 from lib.brief import TEXT_LIMIT
 from lib.dispatcher import Comment, trusted_bots
 from lib.handoff import HandoffError, parse_comment
+from lib.journeys import QaPlan
 
 ORCHESTRATOR = "grok-bot"
 SOURCES = ("brief", "issue", "pr", "none")
@@ -91,6 +95,7 @@ class CriteriaEvidence:
     text: str
     criteria: tuple[Criterion, ...]
     cut: str | None
+    qa_criteria: tuple[str, ...] | None = None
 
 
 def criteria_evidence(
@@ -106,18 +111,22 @@ def criteria_evidence(
 ) -> CriteriaEvidence:
     """The issue fields and acceptance criteria. See the module doc."""
     candidates: list[tuple[str, str | None, str | None]] = []
+    qa_criteria = None
     if _lists_criteria(issue_body):
         candidates.append(("issue", issue_url, issue_body))
     if brief is not None:
-        candidates.append(("brief", brief.url, quoted_ticket(parse_comment(brief.body).body)))
+        brief_body = parse_comment(brief.body).body
+        plan = QaPlan.parse(brief_body)
+        qa_criteria = None if plan is None else tuple(check.ac for check in plan.checks)
+        candidates.append(("brief", brief.url, quoted_ticket(brief_body)))
     candidates.append(("issue", issue_url, issue_body))
     if ready_starts_review:
         candidates.append(("pr", pr_url, pr_body))
     for source, url, body in candidates:
         if body is not None and body.strip():
             text, criteria, cut = _criteria(body, limit)
-            return CriteriaEvidence(issue_key, issue_url, source, url, text, criteria, cut)
-    return CriteriaEvidence(issue_key, issue_url, "none", None, EMPTY, (), None)
+            return CriteriaEvidence(issue_key, issue_url, source, url, text, criteria, cut, qa_criteria)
+    return CriteriaEvidence(issue_key, issue_url, "none", None, EMPTY, (), None, qa_criteria)
 
 
 def numbered(body: str) -> tuple[Criterion, ...]:

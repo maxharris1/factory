@@ -32,21 +32,32 @@ _MODES = {
         "In the verdict, say which checks did not run.",
     ),
 }
-_MISSING_SCENARIO = (
-    "An acceptance criterion a user can observe in the UI that has no live QA scenario in the plan is "
-)
-_QA_GATE_STEPS = {
-    "block": (
-        "Live QA scenarios (factory.md `qa.gate: block`). "
-        + _MISSING_SCENARIO
-        + "a `[blocking]` finding. Name the criterion and the scenario it lacks."
-    ),
-    "report": (
-        "Live QA scenarios (factory.md `qa.gate: report`). "
-        + _MISSING_SCENARIO
-        + "a note in the verdict, not a `[blocking]` finding. Name the criterion and the scenario it lacks."
-    ),
+_QA_GATE_COVERAGE = {
+    False: ("Live QA scenarios", "has no live QA scenario in the plan", " and the scenario it lacks"),
+    True: ("QA coverage", "is not under the brief's `### QA criteria`", ""),
 }
+_QA_GATE_OUTCOMES = {
+    "block": "a `[blocking]` finding",
+    "report": "a note in the verdict, not a `[blocking]` finding",
+}
+
+
+def _qa_gate_step(gate: str, has_qa_plan: bool) -> str:
+    lead, lacks, named = _QA_GATE_COVERAGE[has_qa_plan]
+    return (
+        f"{lead} (factory.md `qa.gate: {gate}`). An acceptance criterion a user can observe in the UI that "
+        f"{lacks} is {_QA_GATE_OUTCOMES[gate]}. Name the criterion{named}."
+    )
+
+
+def _qa_owner(qa_criteria: tuple[str, ...] | None) -> str:
+    if not qa_criteria:
+        return ""
+    ids = ", ".join(f"`{ac}`" for ac in qa_criteria)
+    return (
+        f" The brief lists {ids} under `### QA criteria`. Each such criterion is `qa`-tagged and owned by QA: "
+        "tag it `qa` and do not reassign it."
+    )
 
 
 def filing_active(facts: dict) -> bool:
@@ -197,11 +208,12 @@ def lead(facts: dict) -> Lead:
         "no change to this PR can meet it, such as one about other PRs' state, and sets `unsat=<id>` in the "
         "header. A criterion needing a live provider without credentials here is `unverified`, not "
         "`verdict=BLOCKED`: name what is missing and the builder's live-run evidence or a human check. Never "
-        "read, request or look for credentials. Count `unverified` and `unsatisfiable` as unmet for `ac`.",
+        "read, request or look for credentials. Count `unverified` and `unsatisfiable` as unmet for `ac`."
+        + _qa_owner(facts["qa_criteria"]),
         "QA owns live checks, so judge a `qa` criterion from its code, never `unverified` for lack of a live run. "
         "For each `review` criterion, write your own check (test, script or trace) before reading the builder's "
         "proof, then compare. A `qa` criterion gets none.",
-        *([_QA_GATE_STEPS[facts["qa_gate"]]] if facts["qa_gate"] else []),
+        *([_qa_gate_step(facts["qa_gate"], facts["qa_criteria"] is not None)] if facts["qa_gate"] else []),
         *(
             _update_steps(facts, base, head, unchanged_tag)
             if facts["update"]

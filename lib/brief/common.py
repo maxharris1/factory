@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from typing import Literal
 
 from lib.brief.skills import PLAYBOOKS, skill_paths
 from lib.factory_md import (
@@ -15,6 +17,7 @@ from lib.factory_md import (
     FactoryContext,
 )
 from lib.github_actions import TOKEN_VARIABLES
+from lib.journeys import QaPlan, skill_dir
 from lib.pr_title import SOURCE
 from lib.queue import Job, plan_round
 
@@ -39,6 +42,7 @@ _BRANCH = re.compile(r"^[A-Za-z0-9._/-]+$")
 _SKILL = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _HARNESS = re.compile(r"^(claude|codex|cursor)$")
 _UNMAPPED = re.compile(r"^(?:ac-[1-9][0-9]*|expected size|not named)$")
+_AC = re.compile(r"ac-[1-9][0-9]*")
 _URL = re.compile(r"^https://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+$")
 # A PR number as the producers write it: a decimal string (TrackedTicket.pr_number).
 _NUMBER = re.compile(r"^[1-9][0-9]{0,9}$")
@@ -146,6 +150,7 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
     unmapped = detail.get("unmapped") if job.request.action == "plan" else None
     no_ci_base = detail.get("no_ci_base")
     ticket_type = detail.get("ticket_type")
+    ticket_text = ticket_texts(detail, _plain_repo(job.request.repo), pr)
     return {
         "risk": risk,
         "round": round_text if round_match is not None else None,
@@ -160,7 +165,9 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
         "head": head if isinstance(head, str) and _HEAD.fullmatch(head) else None,
         "pr": pr,
         "repo": _plain_repo(job.request.repo),
-        "ticket_text": ticket_texts(detail, _plain_repo(job.request.repo), pr),
+        "ticket_text": ticket_text,
+        "qa_plan": QaPlan.parse(ticket_text.brief) if job.request.action in ("plan", "build") else None,
+        "qa_criteria": _qa_criteria(detail) if job.request.action == "review" else None,
         "ticket": job.request.ticket_id if _TICKET.fullmatch(job.request.ticket_id) else None,
         "base": base if isinstance(base, str) and _BRANCH.fullmatch(base) else None,
         "no_ci_base": no_ci_base if isinstance(no_ci_base, str) and _BRANCH.fullmatch(no_ci_base) else None,
@@ -192,6 +199,13 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
         "size_flag": _size_flag(detail) if job.request.action == "review" else None,
         "qa": context is not None and context.config.qa is not None,
     }
+
+
+def _qa_criteria(detail: dict[str, object]) -> tuple[str, ...] | None:
+    ids = evidence_part(detail, "criteria").get("qa_criteria")
+    if not isinstance(ids, (list, tuple)) or not all(isinstance(i, str) and _AC.fullmatch(i) for i in ids):
+        return None
+    return tuple(ids)
 
 
 def _rebase_scope(detail: dict[str, object]) -> dict | None:
@@ -509,6 +523,31 @@ def live_lines(where: str) -> list[str]:
         "- `Regression lane:` the scenario ids to rerun on the base branch, or `none`.",
         "- `Not live:` each criterion no live scenario proves, as `ac-<n> (reason)`.",
         "Every bullet in the section is one of these entries.",
+    ]
+
+
+_NEW_JOURNEYS = {
+    "plan": "This PR adds each `new:` journey to the feature map. Map each as work:",
+    "ready": "This PR adds each `new:` journey to the feature map:",
+}
+
+
+def journey_lines(where: Literal["plan", "ready"], plan: QaPlan, skills: Iterable[str]) -> list[str]:
+    folder = skill_dir(skills, plan.verify)
+
+    def path(name: str) -> str:
+        return f"`{folder}/features/{name}`" if folder else f"`features/{name}` in the `{plan.verify}` skill's folder"
+
+    new = [journey.id for journey in plan.journeys if journey.new]
+    return [
+        f"QA runs the brief's `### QA journeys` with `{plan.verify}` against its `### QA criteria`. "
+        "Write no `## Verify, live` section.",
+        *([_NEW_JOURNEYS[where]] if new else []),
+        *(
+            f"- `new:{journey}`: add {path(f'{journey}.md')}, shaped like the map's other files, "
+            f"and its row in {path('README.md')}."
+            for journey in new
+        ),
     ]
 
 
