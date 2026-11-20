@@ -79,7 +79,7 @@ def _render(action: str, attempt: int, head: str | None, extra: dict[str, object
 
 
 def _task(brief: str) -> str:
-    return brief.split("## Method\n", 1)[1].split("\n## Job\n", 1)[0]
+    return brief.split("## Goal\n", 1)[1].split("\n## Job\n", 1)[0]
 
 
 def _prose(brief: str) -> str:
@@ -684,7 +684,9 @@ def test_the_job_detail_names_a_base_without_ci_and_its_local_checks(tmp_path: P
 
 
 def test_a_ci_fix_on_a_base_without_ci_still_names_the_red_checks():
-    assert f"Fix the red CI on this PR. These checks failed on {HEAD}: `pytest (shard 2)`." in _no_ci(CI_FIX)
+    task = _no_ci(CI_FIX)
+    assert f"Fix the red CI on PR #42 at {HEAD}." in task
+    assert f"These checks failed on {HEAD}: `pytest (shard 2)`." in task
 
 
 @pytest.mark.parametrize("commits", [[], ["c" * 40]], ids=["merge", "merge-with-commits"])

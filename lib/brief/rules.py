@@ -160,4 +160,6 @@ CONTRADICTIONS = (
     ),
     ("ci-gate-vs-no-ci", "CI runs the full suite and is the gate", "CI does not run on `"),
     ("decided-builder-vs-reviewer", "build to them and do not ask them again", "is not raised again as a `[blocking]` finding"),
+    ("proof-ready-vs-verdict", "The ready names the pushed head", "The verdict names each `ac-<n>`"),
+    ("questions-only-vs-ready", "The questions handoff is this job's only output.", "Push, then post the ready handoff below"),
 )

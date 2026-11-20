@@ -16,6 +16,7 @@ from lib.brief.common import (
     local_checks,
     read_ticket_line,
     resume_lines,
+    ticket_ref,
     title_line,
 )
 from lib.proof import from_detail
@@ -50,18 +51,25 @@ def lead(job: Job, facts: dict) -> Lead:
         if facts["pr"]
         else f"the ticket's branch (`gitBranchName` in Job data, else a new branch off `{base}`)"
     )
-    return Lead((
-        "Build the ticket. Follow the router in Skills below.",
-        f"1. {read_ticket_line(facts)} {plan_line}",
-        f"2. Work on {branch}. Write tests first, as the `tdd` skill says.",
-        f"3. Run only the tests for the files you touched plus a short smoke set, {TEST_SCOPE} "
-        "Before `ready`, run the router's \"Before ready\" steps.",
-        base_step(4, facts),
-        "5. Push, then post the ready handoff below with the head you pushed.",
-        *(live_lines("ready") if facts["qa"] and not (facts["plan_text"] or facts["plan"]) else []),
-        *answers_lines(detail_of(job)),
-        *builder_notes(job, facts),
-    ))
+    return Lead(
+        f"Build {ticket_ref(facts)} so every acceptance criterion is met.",
+        (
+            "Follow the router in Skills below.",
+            f"1. {read_ticket_line(facts)} {plan_line}",
+            f"2. Work on {branch}. Write tests first, as the `tdd` skill says.",
+            f"3. Run only the tests for the files you touched plus a short smoke set, {TEST_SCOPE} "
+            "Before `ready`, run the router's \"Before ready\" steps.",
+            base_step(4, facts),
+            "5. Push, then post the ready handoff below with the head you pushed.",
+            *(live_lines("ready") if facts["qa"] and not (facts["plan_text"] or facts["plan"]) else []),
+            *answers_lines(detail_of(job)),
+            *builder_notes(job, facts),
+        ),
+        (
+            "The ready names the pushed head and each criterion's test or command with its output.",
+            *proof_lines(detail_of(job)),
+        ),
+    )
 
 
 def base_step(number: int, facts: dict) -> str:
@@ -96,7 +104,6 @@ def builder_notes(job: Job, facts: dict) -> list[str]:
             "pushed head. Run it yourself before you post."
         )
     detail = detail_of(job)
-    notes.extend(_proof_lines(detail))
     notes.extend(resume_lines(detail))
     if job.request.attempt > 1:
         notes.append(
@@ -107,7 +114,7 @@ def builder_notes(job: Job, facts: dict) -> list[str]:
     return notes
 
 
-def _proof_lines(detail: dict[str, object]) -> list[str]:
+def proof_lines(detail: dict[str, object]) -> list[str]:
     items = from_detail(detail.get("proof"))
     if not items:
         return []
@@ -150,5 +157,5 @@ def _retry_why(detail: dict[str, object], facts: dict) -> str:
 
 def ready_handoff(bot: str) -> tuple[str, str]:
     header = f"<!-- orch:v1 kind=ready from={bot} role=builder head=<pushed-head-sha> -->"
-    example = "What changed, the tests and their results, and anything left open."
+    example = "What changed, the Proof above, and anything left open."
     return header, example

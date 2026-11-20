@@ -1,10 +1,12 @@
 ===== box =====
 # Factory job brief: review
 
+## Goal
 You are Codex Bot (codex-bot). `orch wait codex-bot --autostart` claimed this job and started you under `orch job run`. Nobody will message you while this job runs: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins.
+Review PR #42 at 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6 against every acceptance criterion and post one verdict.
 
 ## Method
-Review the PR at head 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6 against `dev`. You are the one cross-family reviewer. Follow the router in Skills below.
+Review against `dev`. You are the one cross-family reviewer. Follow the router in Skills below.
 Mode: `full`. factory.md `review.block_on` is `any-failure`, so every round reviews the whole PR. A `full` review runs interrogate and blast-radius.
 1. Requirements first. Before the diff, tag each `ac-<n>` in the Ticket section below with one owner, `review` (code, tests or logic show it) or `qa` (only the running app can), and mark it `met`, `unmet`, `unverified` or `unsatisfiable` with evidence (file:line, test or run). `unsatisfiable` means no change to this PR can meet it, such as one about other PRs' state, and sets `unsat=<id>` in the header. A criterion needing a live provider without credentials here is `unverified`, not `verdict=BLOCKED`: name what is missing and the builder's live-run evidence or a human check. Never read, request or look for credentials. Count `unverified` and `unsatisfiable` as unmet for `ac`.
 2. QA owns live checks, so judge a `qa` criterion from its code, never `unverified` for lack of a live run. For each `review` criterion, write your own check (test, script or trace) before reading the builder's proof, then compare. A `qa` criterion gets none.
@@ -15,6 +17,9 @@ Mode: `full`. factory.md `review.block_on` is `any-failure`, so every round revi
 7. Give each helper a distinct question: one criterion group or one risk.
 8. Give each finding an id `f-<n>` and name the rule it breaks. Reuse an earlier round's id for the same finding and number new ones after the highest earlier id. The same problem means the same broken rule, not the same line. When a blocker breaks the same rule as an earlier round's blocker, set `repeat=<id>` in the header with that earlier id, ask Max what to do, and stop.
 9. Pick `ac` and the verdict by the definitions in the Review rules below. Leave `repeat=` and `unsat=` out of the header when they do not apply. Post the verdict handoff below on the head you reviewed. Do not merge. Do not push to the PR.
+
+## Proof
+The verdict names each `ac-<n>` with an owner, a state and evidence, and each finding in the Handoff form.
 
 ## Job
 - action: review
@@ -175,10 +180,12 @@ The reviewer runs `verify-cleffy`.
 ===== remote (mac) =====
 # Factory job brief: review
 
+## Goal
 You are Codex Bot (codex-bot). `orch wait codex-bot --autostart` claimed this job and started you under `orch job run`. Nobody will message you while this job runs: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins.
+Review PR #42 at 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6 against every acceptance criterion and post one verdict.
 
 ## Method
-Review the PR at head 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6 against `dev`. You are the one cross-family reviewer. Follow the router in Skills below.
+Review against `dev`. You are the one cross-family reviewer. Follow the router in Skills below.
 Mode: `full`. factory.md `review.block_on` is `any-failure`, so every round reviews the whole PR. A `full` review runs interrogate and blast-radius.
 1. Requirements first. Before the diff, tag each `ac-<n>` in the Ticket section below with one owner, `review` (code, tests or logic show it) or `qa` (only the running app can), and mark it `met`, `unmet`, `unverified` or `unsatisfiable` with evidence (file:line, test or run). `unsatisfiable` means no change to this PR can meet it, such as one about other PRs' state, and sets `unsat=<id>` in the header. A criterion needing a live provider without credentials here is `unverified`, not `verdict=BLOCKED`: name what is missing and the builder's live-run evidence or a human check. Never read, request or look for credentials. Count `unverified` and `unsatisfiable` as unmet for `ac`.
 2. QA owns live checks, so judge a `qa` criterion from its code, never `unverified` for lack of a live run. For each `review` criterion, write your own check (test, script or trace) before reading the builder's proof, then compare. A `qa` criterion gets none.
@@ -189,6 +196,9 @@ Mode: `full`. factory.md `review.block_on` is `any-failure`, so every round revi
 7. Give each helper a distinct question: one criterion group or one risk.
 8. Give each finding an id `f-<n>` and name the rule it breaks. Reuse an earlier round's id for the same finding and number new ones after the highest earlier id. The same problem means the same broken rule, not the same line. When a blocker breaks the same rule as an earlier round's blocker, set `repeat=<id>` in the header with that earlier id, ask Max what to do, and stop.
 9. Pick `ac` and the verdict by the definitions in the Review rules below. Leave `repeat=` and `unsat=` out of the header when they do not apply. Post the verdict handoff below on the head you reviewed. Do not merge. Do not push to the PR.
+
+## Proof
+The verdict names each `ac-<n>` with an owner, a state and evidence, and each finding in the Handoff form.
 
 ## Job
 - action: review

@@ -1,10 +1,12 @@
 ===== box =====
 # Factory job brief: implement
 
+## Goal
 You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`. Nobody will message you while this job runs: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins.
+Build ticket 42 on PR #42 so every acceptance criterion is met.
 
 ## Method
-Build the ticket. Follow the router in Skills below.
+Follow the router in Skills below.
 1. Read the ticket's brief in the Ticket section below. No plan handoff comment is linked: build from the ticket.
 2. Work on PR #42's branch (`gitBranchName` in Job data). Write tests first, as the `tdd` skill says.
 3. Run only the tests for the files you touched plus a short smoke set, in the foreground; never the whole suite, in the background or in chunks. Before `ready`, run the router's "Before ready" steps.
@@ -30,6 +32,9 @@ Title the PR with the source issue, then a Conventional Commits title: `#<issue>
 CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
 Never poll, watch or wait on GitHub Actions or any other CI from inside this job.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
+
+## Proof
+The ready names the pushed head and each criterion's test or command with its output.
 The ready's `## Proof` section has one entry for each criterion id below. A `review` entry gives the command you ran, in backticks, and its output in a fenced block. A `qa` entry gives the verify skill's command for the criterion's journeys and its output, and names each journey.
 - ac-1 (review)
 - ac-2 (qa): journeys start-free
@@ -120,7 +125,7 @@ Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, 
 
 <!-- orch:v1 kind=ready from=claude-bot role=builder head=<pushed-head-sha> -->
 
-Then plain prose for people and agents: What changed, the tests and their results, and anything left open. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
+Then plain prose for people and agents: What changed, the Proof above, and anything left open. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
 
 Write the comment to `handoff.md` (never commit that file) and post it with this command, which prints the new comment's id:
 
@@ -201,10 +206,12 @@ Ship: `ship: merge`, `finish_line: merge`. After an APPROVE of the covered head 
 ===== remote (mac) =====
 # Factory job brief: implement
 
+## Goal
 You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`. Nobody will message you while this job runs: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins.
+Build ticket 42 on PR #42 so every acceptance criterion is met.
 
 ## Method
-Build the ticket. Follow the router in Skills below.
+Follow the router in Skills below.
 1. Read the ticket's brief in the Ticket section below. No plan handoff comment is linked: build from the ticket.
 2. Work on PR #42's branch (`gitBranchName` in Job data). Write tests first, as the `tdd` skill says.
 3. Run only the tests for the files you touched plus a short smoke set, in the foreground; never the whole suite, in the background or in chunks. Before `ready`, run the router's "Before ready" steps.
@@ -214,6 +221,9 @@ Title the PR with the source issue, then a Conventional Commits title: `#<issue>
 CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
 Never poll, watch or wait on GitHub Actions or any other CI from inside this job.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
+
+## Proof
+The ready names the pushed head and each criterion's test or command with its output.
 The ready's `## Proof` section has one entry for each criterion id below. A `review` entry gives the command you ran, in backticks, and its output in a fenced block. A `qa` entry gives the verify skill's command for the criterion's journeys and its output, and names each journey.
 - ac-1 (review)
 - ac-2 (qa): journeys start-free
@@ -304,7 +314,7 @@ Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, 
 
 <!-- orch:v1 kind=ready from=claude-bot role=builder head=<pushed-head-sha> -->
 
-Then plain prose for people and agents: What changed, the tests and their results, and anything left open. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
+Then plain prose for people and agents: What changed, the Proof above, and anything left open. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
 
 Write the comment to `handoff.md` (never commit that file) and post it with this command, which prints the new comment's id:
 

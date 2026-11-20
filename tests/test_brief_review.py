@@ -166,6 +166,7 @@ def merge_update_task(verify: str, block_on: str = "user-impact") -> str:
     facts = {
         "base": "dev",
         "head": "d" * 40,
+        "pr": 42,
         "verify": verify,
         "verify_unavailable": False,
         "round_number": 2,

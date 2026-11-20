@@ -565,6 +565,51 @@ def test_a_brief_spliced_from_both_sides_of_a_pair_is_caught() -> None:
         assert rule in contradictions_in(with_first + with_second)
 
 
+LEAD_HEADINGS = ["Goal", "Method", "Proof"]
+
+
+def _lead_texts() -> dict[str, str]:
+    briefs = {
+        name: text.split(" =====\n", 1)[1] if name.endswith("/remote") else text.removeprefix("===== box =====\n")
+        for name, text in _corpus().items()
+        if name.endswith(("/box", "/remote", "/questions-only"))
+    }
+    assert len(briefs) == 2 * len(SNAPSHOT_CASES) + 2
+    return briefs
+
+
+def _outside_fences(text: str) -> list[str]:
+    lines, fence = [], None
+    for line in text.splitlines():
+        run = re.match(r"`{3,}", line)
+        if fence is None and run:
+            fence = run.group()
+        elif fence is not None and line.strip() == fence:
+            fence = None
+        elif fence is None:
+            lines.append(line)
+    return lines
+
+
+def test_every_brief_opens_with_goal_method_and_proof() -> None:
+    wrong = {}
+    for name, text in _lead_texts().items():
+        lines = [line for line in text.splitlines() if line.strip()]
+        headings = [line[3:] for line in _outside_fences(text) if line.startswith("## ")][:3]
+        bodies = [
+            text.split(f"\n## {heading}\n", 1)[1].split("\n## ", 1)[0].strip() if f"\n## {heading}\n" in text else ""
+            for heading in LEAD_HEADINGS
+        ]
+        if not (
+            re.fullmatch(r"# Factory job brief: [a-z-]+", lines[0])
+            and lines[1] == "## Goal"
+            and headings == LEAD_HEADINGS
+            and all(bodies)
+        ):
+            wrong[name] = (lines[:2], headings)
+    assert wrong == {}
+
+
 def test_the_contradiction_set_is_a_real_list() -> None:
     ids = [rule for rule, _, _ in CONTRADICTIONS]
     assert len(ids) >= 5

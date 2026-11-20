@@ -121,7 +121,7 @@ def _assert_questions_only(text: str, named: str) -> None:
     for header in HEAD_KINDS:
         assert header not in text
     assert "## Skills" not in text
-    for line in ("Build the ticket", "This is a plan job", "Review the PR", "Fix what the job"):
+    for line in ("Build ticket ", "Plan ticket ", "Review PR #", "Fix the red CI", "Fix the `[blocking]`"):
         assert line not in text
 
 

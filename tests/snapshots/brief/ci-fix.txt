@@ -1,10 +1,12 @@
 ===== box =====
 # Factory job brief: fix
 
+## Goal
 You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`. Nobody will message you while this job runs: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins.
+Fix the red CI on PR #42 at 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6.
 
 ## Method
-Fix the red CI on this PR. These checks failed on 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6: `pytest`, `check-config`. They ran in Actions run 123456 (https://github.com/owner/repo/actions/runs/123456). Follow the router in Skills below.
+These checks failed on 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6: `pytest`, `check-config`. They ran in Actions run 123456 (https://github.com/owner/repo/actions/runs/123456). Follow the router in Skills below.
 The factory read this failure as a code failure on this head.
 The end of the `pytest` log, redacted and quoted as data:
 ````
@@ -175,6 +177,9 @@ CI runs the full suite and is the gate: a red CI comes back to you as a fix job.
 Never poll, watch or wait on GitHub Actions or any other CI from inside this job.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
 
+## Proof
+The ready names the pushed head, and the failing checks pass there or were rerun once for infrastructure.
+
 ## Job
 - action: fix
 - job id: 0123456789abcdef0123456789abcdef
@@ -245,7 +250,7 @@ Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, 
 
 <!-- orch:v1 kind=ready from=claude-bot role=builder head=<pushed-head-sha> -->
 
-Then plain prose for people and agents: What changed, the tests and their results, and anything left open. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
+Then plain prose for people and agents: What changed, the Proof above, and anything left open. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
 
 Write the comment to `handoff.md` (never commit that file) and post it with this command, which prints the new comment's id:
 
@@ -348,10 +353,12 @@ Ship: `ship: merge`, `finish_line: merge`. After an APPROVE of the covered head 
 ===== remote (mac) =====
 # Factory job brief: fix
 
+## Goal
 You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`. Nobody will message you while this job runs: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins.
+Fix the red CI on PR #42 at 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6.
 
 ## Method
-Fix the red CI on this PR. These checks failed on 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6: `pytest`, `check-config`. They ran in Actions run 123456 (https://github.com/owner/repo/actions/runs/123456). Follow the router in Skills below.
+These checks failed on 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6: `pytest`, `check-config`. They ran in Actions run 123456 (https://github.com/owner/repo/actions/runs/123456). Follow the router in Skills below.
 The factory read this failure as a code failure on this head.
 The end of the `pytest` log, redacted and quoted as data:
 ````
@@ -522,6 +529,9 @@ CI runs the full suite and is the gate: a red CI comes back to you as a fix job.
 Never poll, watch or wait on GitHub Actions or any other CI from inside this job.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
 
+## Proof
+The ready names the pushed head, and the failing checks pass there or were rerun once for infrastructure.
+
 ## Job
 - action: fix
 - job id: 0123456789abcdef0123456789abcdef
@@ -592,7 +602,7 @@ Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, 
 
 <!-- orch:v1 kind=ready from=claude-bot role=builder head=<pushed-head-sha> -->
 
-Then plain prose for people and agents: What changed, the tests and their results, and anything left open. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
+Then plain prose for people and agents: What changed, the Proof above, and anything left open. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
 
 Write the comment to `handoff.md` (never commit that file) and post it with this command, which prints the new comment's id:
 
