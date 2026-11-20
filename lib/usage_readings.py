@@ -488,9 +488,9 @@ def store(
     own_login: bool = True,
 ) -> None:
     """Store readings for account (None: `<harness>-default`). Only an
-    own_login account's row goes in TABLE. Before the migration adds the account column, the row and its
-    streak keep the harness-and-bot shape and a side account's readings are
-    not stored. After it, every account's row goes in ACCOUNT_READINGS once
+    own_login account's row goes in TABLE. Before the migration adds the
+    account column, the row and its streak keep the harness-and-bot shape
+    and a side account's readings are not stored. After it, every account's row goes in ACCOUNT_READINGS once
     `migrate` has created it. This never adds the column or that table."""
     if not readings:
         return
@@ -576,7 +576,8 @@ def stored(
 ) -> list[StoredRow] | None:
     """The stored rows (account's only, when given), one per account, device
     and window, ordered by account, device, harness and bot: the
-    ACCOUNT_READINGS row, unless TABLE holds one with a newer source time. None when neither table exists."""
+    ACCOUNT_READINGS row, unless TABLE holds one with a newer source time.
+    None when neither table exists."""
     present = tables(connection)
     parts = []
     if ACCOUNT_READINGS in present:
