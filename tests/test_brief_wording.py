@@ -51,7 +51,7 @@ def test_one_wording_per_brief(name: str, text: str) -> None:
         assert "push what you have" not in text
         assert title_lines(text) == []
     else:
-        assert "## What to do" in text
+        assert text.index("\n## Method\n") < text.index("\n## Job\n")
         (line,) = title_lines(text)
         assert line.startswith("Title the PR ")
 

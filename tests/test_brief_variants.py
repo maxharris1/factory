@@ -79,7 +79,7 @@ def _render(action: str, attempt: int, head: str | None, extra: dict[str, object
 
 
 def _task(brief: str) -> str:
-    return brief.split("## What to do", 1)[1].split("## Handoff comment", 1)[0]
+    return brief.split("## Method\n", 1)[1].split("\n## Job\n", 1)[0]
 
 
 def _prose(brief: str) -> str:
@@ -268,7 +268,7 @@ def test_an_actions_log_hides_a_timestamped_credential_in_the_bundle_and_the_tas
     job = _job("fix", "claude", 1, HEAD, {"instruction": "failed: pytest", "round": "1/3", "evidence": {"ci": asdict(ci)}})
 
     brief = render_brief(job, bot="claude-bot", context=None, factory_root="/srv/orch/factory")
-    task = brief.split("## What to do", 1)[1].split("## Handoff comment", 1)[0]
+    task = brief.split("## Method\n", 1)[1].split("\n## Job\n", 1)[0]
 
     assert secret not in (ci.jobs[0].log_tail or "")
     assert secret not in task
@@ -438,7 +438,7 @@ def test_a_qa_fix_links_the_qa_report_and_names_its_failed_scenarios():
     assert "2. For each failed scenario: name the rule it breaks" in task
     assert "REVISE" not in task
     assert "f-2: the poller writes the row directly." not in task
-    assert "(quoted in the What to do section)" not in brief
+    assert "(quoted in the Method section)" not in brief
 
 
 def test_a_revise_fix_with_a_qa_fail_quotes_the_findings_and_names_the_failed_scenarios():

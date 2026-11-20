@@ -51,12 +51,15 @@ from lib.brief.common import (
     BOTS,
     TEXT_LIMIT,
     BriefError,
+    Lead,
+    blocked_lead,
     data_section,
     decided_section,
     detail_of,
     facts_of,
     handoff_section,
     job_section,
+    lead_sections,
     opening,
     questions_handoff_section,
 )
@@ -143,15 +146,13 @@ def render_brief(
         else None
     )
     if isinstance(router, str):
-        middle = [
-            "## What to do\n" + "\n".join(skills.blocked_task_lines(router)),
-            questions_handoff_section(bot, role, facts),
-        ]
+        lead = blocked_lead(router)
+        middle = [questions_handoff_section(bot, role, facts)]
     else:
+        lead = _lead(job, kind, facts)
         middle = [
             *([skills.section(router)] if router is not None else []),
             *(review.evidence_sections(detail, facts) if kind == "review" else []),
-            "## What to do\n" + "\n".join(_task_lines(job, kind, facts)),
             *([ticket] if ticket is not None else []),
             *_quoted_sections(facts),
             *([decided] if decided is not None else []),
@@ -159,6 +160,7 @@ def render_brief(
         ]
     parts = [
         opening(bot, kind),
+        lead_sections(lead),
         job_section(job, bot, kind, facts, remote_device),
         *middle,
         finish_section(job, bot, remote_device),
@@ -189,16 +191,16 @@ def _is_plan(job: Job, kind: str) -> bool:
     return kind == "implement" and job.request.action == "plan"
 
 
-def _task_lines(job: Job, kind: str, facts: dict) -> list[str]:
+def _lead(job: Job, kind: str, facts: dict) -> Lead:
     if _is_plan(job, kind):
-        return plan.task_lines(job, facts)
+        return plan.lead(job, facts)
     if kind == "implement":
-        return build.task_lines(job, facts)
+        return build.lead(job, facts)
     if kind == "fix":
-        return fix.task_lines(job, facts)
+        return fix.lead(job, facts)
     if kind == "review":
-        return review.task_lines(facts)
-    return merge_only.task_lines(job, facts)
+        return review.lead(facts)
+    return merge_only.lead(job, facts)
 
 
 def _handoff(job: Job, bot: str, kind: str, facts: dict) -> str:

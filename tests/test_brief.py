@@ -481,8 +481,8 @@ def test_the_build_brief_titles_the_pr_with_its_source_issue(
     built = replace(base, request=replace(base.request, ticket_id=ticket_id))
 
     task = render_brief(built, bot="claude-bot", factory_root=FACTORY_ROOT, context=None)
-    task = task.split("## What to do")[1]
-    task = task.split("## Handoff comment")[0]
+    task = task.split("## Method\n")[1]
+    task = task.split("\n## Job\n")[0]
 
     assert f"Title the PR with the source issue, then a Conventional Commits title: {wanted}" in task
     assert "gh pr edit --title" in task

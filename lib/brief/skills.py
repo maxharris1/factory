@@ -10,6 +10,7 @@ harness has no adapter, resolve returns the reason and the brief fails closed.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -176,26 +177,33 @@ def section(router: Router) -> str:
 
 
 _PINNED_LINE = re.compile(r"^- `(/[^`]+)`$")
+_FENCE = re.compile(r"^(`{3,})")
+
+
+def _unfenced(brief: str) -> Iterator[str]:
+    fence = ""
+    for line in brief.splitlines():
+        if fence:
+            if line.startswith(fence) and not line.rstrip().strip("`"):
+                fence = ""
+        elif match := _FENCE.match(line):
+            fence = match.group(1)
+        else:
+            yield line
 
 
 def pinned_paths(brief: str) -> tuple[str, ...] | None:
     """The paths `section` named in brief, in order; None when it names none."""
-    lines = brief.splitlines()
-    if "## Skills" not in lines:
+    lines = _unfenced(brief)
+    for line in lines:
+        if line == "## Skills":
+            break
+    else:
         return None
     paths: list[str] = []
-    for line in lines[lines.index("## Skills") + 1 :]:
+    for line in lines:
         if line.startswith("## "):
             break
         if match := _PINNED_LINE.match(line):
             paths.append(match.group(1))
     return tuple(paths) or None
-
-
-def blocked_task_lines(reason: str) -> list[str]:
-    return [
-        f"Do not start the work. This brief cannot name the pinned skill files it needs: {reason}.",
-        "1. Post the `questions` handoff below. Name the problem above and ask Max to fix the "
-        "factory checkout or the pin.",
-        "2. Then stop: no branch, no commit, no push, no other handoff.",
-    ]

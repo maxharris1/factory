@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from lib.brief.common import _HEAD, _URL, evidence_part, fenced, local_checks
+from lib.brief.common import _HEAD, _URL, Lead, evidence_part, fenced, local_checks
 from lib.factory_md import padded_estimate
 from lib.followups import followup_start, followups_active
 
@@ -175,7 +175,7 @@ def review_mode(facts: dict) -> tuple[str, str]:
     return "full", "factory.md `review.block_on` is `any-failure`, so every round reviews the whole PR."
 
 
-def task_lines(facts: dict) -> list[str]:
+def lead(facts: dict) -> Lead:
     base = facts["base"] or "<base branch>"
     head = facts["head"] or "the PR head"
     later_round = (facts["round_number"] or 1) > 1
@@ -218,7 +218,7 @@ def task_lines(facts: dict) -> list[str]:
                     [_fix_check_step(facts["rebase"], head)]
                     if mode == "fix-check"
                     else [
-                        "Close the earlier rounds first: for each `f-<n>` in **Earlier rounds** above, and each "
+                        "Close the earlier rounds first: for each `f-<n>` in **Earlier rounds** below, and each "
                         "earlier unmet `ac-<n>`, say whether this head closes it. List each finding it closes as a "
                         "`[closed]` item in the form below. "
                         + _delta_line(facts["rebase"], head)
@@ -256,12 +256,12 @@ def task_lines(facts: dict) -> list[str]:
         "out of the header when they do not apply. Post the verdict handoff below on the head you reviewed. "
         "Do not merge. Do not push to the PR.",
     ]
-    return [
+    return Lead((
         f"Review the PR at head {head} against `{base}`. You are the one cross-family reviewer. "
-        "Follow the router in Skills above.",
+        "Follow the router in Skills below.",
         f"Mode: `{mode}`. {reason} {summary}",
         *(f"{number}. {step}" for number, step in enumerate(steps, 1)),
-    ]
+    ))
 
 
 def _size_flag_step(facts: dict) -> str:
@@ -294,7 +294,7 @@ def _bar_step(variant: bool) -> str:
 def _fix_check_step(rebase: dict | None, head: str) -> str:
     return (
         "Fix-check: check the fix, not the whole PR again. (a) For each `f-<n>` in **Earlier rounds** "
-        "above, and each earlier unmet `ac-<n>`, say whether this head closes it. List each finding it closes as "
+        "below, and each earlier unmet `ac-<n>`, say whether this head closes it. List each finding it closes as "
         "a `[closed]` item in the form below. (b) Rerun the gates on this head: the tests for the files the fix "
         "touched, in a throwaway copy, and the CI result. (c) Read the fix delta for a bug the fix introduced. "
         + _delta_line(rebase, head)

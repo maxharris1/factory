@@ -6,6 +6,7 @@ import re
 
 from lib.brief.common import (
     QUESTIONS_LINES,
+    Lead,
     TEST_SCOPE,
     answers_lines,
     comment_url,
@@ -36,7 +37,7 @@ PROOF_EXAMPLE = """## Proof
 _PRINT_MODE = {"claude-bot": " Print mode stops background tasks after your last turn, and unpushed work is lost."}
 
 
-def task_lines(job: Job, facts: dict) -> list[str]:
+def lead(job: Job, facts: dict) -> Lead:
     base = facts["base"] or "<base branch>"
     if facts["plan_text"]:
         plan_line = f"The plan handoff is quoted in the Plan section below ({facts['plan'] or 'see the PR'}): it is the plan."
@@ -49,8 +50,8 @@ def task_lines(job: Job, facts: dict) -> list[str]:
         if facts["pr"]
         else f"the ticket's branch (`gitBranchName` in Job data, else a new branch off `{base}`)"
     )
-    return [
-        "Build the ticket. Follow the router in Skills above.",
+    return Lead((
+        "Build the ticket. Follow the router in Skills below.",
         f"1. {read_ticket_line(facts)} {plan_line}",
         f"2. Work on {branch}. Write tests first, as the `tdd` skill says.",
         f"3. Run only the tests for the files you touched plus a short smoke set, {TEST_SCOPE} "
@@ -60,7 +61,7 @@ def task_lines(job: Job, facts: dict) -> list[str]:
         *(live_lines("ready") if facts["qa"] and not (facts["plan_text"] or facts["plan"]) else []),
         *answers_lines(detail_of(job)),
         *builder_notes(job, facts),
-    ]
+    ))
 
 
 def base_step(number: int, facts: dict) -> str:

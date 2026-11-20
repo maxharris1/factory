@@ -175,7 +175,7 @@ def test_a_later_user_impact_round_never_orders_the_full_pass(update: dict | Non
         "local_checks": (),
         "qa_gate": None,
     }
-    text = "\n".join(review_brief.task_lines(facts))
+    text = "\n".join(review_brief.lead(facts).method)
     assert not [phrase for phrase in UNCONDITIONAL_PASS if phrase in text]
     assert "Do not run interrogate or blast-radius: the dispatcher picked `fix-check`." in text
     assert "blast-radius only when" not in text

@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from lib.brief.build import builder_notes
-from lib.brief.common import TEST_SCOPE
+from lib.brief.common import TEST_SCOPE, Lead
 from lib.queue import Job
 
 
-def task_lines(job: Job, facts: dict) -> list[str]:
+def lead(job: Job, facts: dict) -> Lead:
     base = facts["base"] or "<base branch>"
     head = facts["head"] or "the PR head"
-    return [
+    return Lead((
         f"Merge-only job: bring `origin/{base}` into the PR branch, nothing else.",
         f"1. Check out the PR branch at {head} and run `git fetch origin {base}`.",
         f"2. `git merge origin/{base}`: a merge commit only, no rebase, no force-push.",
@@ -20,7 +20,7 @@ def task_lines(job: Job, facts: dict) -> list[str]:
         "5. Push, post the ready handoff below with the head you pushed, and finish the job.",
         *_approved_note(job),
         *builder_notes(job, facts),
-    ]
+    ))
 
 
 def _approved_note(job: Job) -> list[str]:
