@@ -687,15 +687,12 @@ def gh_env(
 
 
 def token_root_of(environ: Mapping[str, str]) -> Path:
-    """deploy/app-token-service.sh's TOKEN_ROOT for this environment."""
     home = environ["HOME"] if "HOME" in environ else str(Path.home())
     state = environ.get("ORCH_STATE_DIR") or f"{home}/.local/state/factory"
     return Path(environ.get("ORCH_APP_TOKEN_ROOT") or f"{state}/app-tokens")
 
 
 def reads_prefix(env_prefix: Sequence[str], bot: str, environ: Mapping[str, str]) -> tuple[str, ...]:
-    """The argv head that runs gh through the `gh` helper with bot's box token
-    directory, in place of a plain `env_prefix gh`."""
     gh = shutil.which("gh", path=environ.get("PATH"))
     if gh is None:
         raise BrokerError("gh is not on PATH")

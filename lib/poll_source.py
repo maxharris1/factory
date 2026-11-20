@@ -258,8 +258,8 @@ class RateWindow:
     reset_epoch: float
 
 
-# None is the gh login; a str is the casefolded owner of an App installation.
 Account = str | None
+LOGIN: Account = None
 PacingReason = Literal["normal", "stretch", "shed", "pause"]
 QuotaState = Literal["normal", "shed", "pause"]
 
@@ -2578,17 +2578,16 @@ class LivePollSource:
                 self.cycle_clock.add_source(name, self.clock() - began)
         route = _call_route(call)
         kind = "graphql" if route.endswith(" graphql") else "billed"
-        self._spend(kind, 1, None)
+        self._spend(kind, 1, LOGIN)
         if self.cycle_clock is not None:
             self.cycle_clock.add_call(route, kind)
         return result
 
     def _account(self, argv: list[str]) -> Account:
         if self.config.poller_reads_app is None:
-            return None
+            return LOGIN
         owner = owner_from_args(argv[argv.index("gh") + 1 :])
-        # A read naming no owner has no known installation, so it runs on the gh login.
-        return None if owner is None else owner.casefold()
+        return LOGIN if owner is None else owner.casefold()
 
     def _run_gh_read(self, argv: list[str]) -> GhResult:
         account = self._account(argv)
@@ -2645,7 +2644,7 @@ class LivePollSource:
                 attempt += 1
 
     def _for_reads(self, argv: list[str], account: Account) -> list[str]:
-        prefix = self.gh if account is None else self._read_prefix
+        prefix = self.gh if account is LOGIN else self._read_prefix
         return [*prefix, *argv[argv.index("gh") + 1 :]]
 
     def _observe_quota(
@@ -2756,7 +2755,7 @@ class LivePollSource:
 
     def _probe_rate_window(self, account: Account) -> None:
         argv = self._for_reads([*self.gh, "api", "rate_limit"], account)
-        if account is not None:
+        if account is not LOGIN:
             # rate_limit names no owner, so the helper takes it from GH_REPO.
             argv.insert(len(self.gh) - 1, f"GH_REPO={account}/{account}")
         try:
