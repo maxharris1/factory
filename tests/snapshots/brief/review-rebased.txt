@@ -41,7 +41,7 @@ The verdict names each `ac-<n>` with an owner, a state and evidence, and each fi
 - working directory: this job's git worktree (`$ORCH_JOB_WORKTREE`); this brief is also at `$ORCH_JOB_BRIEF`
 
 ## Skills
-Read the router (the first path) and the pstack files it names, at these absolute paths in the deployed factory checkout, never the job's working directory. Read each file with the shell (`harness/codex.md`, Tools).
+Read the router (the first path) and the pstack files it names, at these absolute paths in the deployed factory checkout, never the job's working directory. Read each file with the shell (`skills/factory/harness/codex.md`, Tools).
 1. Before you read any of them, check that every path below exists (`test -f`). If one is missing, post a `questions` handoff naming it, then stop: do no work.
 2. Read the router in full, then the rest as it says.
 
@@ -221,7 +221,7 @@ The verdict names each `ac-<n>` with an owner, a state and evidence, and each fi
 - working directory: this job's own directory on device mac (`$ORCH_JOB_WORKDIR`). It is not empty: the run's `.orch-worker*.pid` record is there, so clone into a subfolder with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh repo clone owner/repo repo`, then `cd repo` and check out the branch the task names. This brief is on your stdin only.
 
 ## Skills
-Read the router (the first path) and the pstack files it names, at these absolute paths in the deployed factory checkout, never the job's working directory. Read each file with the shell (`harness/codex.md`, Tools).
+Read the router (the first path) and the pstack files it names, at these absolute paths in the deployed factory checkout, never the job's working directory. Read each file with the shell (`skills/factory/harness/codex.md`, Tools).
 1. Before you read any of them, check that every path below exists (`test -f`). If one is missing, post a `questions` handoff naming it, then stop: do no work.
 2. Read the router in full, then the rest as it says.
 
