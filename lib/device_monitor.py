@@ -314,7 +314,7 @@ class DeviceMonitor:
             }
             for name, reason in judged:
                 if reason is None:
-                    clear_memory_hold(connection, name)
+                    clear_memory_hold(connection, name, now)
                 else:
                     hold_memory(connection, name, until=now + HOLD_SECONDS, reason=reason)
             connection.commit()
