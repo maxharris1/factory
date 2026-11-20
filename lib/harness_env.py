@@ -51,12 +51,16 @@ ACCOUNT_ISOLATION = MappingProxyType(
 
 
 def cpu_cap_env(cap: int = CPU_CAP) -> dict[str, str]:
-    workers = str(cap - 1)
+    """Vitest 1 and 2 default a pool's minimum to host CPUs - 1 and refuse a
+    maximum below it, so each maximum goes with a minimum of 1."""
+    workers = str(max(cap - 1, 1))
     return {
         "ORCH_CPU_CAP": str(cap),
         "PYTEST_XDIST_AUTO_NUM_WORKERS": workers,
         "VITEST_MAX_THREADS": workers,
         "VITEST_MAX_FORKS": workers,
+        "VITEST_MIN_THREADS": "1",
+        "VITEST_MIN_FORKS": "1",
     }
 
 

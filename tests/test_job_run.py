@@ -1470,7 +1470,15 @@ def test_cli_job_run_runs_a_box_job_as_its_slots_account(
     assert rows == [(expected, "five_hour", 0.125), (expected, "seven_day", 0.345)]
 
 
-CAP_NAMES = ("ORCH_CPU_CAP", "PYTEST_XDIST_AUTO_NUM_WORKERS", "VITEST_MAX_THREADS", "VITEST_MAX_FORKS")
+CAPPED_ENV = {
+    "ORCH_CPU_CAP": "4",
+    "PYTEST_XDIST_AUTO_NUM_WORKERS": "3",
+    "VITEST_MAX_THREADS": "3",
+    "VITEST_MAX_FORKS": "3",
+    "VITEST_MIN_THREADS": "1",
+    "VITEST_MIN_FORKS": "1",
+}
+CAP_NAMES = tuple(CAPPED_ENV)
 LINUX_AFFINITY = pytest.mark.skipif(
     not hasattr(os, "sched_getaffinity"), reason="needs the Linux affinity API"
 )
@@ -1511,7 +1519,7 @@ def test_cli_job_run_caps_the_worker_and_its_grandchildren_at_four_cpus(tmp_path
     seen = json.loads(out.read_text())
     assert seen["cpus"] == CPU_CAP
     assert seen["grandchild"]["cpus"] == CPU_CAP
-    assert seen["grandchild"]["env"] == dict(zip(CAP_NAMES, ("4", "3", "3", "3")))
+    assert seen["grandchild"]["env"] == CAPPED_ENV
     node = seen["grandchild"].get("node", "none")
     if node != "none":
         assert int(node) == CPU_CAP and int(node) - 1 <= 3
