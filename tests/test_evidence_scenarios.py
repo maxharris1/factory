@@ -334,7 +334,7 @@ def test_a_ticket_that_adds_a_journey_keeps_its_scenarios_out_of_base_regression
     )
     found = from_plan(plan)
     assert [s.id for s in found.scenarios] == ["qa-1", "qa-2"]
-    assert found.regression == ("qa-1",)
+    assert (found.regression, found.new) == (("qa-1",), ("qa-2",))
     assert "bulk-export" not in found.scenarios[0].steps
     new = found.scenarios[1].steps
     assert "`features/bulk-export.md`" in new and "failed" in new and "cause `product`" in new
@@ -344,7 +344,7 @@ def test_a_ticket_that_adds_a_journey_keeps_its_scenarios_out_of_base_regression
         [],
     )
     assert isinstance(found, LiveScenarios)
-    assert [s.id for s in found.scenarios] == ["qa-1"] and found.regression == ()
+    assert [s.id for s in found.scenarios] == ["qa-1"] and (found.regression, found.new) == ((), ("qa-1",))
 
 
 def test_journeys_with_no_qa_criteria_give_no_scenarios() -> None:
