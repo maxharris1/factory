@@ -192,7 +192,7 @@ from lib.feeder_gates import (
     path_matches,
     paths_collide,
 )
-from lib.followups import has_marker
+from lib.followups import has_marker, split_parent
 from lib.github_actions import TIMEOUT_SECONDS
 from lib.handoff import Handoff, HandoffError, format_comment, parse_comment
 from lib.journeys import (
@@ -237,10 +237,13 @@ from lib.queue import (
     rank,
     set_ticket_priority,
 )
+from lib.split_parent import close_split_parent
 from lib.ticket_type import TICKET_TYPES
 
 FEEDER_TABLE = "feeder_items"
 POLL_TABLE = "feeder_poll"  # one row: when the feeder last read intake
+SPLIT_CURSOR_TABLE = "feeder_split_cursor"
+SPLIT_CURSOR_OVERLAP_SECONDS = 120  # clock skew between orch and GitHub
 # eligible: seen this poll, not fed yet; waiting-capacity: no room for its
 # harness this poll; feeding: some steps done; error: a step failed (retried
 # next poll); fed: brief and go posted; done: fed and its job is queued;
@@ -653,7 +656,15 @@ class GitHubIntake(Protocol):
 
     def marked_issues(self, repo: str, marker: str, since: float) -> tuple[int, ...]: ...
 
-    def close_issue(self, repo: str, number: int, comment: str | None) -> None: ...
+    def close_issue(
+        self, repo: str, number: int, comment: str | None, *, completed: bool = False
+    ) -> None: ...
+
+    def remove_issue_label(self, repo: str, number: int, label: str) -> None: ...
+
+    def closed_issues_since(self, repo: str, since: float) -> Sequence[IssueRecord]: ...
+
+    def split_children(self, repo: str, parent: int) -> Sequence[IssueRecord]: ...
 
     def post_issue_comment_once(self, repo: str, number: int, body: str, marker: str) -> str: ...
 
@@ -874,6 +885,9 @@ def ensure_tables(connection: sqlite3.Connection) -> None:
         f"CREATE TABLE IF NOT EXISTS {POLL_TABLE} "
         "(id INTEGER PRIMARY KEY CHECK (id = 1), at REAL NOT NULL)"
     )
+    connection.execute(
+        f"CREATE TABLE IF NOT EXISTS {SPLIT_CURSOR_TABLE} (repo TEXT PRIMARY KEY, at REAL NOT NULL)"
+    )
     ensure_priority_table(connection)
     connection.execute(
         f"""
@@ -986,6 +1000,7 @@ class Feeder:
     def feed_once(self) -> FeedReport:
         now = self.queue.now()
         contexts, context_errors = self._contexts()
+        context_errors += self._close_split_parents(contexts, now)
         mains, main_errors = self._main_reads(contexts)
         main_errors += self._file_main_fixes(mains, now)
         candidates, read_repos, read_errors = self._candidates(contexts)
@@ -1106,6 +1121,78 @@ class Feeder:
                 errors += 1
                 self.log(f"feeder: cannot read intake for {project.repo}: {safe_ship_error(exc)}")
         return found, errors
+
+    def _close_split_parents(
+        self, contexts: Sequence[tuple[Project, FactoryContext]], now: float
+    ) -> int:
+        errors = 0
+        for project, context in contexts:
+            intake = project.intake
+            assert intake is not None
+            if project.linear_project_ids or intake.label is None or context.config.tickets != "github":
+                continue
+            repo = project.repo
+            with self.queue.connect() as connection:
+                row = connection.execute(
+                    f"SELECT at FROM {SPLIT_CURSOR_TABLE} WHERE repo = ?", (repo.lower(),)
+                ).fetchone()
+            if row is None:
+                self._set_split_cursor(repo, now)
+                continue
+            try:
+                closed = self.github.closed_issues_since(repo, row[0])
+            except Exception as exc:
+                errors += 1
+                self.log(f"feeder: cannot read closed issues for {repo}: {safe_ship_error(exc)}")
+                continue
+            triggers: dict[int, list[IssueRecord]] = {}
+            for record in closed:
+                parent = split_parent(record.body)
+                if record.reason == "completed" and parent is not None:
+                    triggers.setdefault(parent, []).append(record)
+            merged = self._merged_issues(repo) if triggers else frozenset()
+            failed = False
+            for parent, records in sorted(triggers.items()):
+                try:
+                    outcome = close_split_parent(
+                        self.github, repo, parent, records, merged, intake.label
+                    )
+                except Exception as exc:
+                    failed = True
+                    errors += 1
+                    self.log(f"feeder: cannot close split parent {repo}#{parent}: {safe_ship_error(exc)}")
+                    continue
+                if outcome == "closed":
+                    self.log(f"feeder: closed split parent {repo}#{parent} (all parts merged)")
+            if not failed:
+                self._set_split_cursor(repo, now - SPLIT_CURSOR_OVERLAP_SECONDS)
+        return errors
+
+    def _set_split_cursor(self, repo: str, at: float) -> None:
+        def work(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                f"INSERT INTO {SPLIT_CURSOR_TABLE} (repo, at) VALUES (?, ?) "
+                "ON CONFLICT(repo) DO UPDATE SET at = excluded.at",
+                (repo.lower(), at),
+            )
+
+        bookkeeping_write(self.queue.connect, work, site="_set_split_cursor", ledger=self.ledger)
+
+    def _merged_issues(self, repo: str) -> frozenset[int]:
+        with self.queue.connect() as connection:
+            if not _has_table(connection, "ticket_state"):
+                return frozenset()
+            rows = connection.execute(
+                f"""
+                SELECT feed.issue FROM {FEEDER_TABLE} AS feed
+                JOIN ticket_state AS ticket
+                  ON lower(ticket.repo) = feed.repo AND ticket.ticket_id = feed.ticket_id
+                WHERE feed.repo = ? AND feed.tracker = 'github'
+                  AND ticket.workflow_state = 'merged'
+                """,
+                (repo.lower(),),
+            ).fetchall()
+        return frozenset(int(issue) for (issue,) in rows if str(issue).isdigit())
 
     def _candidates(
         self, contexts: Sequence[tuple[Project, FactoryContext]]
