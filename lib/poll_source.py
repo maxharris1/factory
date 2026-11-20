@@ -2464,19 +2464,15 @@ class LivePollSource:
         if result.returncode == 0 or not rate_limited(status, result.stdout, result.stderr):
             self._throttled = False
             return
-        seconds, basis = self._quota_wait(headers.get("retry-after"), own)
+        seconds, basis = self._quota_wait(headers.get("retry-after"))
         self._backoff_until = max(self._backoff_until, self.clock() + seconds)
         if self._throttled:
             return
         self._throttled = True
         if self.warning_sink is None:
             return
-        window = self._rate_window
-        core = (
-            f"; core {window.remaining}/{window.limit} left"
-            if window is not None and window.reset_epoch > self.wall()
-            else ""
-        )
+        window = self._live_window()
+        core = "" if window is None else f"; core {window.remaining}/{window.limit} left"
         http = "" if status is None else f"HTTP {status} "
         minutes, secs = divmod(round(seconds), 60)
         until = datetime.fromtimestamp(
@@ -2487,40 +2483,43 @@ class LivePollSource:
             f"github reads paused {minutes}m{secs:02d}s until {until} ET ({basis})"
         )
 
-    def _quota_wait(self, retry_after: str | None, own: RateWindow | None) -> tuple[float, str]:
+    def _quota_wait(self, retry_after: str | None) -> tuple[float, str]:
         try:
             seconds = float(retry_after)
         except (TypeError, ValueError):
             seconds = math.nan
         if 0 <= seconds < math.inf:
             return seconds, "retry-after"
-        if own is not None and own.remaining > 0:
+        basis = "reset"
+        window = self._live_window()
+        if window is None:
+            self._probe_rate_window()
+            basis = "probe"
+            window = self._live_window()
+        if window is None:
             return BACKOFF_SECONDS, "default"
-        window = self._rate_window
-        if window is not None and window.reset_epoch > self.wall():
-            return window.reset_epoch - self.wall() + RATE_RESET_GRACE_SECONDS, "reset"
-        window = self._probe_rate_window()
-        if window is not None and window.reset_epoch > self.wall():
-            return window.reset_epoch - self.wall() + RATE_RESET_GRACE_SECONDS, "probe"
-        return BACKOFF_SECONDS, "default"
+        return window.reset_epoch - self.wall() + RATE_RESET_GRACE_SECONDS, basis
 
-    def _probe_rate_window(self) -> RateWindow | None:
+    def _live_window(self) -> RateWindow | None:
+        window = self._rate_window
+        return window if window is not None and window.reset_epoch > self.wall() else None
+
+    def _probe_rate_window(self) -> None:
         try:
             result = self.gh_runner([*self.gh, "api", "rate_limit"], self.gh_call_timeout_seconds)
         except (subprocess.TimeoutExpired, OSError):
-            return None
+            return
         if result.returncode != 0:
-            return None
+            return
         try:
             core = json.loads(result.stdout)["resources"]["core"]
         except (ValueError, KeyError, TypeError):
-            return None
+            return
         if not isinstance(core, dict):
-            return None
+            return
         window = _rate_window(core.get("limit"), core.get("remaining"), core.get("reset"))
         if window is not None:
             self._rate_window = _merged_window(self._rate_window, window)
-        return window
 
     def _timed(self, name: str) -> AbstractContextManager[None]:
         return nullcontext() if self.cycle_clock is None else self.cycle_clock.source(name)

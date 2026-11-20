@@ -235,19 +235,30 @@ def test_replayed_headers_do_not_overwrite_a_newer_window() -> None:
         quota.comments()
 
 
-def test_secondary_limit_with_quota_left_does_not_wait_for_the_reset() -> None:
+def test_replayed_rate_limit_response_cannot_shorten_the_pause() -> None:
     quota = Quota()
-    quota.hit_limit(
+    reset = int(WALL + 900)
+    quota.factory.append(
         response(
-            403,
-            '{"message": "You have exceeded a secondary rate limit"}',
+            200,
+            FACTORY_BODY,
             X_RateLimit_Limit=5000,
-            X_RateLimit_Remaining=4000,
-            X_RateLimit_Reset=int(WALL + 3000),
+            X_RateLimit_Remaining=0,
+            X_RateLimit_Reset=reset,
         )
     )
+    quota.read_factory()
+    quota.source.begin_cycle()
+
+    quota.hit_limit(limited(429, X_RateLimit_Remaining=1, X_RateLimit_Reset=reset))
 
     quota.mono += BACKOFF_SECONDS
+    with pytest.raises(QuotaDeferred):
+        quota.comments()
+    quota.mono = 1_000.0 + 900 + RATE_RESET_GRACE_SECONDS - 0.1
+    with pytest.raises(QuotaDeferred):
+        quota.comments()
+    quota.mono = 1_000.0 + 900 + RATE_RESET_GRACE_SECONDS
     quota.comments()
 
 
