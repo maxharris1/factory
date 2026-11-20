@@ -74,7 +74,7 @@ from lib.hook_t7 import T7Hook
 from lib.hook_t8 import T8Hook
 from lib.load import Finding
 from lib.scratch import remove as remove_scratch
-from lib.device_monitor import DeviceMonitor, retry_stranded
+from lib.device_monitor import DeviceMonitor, read_memory, retry_stranded
 from lib.feeder import Feeder
 from lib.intake_live import GitHubIntakeClient, LinearIntakeClient
 from lib.job_state import record_job_event
@@ -1381,11 +1381,13 @@ def _runtime(
         if machines is not None:
             from lib import self_deploy
 
+            transport = SshTransport()
             devices = DeviceMonitor(
                 _device_pool(queue, machines, machines_path, orch=orch_path),
                 machines,
-                SshTransport(),
+                transport,
                 machines_path=_machines_path(machines_path),
+                memory=functools.partial(read_memory, transport),
                 sign_ins=functools.partial(
                     account_doctor.check, queue, SshTransport(), self_deploy.own_repo(ROOT)
                 ),

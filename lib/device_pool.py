@@ -1000,6 +1000,15 @@ def hold_memory(
     )
 
 
+def memory_held(connection: sqlite3.Connection, device: str, now: float) -> bool:
+    _backoff_table(connection)
+    row = connection.execute(
+        f"SELECT 1 FROM {BACKOFF_TABLE} WHERE device = ? AND reason LIKE ? AND until > ?",
+        (device, f"{MEMORY_WAIT}%", now),
+    ).fetchone()
+    return row is not None
+
+
 def clear_memory_hold(connection: sqlite3.Connection, device: str) -> None:
     _backoff_table(connection)
     connection.execute(
