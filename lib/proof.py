@@ -142,8 +142,8 @@ def _problems(item: Required, entry: _Entry) -> list[str]:
         ]
     if item.journeys is None:
         return [
-            f"{name} binds journeys the brief's ticket quote does not show, so write it as unverified "
-            "with the doctor command in backticks and its output in a fenced block"
+            f"{name} binds journeys neither the brief's ticket quote nor the source issue shows, so write it as "
+            "unverified with the doctor command in backticks and its output in a fenced block"
         ]
     found = [] if shown else [
         f"{name} needs the verify-skill command in backticks and its output in a fenced block"
