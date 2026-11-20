@@ -277,6 +277,7 @@ class _NoRedirect(HTTPRedirectHandler):
 
 
 _NUMBERED_PART = re.compile(r"[^/ ]*[0-9][^/ ]*")
+_BRANCH_TAIL = re.compile(r"([ /](?:heads|compare)/).+")
 _REPO_ROUTE = re.compile(r"repos/([^/?]+/[^/?]+)")
 _TICKET_ROUTE = re.compile(r"repos/[^/?]+/[^/?]+/(?:issues|pulls)/([0-9]+)")
 _GH_READ_SUBCOMMANDS = (("run", "view"),)
@@ -2641,7 +2642,8 @@ def _gh_source(argv: Sequence[str]) -> str:
 
 def _call_route(argv: Sequence[str]) -> str:
     if "api" in argv:
-        return _NUMBERED_PART.sub("<value>", _route(argv[argv.index("api") + 1 :]))
+        route = _route(argv[argv.index("api") + 1 :])
+        return _NUMBERED_PART.sub("<value>", _BRANCH_TAIL.sub(r"\1<value>", route))
     at = argv.index("gh") if "gh" in argv else -1
     return " ".join(["gh", *argv[at + 1 : at + 3]])
 

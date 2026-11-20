@@ -3336,7 +3336,10 @@ class LedgerGh(FakeGh):
         if "POST" in call and "graphql" not in call:
             self.calls.append(call)
             return GhResult(0, json.dumps({"id": 5}), "")
-        if any(part.startswith("repos/acme/widgets/pulls?head=") for part in call):
+        if any(
+            part.startswith(("repos/acme/widgets/pulls?head=", "repos/acme/widgets/git/ref/"))
+            for part in call
+        ):
             self.calls.append(call)
             return GhResult(0, "[]", "")
         if any(part.endswith("/contents/factory.md") for part in call) and self.factory_reply:
@@ -3381,16 +3384,17 @@ def test_the_end_line_counts_adapter_reads_gh_call_reads_and_writes() -> None:
     source._gh_call("repos/acme/widgets/contents/factory.md")
     source.github.post_issue_comment("acme/widgets", 12, "hello")
     source._gh_call("repos/acme/widgets/pulls?head=acme:factory/issue-7")
+    source._gh_call("repos/acme/widgets/git/ref/heads/feature/login")
     source.github.pull_states("acme/widgets", ["12"])
 
     line = clock.end()
     assert line.endswith(
-        "; github core 4 [GET contents/factory.md 1, GET issues/<value>/comments 1, "
-        "GET pulls 1, POST issues/<value>/comments 1], "
+        "; github core 5 [GET contents/factory.md 1, GET git/ref/heads/<value> 1, "
+        "GET issues/<value>/comments 1, GET pulls 1, POST issues/<value>/comments 1], "
         "free 0 (304 0, cached 0), graphql 1; core 4321/5000 resets 5m"
     )
-    assert "factory/issue-7" not in line
-    assert "acme" not in line
+    for value in ("acme", "factory/issue-7", "feature", "login"):
+        assert value not in line
 
 
 @pytest.mark.parametrize(("date_age", "kind"), [(0, "304 1, cached 0"), (600, "304 0, cached 1")])
