@@ -282,9 +282,9 @@ _BRANCH_TAIL = re.compile(r"([ /](?:heads|compare)/).+")
 _REPO_ROUTE = re.compile(r"repos/([^/?]+/[^/?]+)")
 _TICKET_ROUTE = re.compile(r"repos/[^/?]+/[^/?]+/(?:issues|pulls)/([0-9]+)")
 _WHITESPACE = re.compile(r"\s*")
-_GO_DURATION_PART = re.compile(r"([0-9]+(?:\.[0-9]*)?|\.[0-9]+)(ns|us|µs|ms|s|m|h)")
-_GO_DURATION = re.compile(f"(?:{_GO_DURATION_PART.pattern})+")
-_GO_UNIT_SECONDS = {"ns": 1e-9, "us": 1e-6, "µs": 1e-6, "ms": 1e-3, "s": 1.0, "m": 60.0, "h": 3600.0}
+_TTL_PART = re.compile(r"([0-9]+)([hms])")
+_TTL = re.compile(r"(?:[0-9]+[hms])+")
+_TTL_UNIT_SECONDS = {"s": 1.0, "m": 60.0, "h": 3600.0}
 _GH_READ_SUBCOMMANDS = (("run", "view"),)
 _REVIEW_ACTIONS = tuple(name for name in vars(ReviewActions) if not name.startswith("_"))
 
@@ -2724,7 +2724,7 @@ def _gh_cache_key(argv: Sequence[str]) -> tuple[tuple[str, ...], float] | None:
         part = argv[index]
         value = argv[index + 1] if index + 1 < len(argv) else ""
         if part == "--cache":
-            ttl = _go_duration(value)
+            ttl = _cache_ttl(value)
             index += 2
         elif part == "-H" and value.lower().startswith("if-none-match:"):
             index += 2
@@ -2735,13 +2735,10 @@ def _gh_cache_key(argv: Sequence[str]) -> tuple[tuple[str, ...], float] | None:
     return None if ttl is None else (tuple(key), ttl)
 
 
-def _go_duration(text: str) -> float | None:
-    if not _GO_DURATION.fullmatch(text):
+def _cache_ttl(text: str) -> float | None:
+    if not _TTL.fullmatch(text):
         return None
-    return sum(
-        float(amount) * _GO_UNIT_SECONDS[unit]
-        for amount, unit in _GO_DURATION_PART.findall(text)
-    )
+    return sum(int(amount) * _TTL_UNIT_SECONDS[unit] for amount, unit in _TTL_PART.findall(text))
 
 
 def _gh_ticket(argv: Sequence[str]) -> str:
