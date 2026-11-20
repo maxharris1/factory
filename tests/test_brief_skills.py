@@ -70,6 +70,44 @@ def test_the_router_comes_first_and_the_adapter_follows_the_harness() -> None:
     assert len(review) == len(REVIEWER_FILES) + 1
 
 
+def _skills_prose(text: str) -> str:
+    skills = text.split("## Skills\n", 1)[1].split("\n## ", 1)[0]
+    return "\n".join(line for line in skills.splitlines() if not line.startswith("- `/"))
+
+
+ADAPTER_PROSE = {
+    "claude": "`skills/pstack/docs/harness/claude-code.md`",
+    "codex": "`skills/factory/harness/codex.md`",
+}
+
+
+@pytest.mark.parametrize(
+    ("action", "recipient", "extra"),
+    [job_ for job_ in ROUTER_JOBS if job_[1] == "codex" or job_[0] in ("plan", "build")],
+)
+def test_the_read_with_line_names_the_adapter_by_its_full_skills_path(
+    action: str, recipient: str, extra: dict
+) -> None:
+    text = _brief(action, recipient, extra)
+    read_with = next(line for line in _skills_prose(text).splitlines() if "Read each file with" in line)
+    assert ADAPTER_PROSE[recipient] in read_with
+    assert not re.search(r"`(docs/)?harness/(codex|claude-code)\.md`", text)
+
+
+@pytest.mark.parametrize(("action", "recipient", "extra"), ROUTER_JOBS)
+def test_every_harness_path_in_the_skills_prose_exists_under_the_factory_checkout(
+    action: str, recipient: str, extra: dict
+) -> None:
+    text = _brief(action, recipient, extra)
+    paths = [path for path in re.findall(r"`([^`\s]+)`", _skills_prose(text)) if "harness/" in path]
+    assert paths
+    named = _named(text)
+    for path in paths:
+        assert path.startswith(("skills/factory/", "skills/pstack/"))
+        assert (ROOT / path).is_file()
+        assert f"{FACTORY_ROOT}/{path}" in named
+
+
 @pytest.mark.parametrize(("action", "recipient", "extra"), ROUTER_JOBS)
 def test_the_model_lines_and_the_helper_permission_are_there_with_no_cap(
     action: str, recipient: str, extra: dict
