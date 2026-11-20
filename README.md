@@ -1905,11 +1905,11 @@ bin/orch usage migrate --db ~/.local/share/factory/orch.db
 
 The migration takes a labelled backup (`usage-accounts`) before any write,
 adds an `account` column to `usage_readings` (filled with
-`<harness>-default`) and three account-keyed tables, and does nothing on a
+`<harness>-default`) and four account-keyed tables, and does nothing on a
 second run. Rollback: deploy the older code, which ignores the column and
 tables. To remove them too, run `ALTER TABLE usage_readings DROP COLUMN
-account` and drop `usage_account_observations`, `lane_account_evidence` and
-`lane_account_limits`. As a last resort, `orch restore-db` from the
+account` and drop `usage_account_readings`, `usage_account_observations`,
+`lane_account_evidence` and `lane_account_limits`. As a last resort, `orch restore-db` from the
 labelled backup loses the readings taken since.
 
 A usage limit pauses only the account that hit it. The other accounts of

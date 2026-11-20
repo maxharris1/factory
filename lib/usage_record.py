@@ -4,7 +4,9 @@ No factory process can read Grok's or Cursor's usage, so an operator or a
 Grok Bot routine reports it by hand. Only accounts machines.yml declares
 with `harness: external` are accepted. The reading is stored in
 usage_readings under harness, bot and device `external`, keyed by the
-account id, and never replaces a reading with a newer source time.
+account id, and in usage_account_readings (bot: the account id) once
+`orch usage migrate` has created it. It never replaces a reading with a
+newer source time.
 Only the account id, the window and numbers are written.
 """
 
@@ -19,6 +21,8 @@ from pathlib import Path
 from lib.machines_yml import EXTERNAL as EXTERNAL_HARNESS
 from lib.machines_yml import MachinesConfig
 from lib.usage_readings import (
+    ACCOUNT_READINGS,
+    ACCOUNT_READINGS_UPSERT,
     CLOCK_SKEW_SECONDS,
     EXTERNAL,
     EXTERNAL_DEVICE,
@@ -27,6 +31,7 @@ from lib.usage_readings import (
     TABLE,
     ensure_table,
     reset_time,
+    tables,
     used_fraction,
 )
 
@@ -116,12 +121,16 @@ def store(database: Path, reading: ExternalReading) -> bool:
                     reading.observed_at,
                     reading.account,
                 ),
-            ).rowcount
+            ).rowcount > 0
+            if ACCOUNT_READINGS in tables(connection):
+                values = (reading.used, reading.resets_at, reading.observed_at, EXTERNAL_JOB, 0, reading.observed_at)
+                keyed = (reading.account, EXTERNAL_DEVICE, reading.window, EXTERNAL, reading.account, *values)
+                written = connection.execute(ACCOUNT_READINGS_UPSERT, keyed).rowcount > 0 and written
         except BaseException:
             connection.execute("ROLLBACK")
             raise
         connection.execute("COMMIT")
-    return written > 0
+    return written
 
 
 def _float(text: str) -> float | None:
