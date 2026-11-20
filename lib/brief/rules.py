@@ -92,15 +92,14 @@ def review_rules(facts: dict) -> str:
 
 
 CONTAINER_RULE = "Label each container or compose stack `factory.job=$ORCH_JOB_ID` and remove it in an EXIT trap."
-LOAD_RULE = "Run JS tests with `--maxWorkers=2`, and run one typecheck at a time."
+LOAD_RULE = "Run JS tests with `--maxWorkers=2` and one typecheck at a time."
 SECRET_RULE = "Never read credentials, runner tokens, `.env`, `auth.json`, `.runner`, `.credentials*` or `FACTORY_WEBHOOK_*` values."
 
 
 def rules(remote_device: str | None = None, *, follow_ups: bool = False) -> str:
     scratch = (
-        "- Put every scratch file and directory (venvs, pytest `--basetemp`, review checkouts, "
-        "comment drafts) under `$TMPDIR`. It is this job's own directory and is removed when "
-        "the job ends. Write nothing else under /tmp.\n"
+        "- Put all scratch files (venvs, pytest `--basetemp`, review checkouts, comment drafts) "
+        "under `$TMPDIR`. It is removed when the job ends. Write nothing else under /tmp.\n"
         if remote_device is None
         else ""
     )
