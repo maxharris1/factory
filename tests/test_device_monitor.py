@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import signal
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from lib import process_tree
+from lib import device_monitor, device_pool, process_tree
 from lib.device_monitor import DeviceMonitor
 from tests.test_remote_start import TAG, FakeTransport, monitor_setup
 
@@ -138,3 +139,77 @@ def test_a_box_runs_kill_never_signals_a_process_outside_its_tag_scope_and_sessi
     box.reconcile()
 
     assert box.signals and all(pid != STRANGER for pid, _, _ in box.signals)
+
+
+OTHER_RUN = "b" * 32
+REUSED = 50
+OTHER_CHILD = 51
+
+
+class StartlessWorkerPidReused:
+    def __init__(self, tmp_path: Path, *, orphaned: bool, run_tag: str | None = None):
+        self.queue, self.pool, config, self.job_id = monitor_setup(tmp_path, "claude", box=True)
+        self.pool.attach_runner(
+            self.job_id, owner="claude", pid=RUNNER, start="r", alive=lambda *_: False
+        )
+        self.pool.attach_worker(
+            self.job_id, owner="claude", pid=REUSED, start=None, run_tag=run_tag
+        )
+        if orphaned:
+            with self.queue.connect() as connection:
+                device_pool.orphan_slot(connection, self.job_id, 100.0)
+        else:
+            self.queue.finish(self.job_id, owner="claude", handoff_comment_id="c1")
+        self.listing = {
+            REUSED: process_tree.Process(REUSED, ppid=1, start="other", tagged=False, group=REUSED),
+            OTHER_CHILD: process_tree.Process(
+                OTHER_CHILD, ppid=REUSED, start="o", tagged=False, group=REUSED
+            ),
+        }
+        self.signals: list[tuple[int, int]] = []
+        self.monitor = DeviceMonitor(
+            self.pool,
+            config,
+            FakeTransport(),
+            alive=lambda pid, _start: pid in self.listing,
+            kill=lambda pid, sig: self.signals.append((pid, sig)),
+            scan=self.scan,
+            cgroup_root=tmp_path / "cgroup",
+        )
+
+
+    def scan(self, tag: str | None) -> dict[int, process_tree.Process]:
+        return {
+            pid: replace(process, tagged=tag == OTHER_RUN and pid == OTHER_CHILD)
+            for pid, process in self.listing.items()
+        }
+
+
+@pytest.mark.parametrize("orphaned", [False, True], ids=["finished-slot", "orphan"])
+def test_a_recorded_worker_pid_without_its_start_never_names_a_kill_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, orphaned: bool
+) -> None:
+    monkeypatch.setattr(device_monitor, "run_tag", lambda pid: OTHER_RUN if pid == REUSED else None)
+    box = StartlessWorkerPidReused(tmp_path, orphaned=orphaned)
+
+    result = box.monitor.reconcile(1000.0, 600.0, lambda *_: None)
+
+    assert box.signals == []
+    assert result.released == ()
+    if not orphaned:
+        assert box.pool.placement(box.job_id) is not None
+
+
+@pytest.mark.parametrize("orphaned", [False, True], ids=["finished-slot", "orphan"])
+def test_a_recorded_worker_pid_without_its_start_adopts_no_process_it_is_responsible_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, orphaned: bool
+) -> None:
+    disowned = process_tree.Process(52, ppid=1, start="d", tagged=False, group=52)
+    monkeypatch.setattr(device_monitor.sys, "platform", "darwin")
+    monkeypatch.setattr(device_monitor, "_responsible_pid", lambda pid: REUSED)
+    box = StartlessWorkerPidReused(tmp_path, orphaned=orphaned, run_tag=TAG)
+    box.listing[disowned.pid] = disowned
+
+    box.monitor.reconcile(1000.0, 600.0, lambda *_: None)
+
+    assert box.signals == []

@@ -452,13 +452,14 @@ class DeviceMonitor:
             (run.runner_pid, run.runner_start),
             (run.worker_pid, run.worker_start),
         ):
-            if pid in listing and start in (None, listing[pid].start):
-                known[pid] = listing[pid].start
+            if start is not None and pid in listing and listing[pid].start == start:
+                known[pid] = start
         tag = run.run_tag
         worker = run.worker_pid
-        if tag is None and worker is not None and known.get(worker) == run.worker_start:
+        if tag is None and worker in known and known[worker] == run.worker_start:
             tag = run_tag(worker)
         root = worker if worker is not None else run.runner_pid
+        proven_root = root in listing and known.get(root) == listing[root].start
         scope = run.run_scope
         session = None if scope else _runner_session(run.runner_pid, listing, known)
         if root is None or (tag is None and not known and session is None and scope is None):
@@ -468,7 +469,7 @@ class DeviceMonitor:
             tag,
             scan=self.scan,
             signal_pid=self.kill,
-            responsible=_responsible_pid if sys.platform == "darwin" else None,
+            responsible=_responsible_pid if sys.platform == "darwin" and proven_root else None,
             known=known,
             session=session,
             scope=scope,
