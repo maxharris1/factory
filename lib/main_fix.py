@@ -29,7 +29,7 @@ class MainFixRow:
     repo: str
     base: str
     marker: str
-    state: Literal["filing", "open", "closed"]
+    state: Literal["filing", "open", "closing", "closed", "closed-unfed"]
     issue: int | None
     last_head: str
     filed_at: float
@@ -75,10 +75,12 @@ Action = File | Resume | Retire | Comment | Close
 def decide(
     row: MainFixRow | None, read: MainRead, *, issue_open: bool | None, feed_begun: bool
 ) -> tuple[Action, ...]:
-    """What to do for one base, given its active row (filing or open) and
-    this poll's read. issue_open is None when the issue's state is unknown."""
+    """What to do for one base, given its active row (filing, open or closing)
+    and this poll's read. issue_open is None when the issue's state is unknown."""
     if read.failed:
         return ()
+    if row is not None and row.state == "closing":
+        return (Close(row),)
     if read.red is None:
         if row is None:
             return ()

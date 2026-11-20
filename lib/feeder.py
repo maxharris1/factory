@@ -303,6 +303,10 @@ BODY_LIMIT = 20_000
 SKILL_WALK_READS = 64
 CLAIM_SECONDS = 15 * TIMEOUT_SECONDS
 
+_FEED_BEGUN = (
+    f"FROM {FEEDER_TABLE} WHERE repo = ? AND issue = ? "
+    f"AND (branch IS NOT NULL OR state IN ({','.join('?' * len(HOLDING))}))"
+)
 _BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
 _KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,63}$")
 
@@ -1346,18 +1350,14 @@ class Feeder:
 
     def _main_fix_feed_begun(self, repo: str, issue: int) -> bool:
         with self.queue.connect() as connection:
-            found = connection.execute(
-                f"SELECT 1 FROM {FEEDER_TABLE} WHERE repo = ? AND issue = ? "
-                f"AND (branch IS NOT NULL OR state IN ({','.join('?' * len(HOLDING))}))",
-                (repo, str(issue), *HOLDING),
-            ).fetchone()
+            found = connection.execute(f"SELECT 1 {_FEED_BEGUN}", (repo, str(issue), *HOLDING)).fetchone()
         return found is not None
 
     def _main_fix_rows(self) -> list[MainFixRow]:
         with self.queue.connect() as connection:
             rows = connection.execute(
                 f"SELECT {', '.join(MainFixRow.__dataclass_fields__)} FROM {MAIN_FIX_TABLE} "
-                "WHERE state IN ('filing', 'open')"
+                "WHERE state IN ('filing', 'open', 'closing')"
             ).fetchall()
         return [MainFixRow(*row) for row in rows]
 
@@ -1365,7 +1365,7 @@ class Feeder:
         with self.queue.connect() as connection:
             row = connection.execute(
                 f"SELECT {', '.join(MainFixRow.__dataclass_fields__)} FROM {MAIN_FIX_TABLE} "
-                "WHERE repo = ? AND base = ? AND state IN ('filing', 'open')",
+                "WHERE repo = ? AND base = ? AND state IN ('filing', 'open', 'closing')",
                 (repo, base),
             ).fetchone()
         return None if row is None else MainFixRow(*row)
@@ -1507,7 +1507,7 @@ class Feeder:
 
     def _close_main_fix(self, line: _MainLine, row: MainFixRow) -> None:
         repo = line.project.repo
-        claim = self._take_main_fix(row.marker, "open")
+        claim = self._begin_main_fix_close(row)
         if claim is None:
             return
         try:
@@ -1518,11 +1518,23 @@ class Feeder:
             raise
         with self.queue.connect() as connection:
             connection.execute(
-                f"UPDATE {MAIN_FIX_TABLE} SET state = 'closed', claimed_by = NULL "
+                f"UPDATE {MAIN_FIX_TABLE} SET state = 'closed-unfed', claimed_by = NULL "
                 "WHERE marker = ? AND claimed_by = ?",
                 (row.marker, claim),
             )
         self.log(f"feeder: closed never-fed main-fix {repo}#{row.issue}: {row.base} is green")
+
+    def _begin_main_fix_close(self, row: MainFixRow) -> str | None:
+        claim = uuid.uuid4().hex
+        now = self.queue.now()
+        with self.queue.connect() as connection:
+            taken = connection.execute(
+                f"UPDATE {MAIN_FIX_TABLE} SET state = 'closing', claimed_by = ?, claimed_at = ? "
+                "WHERE marker = ? AND state IN ('open', 'closing') "
+                f"AND (claimed_by IS NULL OR claimed_at <= ?) AND NOT EXISTS (SELECT 1 {_FEED_BEGUN})",
+                (claim, now, row.marker, now - CLAIM_SECONDS, row.repo, str(row.issue), *HOLDING),
+            ).rowcount
+        return claim if taken == 1 else None
 
     def _close_main_fix_duplicates(self, repo: str, row: MainFixRow, posted: int) -> int:
         found = (posted, *self.github.marked_issues(repo, row.marker, row.filed_at))
@@ -2034,6 +2046,30 @@ class Feeder:
             ledger=self.ledger,
         )
 
+    def _start_feed(self, candidate: _Candidate) -> None:
+        write = _state_write(candidate, "feeding")
+        closing: list[bool] = []
+
+        def work(connection: sqlite3.Connection) -> None:
+            closing[:] = [
+                connection.execute(
+                    f"SELECT 1 FROM {MAIN_FIX_TABLE} WHERE repo = ? AND CAST(issue AS TEXT) = ? "
+                    "AND state IN ('closing', 'closed-unfed')",
+                    (write.repo, write.issue),
+                ).fetchone()
+                is not None
+            ]
+            if not closing[0]:
+                connection.execute(
+                    f"UPDATE {FEEDER_TABLE} SET state = ?, error = ?, waiting_reason = ? "
+                    "WHERE repo = ? AND issue = ? AND state NOT IN ('fed', 'done', 'closed')",
+                    write,
+                )
+
+        must_write(bookkeeping_write(self.queue.connect, work, site="_start_feed", ledger=self.ledger))
+        if closing[0]:
+            raise _Held(Wait(f"{_ticket_name(candidate.issue)} was closed because its base is green"))
+
     def _record(self, candidate: _Candidate, **values: object) -> None:
         assignments = ", ".join(f"{name} = ?" for name in values)
         with self.queue.connect() as connection:
@@ -2048,8 +2084,9 @@ class Feeder:
         """Feed one ticket; None when its recorded PR is no longer open.
 
         Raises _Held, before any write, when the open PR it would reuse is
-        one a ticket in flight conflicts with, or when the branch it would
-        reuse carries another open PR's commits (#205).
+        one a ticket in flight conflicts with, when the branch it would
+        reuse carries another open PR's commits (#205), or when a green base
+        has begun closing its main-fix issue.
         """
         issue = candidate.issue
         config = candidate.context.config
@@ -2098,7 +2135,7 @@ class Feeder:
             )
             if wait is not None:
                 raise _Held(wait)
-        must_write(self._set_state(candidate, "feeding"))
+        self._start_feed(candidate)
         risk = str(row["risk"])
         if risk not in ("low", "high"):
             raise ValueError(f"ticket risk {risk!r} is not low or high")

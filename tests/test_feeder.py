@@ -1447,7 +1447,7 @@ def test_green_main_closes_a_never_fed_main_fix_with_one_comment(tmp_path: Path)
     assert github.filed[MAIN[0], 900]["state"] == "closed"
     [comment] = issue_comments(github)
     assert "`main` is green" in comment
-    assert main_fix_rows(tmp_path / "orch.db") == [("closed", 900)]
+    assert main_fix_rows(tmp_path / "orch.db") == [("closed-unfed", 900)]
 
 
 def test_green_main_closes_a_main_fix_still_waiting_for_capacity(tmp_path: Path) -> None:
@@ -1467,7 +1467,7 @@ def test_green_main_closes_a_main_fix_still_waiting_for_capacity(tmp_path: Path)
 
     assert github.filed[MAIN[0], 900]["state"] == "closed"
     assert len(issue_comments(github)) == 1
-    assert main_fix_rows(tmp_path / "orch.db") == [("closed", 900)]
+    assert main_fix_rows(tmp_path / "orch.db") == [("closed-unfed", 900)]
 
 
 def test_green_main_leaves_a_fed_main_fix_open_with_no_comment(tmp_path: Path) -> None:
@@ -1501,7 +1501,7 @@ def test_an_unreadable_issue_state_on_green_closes_nothing_until_it_reads(tmp_pa
 
     assert poll() == 0
     assert github.filed[MAIN[0], 900]["state"] == "closed"
-    assert main_fix_rows(tmp_path / "orch.db") == [("closed", 900)]
+    assert main_fix_rows(tmp_path / "orch.db") == [("closed-unfed", 900)]
 
 
 def test_a_failure_between_the_close_comment_and_the_close_leaves_one_comment(
@@ -1516,7 +1516,7 @@ def test_a_failure_between_the_close_comment_and_the_close_leaves_one_comment(
     github.close_issue = comment_posted_then_fail
     assert poll() == 1
     assert len(issue_comments(github)) == 1
-    assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
+    assert main_fix_rows(tmp_path / "orch.db") == [("closing", 900)]
     github.close_issue = close
 
     assert poll() == 0
@@ -1524,7 +1524,69 @@ def test_a_failure_between_the_close_comment_and_the_close_leaves_one_comment(
 
     assert github.filed[MAIN[0], 900]["state"] == "closed"
     assert len(issue_comments(github)) == 1
-    assert main_fix_rows(tmp_path / "orch.db") == [("closed", 900)]
+    assert main_fix_rows(tmp_path / "orch.db") == [("closed-unfed", 900)]
+
+
+def two_feeders_on_a_green_main_fix(tmp_path: Path):
+    now = [10_000.0]
+    closer, queue, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD, now=now)
+    feeder = another_feeder(closer, queue, github)
+    red_main(github)
+    red, _ = closer._main_reads(closer._contexts()[0])
+    assert closer._file_main_fixes(red, now[0]) == 0
+    green_main(github)
+    green, _ = closer._main_reads(closer._contexts()[0])
+    feeder._main_reads = lambda contexts: (red, 0)
+    return closer, feeder, github, green, now
+
+
+def fed_and_closed(tmp_path: Path, github: FakeGitHub) -> tuple[str, str]:
+    return rows(tmp_path / "orch.db")["900"]["state"], github.filed[MAIN[0], 900]["state"]
+
+
+def test_a_feed_that_finishes_while_green_reads_the_issue_keeps_it_open(tmp_path: Path) -> None:
+    closer, feeder, github, green, now = two_feeders_on_a_green_main_fix(tmp_path)
+    read_state = github.issue_state
+
+    def feed_then_read(repo: str, number: int) -> str:
+        assert feeder.feed_once().errors == 0
+        return read_state(repo, number)
+
+    github.issue_state = feed_then_read
+
+    assert closer._file_main_fixes(green, now[0]) == 0
+
+    assert fed_and_closed(tmp_path, github) == ("fed", "open")
+    assert issue_comments(github) == []
+
+
+def test_a_feed_that_starts_while_green_closes_the_issue_does_not_begin(tmp_path: Path) -> None:
+    closer, feeder, github, green, now = two_feeders_on_a_green_main_fix(tmp_path)
+    post_once = github.post_issue_comment_once
+
+    def feed_then_comment(*args):
+        feeder.feed_once()
+        return post_once(*args)
+
+    github.post_issue_comment_once = feed_then_comment
+
+    assert closer._file_main_fixes(green, now[0]) == 0
+
+    assert fed_and_closed(tmp_path, github) == ("waiting-blocked", "closed")
+    assert ("owner/app", "factory/issue-900") not in github.branches
+    assert len(issue_comments(github)) == 1
+
+
+def test_a_feed_from_a_list_read_before_the_green_close_does_not_begin(tmp_path: Path) -> None:
+    closer, feeder, github, green, now = two_feeders_on_a_green_main_fix(tmp_path)
+    listed = list(github.issues[MAIN[0]])
+    assert closer._file_main_fixes(green, now[0]) == 0
+    github.issues[MAIN[0]] = listed
+
+    feeder.feed_once()
+
+    assert fed_and_closed(tmp_path, github) == ("waiting-blocked", "closed")
+    assert ("owner/app", "factory/issue-900") not in github.branches
 
 
 def red_head(github: FakeGitHub, n: int) -> str:
