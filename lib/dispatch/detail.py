@@ -691,10 +691,9 @@ class DetailMixin:
         if action in ("plan", "build") and ticket.brief_text:
             context.update(brief_text=ticket.brief_text, brief_url=ticket.brief_url)
         if action in ("build", "fix") and ticket.brief_text:
-            from lib.evidence.criteria import quoted_ticket
             from lib.proof import required, to_detail
 
-            if proof := required(quoted_ticket(ticket.brief_text)):
+            if proof := required(ticket.brief_text):
                 context["proof"] = to_detail(proof)
         if action in ("plan", "build", "fix") and ticket.brief_comment is not None:
             if (ticket_type := ticket_type_of(ticket.brief_comment.body)) is not None:

@@ -46,16 +46,19 @@ class _Entry:
     codes: int = 0
     outputs: int = 0
     text: list[str] = field(default_factory=list)
+    prose: list[str] = field(default_factory=list)
 
 
-def required(ticket_body: str) -> tuple[Required, ...]:
-    """The proof each builder criterion of the ticket needs, in order."""
+def required(brief: str) -> tuple[Required, ...]:
+    """The proof each builder criterion of the brief's ticket needs, in order."""
+    from lib.evidence.criteria import quoted_ticket
     from lib.feeder import parse_intake
 
-    template = parse_intake(ticket_body, ())
+    ticket = quoted_ticket(brief)
+    template = parse_intake(ticket, ())
     every = tuple(journey.id for journey in template.journeys)
     items: list[Required] = []
-    for position, item in enumerate(template.criteria, start=1):
+    for position, item in enumerate(_listed_above_quote(brief, ticket) or template.criteria, start=1):
         prefix = _PREFIX.match(item)
         criterion = prefix.group(1).lower() if prefix else f"ac-{position}"
         tag = qa_tag(item[prefix.end():] if prefix else item)
@@ -64,6 +67,12 @@ def required(ticket_body: str) -> tuple[Required, ...]:
         else:
             items.append(Required(criterion, "qa", tag.journeys or every))
     return tuple(items)
+
+
+def _listed_above_quote(brief: str, ticket: str) -> tuple[str, ...]:
+    from lib.feeder import parse_intake
+
+    return parse_intake(brief[:brief.find(ticket)], ()).criteria if ticket != brief else ()
 
 
 def to_detail(items: tuple[Required, ...]) -> list[dict]:
@@ -109,7 +118,7 @@ def _problems(item: Required, entry: _Entry) -> list[str]:
     text = "\n".join(entry.text)
     if item.kind == "review":
         return [] if shown else [f"{name} needs the command in backticks and its output in a fenced block"]
-    if _UNVERIFIED.search(text):
+    if _UNVERIFIED.search("\n".join(entry.prose)):
         return [] if shown else [
             f"{name} is unverified but lacks the doctor command in backticks and its output in a fenced block"
         ]
@@ -133,11 +142,15 @@ def _entries(body: str) -> dict[str, _Entry]:
         match = _ENTRY_ID.match(_inline_text(first)) if first is not None else None
         if match is None or match.group(1).lower() in entries:
             continue
+        id_span = _leading_code(first)
         entry = _Entry()
         for token in tokens[start:end]:
             if token.type == "inline":
-                entry.codes += sum(child.type == "code_inline" for child in token.children or ())
+                entry.codes += sum(
+                    child.type == "code_inline" and child is not id_span for child in token.children or ()
+                )
                 entry.text.append(_inline_text(token))
+                entry.prose.append(_inline_text(token, ("text", "softbreak", "hardbreak")))
             elif token.type in ("fence", "code_block"):
                 entry.outputs += bool(token.content.strip())
                 entry.text.append(token.content)
@@ -174,9 +187,16 @@ def _top_level_items(tokens: list[Token], section: range) -> list[tuple[int, int
     return spans
 
 
-def _inline_text(token: Token) -> str:
+def _leading_code(token: Token) -> Token | None:
+    first = next((child for child in token.children or () if child.content), None)
+    return first if first is not None and first.type == "code_inline" else None
+
+
+def _inline_text(
+    token: Token, kinds: tuple[str, ...] = ("text", "code_inline", "softbreak", "hardbreak")
+) -> str:
     return "".join(
         "\n" if child.type in ("softbreak", "hardbreak") else child.content
         for child in token.children or ()
-        if child.type in ("text", "code_inline", "softbreak", "hardbreak")
+        if child.type in kinds
     )

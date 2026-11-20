@@ -251,6 +251,29 @@ def test_a_review_job_carries_no_proof(tmp_path) -> None:
     assert "proof" not in json.loads(dispatcher._job_detail(polled, action="review"))
 
 
+@pytest.mark.parametrize("action", ["build", "fix"])
+def test_a_builder_job_whose_ticket_quote_was_cut_still_owes_every_criterion(tmp_path, action: str) -> None:
+    context, findings = parse_factory_context(FACTORY_MD)
+    assert context is not None, findings
+    body = (
+        "Features: search\nRisk: low\nPlan first: no\nDepends on: none\n\n"
+        + "Background. " * 1800
+        + "\n\n## Acceptance criteria\n- Parser accepts the field.\n- qa(search): Search finds the export.\n"
+    )
+    issue = IntakeIssue(
+        repo="acme/widgets", tracker="github", key="41", title="Export works", body=body, labels=(),
+        created_at=0.0, applied_by="max", url="https://github.com/acme/widgets/issues/41",
+    )
+    brief = feeder_brief(issue, context, number=12, branch="factory/issue-41", base="main", risk="low",
+                         state="building", visible=False, template=parse_intake(body, ()))
+    dispatcher, _ = setup(tmp_path)
+    detail = json.loads(dispatcher._job_detail(_polled(("grok-login", brief)), action=action))
+    assert detail["proof"] == [
+        {"id": "ac-1", "kind": "review", "journeys": []},
+        {"id": "ac-2", "kind": "qa", "journeys": ["search"]},
+    ]
+
+
 def _linear_polled(brief: str):
     issue = linear_issue()
     issue["comments"]["nodes"].insert(0, {

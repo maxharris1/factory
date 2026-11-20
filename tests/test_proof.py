@@ -163,3 +163,39 @@ def test_the_first_entry_for_an_id_wins() -> None:
 def test_a_nested_bullet_belongs_to_its_entry() -> None:
     ready = _ready("- ac-1 (review): ran it\n  - `pytest -q`\n\n    ```\n    ok\n    ```")
     assert missing(ITEMS[:1], ready) == []
+
+
+@pytest.mark.parametrize("span", ["`ac-1`", "`ac-1 (review)`", "`AC-1`:", "**`ac-1`**"])
+def test_the_ids_own_code_span_is_not_the_command(span: str) -> None:
+    (problem,) = missing(ITEMS[:1], _ready(f"- {span} (review): Tests passed.\n  ```\n  3 passed\n  ```"))
+    assert "ac-1 (review)" in problem and "command" in problem
+
+
+def test_a_command_after_a_code_formatted_id_counts() -> None:
+    assert missing(ITEMS[:1], _ready("- `ac-1` (review): `pytest -q`\n  ```\n  3 passed\n  ```")) == []
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "- ac-2 (qa): `verify run upload-file`\n  ```\n  upload-file PASS\n  unverified checks: 0\n  ```",
+        "- ac-2 (qa): `verify run upload-file --unverified=0`\n  ```\n  upload-file PASS\n  ```",
+    ],
+)
+def test_unverified_in_captured_output_or_a_command_does_not_waive_journeys(entry: str) -> None:
+    (problem,) = missing(ITEMS[1:2], _ready(entry))
+    assert "does not name journey search" in problem
+
+
+def test_a_feeder_brief_requires_criteria_its_cut_ticket_quote_lost() -> None:
+    ticket = (
+        "Features: search\nRisk: low\nPlan first: no\nDepends on: none\n\n"
+        + "Background. " * 1800
+        + "\n\n## Acceptance criteria\n- Parser accepts the field.\n- qa(search): Search finds the export.\n"
+    )
+    brief = (
+        "**Brief**\n\n### Acceptance criteria\n- Parser accepts the field.\n"
+        "- qa(search): Search finds the export.\n\n### Ticket\n```\n"
+        + ticket[:20_000] + "\n[cut at 20000 characters]\n```\n"
+    )
+    assert required(brief) == (Required("ac-1", "review"), Required("ac-2", "qa", ("search",)))
