@@ -2644,8 +2644,9 @@ class LivePollSource:
                 attempt += 1
 
     def _for_reads(self, argv: list[str], account: Account) -> list[str]:
-        prefix = self.gh if account is LOGIN else self._read_prefix
-        return [*prefix, *argv[argv.index("gh") + 1 :]]
+        if account is LOGIN:
+            return list(argv)
+        return [*self._read_prefix, *argv[argv.index("gh") + 1 :]]
 
     def _observe_quota(
         self, argv: list[str], account: Account, result: GhResult, started_wall: float

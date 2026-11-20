@@ -3906,6 +3906,30 @@ def test_reads_argv_unchanged_without_poller_reads_app(tmp_path: Path) -> None:
         assert tuple(call[: len(source.gh) + 1]) == (*source.gh, "api"), call
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["gh", "api", "repos/acme/widgets/pulls/99"],
+        ["env", "-u", "GH_TOKEN", "gh", "api", "repos/acme/widgets/issues/7/comments"],
+    ],
+)
+def test_reads_hand_the_runner_the_caller_argv_without_poller_reads_app(
+    tmp_path: Path, argv: list[str]
+) -> None:
+    environ, _, _ = _reads_app_world(tmp_path)
+    seen: list[list[str]] = []
+
+    def runner(call, timeout):
+        del timeout
+        seen.append(list(call))
+        return GhResult(0, "[]", "")
+
+    source = LivePollSource(config(), environ=environ, gh_runner=runner)
+    source._run_gh_read(list(argv))
+
+    assert seen == [argv]
+
+
 def test_poller_reads_app_routes_reads_through_the_helper_and_not_writes(
     tmp_path: Path,
 ) -> None:
