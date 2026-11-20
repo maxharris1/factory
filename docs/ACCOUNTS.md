@@ -98,8 +98,10 @@ the token unset. While the export stays, the doctor checks a sign-in that
 the default account's jobs do not use.
 
 1. Remove the `CLAUDE_CODE_OAUTH_TOKEN` export from the bot's login profile.
-2. Open a new login shell as the bot, so that the variable is gone.
-3. Run `claude auth login` as the bot.
+2. In the bot's shell, run `unset CLAUDE_CODE_OAUTH_TOKEN`. A new login
+   shell started from a shell that already exported the token inherits it,
+   so removing the export alone leaves it set.
+3. In that same shell, run `claude auth login` as the bot.
 4. On the orch host, run `orch accounts doctor`.
 
 The Mac's row appears once the Mac lists `claude` in `machines.yml`.
@@ -113,7 +115,7 @@ The Mac's row appears once the Mac lists `claude` in `machines.yml`.
 | `signed-out` | `status reply not understood` | Claude's reply has no `loggedIn`, or Codex's first line is unknown. | Run the status command as the bot and read its reply. |
 | `signed-out` | `status command exited nonzero` | The reply says signed in, but the command failed. | Run the status command as the bot and read its error. |
 | `signed-out` | `sign-in names no org and email` | Claude's `claude.ai` sign-in names no org and email. | Run the Claude login again. |
-| `signed-out` | `auth from a token variable, not the account folder` | Claude's auth method is `oauth_token`, `api_key`, `auth_token` or `apiKeyHelper`. | Remove the token from the bot's login profile, then run the Claude login. |
+| `signed-out` | `auth from a token variable, not the account folder` | Claude's auth method is `oauth_token`, `api_key`, `auth_token` or `apiKeyHelper`. | Follow [Move the Mac's profile token off the default account](#move-the-macs-profile-token-off-the-default-account). |
 | `signed-out` | `api key, not a ChatGPT sign-in` | Codex signed in with an API key. | Run the Codex login and sign in with ChatGPT. |
 | `signed-out` | `auth method not understood` | Claude names no auth method, or one the doctor does not know. | Run the Claude login again. |
 | `mismatch` | `same sign-in as account <ids>` | Another account's folder has the same Claude org and email. | Sign this account in to its own subscription. |

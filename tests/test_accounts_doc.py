@@ -63,3 +63,22 @@ def test_every_detail_the_doctor_writes_is_in_the_status_table() -> None:
 @pytest.mark.parametrize("path", ["README.md", "docs/SPEC.md"])
 def test_readme_and_spec_link_the_procedure(path: str) -> None:
     assert "docs/ACCOUNTS.md" in (ROOT / path).read_text(encoding="utf-8")
+
+
+def mac_token_steps() -> str:
+    section = doc().split("## Move the Mac's profile token off the default account", 1)[1]
+    return section.split("\n## ", 1)[0]
+
+
+def test_the_mac_token_move_unsets_the_inherited_export_before_the_login() -> None:
+    steps = mac_token_steps()
+
+    assert "unset CLAUDE_CODE_OAUTH_TOKEN" in steps
+    assert steps.index("unset CLAUDE_CODE_OAUTH_TOKEN") < steps.index("claude auth login")
+    assert "new login shell" not in steps
+
+
+def test_the_token_status_fix_points_to_the_mac_token_steps() -> None:
+    row = next(line for line in doc().splitlines() if f"`{account_doctor.TOKEN_AUTH}`" in line)
+
+    assert "Move the Mac's profile token off the default account" in row
