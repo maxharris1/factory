@@ -73,11 +73,11 @@ and once on the poll after reload adopts a changed machines.yml.
 
 Memory. After reconcile and before `check_sign_ins`, `check_memory` reads
 /proc/meminfo and /proc/pressure/memory on each enabled device not
-draining (#1226): on the box directly, on a remote device in one SSH call,
-all before it opens the database. A device over lib/device_memory.py's
-limits is held `memory-wait` for `HOLD_SECONDS`, renewed each poll; any
-other reading clears the hold. A read that fails, or a device with no
-/proc (macOS), fails open.
+draining (#1226): on the orch host directly, on any other device in one SSH
+call, all before it opens the database. A device over lib/device_memory.py's
+limits is held `memory-wait` for `HOLD_SECONDS` from when the reads finish,
+renewed each poll; any other reading clears the hold. A read that fails, or
+a device with no /proc (macOS), fails open.
 """
 
 from __future__ import annotations
@@ -124,7 +124,7 @@ OnLost = Callable[[str, str, str], None]  # job_id, device, reason
 Alive = Callable[[int | None, str | None], bool]
 SignIns = Callable[[MachinesConfig, float], object]
 Reading = tuple[str | None, str | None]
-MemoryRead = Callable[[Device], Reading]
+MemoryRead = Callable[[Device, bool], Reading]
 
 _MEMORY_FILES = ("meminfo", "pressure/memory")
 _MEMORY_MARK = "#orch-memory"
@@ -165,10 +165,10 @@ def remote_target(
 
 
 def read_memory(
-    transport: CaptureTransport, device: Device, proc: Path = Path("/proc")
+    transport: CaptureTransport, device: Device, on_host: bool, proc: Path = Path("/proc")
 ) -> Reading:
     """Device's /proc/meminfo and /proc/pressure/memory, each None when missing."""
-    if device.local:
+    if on_host:
         return _read_text(proc / "meminfo"), _read_text(proc / "pressure/memory")
     target = next(
         filter(None, (remote_target(device, harness, "memory") for harness in device.harnesses)),
@@ -280,7 +280,7 @@ class DeviceMonitor:
         self.sign_ins(self.config, now)
         return True
 
-    def check_memory(self, now: float, log: Log) -> tuple[tuple[str, str], ...]:
+    def check_memory(self, log: Log) -> tuple[tuple[str, str], ...]:
         """Hold each over-limit device `memory-wait`, clear the rest; the held, in order."""
         if self.memory is None:
             return ()
@@ -289,7 +289,7 @@ class DeviceMonitor:
             if not device.enabled or device.drain:
                 continue
             try:
-                meminfo, pressure = self.memory(device)
+                meminfo, pressure = self.memory(device, device.name == self.config.orch_host)
             except Exception as exc:
                 self._memory_note(device.name, f"{type(exc).__name__}: {exc}", log)
                 judged.append((device.name, None))
@@ -304,6 +304,7 @@ class DeviceMonitor:
             judged.append((device.name, over_limit(meminfo, pressure)))
         if not judged:
             return ()
+        now = self.pool.queue.now()
         with self.pool.queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             was_held = {
@@ -315,7 +316,7 @@ class DeviceMonitor:
                 if reason is None:
                     clear_memory_hold(connection, name)
                 else:
-                    hold_memory(connection, name, until=now + HOLD_SECONDS, reason=reason, now=now)
+                    hold_memory(connection, name, until=now + HOLD_SECONDS, reason=reason)
             connection.commit()
         held = tuple((name, reason) for name, reason in judged if reason is not None)
         for name, reason in judged:

@@ -503,7 +503,7 @@ class JobsMixin:
         check_memory = getattr(self.devices, "check_memory", None)
         if check_memory is not None:
             try:
-                check_memory(self.queue.now(), self.log or (lambda _line: None))
+                check_memory(self.log or (lambda _line: None))
             except Exception as exc:
                 self.record_poll_error("devices", "-", exc, prefix="memory: ")
         check = getattr(self.devices, "check_sign_ins", None)

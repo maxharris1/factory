@@ -3443,19 +3443,20 @@ PRESSED = "some avg10=42.00 avg60=20.00 avg300=5.00 total=9\nfull avg10=1.00 avg
 def memory_rows(queue: SQLiteJobQueue) -> dict[str, tuple[float, str]]:
     with queue.connect() as connection:
         try:
-            rows = connection.execute("SELECT device, until, reason FROM device_backoff").fetchall()
+            rows = connection.execute("SELECT device, until, reason FROM device_memory_holds").fetchall()
         except sqlite3.OperationalError:
             return {}
     return {str(row[0]): (float(row[1]), str(row[2])) for row in rows}
 
 
 def memory_setup(tmp_path: Path, readings: dict, *, config: MachinesConfig | None = None):
-    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 1000.0)
+    now = [1000.0]
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: now[0])
     config = config or config_of(machines_file(tmp_path))
     pool = DevicePool(queue, config)
     read: list[str] = []
 
-    def reader(device):
+    def reader(device, _on_host):
         read.append(device.name)
         reading = readings[device.name]
         if isinstance(reading, Exception):
@@ -3463,17 +3464,17 @@ def memory_setup(tmp_path: Path, readings: dict, *, config: MachinesConfig | Non
         return reading
 
     monitor = DeviceMonitor(pool, config, FakeTransport(), memory=reader)
-    return queue, pool, monitor, read
+    return queue, pool, monitor, read, now
 
 
 def test_an_over_limit_device_is_held_180s_renewed_each_poll_and_a_good_reading_clears_it(
     tmp_path: Path,
 ) -> None:
     readings = {"box": (LOW, CALM), "pc": (AMPLE, CALM)}
-    queue, pool, monitor, read = memory_setup(tmp_path, readings)
+    queue, pool, monitor, read, now = memory_setup(tmp_path, readings)
     lines: list[str] = []
 
-    held = monitor.check_memory(1000.0, lines.append)
+    held = monitor.check_memory(lines.append)
 
     assert read == ["box", "pc"]
     assert held == (("box", "memory-wait: MemAvailable 6.0 GiB < 8 GiB"),)
@@ -3481,12 +3482,14 @@ def test_an_over_limit_device_is_held_180s_renewed_each_poll_and_a_good_reading_
     assert lines == ["memory-wait on box: memory-wait: MemAvailable 6.0 GiB < 8 GiB"]
 
     readings["box"] = (AMPLE, PRESSED)
-    monitor.check_memory(1060.0, lines.append)
+    now[0] = 1060.0
+    monitor.check_memory(lines.append)
     assert memory_rows(queue) == {"box": (1240.0, "memory-wait: PSI some avg10 42 > 10")}
     assert len(lines) == 1
 
     readings["box"] = (AMPLE, CALM)
-    held = monitor.check_memory(1120.0, lines.append)
+    now[0] = 1120.0
+    held = monitor.check_memory(lines.append)
     assert held == ()
     assert memory_rows(queue) == {}
     assert lines[1:] == ["memory-wait off box"]
@@ -3495,13 +3498,13 @@ def test_an_over_limit_device_is_held_180s_renewed_each_poll_and_a_good_reading_
 
 def test_a_memory_held_device_takes_no_placement_until_it_clears(tmp_path: Path) -> None:
     readings = {"box": (LOW, CALM), "pc": (LOW, CALM)}
-    queue, pool, monitor, _ = memory_setup(tmp_path, readings)
+    queue, pool, monitor, _, _ = memory_setup(tmp_path, readings)
     enqueue(queue, "claude", "1")
-    monitor.check_memory(1000.0, lambda _line: None)
+    monitor.check_memory(lambda _line: None)
     assert pool.claim("claude") is None
 
     readings["pc"] = (AMPLE, CALM)
-    monitor.check_memory(1000.0, lambda _line: None)
+    monitor.check_memory(lambda _line: None)
     claimed = pool.claim("claude")
     assert claimed is not None and claimed[1].device == "pc"
 
@@ -3511,12 +3514,10 @@ def test_memory_is_read_outside_any_database_transaction(tmp_path: Path) -> None
     config = config_of(machines_file(tmp_path))
     pool = DevicePool(queue, config)
     with queue.connect() as connection:
-        hold_memory(
-            connection, "pc", until=1100.0, reason="memory-wait: earlier", now=1000.0
-        )
+        hold_memory(connection, "pc", until=1100.0, reason="memory-wait: earlier")
     free: list[str] = []
 
-    def reader(device):
+    def reader(device, _on_host):
         other = sqlite3.connect(tmp_path / "d.db", timeout=0)
         try:
             other.execute("BEGIN IMMEDIATE")
@@ -3526,7 +3527,7 @@ def test_memory_is_read_outside_any_database_transaction(tmp_path: Path) -> None
             other.close()
         return (AMPLE, CALM)
 
-    DeviceMonitor(pool, config, FakeTransport(), memory=reader).check_memory(1000.0, lambda _l: None)
+    DeviceMonitor(pool, config, FakeTransport(), memory=reader).check_memory(lambda _l: None)
     assert free == ["box", "pc"]
     assert memory_rows(queue) == {}
 
@@ -3536,8 +3537,8 @@ def test_a_disabled_or_draining_device_is_never_read(tmp_path: Path) -> None:
     config = dataclasses.replace(
         base, devices=tuple(dataclasses.replace(d, drain=d.name == "pc") for d in base.devices)
     )
-    _, _, monitor, read = memory_setup(tmp_path, {}, config=config)
-    assert monitor.check_memory(1000.0, lambda _l: None) == ()
+    _, _, monitor, read, _ = memory_setup(tmp_path, {}, config=config)
+    assert monitor.check_memory(lambda _l: None) == ()
     assert read == []
 
 
@@ -3577,23 +3578,24 @@ def real_reader_setup(tmp_path: Path):
     box = fake_proc(tmp_path / "box-proc", AMPLE, CALM)
     pc = fake_proc(tmp_path / "pc-proc", AMPLE, CALM)
     transport = MemoryTransport(pc)
-    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 1000.0)
+    now = [1000.0]
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: now[0])
     config = config_of(machines_file(tmp_path))
     monitor = DeviceMonitor(
         DevicePool(queue, config),
         config,
         transport,
-        memory=lambda device: device_monitor.read_memory(transport, device, proc=box),
+        memory=functools.partial(device_monitor.read_memory, transport, proc=box),
     )
-    return queue, monitor, transport, box, pc
+    return queue, monitor, transport, box, pc, now
 
 
 def test_a_remote_device_is_read_in_one_ssh_call_with_a_10_second_timeout(tmp_path: Path) -> None:
-    queue, monitor, transport, box, pc = real_reader_setup(tmp_path)
+    queue, monitor, transport, box, pc, now = real_reader_setup(tmp_path)
     fake_proc(pc, LOW, CALM)
     lines: list[str] = []
 
-    held = monitor.check_memory(1000.0, lines.append)
+    held = monitor.check_memory(lines.append)
 
     assert held == (("pc", "memory-wait: MemAvailable 6.0 GiB < 8 GiB"),)
     [(argv, timeout)] = transport.captured
@@ -3604,7 +3606,8 @@ def test_a_remote_device_is_read_in_one_ssh_call_with_a_10_second_timeout(tmp_pa
 
     fake_proc(pc, AMPLE, PRESSED)
     fake_proc(box, AMPLE, PRESSED)
-    held = monitor.check_memory(1060.0, lines.append)
+    now[0] = 1060.0
+    held = monitor.check_memory(lines.append)
     assert dict(held) == {
         "box": "memory-wait: PSI some avg10 42 > 10",
         "pc": "memory-wait: PSI some avg10 42 > 10",
@@ -3616,14 +3619,15 @@ def test_a_remote_device_is_read_in_one_ssh_call_with_a_10_second_timeout(tmp_pa
 def test_a_failed_or_timed_out_ssh_read_is_logged_and_clears_the_hold(
     tmp_path: Path, code: int
 ) -> None:
-    queue, monitor, transport, _, pc = real_reader_setup(tmp_path)
+    queue, monitor, transport, _, pc, now = real_reader_setup(tmp_path)
     fake_proc(pc, LOW, CALM)
     lines: list[str] = []
-    monitor.check_memory(1000.0, lines.append)
+    monitor.check_memory(lines.append)
     assert set(memory_rows(queue)) == {"pc"}
 
     transport.code = code
-    assert monitor.check_memory(1060.0, lines.append) == ()
+    now[0] = 1060.0
+    assert monitor.check_memory(lines.append) == ()
 
     assert memory_rows(queue) == {}
     assert [line for line in lines[1:] if line.startswith("memory read pc")]
@@ -3632,13 +3636,14 @@ def test_a_failed_or_timed_out_ssh_read_is_logged_and_clears_the_hold(
 
 def test_a_reader_that_raises_fails_open_for_that_device_alone(tmp_path: Path) -> None:
     readings = {"box": (LOW, CALM), "pc": (LOW, CALM)}
-    queue, _, monitor, _ = memory_setup(tmp_path, readings)
+    queue, _, monitor, _, now = memory_setup(tmp_path, readings)
     lines: list[str] = []
-    monitor.check_memory(1000.0, lines.append)
+    monitor.check_memory(lines.append)
     assert set(memory_rows(queue)) == {"box", "pc"}
 
     readings["box"] = PermissionError(13, "Permission denied", "/proc/meminfo")
-    held = monitor.check_memory(1060.0, lines.append)
+    now[0] = 1060.0
+    held = monitor.check_memory(lines.append)
 
     assert [name for name, _ in held] == ["pc"]
     assert set(memory_rows(queue)) == {"pc"}
@@ -3659,11 +3664,11 @@ def test_a_reader_that_raises_fails_open_for_that_device_alone(tmp_path: Path) -
 def test_a_missing_file_is_logged_and_a_good_reading_of_the_other_still_judges(
     tmp_path: Path, meminfo: str | None, pressure: str | None, reason: str | None
 ) -> None:
-    queue, monitor, _, box, _ = real_reader_setup(tmp_path)
+    queue, monitor, _, box, _, _ = real_reader_setup(tmp_path)
     fake_proc(box, meminfo, pressure)
     lines: list[str] = []
 
-    held = monitor.check_memory(1000.0, lines.append)
+    held = monitor.check_memory(lines.append)
 
     assert held == ((("box", reason),) if reason else ())
     assert set(memory_rows(queue)) == ({"box"} if reason else set())
@@ -3673,16 +3678,17 @@ def test_a_missing_file_is_logged_and_a_good_reading_of_the_other_still_judges(
 
 
 def test_a_device_with_no_proc_is_never_held(tmp_path: Path) -> None:
-    queue, monitor, transport, box, pc = real_reader_setup(tmp_path)
+    queue, monitor, transport, box, pc, now = real_reader_setup(tmp_path)
     fake_proc(pc, LOW, PRESSED)
-    monitor.check_memory(1000.0, lambda _l: None)
+    monitor.check_memory(lambda _l: None)
     assert set(memory_rows(queue)) == {"pc"}
     shutil.rmtree(box)
     shutil.rmtree(pc)
     pc.mkdir()
 
     for at in (1060.0, 1120.0, 1500.0):
-        assert monitor.check_memory(at, lambda _l: None) == ()
+        now[0] = at
+        assert monitor.check_memory(lambda _l: None) == ()
         assert memory_rows(queue) == {}
     assert len(transport.captured) == 4
 
@@ -3701,7 +3707,7 @@ def test_the_poll_checks_memory_and_logs_each_enter_and_leave(tmp_path: Path) ->
         review_actions=FakeReviewActions(),
         grok_delivery=FakeGrokDelivery(),
         devices=DeviceMonitor(
-            DevicePool(queue, config), config, FakeTransport(), memory=lambda d: readings[d.name]
+            DevicePool(queue, config), config, FakeTransport(), memory=lambda d, _on_host: readings[d.name]
         ),
         log=lines.append,
     )
@@ -3726,7 +3732,7 @@ def test_a_memory_check_error_is_recorded_and_never_stops_the_poll(tmp_path: Pat
         def reconcile(self, now, lost_after, on_lost):
             return None
 
-        def check_memory(self, now, log):
+        def check_memory(self, log):
             raise sqlite3.OperationalError("database is locked")
 
         def check_sign_ins(self, now):

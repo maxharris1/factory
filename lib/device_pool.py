@@ -64,7 +64,8 @@ the monitor stops that worker once its device answers and forgets the row
 once the worker is gone. #722 keeps a lost box job's `run_tag` (and #817
 its `run_scope`) there, and `members`, every process of its run seen so
 far (pid and start time), so the monitor finds the run again after it
-restarts.
+restarts. #1226 adds `device_memory_holds`: a device over its memory limits
+takes no new placement until its `until` time, apart from any backoff.
 
 This module starts nothing and contacts no device.
 """
@@ -79,7 +80,6 @@ from fractions import Fraction
 from pathlib import Path
 
 from lib import device_sync, lane_limit, live_settings
-from lib.device_memory import MEMORY_WAIT
 from lib.device_sync import NOTHING_BLOCKED, Blocked
 from lib.machines_yml import (
     Device,
@@ -106,6 +106,7 @@ from lib.schema import HARNESSES
 
 HEALTH_TABLE = "device_health"
 BACKOFF_TABLE = "device_backoff"
+MEMORY_HOLDS_TABLE = "device_memory_holds"
 ORPHANS_TABLE = "device_orphans"
 QA_SLOTS_TABLE = "qa_device_slots"
 UNREACHABLE_BACKOFF_SECONDS = 5 * 60
@@ -982,39 +983,37 @@ def back_off(connection: sqlite3.Connection, device: str, *, until: float, reaso
     )
 
 
-def hold_memory(
-    connection: sqlite3.Connection, device: str, *, until: float, reason: str, now: float
-) -> None:
-    _backoff_table(connection)
+def _memory_holds_table(connection: sqlite3.Connection) -> None:
     connection.execute(
         f"""
-        INSERT INTO {BACKOFF_TABLE} (device, until, reason) VALUES (?, ?, ?)
-        ON CONFLICT(device) DO UPDATE SET
-            until = MAX(until, excluded.until),
-            reason = CASE
-                WHEN until > ? AND reason NOT LIKE ? THEN reason
-                ELSE excluded.reason
-            END
-        """,
-        (device, until, reason, now, f"{MEMORY_WAIT}%"),
+        CREATE TABLE IF NOT EXISTS {MEMORY_HOLDS_TABLE} (
+            device TEXT PRIMARY KEY,
+            until REAL NOT NULL,
+            reason TEXT NOT NULL
+        )
+        """
+    )
+
+
+def hold_memory(connection: sqlite3.Connection, device: str, *, until: float, reason: str) -> None:
+    _memory_holds_table(connection)
+    connection.execute(
+        f"INSERT OR REPLACE INTO {MEMORY_HOLDS_TABLE} (device, until, reason) VALUES (?, ?, ?)",
+        (device, until, reason),
     )
 
 
 def memory_held(connection: sqlite3.Connection, device: str, now: float) -> bool:
-    _backoff_table(connection)
+    _memory_holds_table(connection)
     row = connection.execute(
-        f"SELECT 1 FROM {BACKOFF_TABLE} WHERE device = ? AND reason LIKE ? AND until > ?",
-        (device, f"{MEMORY_WAIT}%", now),
+        f"SELECT 1 FROM {MEMORY_HOLDS_TABLE} WHERE device = ? AND until > ?", (device, now)
     ).fetchone()
     return row is not None
 
 
 def clear_memory_hold(connection: sqlite3.Connection, device: str) -> None:
-    _backoff_table(connection)
-    connection.execute(
-        f"DELETE FROM {BACKOFF_TABLE} WHERE device = ? AND reason LIKE ?",
-        (device, f"{MEMORY_WAIT}%"),
-    )
+    _memory_holds_table(connection)
+    connection.execute(f"DELETE FROM {MEMORY_HOLDS_TABLE} WHERE device = ?", (device,))
 
 
 _ORPHAN_PIDS = (
@@ -1075,14 +1074,12 @@ def placement_blocked(
         for harness in device.harnesses
         if device.account_for(harness) in limited
     }
-    backed_off: set[str] = set()
-    if _has_table(connection, BACKOFF_TABLE):
-        backed_off = {
-            str(row[0])
-            for row in connection.execute(
-                f"SELECT device FROM {BACKOFF_TABLE} WHERE until > ?", (now,)
-            )
-        }
+    backed_off = {
+        str(row[0])
+        for table in (BACKOFF_TABLE, MEMORY_HOLDS_TABLE)
+        if _has_table(connection, table)
+        for row in connection.execute(f"SELECT device FROM {table} WHERE until > ?", (now,))
+    }
     return replace(blocked, pairs=blocked.pairs | pairs, devices=blocked.devices | backed_off)
 
 
@@ -1095,13 +1092,12 @@ def placement_blocks(
 
 def backed_off_through(queue: SQLiteJobQueue, config: MachinesConfig) -> dict[str, float]:
     now = queue.now()
+    until: dict[str, float] = {}
     with queue.connect() as connection:
-        if not _has_table(connection, BACKOFF_TABLE):
-            return {}
-        until = {
-            str(device): min(float(at), now)
-            for device, at in connection.execute(f"SELECT device, until FROM {BACKOFF_TABLE}")
-        }
+        for table in (BACKOFF_TABLE, MEMORY_HOLDS_TABLE):
+            if _has_table(connection, table):
+                for device, at in connection.execute(f"SELECT device, until FROM {table}"):
+                    until[str(device)] = max(until.get(str(device), 0.0), min(float(at), now))
     through: dict[str, float] = {}
     for device in config.devices:
         if device.name not in until:
