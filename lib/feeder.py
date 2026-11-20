@@ -558,6 +558,14 @@ def parse_intake(body: str, labels: Collection[str]) -> IntakeTemplate:
 
 
 @dataclass(frozen=True)
+class IssueRecord:
+    number: int
+    state: str
+    reason: str | None
+    body: str
+
+
+@dataclass(frozen=True)
 class IntakeIssue:
     """One ticket an intake source reports as carrying the project's signal."""
 
@@ -645,7 +653,9 @@ class GitHubIntake(Protocol):
 
     def marked_issues(self, repo: str, marker: str, since: float) -> tuple[int, ...]: ...
 
-    def close_issue(self, repo: str, number: int, comment: str | None) -> None: ...
+    def close_issue(
+        self, repo: str, number: int, comment: str | None, *, completed: bool = False
+    ) -> None: ...
 
     def post_issue_comment_once(self, repo: str, number: int, body: str, marker: str) -> str: ...
 
