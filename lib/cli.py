@@ -68,13 +68,13 @@ from lib.factory_md import EXAMPLE_PATHS, QA_RUNNERS, FactoryConfig, load_factor
 from lib.github_actions import GitHubAdapterError, _status as gh_status
 from lib.grok_delivery import GrokDeliveryError, wake_delivery
 from lib.handoff import format_header
-from lib.harness_env import account_tokens, harness_env
+from lib.harness_env import CPU_CAP, account_tokens, harness_env
 from lib.hold import MergeUpdate
 from lib.hook_t7 import T7Hook
 from lib.hook_t8 import T8Hook
 from lib.load import Finding
 from lib.scratch import remove as remove_scratch
-from lib.device_monitor import DeviceMonitor, retry_stranded
+from lib.device_monitor import DeviceMonitor, read_memory, retry_stranded
 from lib.feeder import Feeder
 from lib.intake_live import GitHubIntakeClient, LinearIntakeClient
 from lib.job_state import record_job_event
@@ -1381,11 +1381,13 @@ def _runtime(
         if machines is not None:
             from lib import self_deploy
 
+            transport = SshTransport()
             devices = DeviceMonitor(
                 _device_pool(queue, machines, machines_path, orch=orch_path),
                 machines,
-                SshTransport(),
+                transport,
                 machines_path=_machines_path(machines_path),
+                memory=functools.partial(read_memory, transport),
                 sign_ins=functools.partial(
                     account_doctor.check, queue, SshTransport(), self_deploy.own_repo(ROOT)
                 ),
@@ -2534,6 +2536,7 @@ def _job_run_command(argv: list[str]) -> int:
                 output=session.consume if session is not None else None,
                 execed=placed.execed,
                 budget=budget,
+                cpu_cap=CPU_CAP,
             )
         return code
     except placed_run.CheckoutError as exc:

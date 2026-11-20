@@ -10,7 +10,7 @@ import pytest
 
 from lib import github_app_token as broker
 from lib.brief.rules import SECRET_RULE, rules
-from lib.harness_env import account_tokens, harness_env, harness_environ
+from lib.harness_env import account_tokens, cpu_cap_env, harness_env, harness_environ
 from lib.queue import SQLiteJobQueue
 from lib.waiter import HarnessCommand, Waiter
 from tests.test_approver_credential import approvals_for
@@ -105,7 +105,7 @@ ACCOUNT_HOME = "/home/claude-bot/.factory-accounts/acct-a"
 def test_an_account_home_names_its_folder_and_the_tokens_to_drop(
     harness: str, env: dict[str, str], tokens: tuple[str, ...]
 ) -> None:
-    assert harness_env(harness, ACCOUNT_HOME) == env
+    assert harness_env(harness, ACCOUNT_HOME) == {**cpu_cap_env(), **env}
     assert account_tokens(harness, ACCOUNT_HOME) == tokens
 
 

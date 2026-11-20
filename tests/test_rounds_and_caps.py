@@ -18,7 +18,7 @@ import pytest
 from lib import cli
 from lib.dispatcher import CIResult, Comment, TicketRef, TrackedTicket
 from lib.handoff import parse_comment
-from lib.harness_env import CLAUDE_BG_WAIT_ENV, harness_env
+from lib.harness_env import CLAUDE_BG_WAIT_ENV, cpu_cap_env, harness_env
 from lib.queue import Job, JobRequest
 from tests.test_dispatcher import (
     GO,
@@ -560,7 +560,7 @@ def test_t6_retry_detail_names_the_failed_job(tmp_path: Path) -> None:
 def test_harness_env_names_the_bg_wait_ceiling_for_claude_only(
     harness: str, expected: dict
 ) -> None:
-    assert harness_env(harness) == expected
+    assert harness_env(harness) == {**cpu_cap_env(), **expected}
 
 
 def _report_env(tmp_path: Path) -> tuple[str, Path]:

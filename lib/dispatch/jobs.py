@@ -481,7 +481,8 @@ class JobsMixin:
         device unreachable for job_states.unreachable_lost_seconds.
 
         Runs before T6 looks at timeouts, so T6 sees a lost job as a link
-        drop in the same poll. #679: machines.yml is reloaded first. #1101:
+        drop in the same poll. #679: machines.yml is reloaded first. #1226:
+        each device's memory is read and an over-limit device held. #1101:
         the account doctor runs last when due. A failure of any step is
         recorded and never stops the poll.
         """
@@ -499,6 +500,12 @@ class JobsMixin:
             )
         except Exception as exc:
             self.record_poll_error("devices", "-", exc)
+        check_memory = getattr(self.devices, "check_memory", None)
+        if check_memory is not None:
+            try:
+                check_memory(self.log or (lambda _line: None))
+            except Exception as exc:
+                self.record_poll_error("devices", "-", exc, prefix="memory: ")
         check = getattr(self.devices, "check_sign_ins", None)
         if check is not None:
             try:

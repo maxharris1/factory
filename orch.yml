@@ -56,6 +56,9 @@ approver_logins:
 #         maxharris1: 3000001
 #         aut0-code: 3000002
 #       private_key_file: /home/box/.config/factory/apps/codex.pem
+# Box poller only (#1128): its gh reads, not its writes, use this bot's App
+# token. Needs the bot's github_app.apps entry and the box token timer.
+# poller_reads_app: claude-bot
 # Before install, Max must add the confirmed stable Linear user ID under
 # trusted_linear_users. The poller refuses Linear polling without it.
 # intake (issue #85, docs/SPEC.md section 7): the backlog feeder turns a

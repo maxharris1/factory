@@ -76,6 +76,7 @@ from lib.github_actions import (
     rate_limited,
     run_gh,
 )
+from lib.github_app_token import BrokerError, owner_from_args, reads_prefix
 from lib.handoff import HandoffError, parse_comment
 from lib.hold import FACTORY_MD
 from lib.intake_risk import INTAKE_RISK_SCHEMA, INTAKE_RISK_TABLE, stored_risk
@@ -259,6 +260,8 @@ class RateWindow:
     reset_epoch: float
 
 
+Account = str | None
+LOGIN: Account = None
 PacingReason = Literal["normal", "stretch", "shed", "pause"]
 QuotaState = Literal["normal", "shed", "pause"]
 
@@ -650,12 +653,12 @@ class LivePollSource:
         self._linear_branches: dict[str, str] = {}
         self._linear_branch_pulls: dict[str, str | None] = {}
         self._closed_reads: set[tuple[str, str]] = set()
-        self._backoff_until = 0.0
-        self._rate_window: RateWindow | None = None
+        self._backoffs: dict[Account, float] = {}
+        self._rate_windows: dict[Account, RateWindow] = {}
         self._throttled = False
-        self._floor_lifted = False
-        self._secondary_wait = 0.0
-        self._secondary_calm_at = 0.0
+        self._floor_lifted: set[Account] = set()
+        self._secondary_waits: dict[Account, float] = {}
+        self._secondary_calm_at: dict[Account, float] = {}
         self._linear_backoff_until = 0.0
         self._linear_requests = 0
         self._linear_complexity = 0
@@ -704,6 +707,13 @@ class LivePollSource:
             cleared_variables=cleared,
         )
         self.gh = self.github.gh
+        self._read_prefix: tuple[str, ...] = self.gh
+        bot = config.poller_reads_app
+        if bot is not None:
+            try:
+                self._read_prefix = reads_prefix(self.gh[:-1], bot, environ)
+            except BrokerError as exc:
+                raise PollSourceError(f"poller_reads_app {bot}: {exc}") from None
 
     def review_actions_by_repo(self) -> dict[str, ReviewActions]:
         cleared = self.config.secret_env_names
@@ -2573,16 +2583,23 @@ class LivePollSource:
                 self.cycle_clock.add_source(name, self.clock() - began)
         route = _call_route(call)
         kind = "graphql" if route.endswith(" graphql") else "billed"
-        self._spend(kind, 1)
+        self._spend(kind, 1, LOGIN)
         if self.cycle_clock is not None:
             self.cycle_clock.add_call(route, kind)
         return result
 
+    def _account(self, argv: list[str]) -> Account:
+        if self.config.poller_reads_app is None:
+            return LOGIN
+        owner = owner_from_args(argv[argv.index("gh") + 1 :])
+        return LOGIN if owner is None else owner.casefold()
+
     def _run_gh_read(self, argv: list[str]) -> GhResult:
-        left = self._backoff_until - self.clock()
+        account = self._account(argv)
+        left = self._backoffs.get(account, 0.0) - self.clock()
         if left > 0:
             raise QuotaDeferred(f"GitHub rate-limit backoff is active ({left:.0f}s left)")
-        window = self._gate_window()
+        window = self._gate_window(account)
         state = quota_state(window, self.wall())
         if state == "pause":
             if not self._throttled:
@@ -2611,7 +2628,7 @@ class LivePollSource:
                 timeout = min(self.gh_call_timeout_seconds, left, self._require_budget())
                 started_wall = self.wall()
                 try:
-                    result = self.gh_runner(argv, timeout)
+                    result = self.gh_runner(self._for_reads(argv, account), timeout)
                 except subprocess.TimeoutExpired:
                     self._require_budget()
                     pause = GH_RETRY_BACKOFF_SECONDS * 2 ** (attempt - 1)
@@ -2626,12 +2643,19 @@ class LivePollSource:
                         f"{route} could not run: {type(exc).__name__}"
                     ) from exc
                 else:
-                    self._observe_quota(argv, result, started_wall)
+                    self._observe_quota(argv, account, result, started_wall)
                     return result
                 self.sleep(pause)
                 attempt += 1
 
-    def _observe_quota(self, argv: list[str], result: GhResult, started_wall: float) -> None:
+    def _for_reads(self, argv: list[str], account: Account) -> list[str]:
+        if account is LOGIN:
+            return list(argv)
+        return [*self._read_prefix, *argv[argv.index("gh") + 1 :]]
+
+    def _observe_quota(
+        self, argv: list[str], account: Account, result: GhResult, started_wall: float
+    ) -> None:
         route = _call_route(argv)
         status = _status_code(result.stderr)
         headers: dict[str, str] = {}
@@ -2652,29 +2676,32 @@ class LivePollSource:
         kind = _call_kind(route, headers, status, started_wall, replayed)
         requests = _request_count(argv, result)
         if own is not None:
-            self._rate_window = _merged_window(self._rate_window, own)
-            self._floor_lifted = False
+            self._rate_windows[account] = _merged_window(self._rate_windows.get(account), own)
+            self._floor_lifted.discard(account)
         if self.cycle_clock is not None:
             self.cycle_clock.add_call(route, kind, requests)
             if own is not None:
-                window = self._rate_window
+                window = self._rate_windows[account]
                 self.cycle_clock.note_core(window.remaining, window.limit, window.reset_epoch)
         if own is None:
-            self._spend(kind, requests)
+            self._spend(kind, requests, account)
         if result.returncode == 0 or not rate_limited(status, result.stdout, result.stderr):
             self._throttled = False
             return
         seconds, basis = self._quota_wait(
-            headers.get("retry-after"), f"{result.stdout}\n{result.stderr}"
+            headers.get("retry-after"), account, f"{result.stdout}\n{result.stderr}"
         )
-        self._backoff_until = max(self._backoff_until, self.clock() + seconds)
-        self._floor_lifted = basis == "retry-after"
+        self._backoffs[account] = max(self._backoffs.get(account, 0.0), self.clock() + seconds)
+        if basis == "retry-after":
+            self._floor_lifted.add(account)
+        else:
+            self._floor_lifted.discard(account)
         if self._throttled:
             return
         self._throttled = True
         if self.warning_sink is None:
             return
-        window = self._live_window()
+        window = self._live_window(account)
         core = "" if window is None else f"; core {window.remaining}/{window.limit} left"
         http = "" if status is None else f"HTTP {status} "
         self.warning_sink(
@@ -2702,7 +2729,9 @@ class LivePollSource:
             self.gh_cache.keep(key, started_wall + ttl, started_wall)
         return False
 
-    def _quota_wait(self, retry_after: str | None, text: str) -> tuple[float, str]:
+    def _quota_wait(
+        self, retry_after: str | None, account: Account, text: str
+    ) -> tuple[float, str]:
         try:
             seconds = float(retry_after)
         except (TypeError, ValueError):
@@ -2710,44 +2739,58 @@ class LivePollSource:
         if 0 <= seconds < math.inf:
             return seconds, "retry-after"
         basis = "reset"
-        window = self._live_window()
+        window = self._live_window(account)
         if window is None:
-            self._probe_rate_window()
+            self._probe_rate_window(account)
             basis = "probe"
-            window = self._live_window()
+            window = self._live_window(account)
         if window is not None and window.remaining <= RATE_PAUSE_REMAINING:
             return window.reset_epoch - self.wall() + RATE_RESET_GRACE_SECONDS, basis
         if window is None and "secondary rate limit" not in text.lower():
             return BACKOFF_SECONDS, "default"
         now = self.clock()
-        if now < self._secondary_calm_at:
-            self._secondary_wait = min(2 * self._secondary_wait, SECONDARY_BACKOFF_MAX_SECONDS)
+        if now < self._secondary_calm_at.get(account, 0.0):
+            wait = min(2 * self._secondary_waits[account], SECONDARY_BACKOFF_MAX_SECONDS)
         else:
-            self._secondary_wait = SECONDARY_BACKOFF_SECONDS
-        self._secondary_calm_at = now + self._secondary_wait + SECONDARY_BACKOFF_MAX_SECONDS
-        return self._secondary_wait, "secondary"
+            wait = SECONDARY_BACKOFF_SECONDS
+        self._secondary_waits[account] = wait
+        self._secondary_calm_at[account] = now + wait + SECONDARY_BACKOFF_MAX_SECONDS
+        return wait, "secondary"
 
-    def _spend(self, kind: CallKind, requests: int) -> None:
-        window = self._live_window()
+    def _spend(self, kind: CallKind, requests: int, account: Account) -> None:
+        window = self._live_window(account)
         if kind == "billed" and window is not None:
-            self._rate_window = replace(window, remaining=max(window.remaining - requests, 0))
+            self._rate_windows[account] = replace(
+                window, remaining=max(window.remaining - requests, 0)
+            )
 
     def pacing(self, base_interval: float, recent_billed: int, cycle_seconds: float) -> Pacing:
-        return pace(self._gate_window(), self.wall(), base_interval, recent_billed, cycle_seconds)
+        windows = [self._gate_window(account) for account in self._rate_windows] or [None]
+        paces = [
+            pace(window, self.wall(), base_interval, recent_billed, cycle_seconds)
+            for window in windows
+        ]
+        return max(
+            paces, key=lambda p: (p.interval_seconds, p.shed_low_priority, p.reason == "pause")
+        )
 
-    def _gate_window(self) -> RateWindow | None:
-        window = self._rate_window
-        if self._floor_lifted and quota_state(window, self.wall()) == "pause":
+    def _gate_window(self, account: Account) -> RateWindow | None:
+        window = self._rate_windows.get(account)
+        if account in self._floor_lifted and quota_state(window, self.wall()) == "pause":
             return None
         return window
 
-    def _live_window(self) -> RateWindow | None:
-        window = self._rate_window
+    def _live_window(self, account: Account) -> RateWindow | None:
+        window = self._rate_windows.get(account)
         return window if window is not None and window.reset_epoch > self.wall() else None
 
-    def _probe_rate_window(self) -> None:
+    def _probe_rate_window(self, account: Account) -> None:
+        argv = self._for_reads([*self.gh, "api", "rate_limit"], account)
+        if account is not LOGIN:
+            # rate_limit names no owner, so the helper takes it from GH_REPO.
+            argv.insert(len(self.gh) - 1, f"GH_REPO={account}/{account}")
         try:
-            result = self.gh_runner([*self.gh, "api", "rate_limit"], self.gh_call_timeout_seconds)
+            result = self.gh_runner(argv, self.gh_call_timeout_seconds)
         except (subprocess.TimeoutExpired, OSError):
             return
         if result.returncode != 0:
@@ -2760,7 +2803,7 @@ class LivePollSource:
             return
         window = _rate_window(core.get("limit"), core.get("remaining"), core.get("reset"))
         if window is not None:
-            self._rate_window = _merged_window(self._rate_window, window)
+            self._rate_windows[account] = _merged_window(self._rate_windows.get(account), window)
 
     def _timed(self, name: str) -> AbstractContextManager[None]:
         return nullcontext() if self.cycle_clock is None else self.cycle_clock.source(name)
