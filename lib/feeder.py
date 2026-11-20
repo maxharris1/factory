@@ -108,10 +108,7 @@ rendered from the streak's first red read, and a feeder posts or retires it
 only while it holds the row's claim, which lapses after CLAIM_SECONDS. Each
 later red head of the streak adds one comment with its log to the open issue,
 once per head by a marker, under the row's claim. A head whose log read fails
-posts nothing until a later poll reads it. When no feed of the issue has
-begun (no branch and not feeding or fed), a green read closes it with one
-comment, once by a marker; a fed issue stays open and only its row ends. An
-unreadable issue state on a green read keeps the row for the next poll.
+posts nothing until a later poll reads it.
 
 Stacked branches (#205, lib/branch_stack.py): a ticket whose branch already
 exists and carries commits of another open PR is `waiting-blocked` until
@@ -1313,15 +1310,15 @@ class Feeder:
         for (repo, base), line in lines.items():
             row = self._main_fix_row(repo, base)
             issue_open: bool | None = None
-            fed = False
+            feed_begun = False
             if row is not None and row.issue is not None and not line.read.failed:
-                fed = self._main_fix_fed(repo, row.issue)
+                feed_begun = self._main_fix_feed_begun(repo, row.issue)
                 try:
                     issue_open = self.github.issue_state(line.project.repo, row.issue) == "open"
                 except Exception as exc:
                     self.log(f"feeder: cannot read main-fix {repo}#{row.issue}: {safe_ship_error(exc)}")
             try:
-                for action in decide(row, line.read, issue_open=issue_open, fed=fed):
+                for action in decide(row, line.read, issue_open=issue_open, feed_begun=feed_begun):
                     if isinstance(action, File):
                         claimed = self._claim_main_fix(line, repo, base, action.red, now)
                         if claimed is not None:
@@ -1347,7 +1344,7 @@ class Feeder:
                 self.log(f"feeder: main-fix for {repo}@{base} not filed yet: {safe_ship_error(exc)}")
         return errors
 
-    def _main_fix_fed(self, repo: str, issue: int) -> bool:
+    def _main_fix_feed_begun(self, repo: str, issue: int) -> bool:
         with self.queue.connect() as connection:
             found = connection.execute(
                 f"SELECT 1 FROM {FEEDER_TABLE} WHERE repo = ? AND issue = ? "

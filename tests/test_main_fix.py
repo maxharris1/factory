@@ -69,7 +69,7 @@ LATER_READ = MainRead(LATER, False)
     ],
 )
 def test_decide(row, read, issue_open, actions) -> None:
-    assert decide(row, read, issue_open=issue_open, fed=False) == actions
+    assert decide(row, read, issue_open=issue_open, feed_begun=False) == actions
 
 
 @pytest.mark.parametrize(
@@ -83,8 +83,8 @@ def test_decide(row, read, issue_open, actions) -> None:
         (OPEN, FAILED, True, ()),
     ],
 )
-def test_decide_leaves_a_fed_issue_open(row, read, issue_open, actions) -> None:
-    assert decide(row, read, issue_open=issue_open, fed=True) == actions
+def test_decide_leaves_an_issue_whose_feed_began_open(row, read, issue_open, actions) -> None:
+    assert decide(row, read, issue_open=issue_open, feed_begun=True) == actions
 
 
 def test_the_close_comment_carries_its_marker_and_names_the_base() -> None:

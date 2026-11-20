@@ -73,17 +73,16 @@ Action = File | Resume | Retire | Comment | Close
 
 
 def decide(
-    row: MainFixRow | None, read: MainRead, *, issue_open: bool | None, fed: bool
+    row: MainFixRow | None, read: MainRead, *, issue_open: bool | None, feed_begun: bool
 ) -> tuple[Action, ...]:
     """What to do for one base, given its active row (filing or open) and
-    this poll's read. issue_open is None when the issue's state is unknown;
-    fed is whether a feed of the issue has begun."""
+    this poll's read. issue_open is None when the issue's state is unknown."""
     if read.failed:
         return ()
     if read.red is None:
         if row is None:
             return ()
-        if row.state == "filing" or fed or issue_open is False:
+        if row.state == "filing" or feed_begun or issue_open is False:
             return (Retire(row),)
         return () if issue_open is None else (Close(row),)
     if row is None:
