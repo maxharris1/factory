@@ -105,7 +105,10 @@ red checks and their log tails, and the same poll feeds it as `building`. A
 issue across crashes and feeders; a green read ends the streak, and an issue
 closed while main stays red starts a new one. The row stores the title and body
 rendered from the streak's first red read, and a feeder posts or retires it
-only while it holds the row's claim, which lapses after CLAIM_SECONDS.
+only while it holds the row's claim, which lapses after CLAIM_SECONDS. Each
+later red head of the streak adds one comment with its log to the open issue,
+once per head by a marker, under the row's claim. A head whose log read fails
+posts nothing until a later poll reads it.
 
 Stacked branches (#205, lib/branch_stack.py): a ticket whose branch already
 exists and carries commits of another open PR is `waiting-blocked` until
@@ -164,7 +167,7 @@ from lib.device_sync import Blocked
 from lib.dispatch.bookkeeping import LockLedger, bookkeeping_write, must_write
 from lib.dispatch.types import BaseCheck, FailedCheck
 from lib.dispatcher import Comment, TicketRef, TrackedTicket, safe_ship_error
-from lib.evidence.ci import MainRed, ci_evidence, main_red
+from lib.evidence.ci import CIEvidence, MainRed, ci_evidence, main_red
 from lib.evidence.criteria import numbered
 from lib.factory_md import FactoryContext
 from lib.feeder_gates import (
@@ -207,11 +210,14 @@ from lib.journeys import (
 )
 from lib.main_fix import (
     MAIN_FIX_TABLE,
+    Comment as MainFixComment,
     File,
     MainFixRow,
     MainRead,
     Retire,
     decide,
+    head_comment,
+    head_marker,
     issue_body,
     issue_title,
     marked_issue_fate,
@@ -629,6 +635,8 @@ class GitHubIntake(Protocol):
     def marked_issues(self, repo: str, marker: str, since: float) -> tuple[int, ...]: ...
 
     def close_issue(self, repo: str, number: int, comment: str) -> None: ...
+
+    def post_issue_comment_once(self, repo: str, number: int, body: str, marker: str) -> str: ...
 
     def issue_state(self, repo: str, number: int) -> str: ...
 
@@ -1311,9 +1319,12 @@ class Feeder:
                         if claimed is not None:
                             self._post_main_fix(line, *claimed)
                         continue
+                    if isinstance(action, MainFixComment):
+                        self._comment_main_fix(line, action.row, action.red)
+                        continue
                     claim = None
                     if action.row.state == "filing":
-                        claim = self._take_main_fix(action.row.marker)
+                        claim = self._take_main_fix(action.row.marker, "filing")
                         if claim is None:
                             continue
                     if isinstance(action, Retire):
@@ -1361,76 +1372,121 @@ class Feeder:
             return None
         return row, claim
 
-    def _take_main_fix(self, marker: str) -> str | None:
+    def _take_main_fix(self, marker: str, state: str) -> str | None:
         claim = uuid.uuid4().hex
         now = self.queue.now()
         with self.queue.connect() as connection:
             taken = connection.execute(
                 f"UPDATE {MAIN_FIX_TABLE} SET claimed_by = ?, claimed_at = ? "
-                "WHERE marker = ? AND state = 'filing' AND (claimed_by IS NULL OR claimed_at <= ?)",
-                (claim, now, marker, now - CLAIM_SECONDS),
+                "WHERE marker = ? AND state = ? AND (claimed_by IS NULL OR claimed_at <= ?)",
+                (claim, now, marker, state, now - CLAIM_SECONDS),
             ).rowcount
         return claim if taken == 1 else None
 
-    def _renew_main_fix(self, marker: str, claim: str) -> None:
+    def _renew_main_fix(self, marker: str, claim: str, state: str) -> None:
         now = self.queue.now()
         with self.queue.connect() as connection:
             renewed = connection.execute(
                 f"UPDATE {MAIN_FIX_TABLE} SET claimed_at = ? "
-                "WHERE marker = ? AND state = 'filing' AND claimed_by = ? AND claimed_at > ?",
-                (now, marker, claim, now - CLAIM_SECONDS),
+                "WHERE marker = ? AND state = ? AND claimed_by = ? AND claimed_at > ?",
+                (now, marker, state, claim, now - CLAIM_SECONDS),
             ).rowcount
         if renewed != 1:
             raise _ClaimLost(marker)
+
+    def _release_main_fix(self, marker: str, claim: str) -> None:
+        with self.queue.connect() as connection:
+            connection.execute(
+                f"UPDATE {MAIN_FIX_TABLE} SET claimed_by = NULL WHERE marker = ? AND claimed_by = ?",
+                (marker, claim),
+            )
 
     def _retire_main_fix(self, marker: str) -> None:
         with self.queue.connect() as connection:
             connection.execute(f"UPDATE {MAIN_FIX_TABLE} SET state = 'closed' WHERE marker = ?", (marker,))
 
     def _main_fix_body(self, line: _MainLine, base: str, red: MainRed, tag: str) -> str:
-        repo = line.project.repo
-        logs: dict[str, str | None] = {}
+        runs = self._main_fix_runs(line.project.repo, red)
+        evidence = self._main_fix_evidence(line.project.repo, red, runs)
+        return issue_body(line.project.repo, base, line.required, red, evidence, tag)
+
+    def _main_fix_runs(self, repo: str, red: MainRed) -> dict[str, Mapping[str, str] | None]:
+        runs: dict[str, Mapping[str, str] | None] = {}
         for run_id in dict.fromkeys(check.run_id for check in red.checks):
             try:
-                run_logs = self.github.failed_run_logs(repo, run_id)
+                runs[run_id] = self.github.failed_run_logs(repo, run_id)
             except Exception as exc:
                 self.log(f"feeder: {repo} run {run_id} log unavailable: {safe_ship_error(exc)}")
-                continue
-            for check in red.checks:
-                if check.run_id == run_id:
-                    logs[check.job_id] = run_logs.get(check.name)
+                runs[run_id] = None
+        return runs
+
+    def _main_fix_evidence(
+        self, repo: str, red: MainRed, runs: Mapping[str, Mapping[str, str] | None]
+    ) -> CIEvidence:
+        logs = {
+            check.job_id: run_logs.get(check.name)
+            for check in red.checks
+            if (run_logs := runs[check.run_id]) is not None
+        }
         failed = [
             FailedCheck(check.name, check.run_id, check.job_id,
                         f"https://github.com/{repo}/actions/runs/{check.run_id}")
             for check in red.checks
         ]
-        evidence = ci_evidence(failed=failed, logs=logs, limit=sys.maxsize)
-        return issue_body(repo, base, line.required, red, evidence, tag)
+        return ci_evidence(failed=failed, logs=logs, limit=sys.maxsize)
 
     def _post_main_fix(self, line: _MainLine, row: MainFixRow, claim: str) -> None:
         repo = line.project.repo
         try:
             number = self.github.file_repo_issue(
                 repo, row.title, row.body, (line.label, MAIN_FIX_LABEL), row.marker, row.filed_at,
-                before_post=lambda: self._renew_main_fix(row.marker, claim),
+                before_post=lambda: self._renew_main_fix(row.marker, claim, "filing"),
             )
         except _ClaimLost:
+            self._release_main_fix(row.marker, claim)
             self.log(f"feeder: main-fix for {repo}@{row.base} left to the feeder now holding it")
             return
         except Exception:
-            with self.queue.connect() as connection:
-                connection.execute(
-                    f"UPDATE {MAIN_FIX_TABLE} SET claimed_by = NULL WHERE marker = ? AND claimed_by = ?",
-                    (row.marker, claim),
-                )
+            self._release_main_fix(row.marker, claim)
             raise
         keep = self._close_main_fix_duplicates(repo, row, number)
         with self.queue.connect() as connection:
             connection.execute(
-                f"UPDATE {MAIN_FIX_TABLE} SET state = 'open', issue = ? WHERE marker = ? AND state != 'closed'",
+                f"UPDATE {MAIN_FIX_TABLE} SET state = 'open', issue = ? "
+                "WHERE marker = ? AND state != 'closed'",
                 (keep, row.marker),
             )
+        self._release_main_fix(row.marker, claim)
         self.log(f"feeder: filed main-fix {repo}#{keep} for red {row.base} at {row.last_head[:8]}")
+
+    def _comment_main_fix(self, line: _MainLine, row: MainFixRow, red: MainRed) -> None:
+        repo = line.project.repo
+        claim = self._take_main_fix(row.marker, "open")
+        if claim is None:
+            return
+        try:
+            runs = self._main_fix_runs(repo, red)
+            if None in runs.values():
+                raise RuntimeError(f"a log of red {red.head[:8]} is unreadable")
+            evidence = self._main_fix_evidence(repo, red, runs)
+            tag = head_marker(row, red.head)
+            body = head_comment(row.base, red, evidence, tag)
+            self._renew_main_fix(row.marker, claim, "open")
+            self.github.post_issue_comment_once(repo, row.issue, body, tag)
+        except _ClaimLost:
+            self._release_main_fix(row.marker, claim)
+            self.log(f"feeder: main-fix {repo}#{row.issue} left to the feeder now holding it")
+            return
+        except Exception:
+            self._release_main_fix(row.marker, claim)
+            raise
+        with self.queue.connect() as connection:
+            connection.execute(
+                f"UPDATE {MAIN_FIX_TABLE} SET last_head = ?, claimed_by = NULL "
+                "WHERE marker = ? AND claimed_by = ?",
+                (red.head, row.marker, claim),
+            )
+        self.log(f"feeder: added {red.head[:8]} log to main-fix {repo}#{row.issue}")
 
     def _close_main_fix_duplicates(self, repo: str, row: MainFixRow, posted: int) -> int:
         found = (posted, *self.github.marked_issues(repo, row.marker, row.filed_at))

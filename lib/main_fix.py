@@ -58,7 +58,13 @@ class Retire:
     row: MainFixRow
 
 
-Action = File | Resume | Retire
+@dataclass(frozen=True)
+class Comment:
+    row: MainFixRow
+    red: MainRed
+
+
+Action = File | Resume | Retire | Comment
 
 
 def decide(row: MainFixRow | None, read: MainRead, *, issue_open: bool | None) -> tuple[Action, ...]:
@@ -74,6 +80,8 @@ def decide(row: MainFixRow | None, read: MainRead, *, issue_open: bool | None) -
         return (Resume(row),)
     if issue_open is False:
         return (Retire(row), File(read.red))
+    if issue_open is True and read.red.head != row.last_head:
+        return (Comment(row, read.red),)
     return ()
 
 
@@ -85,6 +93,10 @@ def marked_issue_fate(row: MainFixRow, number: int) -> Literal["feed", "hold", "
 
 def marker(repo: str, base: str, filed_at: float) -> str:
     return f"<!-- factory-main-fix id={repo.lower()}:{base}:{filed_at} -->"
+
+
+def head_marker(row: MainFixRow, head: str) -> str:
+    return f"<!-- factory-main-fix-head id={row.repo.lower()}:{row.base}:{row.filed_at} head={head} -->"
 
 
 def issue_title(red: MainRed) -> str:
@@ -100,25 +112,38 @@ def issue_body(
     evidence: CIEvidence,
     marker: str,
 ) -> str:
+    patterns = ", ".join(f"`{pattern}`" for pattern in required)
+    return _with_evidence(
+        [
+            marker,
+            "Risk: high",
+            "Plan first: no",
+            "Depends on: none",
+            "Type: bug-fix",
+            "",
+            f"`{base}` is red at `{red.head}`. The feeder starts no other ticket on `{base}` "
+            "until its required checks pass. Fix the failures below.",
+            "",
+            "## Acceptance criteria",
+            "",
+            f"- The required checks ({patterns}) pass on `{base}`.",
+        ],
+        evidence,
+    )
+
+
+def head_comment(base: str, red: MainRed, evidence: CIEvidence, marker: str) -> str:
+    return _with_evidence([marker, "", f"`{base}` is still red, now at `{red.head}`."], evidence)
+
+
+def _with_evidence(lines: list[str], evidence: CIEvidence) -> str:
     from lib.feeder import BODY_LIMIT, _fence
 
-    patterns = ", ".join(f"`{pattern}`" for pattern in required)
     tests = dict.fromkeys(
         test for job in evidence.jobs for test in failing_tests(job.log_tail or "")
     )
     lines = [
-        marker,
-        "Risk: high",
-        "Plan first: no",
-        "Depends on: none",
-        "Type: bug-fix",
-        "",
-        f"`{base}` is red at `{red.head}`. The feeder starts no other ticket on `{base}` "
-        "until its required checks pass. Fix the failures below.",
-        "",
-        "## Acceptance criteria",
-        "",
-        f"- The required checks ({patterns}) pass on `{base}`.",
+        *lines,
         "",
         "## Red checks",
         "",
