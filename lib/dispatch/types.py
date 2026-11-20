@@ -36,6 +36,15 @@ class Comment:
 
 
 @dataclass(frozen=True)
+class PullReview:
+    id: str
+    author: str
+    state: str
+    submitted_at: float
+    url: str | None = None
+
+
+@dataclass(frozen=True)
 class HandoffCandidate:
     comment: Comment
     unread: bool
@@ -280,6 +289,7 @@ class TrackedTicket:
     ticket_url: str | None = None
     git_branch_name: str | None = None
     pr_number: str | None = None
+    reviews: tuple[PullReview, ...] = ()
     brief: str | None = None
     brief_text: str | None = None
     brief_url: str | None = None

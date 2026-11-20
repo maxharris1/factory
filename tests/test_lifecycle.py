@@ -12,12 +12,14 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from lib.device_monitor import DeviceMonitor
 from lib.device_pool import DevicePool
+from lib.dispatch.types import PullReview
 from lib.dispatcher import CIResult, Comment, TrackedTicket
 from lib.job_state import REQUEUED_EARLY_EXIT, requeue_unstarted
 from lib.queue import Job, JobRequest
@@ -65,13 +67,17 @@ class Flow:
         self.head = HEADS[0]
         self.ci = "success"
         self.factory = factory(ship=ship, rounds_high=rounds_high)
+        self.reviews: list[PullReview] = []
 
     def snapshot(self) -> TrackedTicket:
-        return ticket(
-            *self.comments,
-            head=self.head,
-            ci={self.head: CIResult(self.ci)},
-            factory_config=self.factory,
+        return replace(
+            ticket(
+                *self.comments,
+                head=self.head,
+                ci={self.head: CIResult(self.ci)},
+                factory_config=self.factory,
+            ),
+            reviews=tuple(self.reviews),
         )
 
     def add(self, comment_id: str, body: str, author: str) -> None:

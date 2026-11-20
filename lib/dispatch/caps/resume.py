@@ -40,13 +40,58 @@ class ResumeMixin:
         if outcome == "go-not-from-approver":
             self._wake_comment_problem(ticket, comment, outcome, outcome)
             return True, outcome
+        self._after_lift(ticket, queued, reopened)
+        return True, outcome
+
+    def _reopen_on_reviews(self, ticket: TrackedTicket) -> None:
+        if ticket.factory.ship != "handoff" or not ticket.reviews:
+            return
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT workflow_state FROM ticket_state WHERE repo = ? AND ticket_id = ?",
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+            replayed = {
+                str(item["comment_id"])
+                for item in connection.execute(
+                    "SELECT comment_id FROM review_events"
+                    " WHERE repo = ? AND ticket_id = ? AND comment_id LIKE 'review:%'",
+                    (ticket.repo.lower(), ticket.ticket_id),
+                )
+            }
+        if row is None or row["workflow_state"] != "handed-off":
+            return
+        approved_at = self._shipped_approval_at(ticket)
+        if approved_at is None:
+            return
+        reviewers = {login.casefold() for login in ticket.factory.human_reviewers}
+        for review in sorted(ticket.reviews, key=lambda item: (item.submitted_at, int(item.id))):
+            if (
+                review.state != "CHANGES_REQUESTED"
+                or review.submitted_at <= approved_at
+                or f"review:{review.id}" in replayed
+                or not (self.approvals.may_approve(review.author) or review.author.casefold() in reviewers)
+            ):
+                continue
+            comment = Comment(
+                id=f"review:{review.id}",
+                author=review.author,
+                body="",
+                created_at=review.submitted_at,
+                url=review.url,
+            )
+            lifted = self._lift_cap(ticket, comment, building=True, trusted_review=True)
+            if lifted is not None and lifted[1]:
+                self._after_lift(ticket, queued=True, reopened=True)
+                return
+
+    def _after_lift(self, ticket: TrackedTicket, queued: bool, reopened: bool) -> None:
         if queued:
             self.clear_attention(ticket.repo, ticket.ticket_id, "ready-after-cap")
             self.clear_attention(ticket.repo, ticket.ticket_id, UNANNOUNCED_AFTER_CAP)
         if reopened:
             self._reopen_linear(ticket)
         self._write_state_label(ticket, "fixing")
-        return True, outcome
 
     def _lift_cap(
         self,
@@ -54,6 +99,7 @@ class ResumeMixin:
         comment: Comment,
         *,
         building: bool,
+        trusted_review: bool = False,
     ) -> tuple[str, bool, bool] | None:
         scope = _scope(ticket.repo, ticket.ticket_id)
         ticket = self._fresh_issue(ticket)
@@ -81,6 +127,9 @@ class ResumeMixin:
                 connection.commit()
                 return None
             handed_off = row["workflow_state"] == "handed-off"
+            if trusted_review and not handed_off:
+                connection.commit()
+                return None
             completed = int(row["review_round"])
             reopen = False
             if handed_off:
@@ -90,7 +139,24 @@ class ResumeMixin:
                         connection.commit()
                         return None
                     reopen = True
-            if not self._may_lift_cap(comment.author):
+                elif trusted_review:
+                    connection.execute(
+                        """
+                        INSERT INTO review_events (repo, ticket_id, comment_id, outcome)
+                        VALUES (?, ?, ?, 'changes-requested-after-cap')
+                        """,
+                        (ticket.repo.lower(), ticket.ticket_id, comment.id),
+                    )
+                    self._flag_attention_once(
+                        connection,
+                        ticket.repo,
+                        ticket.ticket_id,
+                        "changes-requested-after-cap",
+                        _comment_link(comment),
+                    )
+                    connection.commit()
+                    return "changes-requested-after-cap", False, False
+            if not trusted_review and not self._may_lift_cap(comment.author):
                 connection.commit()
                 return "go-not-from-approver", False, False
             cap_extra = int(row["cap_extra"]) + (0 if reopen else 1)
@@ -135,6 +201,7 @@ class ResumeMixin:
                         instruction=verdict,
                         resume=True,
                         kind="reopen" if reopen else None,
+                        source="review" if trusted_review else None,
                         ci_failure=red_checks(ticket, ticket.current_head),
                         connection=connection,
                     ),

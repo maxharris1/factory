@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from lib.brief.common import detail_of
-from lib.dispatch.types import LinearState, RetryableStateError
+from lib.dispatch.types import LinearState, PullReview, RetryableStateError
 from lib.orch_yml import Approvals
 from lib.dispatch.helpers import _comment_link
 from tests.test_dispatch_answers_handoff import HANDOFF
@@ -334,3 +334,184 @@ def test_a_ready_after_a_capped_reopen_is_handed_off_waits_for_a_go(tmp_path: Pa
 
     assert len(jobs(flow.queue, "review")) == reviews
     assert attention(flow.queue) == ["ready-after-cap"]
+
+
+REVIEWER = "olivermillard"
+
+
+def reviewed(flow: Flow, review_id: str, author: str = REVIEWER, **fields) -> None:
+    flow.now[0] += 10
+    flow.reviews.append(
+        PullReview(
+            id=review_id,
+            author=author,
+            state=fields.get("state", "CHANGES_REQUESTED"),
+            submitted_at=fields.get("submitted_at", flow.now[0]),
+            url=f"https://github.com/{REPO}/pull/{TICKET}#pullrequestreview-{review_id}",
+        )
+    )
+    flow.dispatcher.process(flow.snapshot())
+
+
+def review_outcomes(flow: Flow) -> list[tuple[str, str]]:
+    with flow.queue.connect() as connection:
+        return [
+            (str(row["comment_id"]), str(row["outcome"]))
+            for row in connection.execute(
+                "SELECT comment_id, outcome FROM review_events"
+                " WHERE comment_id LIKE 'review:%' ORDER BY rowid"
+            )
+        ]
+
+
+def with_human_reviewer(flow: Flow) -> Flow:
+    flow.factory = replace(flow.factory, human_reviewers=(REVIEWER,))
+    return flow
+
+
+def test_a_trusted_changes_requested_review_under_the_cap_reopens_like_a_go(
+    tmp_path: Path,
+) -> None:
+    flow = with_human_reviewer(Flow(tmp_path))
+    flow.hand_off_at(2)
+    before = len(fixes(flow))
+
+    reviewed(flow, "901", author="OliverMillard")
+
+    row = flow.state()
+    assert (
+        row["workflow_state"],
+        row["cap_extra"],
+        row["approved_head"],
+        row["review_round"],
+        row["reopen_hold"],
+    ) == ("fixing", 0, None, 2, "-")
+    [fix] = fixes(flow)[before:]
+    assert (fix["source_comment_id"], fix["head"], round_of(fix)) == ("review:901", HEADS[2], "3/3")
+    assert review_outcomes(flow) == [("review:901", "queued-fix")]
+    assert flow.actions.linear_reopens == [TICKET]
+    assert flow.actions.states[-1] == "fixing"
+    claimed = flow.finish("claude", f"ready-{HEADS[5][:6]}")
+    assert (detail_of(claimed)["kind"], detail_of(claimed)["source"]) == ("reopen", "review")
+    assert detail_of(claimed)["instruction"] == flow.reviews[-1].url
+    assert flow.ready(HEADS[5]) == "queued-review"
+    assert round_of(jobs(flow.queue, "review")[-1]) == "3/3"
+
+
+def test_an_approvers_changes_requested_review_reopens(tmp_path: Path) -> None:
+    flow = Flow(tmp_path)
+    flow.hand_off_at(2)
+    flow.dispatcher.approvals = Approvals(logins=frozenset({"max-login"}))
+
+    reviewed(flow, "902", author="max-login")
+
+    assert flow.state()["workflow_state"] == "fixing"
+    assert [fix["source_comment_id"] for fix in fixes(flow)][-1] == "review:902"
+
+
+@pytest.mark.parametrize(
+    ("author", "state"),
+    [
+        ("stranger", "CHANGES_REQUESTED"),
+        ("grok-login", "CHANGES_REQUESTED"),
+        (REVIEWER, "APPROVED"),
+        (REVIEWER, "COMMENTED"),
+        (REVIEWER, "DISMISSED"),
+    ],
+)
+def test_an_untrusted_or_other_review_changes_nothing(
+    tmp_path: Path, author: str, state: str
+) -> None:
+    flow = with_human_reviewer(Flow(tmp_path))
+    flow.hand_off_at(2)
+    before = observed(flow)
+
+    reviewed(flow, "903", author=author, state=state)
+
+    assert observed(flow) == before
+    assert review_outcomes(flow) == []
+    assert flow.actions.linear_reopens == []
+
+
+def test_a_changes_requested_review_from_before_the_approval_changes_nothing(
+    tmp_path: Path,
+) -> None:
+    flow = with_human_reviewer(Flow(tmp_path))
+    flow.hand_off_at(2)
+    approved_at = next(item for item in flow.comments if item.id == "approve-2/3").created_at
+    before = observed(flow)
+
+    reviewed(flow, "904", submitted_at=approved_at - 1)
+
+    assert observed(flow) == before
+    assert review_outcomes(flow) == []
+
+
+def test_a_changes_requested_review_on_a_ticket_not_handed_off_changes_nothing(
+    tmp_path: Path,
+) -> None:
+    flow = with_human_reviewer(Flow(tmp_path))
+    assert flow.go() == "queued-build"
+    before = observed(flow)
+
+    reviewed(flow, "905")
+
+    assert observed(flow) == before
+    assert review_outcomes(flow) == []
+
+
+def test_a_trusted_changes_requested_review_at_the_cap_flags_once_and_queues_nothing(
+    tmp_path: Path,
+) -> None:
+    flow = with_human_reviewer(Flow(tmp_path))
+    flow.hand_off_at(3)
+    before = len(jobs(flow.queue))
+    round_before = flow.state()["review_round"]
+
+    reviewed(flow, "906")
+    reviewed(flow, "907")
+
+    row = flow.state()
+    assert (row["workflow_state"], row["cap_extra"], row["review_round"]) == ("handed-off", 0, round_before)
+    assert len(jobs(flow.queue)) == before
+    assert attention(flow.queue) == ["changes-requested-after-cap"]
+    assert review_outcomes(flow) == [
+        ("review:906", "changes-requested-after-cap"),
+        ("review:907", "changes-requested-after-cap"),
+    ]
+    assert flow.actions.linear_reopens == []
+
+
+def test_a_replayed_review_at_the_cap_raises_no_second_flag(tmp_path: Path) -> None:
+    flow = with_human_reviewer(Flow(tmp_path))
+    flow.hand_off_at(3)
+    reviewed(flow, "908")
+    flow.dispatcher.clear_attention(REPO, TICKET, "changes-requested-after-cap")
+    flow.dispatcher.process(flow.snapshot())
+    assert attention(flow.queue) == []
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert attention(flow.queue) == []
+    assert review_outcomes(flow) == [("review:908", "changes-requested-after-cap")]
+
+
+def test_a_replayed_review_queues_nothing_more_and_keeps_the_round(tmp_path: Path) -> None:
+    flow = with_human_reviewer(Flow(tmp_path))
+    flow.hand_off_at(2)
+    reviewed(flow, "909")
+    after = len(jobs(flow.queue))
+
+    flow.dispatcher.process(flow.snapshot())
+    with flow.queue.connect() as connection:
+        connection.execute(
+            "UPDATE ticket_state SET workflow_state = 'handed-off', reopen_hold = NULL"
+            " WHERE repo = ? AND ticket_id = ?",
+            (REPO, TICKET),
+        )
+    flow.dispatcher.process(flow.snapshot())
+
+    assert len(jobs(flow.queue)) == after
+    assert (flow.state()["review_round"], flow.state()["cap_extra"]) == (2, 0)
+    assert review_outcomes(flow) == [("review:909", "queued-fix")]
+    assert flow.actions.linear_reopens == [TICKET]

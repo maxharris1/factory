@@ -78,6 +78,7 @@ class CommentsMixin:
             self._redrive_handoffs(ticket)
             self._resume_unannounced_review(ticket)
             self._process_comments(ticket, comments)
+            self._reopen_on_reviews(self._polled.get(key, ticket))
             if _base_mismatch(self._polled.get(key, ticket)) is not None:
                 return
             self._requeue_unanswered_jobs(ticket)
