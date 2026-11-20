@@ -134,6 +134,7 @@ class Detail:
     ids: tuple[str, ...]
     live: Mapping[str, Mapping]
     regression: tuple[str, ...]
+    new: tuple[str, ...]
 
     @classmethod
     def of(cls, raw: Mapping) -> Detail:
@@ -147,6 +148,7 @@ class Detail:
             ids=tuple(raw["scenarios"]),
             live={item["id"]: item for item in raw["live"]},
             regression=tuple(raw.get("regression") or ()),
+            new=tuple(raw.get("new") or ()),
         )
 
 
@@ -264,12 +266,14 @@ def _results(rows: Sequence[LaneRow]) -> tuple[dict[str, str], dict[str, str]]:
     return head, base
 
 
-def owed_base_check(rows: Sequence[LaneRow]) -> tuple[str, ...]:
+def owed_base_check(rows: Sequence[LaneRow], new: Sequence[str]) -> tuple[str, ...]:
     latest = newest(rows).values()
     if any(row.kind == "base-check" for row in latest) or any(row.state != "reported" for row in latest):
         return ()
     head, base = _results(list(latest))
-    return tuple(item for item, outcome in head.items() if outcome == "failed" and item not in base)
+    return tuple(
+        item for item, outcome in head.items() if outcome == "failed" and item not in base and item not in new
+    )
 
 
 def head_lanes(rows: Sequence[LaneRow]) -> list[LaneRow]:
@@ -300,7 +304,9 @@ def decide(rows: Sequence[LaneRow], detail: Detail) -> Decision:
         for item in detail.ids
     )
     findings = tuple(
-        f"- [follow-up] {item} ({criterion}): failed at the head commit and also on the base commit"
+        f"- [blocking] {item} ({criterion}): failed at the head commit on a journey new in this pull request"
+        if item in detail.new
+        else f"- [follow-up] {item} ({criterion}): failed at the head commit and also on the base commit"
         if base.get(item) == "failed"
         else f"- [blocking] {item} ({criterion}): failed at the head commit and not on the base commit"
         for item, criterion, word in table
@@ -596,7 +602,7 @@ class QaWorker:
         gapped = any(row.state in GAPS for row in newest(rows).values())
         if not gapped and len({row.slice for row in rows}) < len(plan.slices):
             return
-        owed = () if gapped else owed_base_check(rows)
+        owed = () if gapped else owed_base_check(rows, detail.new)
         if owed:
             base_check = Slice(max(row.slice for row in rows) + 1, "base-check", owed)
             with self.queue.connect() as connection:

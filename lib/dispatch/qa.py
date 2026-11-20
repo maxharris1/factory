@@ -360,6 +360,7 @@ class QaMixin:
                             for scenario in chosen
                         ],
                         "regression": [qa_id for qa_id in (live.regression if live else ()) if qa_id in run.scenario_ids],
+                        "new": [qa_id for qa_id in (live.new if live else ()) if qa_id in run.scenario_ids],
                         "run_id": run_id,
                         "pr_number": ticket.pr_number,
                     },
@@ -585,11 +586,12 @@ class QaMixin:
                 return EnvFailed(sum(_env_failure(item) for item in rows))
 
     def _retry_qa(self, ticket: TrackedTicket, comment: Comment, head: str) -> None:
+        from lib.evidence.scenarios import LiveScenarios, Scenario
+
         qa = ticket.factory.qa
         assert qa is not None
         key = (ticket.repo.lower(), ticket.ticket_id)
         generation = self._generation(ticket.repo, ticket.ticket_id)
-        live = self._qa_live(self._fresh_issue(ticket))
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             last = connection.execute(
@@ -603,7 +605,19 @@ class QaMixin:
                 """,
                 (*key, head),
             ).fetchone()
-            scenarios = tuple(json.loads(last["detail"]).get("scenarios") or ())
+            detail = json.loads(last["detail"])
+            scenarios = tuple(detail.get("scenarios") or ())
+            live = LiveScenarios(
+                scenarios=tuple(
+                    Scenario(
+                        item["id"], item["criterion"], item["steps"], item["passes"], item["pack"],
+                        tuple(item["saves"]),
+                    )
+                    for item in detail.get("live") or ()
+                ),
+                regression=tuple(detail.get("regression") or ()),
+                new=tuple(detail.get("new") or ()),
+            )
             connection.execute(
                 """
                 UPDATE qa_runs SET state = 'cancelled', reason = 'env-retry'

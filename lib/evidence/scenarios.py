@@ -3,10 +3,12 @@
 Pure functions: the caller passes only comments it already trusts, and this
 decides nothing about trust. When the canonical brief carries a QA plan
 (`### QA journeys`, lib.journeys), the scenarios come from it alone, one per
-`### QA criteria` line, and no plan or ready comment is read. When the
-issue's criteria are given and a `qa` tag no longer matches the brief's
-check, or a check's ac id is gone, the result is an `EditedTag` naming the
-first such ac id.
+`### QA criteria` line, and no plan or ready comment is read. A scenario
+that drives a journey new in the pull request is in `new`, never in
+`regression`, so it is never compared against base. When the issue's
+criteria are given and a `qa` tag no longer matches the brief's check, or a
+check's ac id is gone, the result is an `EditedTag` naming the first such
+ac id.
 
 Without a plan in the brief, the scenarios come from the latest `kind=plan`
 comment's `## Verify, live` section. When there is no plan, or its section is
@@ -81,6 +83,7 @@ class NotLive:
 class LiveScenarios:
     scenarios: tuple[Scenario, ...] = ()
     regression: tuple[str, ...] = ()
+    new: tuple[str, ...] = ()
     not_live: tuple[NotLive, ...] = ()
     source_url: str | None = None
 
@@ -205,16 +208,18 @@ def qa_scenarios(
 
 
 def from_plan(plan: QaPlan) -> LiveScenarios:
-    """One scenario per qa check; a check that drives a new journey stays out of base regression."""
+    """One scenario per qa check; a check that drives a new journey is in `new`, not base regression."""
     new = {journey.id for journey in plan.journeys if journey.new}
     scenarios = tuple(
         Scenario(f"qa-{n}", check.ac, _steps(plan, check, new), check.text, None, ())
         for n, check in enumerate(plan.checks, start=1)
     )
-    regression = tuple(
-        scenario.id for scenario, check in zip(scenarios, plan.checks) if not new & set(check.journeys)
+    fresh = {scenario.id for scenario, check in zip(scenarios, plan.checks) if new & set(check.journeys)}
+    return LiveScenarios(
+        scenarios=scenarios,
+        regression=tuple(scenario.id for scenario in scenarios if scenario.id not in fresh),
+        new=tuple(scenario.id for scenario in scenarios if scenario.id in fresh),
     )
-    return LiveScenarios(scenarios=scenarios, regression=regression)
 
 
 def _steps(plan: QaPlan, check: QaCheck, new: set[str]) -> str:

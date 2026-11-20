@@ -30,6 +30,7 @@ from lib.qa_runners.fake import FakeRunner
 from lib.poll_source import HTTPResult
 from lib.qa_storage import BUNDLE_NAME, RESULT_NAME, StorageError
 from lib.queue import JobRequest, job_from_row
+from lib.dispatcher import Comment
 from tests.qa_support import (
     HEAD_A,
     HEAD_B,
@@ -40,6 +41,7 @@ from tests.qa_support import (
     bundle,
     Harness,
     qa_config,
+    qa_report,
     ready,
     receipts_bundle,
     scenarios,
@@ -185,13 +187,13 @@ class Lab:
             self.broken[(row.slice, row.attempt)](result)
         return result
 
-    def enqueue(self, *, ids: int = 5, regression: tuple[str, ...] = (), ticket: str = "784",
+    def enqueue(self, *, ids: int = 5, regression: tuple[str, ...] = (), new: tuple[str, ...] = (), ticket: str = "784",
                 runner: str = "claude-cloud", arm: str = "primary",
                 packs: dict[str, str | None] | None = None, repo: str = REPO) -> str:
         detail = {
             "action": "qa", "head": HEAD_A, "scope": "full", "runner": runner, "arm": arm,
             "scenarios": [f"qa-{n}" for n in range(1, ids + 1)], "live": live(ids, packs),
-            "regression": list(regression), "run_id": f"run-{ticket}-{runner}", "pr_number": "833",
+            "regression": list(regression), "new": list(new), "run_id": f"run-{ticket}-{runner}", "pr_number": "833",
         }
         job = self.run.queue.enqueue(
             JobRequest(
@@ -442,6 +444,78 @@ def test_failure_passing_on_base_is_blocking(tmp_path: Path) -> None:
     assert (lab.header()["result"], lab.header()["cause"]) == ("FAIL", "product")
     assert "- [blocking] qa-2 (ac-2): failed at the head commit and not on the base commit" in comment
     assert "| qa-2 | ac-2 | Failed |" in comment and "| qa-1 | ac-1 | Verified |" in comment
+
+
+def test_failure_on_a_new_journey_is_blocking_with_no_base_check(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    lab.enqueue(ids=2, new=("qa-2",))
+    lab.head_outcome["qa-2"] = "failed"
+    lab.base_outcome["qa-2"] = "failed"
+    lab.tick(5)
+
+    assert [row[1] for row in lab.lanes()] == ["head"]
+    assert (lab.header()["result"], lab.header()["cause"]) == ("FAIL", "product")
+    assert "- [blocking] qa-2 (ac-2): failed at the head commit on a journey new in this pull request" in (
+        lab.only_comment()
+    )
+    assert "[follow-up]" not in lab.only_comment()
+
+
+NEW_JOURNEY_BRIEF = Comment(
+    id="brief",
+    author="maxharris1",
+    created_at=1,
+    body=(
+        "<!-- orch:v1 kind=brief from=grok-bot role=orchestrator -->\n"
+        "### QA journeys\n- Verify skill: `verify-cleffy`\n- Base: `" + BASE + "`\n- `new:bulk-export`\n\n"
+        "### QA criteria\n- ac-1 [bulk-export]: export works\n"
+    ),
+)
+NEW_JOURNEY_ISSUE = "## Acceptance criteria\n- qa(bulk-export): export works\n"
+
+
+def test_a_new_journey_failing_at_head_and_base_wakes_the_builder(tmp_path: Path) -> None:
+    lab = Lab(tmp_path)
+    lab.run.thread.base = replace(lab.run.thread.base, brief_comment=NEW_JOURNEY_BRIEF, issue_body=NEW_JOURNEY_ISSUE)
+    lab.head_outcome["qa-1"] = "failed"
+    lab.base_outcome["qa-1"] = "failed"
+    lab.run.post("r1", ready(HEAD_A), head=HEAD_A)
+    lab.run.poll()
+    [job] = lab.run.qa_jobs()
+    assert (job["regression"], job["new"]) == ([], ["qa-1"])
+    lab.tick(12)
+    lab.run.post("q1", lab.only_comment())
+    lab.run.finish("codex", "v1")
+    lab.run.post("v1", verdict(HEAD_A, "APPROVE"))
+    lab.run.poll(3)
+
+    assert [row[1] for row in lab.lanes()] == ["head"]
+    assert lab.run.rows("SELECT COUNT(*) FROM jobs WHERE action = 'qa-failed'") == [(1,)]
+
+
+def test_env_retry_keeps_the_scenarios_its_first_attempt_ran(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, gate="block")
+    body = [NEW_JOURNEY_ISSUE]
+    lab.run.thread.base = replace(
+        lab.run.thread.base, brief_comment=NEW_JOURNEY_BRIEF, issue_body=NEW_JOURNEY_ISSUE,
+        read_issue_body=lambda: body[0],
+    )
+    lab.run.post("r1", ready(HEAD_A), head=HEAD_A)
+    lab.run.poll()
+    lab.run.finish("codex", "v1")
+    lab.run.post("v1", verdict(HEAD_A, "APPROVE"))
+    lab.run.poll()
+    lab.run.post("q1", qa_report(HEAD_A, "BLOCKED"))
+    lab.run.finish("qa", "q1")
+    body[0] = "## Acceptance criteria\n- export works\n"
+    lab.run.poll(2)
+
+    first, retry = lab.run.qa_jobs()
+    assert retry["scenarios"] == first["scenarios"] == ["qa-1"]
+    assert retry["live"] == first["live"] != []
+    assert (retry["regression"], retry["new"]) == (first["regression"], first["new"])
+    lab.tick(4)
+    assert all(row[4] != "launch-failed:KeyError" for row in lab.lanes())
 
 
 def with_verify(lab: Lab, verify: str = "verify-live") -> None:
