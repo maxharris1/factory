@@ -2,8 +2,6 @@
 
 The go raises cap_extra by 1, sets fixing and queues one fix keyed on the go,
 and the builder's ready at a new head re-enters review at the next round.
-Inside the cap an approver's building go reopens a ship: handoff ticket for
-one normal round (#1197); any other go there still changes nothing (#108).
 """
 
 from __future__ import annotations

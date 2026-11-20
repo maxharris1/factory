@@ -28,12 +28,10 @@ class ResumeMixin:
         queues exactly one fix. A handed-off ticket whose next round T2
         would flag ready-after-cap resumes the same way (#118): the approved
         round counts as completed and the approval is cleared, as a T2
-        re-entry does. Inside the cap, a building go on a ship: handoff
-        ticket reopens it (#1197): the same writes without cap_extra, a
-        kind=reopen fix, reopen_hold, and the tracker issue moved out of
-        its handoff state. None when none of these holds. A go
-        _may_lift_cap refuses wakes Grok once with go-not-from-approver and
-        changes nothing (#122, #174).
+        re-entry does. Inside the cap a building go on a ship: handoff
+        ticket reopens it the same way, without cap_extra (#1197). None
+        when none of these holds. A go _may_lift_cap refuses wakes Grok
+        once with go-not-from-approver and changes nothing (#122, #174).
         """
         lifted = self._lift_cap(ticket, comment, building=building)
         if lifted is None:
@@ -472,7 +470,6 @@ class ResumeMixin:
 
 
 def _reopen_hold(connection: sqlite3.Connection, ticket: TrackedTicket) -> str:
-    """The Linear state name the reopen saw, or "-" with none on record."""
     row = connection.execute(
         "SELECT state_name FROM linear_states WHERE repo = ? AND ticket_id = ?",
         (ticket.repo.lower(), ticket.ticket_id),

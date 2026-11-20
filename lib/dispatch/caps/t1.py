@@ -40,9 +40,6 @@ class T1Mixin:
                 self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
                 return resumed
         if current == "handed-off":
-            # #108, #118, #1197: inside the cap only a building go on a
-            # ship: handoff ticket reopens it (_resume_after_cap); any other
-            # go changes nothing, and the builder's ready still re-enters.
             return True, "go-after-handoff"
         if not trusted:
             return True, "rejected-go-author"

@@ -1,6 +1,4 @@
-"""#130: a trusted go on an approved, watched ticket is honored; on a
-ready-for-review ticket inside the cap a building go reopens it for one fix
-round (#1197) and any other go changes nothing (#108)."""
+"""#130: a trusted go on an approved, watched ticket is honored."""
 
 from __future__ import annotations
 
