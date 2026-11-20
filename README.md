@@ -1867,6 +1867,20 @@ or there and as the device's own login). `max_jobs`, a positive
 integer, caps the account's running jobs once account choice lands
 (#1064); today it is only checked.
 
+Account homes (issues #1183 and #1184). One bot user on one device can run
+several accounts of its harness, each from its own folder. A job placed on
+an account that is not the device's own login runs with `CLAUDE_CONFIG_DIR`
+(Claude) or `CODEX_HOME` (Codex) set to `<home>/.factory-accounts/<id>`.
+Its token variables are dropped by name after the login profile runs:
+`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`
+for Claude, `OPENAI_API_KEY` and `CODEX_API_KEY` for Codex. The harness then
+signs in from the folder, never from a variable, and the values never reach
+the run log, the telemetry or the job detail. The job's usage probe and
+`skill-probe run --account <id>` run the same way, and the skill probe reads
+the run's transcript from that folder. A job on the device's own login runs
+unchanged. `lib/harness_env.py` `ACCOUNT_ISOLATION` is the one table that
+names these variables.
+
 The older device value `{bot: <bot user>, account: <id>}` still loads and
 means that account is the device's own login. `orch check-config` reports
 it as deprecated. Still, keep {bot, account} until account placement
