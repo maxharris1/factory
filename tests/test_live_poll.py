@@ -33,6 +33,7 @@ from lib.github_actions import (
     LinearReviewActions,
     _is_read,
 )
+from lib.intake_live import GitHubIntakeClient
 from lib.grok_delivery import (
     GrokDeliveryError,
     WebhookGrokDelivery,
@@ -1252,6 +1253,167 @@ def test_304_on_the_unconditional_refetch_is_still_an_error() -> None:
     with pytest.raises(PollSourceError, match="304 without a cached response"):
         source._gh_call("repos/acme/widgets/contents/factory.md")
     assert len(calls) == 2
+
+
+OPEN_LIST = "repos/acme/widgets/issues?state=open&per_page=100"
+NOT_MODIFIED = GhResult(1, "HTTP/2.0 304 Not Modified\r\n\r\n", "gh: HTTP 304\n")
+
+
+def included(etag: str, value: object, *, link: str | None = None) -> GhResult:
+    headers = f'HTTP/2.0 200 OK\nETag: "{etag}"\n' + (f"Link: {link}\n" if link else "")
+    return GhResult(0, f"{headers}\n{json.dumps(value)}", "")
+
+
+class ListGh(FakeGh):
+    """FakeGh whose conditional open-issue list replies per list_etags (None is a 304)."""
+
+    def __init__(self) -> None:
+        super().__init__(FACTORY.format(tickets="github", ship="merge"))
+        self.list_etags: list[str | None] = []
+        self.link: str | None = None
+        self.later_pages: list[dict] = []
+
+    def __call__(self, argv, timeout):
+        call = list(argv)
+        if call[-1] == OPEN_LIST and "--paginate" not in call:
+            self.calls.append(call)
+            etag = self.list_etags.pop(0)
+            return NOT_MODIFIED if etag is None else included(etag, self.issues, link=self.link)
+        if call[-1] == f"{OPEN_LIST}&page=2":
+            self.calls.append(call)
+            return GhResult(0, json.dumps(self.later_pages), "")
+        return super().__call__(argv, timeout)
+
+
+def ready_starts_review_config() -> OrchConfig:
+    base = config()
+    return replace(base, projects=(replace(base.projects[0], ready_starts_review=True),))
+
+
+def open_pull(number: int, *, labels: tuple[str, ...] = ()) -> dict:
+    return {
+        "number": number,
+        "pull_request": {},
+        "labels": [{"name": name} for name in labels],
+        "comments": 1,
+        "updated_at": "2026-11-11T12:00:00Z",
+    }
+
+
+def ready_comment(comment_id: int, head: str) -> dict:
+    return {
+        "id": comment_id,
+        "user": {"login": "maxharris1"},
+        "body": f"<!-- orch:v1 kind=ready from=claude-bot role=builder head={head} -->\n",
+        "created_at": "2026-11-11T12:00:00Z",
+        "html_url": f"https://github.test/pr/12#issuecomment-{comment_id}",
+    }
+
+
+def candidate_cycle(source: LivePollSource, gh: FakeGh) -> tuple[tuple[TrackedTicket, ...], list[list[str]]]:
+    start = len(gh.calls)
+    source.begin_cycle()
+    tickets = source.github_candidates("orch:state/")
+    return tickets, gh.calls[start:]
+
+
+def test_unchanged_candidate_list_is_a_304_with_no_comments_read() -> None:
+    gh = ListGh()
+    gh.comments = [ready_comment(9, gh.head)]
+    gh.issues = [open_pull(12)]
+    gh.list_etags = ["list-v1", None]
+    source = LivePollSource(ready_starts_review_config(), gh_runner=gh)
+
+    first, cycle_one = candidate_cycle(source, gh)
+    second, cycle_two = candidate_cycle(source, gh)
+
+    assert [ticket.ticket_id for ticket in first] == ["12"]
+    assert second == first
+    assert [call[-1] for call in cycle_one].count(
+        "repos/acme/widgets/issues/12/comments?per_page=100"
+    ) == 1
+    assert 'If-None-Match: "list-v1"' in next(call for call in cycle_two if call[-1] == OPEN_LIST)
+    assert not any("/comments" in call[-1] for call in cycle_two)
+    assert len(cycle_two) - 1 <= len(cycle_one)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"comments": 2}, {"updated_at": "2026-11-11T12:30:00Z"}],
+    ids=["comments-count", "updated-at"],
+)
+def test_changed_comment_count_refetches_comments(change: dict) -> None:
+    gh = ListGh()
+    gh.comments = [ready_comment(9, gh.head)]
+    gh.issues = [open_pull(12)]
+    gh.list_etags = ["list-v1", "list-v2"]
+    source = LivePollSource(ready_starts_review_config(), gh_runner=gh)
+    candidate_cycle(source, gh)
+
+    gh.comments = [*gh.comments, ready_comment(10, gh.head)]
+    gh.issues = [{**open_pull(12), **change}]
+    tickets, cycle_two = candidate_cycle(source, gh)
+
+    assert 'If-None-Match: "list-v1"' in next(call for call in cycle_two if call[-1] == OPEN_LIST)
+    assert [call[-1] for call in cycle_two].count(
+        "repos/acme/widgets/issues/12/comments?per_page=100"
+    ) == 1
+    assert [len(ticket.comments) for ticket in tickets] == [2]
+
+
+def test_rel_next_falls_back_to_paginate() -> None:
+    gh = ListGh()
+    gh.issues = [open_pull(12, labels=("orch:state/intake",))]
+    gh.later_pages = [open_pull(13, labels=("orch:state/intake",))]
+    gh.link = (
+        "<https://api.github.com/repositories/1/issues?state=open&per_page=100&page=2>; "
+        'rel="next"'
+    )
+    gh.list_etags = ["list-v1", None]
+    source = LivePollSource(config(), gh_runner=gh)
+
+    for _ in range(2):
+        tickets, cycle = candidate_cycle(source, gh)
+        page_one = next(index for index, call in enumerate(cycle) if call[-1] == OPEN_LIST)
+        assert cycle[page_one + 1][-2:] == ["--paginate", f"{OPEN_LIST}&page=2"]
+        assert sorted(ticket.ticket_id for ticket in tickets) == ["12", "13"]
+
+
+def test_intake_list_304_makes_no_events_call() -> None:
+    endpoint = "repos/acme/widgets/issues?state=open&labels=factory%3Aqueue&per_page=100"
+    issue = {
+        "number": 5,
+        "title": "Queue me",
+        "body": "",
+        "labels": [{"name": "factory:queue"}],
+        "created_at": "2026-11-11T12:00:00Z",
+        "updated_at": "2026-11-11T12:00:00Z",
+        "html_url": "https://github.test/acme/widgets/issues/5",
+    }
+    labeled = {"event": "labeled", "label": {"name": "factory:queue"}, "actor": {"login": "maxharris1"}}
+    calls: list[list[str]] = []
+
+    def runner(argv, timeout):
+        del timeout
+        call = list(argv)
+        calls.append(call)
+        if call[-1] == endpoint:
+            return included("intake-v1", [issue]) if len(calls) == 1 else NOT_MODIFIED
+        if call[-1] == "repos/acme/widgets/issues/5/events?per_page=100":
+            return GhResult(0, json.dumps([labeled]), "")
+        raise AssertionError(call)
+
+    source = LivePollSource(config(), gh_runner=runner)
+    client = GitHubIntakeClient(runner=source._adapter_runner, list_pages=source._gh_list)
+    first = client.github_intake("acme/widgets", "factory:queue")
+    before = len(calls)
+    second = client.github_intake("acme/widgets", "factory:queue")
+    cycle_two = calls[before:]
+
+    assert [issue.applied_by for issue in first] == ["maxharris1"]
+    assert second == first
+    assert [call[-1] for call in cycle_two] == [endpoint]
+    assert 'If-None-Match: "intake-v1"' in cycle_two[0]
 
 
 def test_fresh_ticket_bypasses_ticket_and_gh_caches() -> None:

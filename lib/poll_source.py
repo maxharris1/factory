@@ -585,7 +585,8 @@ class LivePollSource:
         self._head_reads: dict[tuple[str, str, str], tuple[tuple[str, str, str], Any]] = {}
         self._head_read_last_used: dict[tuple[str, str, str], float] = {}
         self._linear_issue_cache: dict[str, dict[str, Any] | None] = {}
-        self._etag_cache: dict[tuple[str, ...], tuple[str, str]] = {}
+        self._etag_cache: dict[tuple[str, ...], tuple[str, str, bool]] = {}
+        self._candidate_comments: dict[tuple[str, str], tuple[str, int, tuple[Comment, ...]]] = {}
         self._last_reads: dict[tuple[str, str], LastRead] = {}
         self._linear_branches: dict[str, str] = {}
         self._linear_branch_pulls: dict[str, str | None] = {}
@@ -811,10 +812,11 @@ class LivePollSource:
                 continue
             endpoint = f"repos/{project.repo}/issues?state=open&per_page=100"
             try:
-                pages = self._gh_pages(endpoint)
+                pages = self._gh_list(endpoint)
             except Exception as exc:
                 self._record(project.repo, "-", exc)
                 continue
+            listed: set[str] = set()
             for item in pages:
                 try:
                     raw_items = _array(item, "GitHub issue page")
@@ -840,15 +842,12 @@ class LivePollSource:
                         number = str(
                             _positive_int(issue.get("number"), "issue number")
                         )
+                        listed.add(number)
                         if (project.repo.lower(), number) in exclude:
                             continue
-                        comments: tuple[Comment, ...] | None = None
-                        if not labelled:
-                            comments = self.github.list_comments(
-                                project.repo, number
-                            )
-                            if not _has_ready(comments):
-                                continue
+                        comments = self._comments_for(project.repo, number, issue)
+                        if not labelled and not _has_ready(comments):
+                            continue
                         ticket = self._github_ticket(
                             project, factory, number, comments=comments
                         )
@@ -862,7 +861,28 @@ class LivePollSource:
                             continue
                         ticket_id = _ticket_hint(raw)
                         self._record(project.repo, ticket_id, exc)
+            self._candidate_comments = {
+                key: held
+                for key, held in self._candidate_comments.items()
+                if key[0] != project.repo.lower() or key[1] in listed
+            }
         return tuple(tickets)
+
+    def _comments_for(
+        self, repo: str, number: str, issue: dict[str, Any]
+    ) -> tuple[Comment, ...]:
+        """Candidate comments, reread only when the list item's updated_at or
+        comment count moved, so an unchanged candidate list costs no reads."""
+        key = (repo.lower(), number)
+        stamp = (issue.get("updated_at"), issue.get("comments"))
+        valid = isinstance(stamp[0], str) and type(stamp[1]) is int
+        held = self._candidate_comments.get(key)
+        if valid and held is not None and held[:2] == stamp:
+            return held[2]
+        comments = self.github.list_comments(repo, number)
+        if valid:
+            self._candidate_comments[key] = (*stamp, comments)
+        return comments
 
     def linear_candidates(
         self,
@@ -2359,12 +2379,27 @@ class LivePollSource:
             raise PollSourceError("gh returned no JSON")
         return pages
 
-    def _gh_call(
+    def _gh_list(self, endpoint: str) -> list[object]:
+        """A list read whose first page is conditional, so an unchanged list
+        is a 304. Later pages are read only when page one links to them."""
+        body, has_next = self._gh_response(endpoint)
+        try:
+            pages = [json.loads(body)]
+        except json.JSONDecodeError as exc:
+            raise PollSourceError("gh returned malformed JSON") from exc
+        if has_next:
+            pages.extend(self._gh_pages(f"{endpoint}&page=2"))
+        return pages
+
+    def _gh_call(self, *args: str, fresh: bool = False) -> str:
+        return self._gh_response(*args, fresh=fresh)[0]
+
+    def _gh_response(
         self,
         *args: str,
         fresh: bool = False,
         _unconditional: bool = False,
-    ) -> str:
+    ) -> tuple[str, bool]:
         conditional = "--paginate" not in args and not fresh
         cache_key = tuple(args)
         argv = [*self.gh, "api"]
@@ -2393,18 +2428,21 @@ class LivePollSource:
                 raise GhHttpError(f"{route} returned HTTP {status}", status)
             raise PollSourceError(f"{route} exited {result.returncode}")
         if not conditional:
-            return result.stdout
+            return result.stdout, False
         status, headers, body = (
             included if included is not None else _included_response(result.stdout)
         )
         if status == 304:
             return self._not_modified(args, _unconditional)
+        has_next = 'rel="next"' in headers.get("link", "")
         etag = headers.get("etag")
         if etag is not None:
-            self._etag_cache[cache_key] = (etag, body)
-        return body
+            self._etag_cache[cache_key] = (etag, body, has_next)
+        return body, has_next
 
-    def _not_modified(self, args: tuple[str, ...], unconditional: bool) -> str:
+    def _not_modified(
+        self, args: tuple[str, ...], unconditional: bool
+    ) -> tuple[str, bool]:
         """Serve a 304 from the ETag cache, or refetch once when it is empty.
 
         After a restart the in-memory cache is empty, yet gh's own --cache
@@ -2414,10 +2452,10 @@ class LivePollSource:
         """
         cached = self._etag_cache.get(tuple(args))
         if cached is not None and not unconditional:
-            return cached[1]
+            return cached[1], cached[2]
         if unconditional:
             raise PollSourceError("gh returned 304 without a cached response")
-        return self._gh_call(*args, _unconditional=True)
+        return self._gh_response(*args, _unconditional=True)
 
     def _adapter_runner(self, argv: Sequence[str], timeout: float) -> GhResult:
         call = list(argv)
