@@ -5,13 +5,15 @@ The archive mirrors `jobs/`: the job folder's kept files go to
 to `jobs-kept/<id>/` under their own names. A folder keeps each top-level
 regular file that HEAD does not track, every `.orch-worker*` record, and the
 same one level down in a subfolder that is a checkout (the local layout's
-`repo/`). Trees, symlinks and the checkout itself are not kept. `kept.json`
-is written last, once the folder is deleted, so its presence means the
-archive is whole.
+`repo/`). `venv/` and `interrogate-*` trees are scratch and never kept, even
+when they hold their own `.git`. Other trees, symlinks and the checkout itself
+are not kept. `kept.json` is written last, once the folder is deleted, so its
+presence means the archive is whole.
 """
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import subprocess
@@ -26,6 +28,7 @@ KEPT_JSON = "kept.json"
 WORKER_RECORD = ".orch-worker"
 ARCHIVED_SIBLINGS = (".run", ".brief.md", ".launched")
 DELETED_SIBLINGS = (".claimed",)
+SCRATCH_TREES = ("venv", "interrogate-*")
 
 
 def _tracked(folder: Path) -> frozenset[str]:
@@ -49,10 +52,15 @@ def _kept_files(folder: Path) -> list[Path]:
             and (entry.name not in tracked or entry.name.startswith(WORKER_RECORD))]
 
 
+def _scratch(sub: Path) -> bool:
+    return any(fnmatch.fnmatchcase(sub.name, pattern) for pattern in SCRATCH_TREES)
+
+
 def kept_entries(folder: Path) -> list[Path]:
     kept = _kept_files(folder)
     for sub in folder.iterdir():
-        if not sub.is_symlink() and sub.is_dir() and os.path.lexists(sub / ".git"):
+        if (not _scratch(sub) and not sub.is_symlink() and sub.is_dir()
+                and os.path.lexists(sub / ".git")):
             kept += _kept_files(sub)
     return sorted(kept)
 

@@ -1289,6 +1289,30 @@ def test_archive_mirrors_jobs_and_drops_the_trees(tmp_path: Path, layout: str) -
     assert (jobs / "j.lock").exists()
 
 
+@pytest.mark.parametrize("layout", ["remote", "local"])
+def test_scratch_trees_with_their_own_git_are_not_archived(tmp_path: Path, layout: str) -> None:
+    root = work_root(tmp_path)
+    folder = root / "jobs" / "j"
+    checkout = folder if layout == "remote" else folder / "repo"
+    git_checkout(checkout)
+    subprocess.run(["git", "-C", str(checkout), "worktree", "add", "-q", "--detach",
+                    str(folder / "interrogate-a"), "HEAD"],
+                   env={**os.environ, **GIT_ENV}, check=True, capture_output=True)
+    git_checkout(folder / "venv")
+    for tree in ("interrogate-a", "venv"):
+        write_random(folder / tree / "review.log")
+    handoff = write_random(folder / "handoff.md")
+    gone = folder.with_name("j.gone")
+    folder.rename(gone)
+
+    job_leftovers.retire(root, "j", gone, siblings=True, finished_at=OLD, removed_bytes=0)
+
+    kept = root / "jobs-kept" / "j"
+    assert files_under(kept) == ["j/handoff.md", "kept.json"]
+    assert (kept / "j" / "handoff.md").read_bytes() == handoff
+    assert json.loads((kept / "kept.json").read_text())["archived"] == ["j/handoff.md"]
+
+
 def test_kept_json_is_written_last(tmp_path: Path, monkeypatch) -> None:
     root = work_root(tmp_path)
     finished_with_leftovers(root, "j")
