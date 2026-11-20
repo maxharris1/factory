@@ -354,6 +354,10 @@ class FakeGitHub:
             if filed_repo == repo and split_parent(item["body"]) == parent
         )
 
+    def issue_record(self, repo: str, number: int) -> IssueRecord:
+        self.calls.append(f"issue-record:{repo}#{number}")
+        return self._record(number, self.filed[(repo, number)])
+
     def issue_state(self, repo: str, number: int) -> str:
         return self.filed[(repo, number)]["state"]
 

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from pathlib import Path
 
-from lib.feeder import IntakeIssue, _pull_body
+from lib.feeder import IntakeIssue, IssueRecord, _pull_body
+from lib.intake_live import GitHubIntakeClient
 from tests.test_feeder import FakeGitHub, make_feeder
+from tests.test_github_actions import RecordedGh
+from tests.test_intake_live import ok, reference, search, timeline
 
 REPO = "owner/app"
 PARENT = 10
@@ -136,6 +141,129 @@ def test_a_part_merged_in_orch_counts_as_done(tmp_path: Path) -> None:
     poll(feeder, clock)
 
     assert parent(github)["state"] == "closed"
+
+
+def merge_in_orch(queue, issue: int) -> None:
+    with queue.connect() as connection:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS ticket_state "
+            "(repo TEXT NOT NULL, ticket_id TEXT NOT NULL, workflow_state TEXT, "
+            "PRIMARY KEY (repo, ticket_id))"
+        )
+        connection.execute(
+            "INSERT INTO feeder_items (repo, issue, tracker, title, harness, state, risk, "
+            "issue_created_at, first_seen_at, seen_at, ticket_id, pr_number) "
+            "VALUES (?, ?, 'github', 'Part', 'claude', 'done', 'high', 1, 1, 1, ?, ?)",
+            (REPO, str(issue), str(issue + 490), str(issue + 490)),
+        )
+        connection.execute(
+            "INSERT INTO ticket_state (repo, ticket_id, workflow_state) VALUES (?, ?, 'merged')",
+            (REPO, str(issue + 490)),
+        )
+
+
+def test_parts_merged_in_orch_whose_issues_stay_open_close_the_parent(tmp_path: Path) -> None:
+    feeder, queue, github, clock = board(tmp_path, {11: auto_part(1), 12: auto_part(2)})
+    poll(feeder, clock)
+
+    merge_in_orch(queue, 11)
+    poll(feeder, clock)
+    assert parent(github)["state"] == "open"
+
+    merge_in_orch(queue, 12)
+    poll(feeder, clock)
+
+    assert github.filed[(REPO, 11)]["state"] == github.filed[(REPO, 12)]["state"] == "open"
+    assert parent(github)["state"] == "closed"
+    assert "factory:ready" not in parent(github)["labels"]
+    poll(feeder, clock)
+    assert [call for call in github.calls if call.startswith("issue-record:")] == [
+        f"issue-record:{REPO}#11", f"issue-record:{REPO}#12",
+    ]
+
+
+def test_a_follow_up_merged_after_its_siblings_closed_long_ago_closes_the_parent(
+    tmp_path: Path,
+) -> None:
+    feeder, queue, github, clock = board(tmp_path, {11: auto_part(1), 12: FOLLOW_UP})
+    close(github, clock, 11)
+    for _ in range(5):
+        poll(feeder, clock)
+    assert parent(github)["state"] == "open"
+
+    merge_in_orch(queue, 12)
+    poll(feeder, clock)
+
+    assert parent(github)["state"] == "closed"
+
+
+def test_a_stale_open_sibling_is_rechecked_until_the_parent_closes(tmp_path: Path) -> None:
+    feeder, _, github, clock = board(tmp_path, {11: auto_part(1), 12: auto_part(2)})
+    close(github, clock, 11)
+    for _ in range(4):
+        poll(feeder, clock)
+    fresh = github.split_children
+    github.split_children = lambda repo, number: tuple(
+        replace(child, state="open", reason=None) if child.number == 11 else child
+        for child in fresh(repo, number)
+    )
+    close(github, clock, 12)
+    for _ in range(4):
+        poll(feeder, clock)
+    assert parent(github)["state"] == "open"
+
+    github.split_children = fresh
+    searches = sum(call.startswith("split-children:") for call in github.calls)
+    for _ in range(2):
+        poll(feeder, clock)
+
+    assert parent(github)["state"] == "closed"
+    assert sum(call.startswith("split-children:") for call in github.calls) == searches + 1
+
+
+def test_a_parent_waiting_on_a_follow_up_is_searched_at_most_every_two_minutes(
+    tmp_path: Path,
+) -> None:
+    feeder, _, github, clock = board(tmp_path, {11: auto_part(1), 12: FOLLOW_UP})
+    close(github, clock, 11)
+    poll(feeder, clock)
+    searches = sum(call.startswith("split-children:") for call in github.calls)
+
+    for _ in range(10):
+        clock[0] += 30
+        feeder.feed_once()
+
+    assert sum(call.startswith("split-children:") for call in github.calls) == searches + 2
+    assert parent(github)["state"] == "open"
+
+
+def done(number: int) -> dict:
+    return {"number": number, "body": auto_part(number - 10), "state": "closed",
+            "state_reason": "completed"}
+
+
+def test_an_open_follow_up_the_search_index_misses_keeps_the_parent_open(
+    tmp_path: Path,
+) -> None:
+    feeder, _, github, clock = board(
+        tmp_path, {11: auto_part(1), 12: auto_part(2), 13: FOLLOW_UP}
+    )
+    gh = RecordedGh()
+    gh.route(search(PARENT), ok(
+        {"total_count": 2, "incomplete_results": False, "items": [done(11), done(12)]}
+    ))
+    gh.route(timeline(PARENT), ok([
+        reference(11, auto_part(1), "closed", "completed"),
+        reference(12, auto_part(2), "closed", "completed"),
+        reference(13, FOLLOW_UP),
+    ]))
+    github.split_children = GitHubIntakeClient(gh).split_children
+    close(github, clock, 11)
+    close(github, clock, 12)
+    poll(feeder, clock)
+
+    assert parent(github)["state"] == "open"
+    assert writes(github) == []
 
 
 def test_the_closer_never_needs_fixes_parent_in_a_part(tmp_path: Path) -> None:
