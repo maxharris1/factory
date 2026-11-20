@@ -11,6 +11,7 @@ import pytest
 from markdown_it import MarkdownIt
 
 from lib.brief import render_brief
+from lib.brief.common import LIVE_SECTION_CUTOFF
 from lib.dispatcher import CIResult, Comment, FailedCheck, TrackedTicket
 from lib.evidence.ci import ci_evidence
 from lib.evidence.scenarios import qa_scenarios
@@ -703,10 +704,10 @@ def test_an_update_review_on_a_base_without_ci_requires_the_pasted_local_checks(
     assert "CI may still be running" not in task
 
 
-def _task_under(factory_md: str, action: str, extra: dict[str, object]) -> str:
+def _task_under(factory_md: str, action: str, extra: dict[str, object], created_at: float = 0.0) -> str:
     context, findings = parse_factory_context(factory_md)
     assert context is not None, findings
-    job = _job(action, "claude", 1, None, {"gitBranchName": "factory/issue-42", **extra})
+    job = replace(_job(action, "claude", 1, None, {"gitBranchName": "factory/issue-42", **extra}), created_at=created_at)
     return _task(render_brief(job, bot="claude-bot", context=context, factory_root="/srv/orch/factory"))
 
 
@@ -715,6 +716,13 @@ def test_live_scenarios_are_asked_for_only_with_qa_on_and_no_plan_to_carry_them(
     assert "## Verify, live" in _task_under(QA_FACTORY_MD, "plan", {})
     assert "## Verify, live" not in _task_under(QA_FACTORY_MD, "build", {"instruction": PLAN_URL})
     assert "## Verify, live" not in _task_under(FACTORY_MD, "plan", {})
+
+
+@pytest.mark.parametrize("action", ["plan", "build"])
+def test_live_scenarios_are_asked_for_only_by_jobs_queued_before_the_cutoff(action: str):
+    cutoff = LIVE_SECTION_CUTOFF.timestamp()
+    assert "## Verify, live" in _task_under(QA_FACTORY_MD, action, {}, cutoff - 1)
+    assert "## Verify, live" not in _task_under(QA_FACTORY_MD, action, {}, cutoff)
 
 
 def test_the_example_the_plan_brief_shows_parses_to_its_two_scenarios():

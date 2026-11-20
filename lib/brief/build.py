@@ -65,7 +65,7 @@ def lead(job: Job, facts: dict) -> Lead:
             *(
                 journey_lines("ready", facts["qa_plan"], facts["skills"])
                 if facts["qa_plan"]
-                else live_lines("ready") if facts["qa"] and not (facts["plan_text"] or facts["plan"]) else []
+                else live_lines("ready", job.created_at) if facts["qa"] and not (facts["plan_text"] or facts["plan"]) else []
             ),
             *answers_lines(detail_of(job)),
             *builder_notes(job, facts),

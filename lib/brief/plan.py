@@ -33,7 +33,7 @@ def lead(job: Job, facts: dict) -> Lead:
             *(
                 journey_lines("plan", facts["qa_plan"], facts["skills"])
                 if facts["qa_plan"]
-                else live_lines("plan") if facts["qa"] else []
+                else live_lines("plan", job.created_at) if facts["qa"] else []
             ),
             "3. Estimate the changed lines the build will add and remove, tests and docs included. "
             "Put the number on its own line in the plan body as `Estimate: <n>`, before any "
