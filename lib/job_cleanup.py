@@ -22,9 +22,10 @@ deletes `.claimed` and the folder, and writes `kept.json` last. The
 an error. `_CLAIM` only ever restores `.cleanup`, never `.gone`, so the
 next HOLD first finishes every `<job-id>.gone` and pending `kept.json.tmp`
 under the root it was sent to. It archives the siblings and deletes
-`.claimed` only while the host still names the job finished and nothing
-claimed it since; otherwise it finishes only the `.gone` tree and leaves
-the siblings to the requeued run. A device that cannot scan for
+`.claimed` only while the host still names the job finished, nothing
+claimed it since and no later `<job-id>` or `<job-id>.cleanup` checkout
+exists; otherwise it finishes only the `.gone` tree and leaves the siblings
+to the later run and its own guards. A device that cannot scan for
 processes of this user with a cwd or open file in a folder removes
 nothing. A process of this user whose cwd or open files the scan cannot
 read (a non-dumpable one: ssh, an agent, a sandboxed shell) could be in any
@@ -397,6 +398,10 @@ def _claimed_since(jobs: Path, job_id: str, own_finish: float) -> bool:
     return any(_changed_after(jobs / f"{job_id}{mark}", own_finish) for mark in (CLAIMED, LAUNCHED))
 
 
+def _checked_out_again(jobs: Path, job_id: str) -> bool:
+    return any(os.path.lexists(jobs / f"{job_id}{mark}") for mark in ("", SET_ASIDE))
+
+
 def _live_reason(folder: Path, job_id: str, own_finish: float,
                  scan: Callable[[Path], set[str] | None]) -> str | None:
     if _claimed_since(folder.parent, job_id, own_finish):
@@ -450,8 +455,9 @@ def _finish_crashed(root: Path, plan: Plan, locks: bool) -> tuple[dict[str, int]
                 elif gone.is_dir() and not gone.is_symlink():
                     size = _deleted_bytes(gone)
                     if not plan.dry_run:
-                        siblings = (locks and job_id in plan.finished and not _claimed_since(
-                            jobs, job_id, plan.own_finish(job_id)))
+                        siblings = (locks and job_id in plan.finished
+                                    and not _checked_out_again(jobs, job_id)
+                                    and not _claimed_since(jobs, job_id, plan.own_finish(job_id)))
                         job_leftovers.retire(root, job_id, gone, siblings=siblings,
                                              finished_at=plan.own_finish(job_id),
                                              removed_bytes=size)

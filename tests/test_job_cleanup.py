@@ -1479,6 +1479,65 @@ def test_every_part_1_guard_keeps_its_folder_and_archives_nothing(
         live_cases_unchanged(root, "j", guard, given, tmp_path, scan)
 
 
+def old_gone_beside(root: Path) -> Path:
+    gone = root / "jobs" / "j.gone"
+    (gone / "handoff.md").parent.mkdir(parents=True)
+    (gone / "handoff.md").write_text("old handoff\n")
+    return gone
+
+
+def current_run(jobs: Path) -> dict[str, bytes | None]:
+    return {name: content for name, content in snapshot(jobs, "j").items()
+            if not name.startswith("j.gone")}
+
+
+@pytest.mark.parametrize("guard", PART_1_GUARDS, ids=list(PART_1_GUARDS))
+def test_every_part_1_guard_keeps_a_later_checkout_beside_an_old_gone(
+    tmp_path: Path, monkeypatch, guard: str
+) -> None:
+    root = work_root(tmp_path)
+    jobs = root / "jobs"
+    finished_with_leftovers(root, "j")
+    old_gone_beside(root)
+    with ExitStack() as stack:
+        given, scan = PART_1_GUARDS[guard](root, monkeypatch, stack)
+        before = current_run(jobs)
+
+        [(_, report)] = job_cleanup.run(database(tmp_path, given), machines(tmp_path, "pc"),
+                                        InProcessTransport(root, scan), now=NOW,
+                                        grace_hours=6, dry_run=False)
+
+    assert report.kept == {"j": guard}
+    assert current_run(jobs) == before
+    kept = root / "jobs-kept" / "j"
+    assert not kept.exists() or not any(path.name.startswith("j.") for path in kept.iterdir())
+
+
+def test_finishing_an_old_gone_leaves_a_later_run_held_open_by_a_process(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    jobs = root / "jobs"
+    old_gone_beside(root)
+    current = jobs / "j"
+    subprocess.run(["sh", "-c", "d=$1; lk=$(command -v flock); " + remote._CLAIM,
+                    "claim", str(current)], check=True)
+    (current / "repo").mkdir(parents=True)
+    (current / "repo" / "source").write_text("new checkout\n")
+    reader = jobs / "j.run" / "log-reader"
+    reader.mkdir(parents=True)
+    with ExitStack() as stack:
+        hold_for_the_test(stack, ["sleep", "60"], cwd=reader)
+        finished = time.time()
+        [(_, report)] = job_cleanup.run(database(tmp_path, [("j", "t1", "done", finished)]),
+                                        machines(tmp_path, "pc"), InProcessTransport(root),
+                                        now=finished + 1, grace_hours=0, dry_run=False)
+
+        assert report.kept == {"j": "held-open"}
+        assert (current / "repo" / "source").read_text() == "new checkout\n"
+        assert reader.is_dir() and (jobs / "j.claimed").exists()
+        assert not (jobs / "j.gone").exists()
+        assert (root / "jobs-kept" / "j" / job_leftovers.KEPT_JSON).exists()
+
+
 class Crash(BaseException):
     pass
 
