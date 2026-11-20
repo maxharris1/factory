@@ -2536,9 +2536,11 @@ class LivePollSource:
         finally:
             if self.cycle_clock is not None:
                 self.cycle_clock.add_source(name, self.clock() - began)
+        route = _call_route(call)
+        kind = "graphql" if route.endswith(" graphql") else "billed"
+        self._spend(kind, 1)
         if self.cycle_clock is not None:
-            route = _call_route(call)
-            self.cycle_clock.add_call(route, "graphql" if route.endswith(" graphql") else "billed")
+            self.cycle_clock.add_call(route, kind)
         return result
 
     def _run_gh_read(self, argv: list[str]) -> GhResult:
@@ -2612,17 +2614,17 @@ class LivePollSource:
             headers.get("x-ratelimit-remaining"),
             headers.get("x-ratelimit-reset"),
         )
+        kind = _call_kind(route, headers, status, started_wall, replayed)
+        requests = _request_count(argv, result)
         if own is not None:
             self._rate_window = _merged_window(self._rate_window, own)
         if self.cycle_clock is not None:
-            self.cycle_clock.add_call(
-                route,
-                _call_kind(route, headers, status, started_wall, replayed),
-                _request_count(argv, result),
-            )
+            self.cycle_clock.add_call(route, kind, requests)
             if own is not None:
                 window = self._rate_window
                 self.cycle_clock.note_core(window.remaining, window.limit, window.reset_epoch)
+        if own is None:
+            self._spend(kind, requests)
         if result.returncode == 0 or not rate_limited(status, result.stdout, result.stderr):
             self._throttled = False
             return
@@ -2677,6 +2679,11 @@ class LivePollSource:
         if window is None:
             return BACKOFF_SECONDS, "default"
         return window.reset_epoch - self.wall() + RATE_RESET_GRACE_SECONDS, basis
+
+    def _spend(self, kind: CallKind, requests: int) -> None:
+        window = self._live_window()
+        if kind == "billed" and window is not None:
+            self._rate_window = replace(window, remaining=max(window.remaining - requests, 0))
 
     def pacing(self, base_interval: float, recent_billed: int, cycle_seconds: float) -> Pacing:
         return pace(self._rate_window, self.wall(), base_interval, recent_billed, cycle_seconds)

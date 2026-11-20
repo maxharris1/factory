@@ -4,6 +4,7 @@ import json
 import pytest
 
 from lib.dispatch.cycle_clock import CycleClock
+from lib.dispatcher import TicketRef
 from lib.github_actions import GhResult
 from lib.poll_source import (
     BACKOFF_SECONDS,
@@ -17,7 +18,7 @@ from lib.poll_source import (
     RateWindow,
     pace,
 )
-from tests.test_live_poll import FACTORY, config
+from tests.test_live_poll import FACTORY, FakeGh, config
 
 WALL = 1_800_000_000.0
 FACTORY_BODY = json.dumps(
@@ -373,3 +374,72 @@ def test_pacing_reads_the_live_window() -> None:
     seen(quota, 1500, reset_in=1800)
 
     assert quota.source.pacing(30.0, 60, 5.0) == pace(window(1500, 1800), WALL, 30.0, 60, 5.0)
+
+
+def test_reads_without_rate_headers_spend_the_recorded_quota() -> None:
+    quota = Quota()
+    seen(quota, RATE_PAUSE_REMAINING + 2)
+    quota.comments()
+    quota.comments()
+    reads = quota.reads()
+
+    with pytest.raises(QuotaDeferred, match=f"{RATE_PAUSE_REMAINING}/5000 left"):
+        quota.comments()
+    assert quota.reads() == reads
+    assert quota.source.pacing(30.0, 2, 5.0).reason == "pause"
+
+
+def test_writes_spend_the_recorded_quota() -> None:
+    quota = Quota()
+    seen(quota, RATE_PAUSE_REMAINING + 1)
+    quota.source.github.post_issue_comment("acme/widgets", 7, "hello")
+
+    with pytest.raises(QuotaDeferred):
+        quota.comments()
+
+
+def test_paginated_reads_spend_one_unit_per_page() -> None:
+    quota = Quota()
+    seen(quota, 1001)
+    quota.source.gh_runner = lambda argv, timeout: GhResult(0, "[]\n[]", "")
+    quota.comments()
+
+    assert quota.source.pacing(30.0, 1, 0.0) == pace(window(999, 900), WALL, 30.0, 1, 0.0)
+
+
+def test_spent_quota_returns_with_the_next_reset() -> None:
+    quota = Quota()
+    seen(quota, RATE_PAUSE_REMAINING + 1)
+    quota.comments()
+    quota.wall += 900
+
+    quota.comments()
+    assert quota.source.pacing(30.0, 1, 0.0) == Pacing(30.0, False, "normal")
+
+
+def test_fresh_ticket_reads_stop_at_the_floor_when_only_some_responses_carry_headers() -> None:
+    left = [RATE_PAUSE_REMAINING + 15]
+    fake = FakeGh(FACTORY.format(tickets="github", ship="merge"))
+
+    def run(argv, timeout):
+        left[0] -= 1
+        result = fake(argv, timeout)
+        if "--include" not in argv:
+            return result
+        headers = (
+            "HTTP/2.0 200 OK\r\nX-RateLimit-Limit: 5000\r\n"
+            f"X-RateLimit-Remaining: {left[0]}\r\nX-RateLimit-Reset: {int(WALL + 900)}\r\n\r\n"
+        )
+        return GhResult(result.returncode, headers + result.stdout, result.stderr)
+
+    source = LivePollSource(
+        config(), environ={}, gh_runner=run, wall=lambda: WALL, clock=lambda: 1000.0
+    )
+    for number in ("7", "8", "9", "10"):
+        try:
+            source.fresh_ticket(TicketRef("acme/widgets", number, "github"))
+        except QuotaDeferred:
+            pass
+
+    assert left[0] >= RATE_PAUSE_REMAINING
+    assert source.pacing(30.0, 1, 0.0) == pace(window(left[0], 900), WALL, 30.0, 1, 0.0)
