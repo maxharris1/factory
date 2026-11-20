@@ -1214,3 +1214,39 @@ def test_check_config_refuses_an_unknown_stop_on(tmp_path: Path) -> None:
     )
     assert result.returncode != 0
     assert STOP_ON_MESSAGE in result.stdout + result.stderr
+
+
+def test_human_reviewers_are_logins_and_a_trust_field(tmp_path: Path) -> None:
+    config, findings = load_factory_md(
+        write_factory(tmp_path, {**VALID, "human_reviewers": ["olivermillard", "KonstantineBiganashvili"]})
+    )
+    assert findings == []
+    assert config is not None
+    assert config.human_reviewers == ("olivermillard", "KonstantineBiganashvili")
+    absent, _ = load_factory_md(write_factory(tmp_path, VALID))
+    assert absent is not None and absent.human_reviewers == ()
+    base = _with_root_qa(ROOT_FACTORY_MD, "human_reviewers: [olivermillard]\n")
+    head = _with_root_qa(ROOT_FACTORY_MD, "human_reviewers: [olivermillard, stranger]\n")
+    assert trust_front_matter_changed(base, head) is True
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("olivermillard", "human_reviewers must be a list"),
+        (["bad login"], "human_reviewers[0] must be a GitHub login"),
+        ([7], "human_reviewers[0] must be a GitHub login"),
+        (["olivermillard", "OliverMillard"], "human_reviewers[1] is listed twice"),
+    ],
+)
+def test_human_reviewers_rejects_what_is_not_a_login_list(
+    tmp_path: Path, value: object, message: str
+) -> None:
+    path = write_factory(tmp_path, {**VALID, "human_reviewers": value})
+    assert messages(path) == [message]
+
+
+def test_the_aut0_example_names_its_human_reviewers() -> None:
+    aut0, _ = load_factory_md(ROOT / "examples/aut0/factory.md")
+    assert aut0 is not None
+    assert aut0.human_reviewers == ("olivermillard", "KonstantineBiganashvili")

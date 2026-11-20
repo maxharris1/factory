@@ -26,7 +26,7 @@ clone and no cache.
   HeadMismatchError. A failure that may pass on a later try (405 not
   mergeable, a 5xx, a timeout, or a mark-ready that did not land) is
   raised with retryable=True, so the dispatcher re-drives it once.
-- list_comments and ci_status: GET with --paginate. ci_status counts only
+- list_comments, list_reviews and ci_status: GET with --paginate. ci_status counts only
   the latest attempt of each check (issue #84: a rerun at the same head
   replaces the attempt it reran) and is success only with at least one
   successful check run or a success commit status, and nothing failing or
@@ -81,6 +81,7 @@ from lib.dispatch.types import (
     CheckRow,
     CIJobStatus,
     PoolRunner,
+    PullReview,
     RerunOutcome,
     RunJob,
     RunnerKind,
@@ -668,6 +669,16 @@ class GitHubReviewActions:
                 seen.add(int(comment.id))
                 comments.append(comment)
         return tuple(sorted(comments, key=lambda item: (item.created_at, int(item.id))))
+
+    def list_reviews(self, repo: str, number: str) -> tuple[PullReview, ...]:
+        """Every submitted PR review, all pages, ordered by (submitted_at, int id)."""
+        endpoint = f"{_repo_path(repo)}/pulls/{_number(number)}/reviews?per_page=100"
+        reviews: list[PullReview] = []
+        for page in self._pages(endpoint):
+            if not isinstance(page, list):
+                raise GitHubAdapterError("review page is not a list")
+            reviews.extend(review for item in page if (review := _review(item)) is not None)
+        return tuple(sorted(reviews, key=lambda item: (item.submitted_at, int(item.id))))
 
     def pull_fingerprints(self, repo: str, numbers: Sequence[str]) -> dict[str, str]:
         found: dict[str, str] = {}
@@ -1649,6 +1660,29 @@ def _created_at(value: object) -> float:
         return datetime.fromisoformat(value).timestamp()
     except ValueError as exc:
         raise GitHubAdapterError(f"created_at {value!r} is not ISO-8601") from exc
+
+
+def _review(item: object) -> PullReview | None:
+    """None for a review not yet submitted (PENDING has no submitted_at)."""
+    raw = _object(item)
+    review_id = _comment_id(raw.get("id"))
+    login = _object(raw.get("user")).get("login")
+    if not isinstance(login, str) or _LOGIN.fullmatch(login) is None:
+        raise GitHubAdapterError(f"review {review_id} has no valid author login")
+    state = raw.get("state")
+    if not isinstance(state, str):
+        raise GitHubAdapterError(f"review {review_id} has no state")
+    submitted = raw.get("submitted_at")
+    if submitted is None:
+        return None
+    url = raw.get("html_url")
+    return PullReview(
+        id=str(review_id),
+        author=login,
+        state=state,
+        submitted_at=_created_at(submitted),
+        url=url if isinstance(url, str) else None,
+    )
 
 
 def _comment(item: object) -> Comment:

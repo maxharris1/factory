@@ -22,7 +22,7 @@ from lib.dispatcher import (
     TrackedTicket,
     _comment_order,
 )
-from lib.dispatch.types import BaseCheck, CheckRow, PoolRunner, RunJob
+from lib.dispatch.types import BaseCheck, CheckRow, PoolRunner, PullReview, RunJob
 from lib.github_actions import (
     GH,
     GhResult,
@@ -494,6 +494,52 @@ def test_paginated_comments_with_tied_created_at_order_9_before_10() -> None:
     assert comments[1].author == "tracy-login"
     assert comments[1].url == "https://github.com/owner/repo/pull/42#issuecomment-9"
     assert gh.keys() == [COMMENTS]
+
+
+REVIEWS = ("--paginate", f"{REPO}/pulls/42/reviews?per_page=100")
+
+
+def test_reviews_are_parsed_and_an_unsubmitted_review_is_left_out() -> None:
+    actions, gh = adapter()
+    gh.route(REVIEWS, served("reviews-page.json"))
+
+    reviews = actions.list_reviews("owner/repo", "42")
+
+    assert reviews == (
+        PullReview(
+            id="901",
+            author="olivermillard",
+            state="CHANGES_REQUESTED",
+            submitted_at=datetime(2026, 11, 10, 20, tzinfo=timezone.utc).timestamp(),
+            url="https://github.com/owner/repo/pull/42#pullrequestreview-901",
+        ),
+        PullReview(
+            id="903",
+            author="codex-login",
+            state="COMMENTED",
+            submitted_at=datetime(2026, 11, 10, 20, 5, tzinfo=timezone.utc).timestamp(),
+            url="https://github.com/owner/repo/pull/42#pullrequestreview-903",
+        ),
+    )
+    assert gh.keys() == [REVIEWS]
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        ('"id": 901,', '"id": "r901",', "is not a positive integer"),
+        ('"login": "olivermillard"', '"login": "bad login"', "no valid author login"),
+        ('"state": "CHANGES_REQUESTED"', '"state": 7', "has no state"),
+        ('"submitted_at": "2026-11-10T20:00:00Z"', '"submitted_at": "yesterday"', "is not ISO-8601"),
+    ],
+)
+def test_a_malformed_review_is_rejected(old: str, new: str, message: str) -> None:
+    actions, gh = adapter()
+    text = (FIXTURES / "reviews-page.json").read_text()
+    gh.route(REVIEWS, GhResult(0, text.replace(old, new, 1), ""))
+
+    with pytest.raises(GitHubAdapterError, match=message):
+        actions.list_reviews("owner/repo", "42")
 
 
 @pytest.mark.parametrize(

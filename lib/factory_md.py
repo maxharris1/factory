@@ -83,6 +83,11 @@ globs, a trailing / naming a directory. A Touches: path that matches never
 causes a feeder collision wait, and in a matching file a conflict hunk kept
 as both sides still counts as a trivial update. Absent, it is empty.
 
+human_reviewers is optional (issue #1198): a list of GitHub logins. On a
+ship: handoff ticket handed off after an APPROVE, a CHANGES_REQUESTED PR
+review from one of them, or from an approver, reopens the ticket as an
+approver's go does. Absent, it is empty. It is a trust field.
+
 feeder is optional (issue #269): a mapping with max_holders_per_path (an
 integer of at least 1, default 2) and exclusive_paths (a list like
 shared_paths, default none). Up to max_holders_per_path tickets in flight
@@ -173,6 +178,7 @@ _TOP_KEYS = {
     "hold",
     "finish_line",
     "shared_paths",
+    "human_reviewers",
     "feeder",
     "plan",
     "ci",
@@ -184,7 +190,7 @@ DEFAULT_PLAN_MAX_LINES = 400
 PLAN_ESTIMATE_FACTOR = Fraction(27, 20)
 DEFAULT_PLAN_MAX_CRITERIA = 5
 _HOLD_KEYS = {"label", "approver", "paths"}
-TRUST_KEYS = ("hold", "ship", "finish_line", "builder", "reviewer", "ci", "qa")
+TRUST_KEYS = ("hold", "ship", "finish_line", "builder", "reviewer", "ci", "qa", "human_reviewers")
 _FEEDER_KEYS = {"max_holders_per_path", "exclusive_paths", "required_checks"}
 DEFAULT_MAX_HOLDERS_PER_PATH = 2
 QA_RUNNERS = ("claude-cloud", "cursor-cloud")
@@ -292,6 +298,7 @@ class FactoryConfig:
     # code gets the same default as one parsed from factory.md.
     finish_line: str | None = None
     shared_paths: tuple[str, ...] = ()
+    human_reviewers: tuple[str, ...] = ()
     followup_from_round: int | None = None
     auto_extra_rounds: int = 0
     start_before_ci: bool = False
@@ -427,6 +434,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
     hold = _hold(data, findings, unknown)
     finish_line = _finish_line(data, ship, findings)
     shared_paths = _path_list(data.get("shared_paths"), "shared_paths", findings)
+    human_reviewers = _human_reviewers(data.get("human_reviewers"), findings)
     max_holders_per_path, exclusive_paths, required_checks = _feeder(data, findings, unknown)
     plan_max_lines, plan_max_criteria = _plan(data, findings, unknown)
     ci_branches, ci_local_checks = _ci(data, findings, unknown)
@@ -497,6 +505,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
         hold=hold,
         finish_line=finish_line,
         shared_paths=shared_paths,
+        human_reviewers=human_reviewers,
         followup_from_round=followup_from_round,
         auto_extra_rounds=auto_extra_rounds,
         start_before_ci=start_before_ci,
@@ -1235,6 +1244,25 @@ def _path_list(value: object, name: str, findings: list[Finding]) -> tuple[str, 
                 )
             )
     return tuple(paths)
+
+
+def _human_reviewers(value: object, findings: list[Finding]) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        findings.append(Finding("error", "human_reviewers must be a list"))
+        return ()
+    logins: list[str] = []
+    seen: set[str] = set()
+    for index, item in enumerate(value):
+        if not isinstance(item, str) or _LOGIN.fullmatch(item) is None:
+            findings.append(Finding("error", f"human_reviewers[{index}] must be a GitHub login"))
+        elif item.casefold() in seen:
+            findings.append(Finding("error", f"human_reviewers[{index}] is listed twice"))
+        else:
+            seen.add(item.casefold())
+            logins.append(item)
+    return tuple(logins)
 
 
 def _is_glob(value: object) -> bool:
