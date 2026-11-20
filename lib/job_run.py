@@ -40,6 +40,9 @@ same process that runs the command:
   descendant, even one that left the session and dropped the tag, stays
   findable by the scope; a user with no usable user manager or Linger off
   gets a log line saying the run is uncontained, and the command still runs;
+* on Linux, the gate raises the command's oom_score_adj to 800 (#1229,
+  lib/oom.py), so the OOM killer takes the worker and its children before
+  run; a refused write is logged and the command still runs;
 * on macOS the command runs as the child of an anchor that is its own
   responsible process (#329, #846), an identity every descendant inherits;
   the anchor keeps the worker pid and lives until the run's kill round, so
@@ -67,6 +70,7 @@ from pathlib import Path
 from types import FrameType
 from typing import IO
 
+from lib import oom
 from lib.job_state import HEARTBEAT_SECONDS, KILL_GRACE_SECONDS, MAX_HEARTBEAT_SECONDS
 from lib.process_tree import (
     RUN_TAG_ENV,
@@ -128,6 +132,12 @@ if not go:
 for name in ("SIGPIPE", "SIGXFZ", "SIGXFSZ"):
     if hasattr(signal, name):
         signal.signal(getattr(signal, name), signal.SIG_DFL)
+if sys.platform.startswith("linux"):
+    try:
+        with open("/proc/self/oom_score_adj", "w") as adj:
+            adj.write("WORKER_ADJ")
+    except OSError as exc:
+        print(f"orch job run: worker oom_score_adj left as is (not WORKER_ADJ): {exc}", file=sys.stderr)
 
 def disclaimed_exec(argv):
     import ctypes
@@ -197,7 +207,7 @@ say(b"%d\\n" % child.wait())
 while True:
     time.sleep(3600)
 """
-_GATE = _GATE.replace("ANCHOR", repr(_ANCHOR))
+_GATE = _GATE.replace("ANCHOR", repr(_ANCHOR)).replace("WORKER_ADJ", str(oom.WORKER_ADJ))
 
 
 def heartbeat_interval(timeout_seconds: float, override: float | None) -> float:
