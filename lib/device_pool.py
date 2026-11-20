@@ -337,13 +337,16 @@ class DevicePool:
         live = live_settings.recorded(connection, self.machines_path)
         return live.placement_config(self.config), live
 
-    def serving(self, harness: str) -> frozenset[str]:
-        """The accounts of harness on devices placement may use."""
+    def placement_config(self) -> MachinesConfig:
         with self.queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             config, _ = self._placement(connection)
             connection.commit()
-        return config.serving(harness)
+        return config
+
+    def serving(self, harness: str) -> frozenset[str]:
+        """The accounts of harness on devices placement may use."""
+        return self.placement_config().serving(harness)
 
     def place_qa(self, connection: sqlite3.Connection, job_id: str, repo: str) -> bool:
         """Hold a slot for a pinned project's QA job on a listed device.

@@ -241,8 +241,15 @@ class JobsMixin:
                 connection, job, "handed-off", "Max handed the ticket off; no T6 retry", now
             )
 
-    def _no_free_slot(self, *, memory: bool = True) -> Callable[[Job], bool]:
-        config = getattr(self.devices, "config", None)
+    def _placement_config(self) -> MachinesConfig | None:
+        pool = getattr(self.devices, "pool", None)
+        if pool is not None:
+            return pool.placement_config()
+        return getattr(self.devices, "config", None)
+
+    def _no_free_slot(
+        self, config: MachinesConfig | None, *, memory: bool = True
+    ) -> Callable[[Job], bool]:
         if config is None:
             return lambda job: False
         used = used_slots(self.queue, config)
@@ -260,13 +267,12 @@ class JobsMixin:
 
         return full
 
-    def _memory_wait(self) -> Callable[[Job], str | None]:
-        config = getattr(self.devices, "config", None)
+    def _memory_wait(self, config: MachinesConfig | None) -> Callable[[Job], str | None]:
         holds = {} if config is None else memory_holds(self.queue)
         if not holds:
             return lambda job: None
-        full = self._no_free_slot()
-        full_apart_from_memory = self._no_free_slot(memory=False)
+        full = self._no_free_slot(config)
+        full_apart_from_memory = self._no_free_slot(config, memory=False)
         pins = self._pins()
 
         def waiting(job: Job) -> str | None:
@@ -371,8 +377,9 @@ class JobsMixin:
         self._check_job_states()
         self._close_abandoned_jobs()
         now = self.queue.now()
-        no_free_slot = self._no_free_slot()
-        memory_wait = self._memory_wait()
+        placement = self._placement_config()
+        no_free_slot = self._no_free_slot(placement)
+        memory_wait = self._memory_wait(placement)
         lag_blocked = self._lag_blocked_recipients()
         serving = self._serving()
         with self._connect() as connection:
