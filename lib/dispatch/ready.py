@@ -673,6 +673,8 @@ class ReadyMixin:
     ) -> bool:
         if not ticket.pr_base:
             return False
+        if self.feeder is not None and self.feeder.main_fix_pr(ticket.repo, ticket.ticket_id):
+            return False
         base = self._base_checks_for(ticket.repo, ticket.pr_base)
         if base is None:
             return held

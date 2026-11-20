@@ -1721,3 +1721,20 @@ def test_an_owner_whose_claim_lapsed_before_the_post_does_not_post(tmp_path: Pat
     assert feeder.feed_once().errors == 0
     assert main_fixes(github) == [900]
     assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
+
+
+def test_main_fix_pr_names_the_fed_main_fix_and_no_ordinary_pr(tmp_path: Path) -> None:
+    feeder, queue, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD)
+    github.issues["owner/app"] = [issue(1)]
+    github.main_checks[MAIN] = {"test (2/3)": BaseCheck("test (2/3)", "success", "899", "1", RED_SHA)}
+    dispatcher = dispatcher_for(tmp_path, queue, feeder)
+    source = FeederSource(github)
+    dispatcher.poll_once(source)
+    red_main(github)
+    dispatcher.poll_once(source)
+
+    pulls = {github.pulls[key]["head"]: str(key[1]) for key in github.pulls}
+    assert set(pulls) == {"factory/issue-1", "factory/issue-900"}
+    assert feeder.main_fix_pr("Owner/App", pulls["factory/issue-900"])
+    assert not feeder.main_fix_pr("owner/app", pulls["factory/issue-1"])
+    assert not feeder.main_fix_pr("owner/app", "999")
