@@ -10,7 +10,7 @@ from lib.device_pool import DevicePool
 from lib.dispatch.constants import STOPPED_POLL_SECONDS
 from lib.dispatch.types import Comment
 from lib.hook_t7 import T7Hook
-from lib.queue import Job
+from lib.queue import PRE_READY_FAILED, Job
 from tests.merge_queue_support import PR, REPO, Board, sha
 from tests.test_dispatcher import PLAN, RETRY, VERDICT
 from tests.test_remote_start import FakeTransport, config_of, machines_file
@@ -339,6 +339,10 @@ def _events(b: Board, job_id: str) -> list[str]:
 
 def _orphans(b: Board) -> list[tuple[str, str]]:
     with b.queue.connect() as connection:
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'device_orphans'"
+        ).fetchone() is None:
+            return []
         return [
             (str(row[0]), str(row[1]))
             for row in connection.execute("SELECT job_id, device FROM device_orphans")
@@ -464,3 +468,251 @@ def test_retry_of_a_stranded_job_that_posted_its_ready_settles_it_instead_of_rer
     assert build["state"] == "done"
     assert [r["state"] for r in b.jobs("review")] == ["queued"]
     assert pool.claim("claude") is None
+
+
+LEFTOVER_TAG = "e" * 32
+
+
+def _running_with_leftovers(
+    b: Board, tmp_path: Path, recipient: str
+) -> tuple[DevicePool, FakeTransport, Job]:
+    config = config_of(machines_file(tmp_path))
+    pool = DevicePool(b.queue, config)
+    transport = FakeTransport(check=1)
+    b.dispatcher.devices = DeviceMonitor(pool, config, transport, alive=lambda *_: False)
+    claimed = pool.claim(recipient)
+    assert claimed is not None
+    job, placed = claimed
+    assert placed.device == "pc"
+    pool.attach_runner(job.id, owner=recipient, pid=11, start="r", alive=lambda *_: False)
+    pool.attach_worker(job.id, owner=recipient, remote=True, tag=LEFTOVER_TAG)
+    b.poll()
+    assert _job_state(b, job.id) == "running"
+    return pool, transport, job
+
+
+def _answer(b: Board, recipient: str, comment_id: str) -> None:
+    job = b.claim(recipient)
+    b.queue.finish(job.id, owner=recipient, handoff_comment_id=comment_id)
+
+
+def _job_state(b: Board, job_id: str) -> str:
+    [row] = [row for row in b.jobs() if row["id"] == job_id]
+    return str(row["state"])
+
+
+def _handoff(b: Board, job_id: str) -> str | None:
+    [row] = [row for row in b.jobs() if row["id"] == job_id]
+    return row["handoff_comment_id"]
+
+
+def _stops(transport: FakeTransport) -> int:
+    return sum(1 for kind, _user, _alias in transport.calls if kind == "stop")
+
+
+@pytest.mark.job_bound
+def test_4f441ac6_a_dead_runner_with_tagged_leftovers_settles_from_its_posted_ready(
+    tmp_path: Path,
+) -> None:
+    b = Board(tmp_path)
+    p = b.open("42", sha(1))
+    b.go(p, "go")
+    b.poll()
+    pool, transport, build = _running_with_leftovers(b, tmp_path, "claude")
+    p.push(sha(2))
+    ready = b.ready(p, p.head)
+    b.poll()
+
+    assert _job_state(b, build.id) == "done"
+    assert _handoff(b, build.id) == ready
+    events = _events(b, build.id)
+    assert events.index("dead") < events.index("done-from-ready")
+    assert pool.placement(build.id) is None
+    assert _orphans(b) == [(build.id, "pc")]
+
+    b.poll()
+
+    assert _stops(transport) >= 1
+    assert b.outcome(ready) == "queued-review"
+    assert [r["state"] for r in b.jobs("review")] == ["queued"]
+    assert b.jobs("review")[0]["head"] == sha(2)
+
+
+@pytest.mark.job_bound
+def test_settling_from_a_posted_ready_is_idempotent_across_polls(tmp_path: Path) -> None:
+    b = Board(tmp_path)
+    p = b.open("42", sha(1))
+    b.go(p, "go")
+    b.poll()
+    _pool, _transport, build = _running_with_leftovers(b, tmp_path, "claude")
+    p.push(sha(2))
+    ready = b.ready(p, p.head)
+    for _ in range(4):
+        b.poll()
+
+    assert b.outcome(ready) == "queued-review"
+    assert [r["state"] for r in b.jobs("review")] == ["queued"]
+    events = _events(b, build.id)
+    assert (events.count("dead"), events.count("done-from-ready")) == (1, 1)
+    assert _job_state(b, build.id) == "done"
+
+
+def _review_running_with_leftovers(
+    b: Board, tmp_path: Path
+) -> tuple[PR, DevicePool, FakeTransport, Job]:
+    p = b.open("42", sha(1))
+    b.go(p, "go")
+    b.poll()
+    _answer(b, "claude", b.ready(p, p.head))
+    b.poll()
+    pool, transport, review = _running_with_leftovers(b, tmp_path, "codex")
+    assert review.request.action == "review"
+    return p, pool, transport, review
+
+
+@pytest.mark.job_bound
+def test_a_dead_reviewer_with_tagged_leftovers_settles_from_its_posted_verdict(
+    tmp_path: Path,
+) -> None:
+    b = Board(tmp_path)
+    p, pool, transport, review = _review_running_with_leftovers(b, tmp_path)
+    verdict = b.revise(p, "1/3")
+    b.poll()
+
+    assert _job_state(b, review.id) == "done"
+    assert _handoff(b, review.id) == verdict
+    assert "done-from-verdict" in _events(b, review.id)
+    assert pool.placement(review.id) is None
+    assert _orphans(b) == [(review.id, "pc")]
+
+    b.poll()
+
+    assert b.outcome(verdict) == "queued-review-fix"
+    assert b.state("42")["workflow_state"] == "fixing"
+    assert _queued_fix_heads(b) == [p.head]
+    assert _stops(transport) >= 1
+    review_round = b.state("42")["review_round"]
+
+    b.poll()
+    b.poll()
+
+    assert _queued_fix_heads(b) == [p.head]
+    assert len(b.jobs("fix")) == 1
+    assert b.state("42")["review_round"] == review_round
+    assert _events(b, review.id).count("done-from-verdict") == 1
+
+
+@pytest.mark.job_bound
+def test_a_dead_runner_with_tagged_leftovers_and_no_handoff_stays_running(
+    tmp_path: Path,
+) -> None:
+    b = Board(tmp_path)
+    p = b.open("42", sha(1))
+    b.go(p, "go")
+    b.poll()
+    pool, _transport, build = _running_with_leftovers(b, tmp_path, "claude")
+    for _ in range(3):
+        b.now[0] += 600
+        b.poll()
+
+    assert _job_state(b, build.id) == "running"
+    assert not {"dead", "done-from-ready"} & set(_events(b, build.id))
+    assert pool.placement(build.id) is not None
+    assert _orphans(b) == []
+
+
+@pytest.mark.job_bound
+def test_a_handoff_for_another_job_does_not_settle_a_dead_runner_with_leftovers(
+    tmp_path: Path,
+) -> None:
+    b = Board(tmp_path)
+    p, pool, _transport, review = _review_running_with_leftovers(b, tmp_path)
+    for comment_id, round_text, head in (
+        ("old-head", "1/3", sha(9)),
+        ("other-round", "2/3", p.head),
+    ):
+        body = VERDICT.format(round=round_text, head=head, verdict="REVISE", risk="high")
+        b.post(p, comment_id, body, "codex-login")
+    b.ready(p, p.head, "builder-ready-again")
+    b.poll()
+    b.poll()
+
+    assert _job_state(b, review.id) == "running"
+    assert not {"dead", "done-from-verdict"} & set(_events(b, review.id))
+    assert pool.placement(review.id) is not None
+    assert _orphans(b) == []
+
+
+@pytest.mark.job_bound
+def test_a_ready_from_an_earlier_generation_does_not_settle_a_dead_runner_with_leftovers(
+    tmp_path: Path,
+) -> None:
+    b = Board(tmp_path)
+    p = b.open("42", sha(1))
+    b.go(p, "go")
+    b.poll()
+    _answer(b, "claude", b.ready(p, p.head))
+    b.poll()
+    _answer(b, "codex", b.revise(p, "1/3"))
+    b.poll()
+    pool, _transport, fix = _running_with_leftovers(b, tmp_path, "claude")
+    assert fix.request.action == "fix"
+    b.poll()
+    b.poll()
+
+    assert _job_state(b, fix.id) == "running"
+    assert not {"dead", "done-from-ready"} & set(_events(b, fix.id))
+    assert pool.placement(fix.id) is not None
+    assert _orphans(b) == []
+
+
+@pytest.mark.job_bound
+def test_a_ready_at_a_superseded_head_does_not_hide_the_current_ready_from_a_dead_runner(
+    tmp_path: Path,
+) -> None:
+    b = Board(tmp_path)
+    p = b.open("42", sha(1))
+    b.go(p, "go")
+    b.poll()
+    pool, _transport, build = _running_with_leftovers(b, tmp_path, "claude")
+    p.push(sha(2))
+    superseded = b.ready(p, p.head)
+    p.push(sha(3))
+    ready = b.ready(p, p.head)
+    for _ in range(4):
+        b.poll()
+
+    assert _job_state(b, build.id) == "done"
+    assert _handoff(b, build.id) == ready
+    assert pool.placement(build.id) is None
+    assert b.outcome(superseded) == "stale-ready-head"
+    assert b.outcome(ready) == "queued-review"
+    assert [(r["state"], r["head"]) for r in b.jobs("review")] == [("queued", sha(3))]
+    assert _events(b, build.id).count("dead") == 1
+
+
+@pytest.mark.job_bound
+def test_a_ready_its_pre_ready_check_refused_does_not_settle_a_dead_runner_with_leftovers(
+    tmp_path: Path,
+) -> None:
+    b = Board(tmp_path)
+    p = b.open("42", sha(1))
+    b.go(p, "go")
+    b.poll()
+    pool, _transport, build = _running_with_leftovers(b, tmp_path, "claude")
+    p.push(sha(2))
+    ready = b.ready(p, p.head)
+    b.queue.record_invalid_handoff(
+        build.id,
+        owner="claude",
+        comment_id=ready,
+        detail="pre_ready failed: exit 1",
+        event=PRE_READY_FAILED,
+    )
+    b.poll()
+    b.poll()
+
+    assert _job_state(b, build.id) == "running"
+    assert not {"dead", "done-from-ready"} & set(_events(b, build.id))
+    assert pool.placement(build.id) is not None
+    assert b.jobs("review") == []
