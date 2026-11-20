@@ -149,7 +149,7 @@ class T3Mixin:
             )
             if granted is not None:
                 cap += 1
-            next_state = "capped" if round_number >= cap else "fixing"
+            next_state = "capped" if isinstance(convergence, Stalled) or round_number >= cap else "fixing"
             answered = None
             if next_state == "fixing":
                 detail = self._job_detail(

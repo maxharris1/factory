@@ -38,6 +38,7 @@ RULE_MODULE = {
     "_builder_response": "repeat",
     "_stop_disputed": "repeat",
     "_stop_decision": "repeat",
+    "_capped_stop": "repeat",
     "_held_stop": "repeat",
     "_t4": "t4",
     "_approve_ci_red_fix": "t4",

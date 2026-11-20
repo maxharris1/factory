@@ -4,11 +4,13 @@ import dataclasses
 from collections.abc import Sequence
 from pathlib import Path
 
+from lib.dispatch.verdict.repeat import STOP_OPTIONS
 from tests.qa_support import Harness, qa_report, ready, scenarios, verdict
 from tests.test_approver_credential import MAX, AppFlow
 from tests.test_auto_extra_round import AutoFlow, capped_wakes
 from tests.test_dispatcher import GO, VERDICT, job_count
 from tests.test_qa_gate_table import blocking
+from tests.test_repeat import ABANDONED, decisions, wake_detail
 from tests.test_rounds_and_caps import HEADS, round_of
 from tests.test_unsatisfiable_criterion import revise, to_first_review
 
@@ -95,6 +97,67 @@ def test_a_flat_round_gets_one_round_then_a_second_flat_round_caps(tmp_path: Pat
     assert (flow.state()["workflow_state"], flow.state()["cap_extra"]) == ("capped", 1)
     assert capped_wakes(flow) == 1
     assert len(flow.actions.posted) == 1
+
+
+def _stalled(tmp_path: Path) -> ConvergingFlow:
+    flow = ConvergingFlow(tmp_path, "convergence")
+    flow.factory = dataclasses.replace(flow.factory, rounds_high=4)
+    assert flow.go("go-1") == "queued-build"
+    flow.finish("claude")
+    for number in (1, 2):
+        flow.review(number, cap=4)
+        assert flow.revise_with(f"{number}/4", flow.fresh(2)) == "queued-review-fix"
+        flow.finish("claude")
+    flow.review(3, cap=4)
+    assert flow.revise_with("3/4", flow.fresh(2)) == "capped-review"
+    return flow
+
+
+def _stalled_question(flow: ConvergingFlow) -> str:
+    return wake_detail(flow, "capped", "review not converging")["question"]
+
+
+def test_two_flat_rounds_below_the_cap_stall(tmp_path: Path) -> None:
+    flow = _stalled(tmp_path)
+    state = flow.state()
+    assert (state["workflow_state"], state["cap_extra"], state["review_round"]) == ("capped", 0, 3)
+    assert capped_wakes(flow) == 1
+    wake = wake_detail(flow, "capped", "review not converging")
+    assert wake["detail"].startswith("review not converging")
+    assert wake["question"].startswith("Blocking findings did not shrink in rounds 2 and 3")
+    for option in STOP_OPTIONS["stalled"]:
+        assert f"- {option.name}: {option.consequence}" in wake["question"]
+    assert flow.actions.posted == []
+
+
+def test_a_carried_id_on_a_flat_round_repeats(tmp_path: Path) -> None:
+    flow = ConvergingFlow(tmp_path, "convergence")
+    assert flow.go("go-1") == "queued-build"
+    flow.finish("claude")
+    flow.review(1)
+    assert flow.revise_with("1/3", ["f-1", "f-2"]) == "queued-review-fix"
+    flow.finish("claude")
+    flow.review(2)
+    assert flow.revise_with("2/3", ["f-1", "f-3"]) == "waiting-max-repeat"
+    assert wake_detail(flow, "clarify", "repeat-block")["detail"].startswith("repeat-block: f-1")
+
+
+def test_go_lifts_a_stalled_stop(tmp_path: Path) -> None:
+    flow = _stalled(tmp_path)
+    asked = _stalled_question(flow)
+    assert flow.go("go-max") == "queued-fix"
+    assert (flow.state()["workflow_state"], flow.state()["cap_extra"]) == ("fixing", 1)
+    [decision] = decisions(flow)
+    assert (decision["question"], decision["choice"]) == (asked, "Another round: Go.")
+    assert decision["options"] == [option.name for option in STOP_OPTIONS["stalled"]]
+
+
+def test_abandoning_a_stalled_stop_records_split_on_its_question(tmp_path: Path) -> None:
+    flow = _stalled(tmp_path)
+    asked = _stalled_question(flow)
+    assert flow.post("split", ABANDONED, "grok-login") == "abandoned"
+    [decision] = decisions(flow)
+    assert (decision["question"], decision["choice"]) == (asked, "Split: file smaller tickets.")
 
 
 def _carried(tmp_path: Path, stop_on: str) -> str:
