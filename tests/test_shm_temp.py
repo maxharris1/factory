@@ -10,6 +10,7 @@ import tempfile
 import time
 from collections import namedtuple
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -97,6 +98,12 @@ def test_an_unwritable_root_falls_back(tmp_path):
         assert shm_temp.choose_session_root(root, GIB, usage(4 * GIB)) is None
     finally:
         root.chmod(0o700)
+
+
+def test_a_noexec_mount_falls_back(tmp_path, monkeypatch):
+    monkeypatch.setattr(shm_temp, "statvfs", lambda _path: SimpleNamespace(f_flag=os.ST_NOEXEC))
+    assert shm_temp.choose_session_root(tmp_path, GIB, usage(4 * GIB)) is None
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_a_mkdtemp_error_falls_back(tmp_path, monkeypatch):

@@ -2,7 +2,8 @@
 
 Loaded from pytest.ini with `-p tests.shm_temp`. Each session gets its own
 `pytest-factory-<pid>-*` dir, so concurrent suites never share a basetemp.
-When /dev/shm is missing, unwritable or short of space, nothing changes.
+When /dev/shm is missing, unwritable, mounted noexec or short of space,
+nothing changes.
 An explicit `--basetemp` keeps pytest's basetemp; TMPDIR still moves.
 """
 
@@ -23,6 +24,7 @@ STALE_SECONDS = 3600
 PREFIX = "pytest-factory-"
 ENV_NAMES = ("TMPDIR", "TEMP", "TMP")
 disk_usage = shutil.disk_usage
+statvfs = os.statvfs
 
 _session_root = pytest.StashKey[Path]()
 _saved_env = pytest.StashKey[dict]()
@@ -33,6 +35,7 @@ def qualifies(shm_root: Path, min_free: int, usage=shutil.disk_usage) -> bool:
         return (
             shm_root.is_dir()
             and os.access(shm_root, os.W_OK | os.X_OK)
+            and not statvfs(shm_root).f_flag & os.ST_NOEXEC
             and usage(shm_root).free >= min_free
         )
     except OSError:
