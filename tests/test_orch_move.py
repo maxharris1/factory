@@ -354,7 +354,7 @@ exec "{sys.executable}" "{ROOT / "bin/orch"}" "$@"
 
 
 def _real_poller_service(host: Host) -> None:
-    for name in ("poller-service.sh", "host-pidns.sh"):
+    for name in ("poller-service.sh", "host-pidns.sh", "contain.sh"):
         shutil.copy(ROOT / "deploy" / name, host.checkout / "deploy" / name)
 
 

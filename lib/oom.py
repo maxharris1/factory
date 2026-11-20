@@ -55,3 +55,14 @@ def raise_sh(adj: int = WORKER_ADJ) -> str:
         f"{{ echo {adj} > /proc/$$/oom_score_adj; }} 2>/dev/null "
         f"|| echo {skipped} >&2; "
     )
+
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) != 3 or sys.argv[1] != "floor" or not sys.argv[2].isdigit():
+        sys.exit("usage: oom.py floor <pid>")
+    lower_to_floor(
+        lambda line: print(line, file=sys.stderr),
+        Path(f"/proc/{sys.argv[2]}/oom_score_adj"),
+    )

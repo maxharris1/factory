@@ -95,6 +95,7 @@ START_WAIT="${ORCH_WAITER_START_WAIT:-15}"
 STOP_WAIT="${ORCH_WAITER_STOP_WAIT:-60}"
 CRONTAB="${ORCH_CRONTAB:-crontab}"
 PROC="${ORCH_PROC_DIR:-/proc}"
+CONTAIN="${HERE}/contain.sh"
 # cron and fresh shells have a minimal PATH; the waiter needs orch, gh and git,
 # and stop needs lsof (/usr/sbin on macOS).
 export PATH="${HOME}/.local/bin${PATH:+:${PATH}}:/usr/local/bin:/usr/bin:/bin:/usr/sbin"
@@ -351,7 +352,8 @@ launch() {
         return 0
     fi
     refuse_if_retired start
-    factory_detach bash "$SELF" "$BOT" _supervise "$STATE" >>"$LOG" 2>&1 </dev/null 9>&-
+    factory_detach "$CONTAIN" "orch-wait-${BOT}" bash "$SELF" "$BOT" _supervise "$STATE" \
+        >>"$LOG" 2>&1 </dev/null 9>&-
     child=$!
     for ((i = 0; i < START_WAIT * 10; i++)); do
         if pid="$(running_pid)"; then

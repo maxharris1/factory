@@ -96,6 +96,32 @@ def test_lower_to_floor_reaches_the_kernel_floor() -> None:
     assert floor == 0 or cannot_write_from_300(floor - 1), "nothing lower is allowed"
 
 
+@linux
+def test_the_floor_command_lowers_another_process_to_the_kernel_floor() -> None:
+    child = subprocess.Popen(["sleep", "60"], preexec_fn=at_300)
+    try:
+        result = subprocess.run(
+            [sys.executable, "-I", "-S", str(ROOT / "lib/oom.py"), "floor", str(child.pid)],
+            capture_output=True, text=True,
+        )
+        lowered = score(child.pid)
+    finally:
+        child.kill()
+        child.wait()
+    assert result.returncode == 0, result.stderr
+    assert 0 <= lowered < 300
+    assert lowered == 0 or cannot_write_from_300(lowered - 1), "nothing lower is allowed"
+
+
+def test_the_floor_command_logs_and_exits_0_for_a_pid_it_cannot_read() -> None:
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", str(ROOT / "lib/oom.py"), "floor", "999999999"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "oom_score_adj left as is" in result.stderr
+
+
 def test_lower_to_floor_never_raises_a_score_below_0(tmp_path: Path) -> None:
     adj = tmp_path / "oom_score_adj"
     adj.write_text("-500\n")

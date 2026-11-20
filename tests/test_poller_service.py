@@ -2,6 +2,7 @@
 
 import fcntl
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -13,6 +14,7 @@ import pytest
 
 from lib import cli
 from tests.procs import alive
+from tests.test_oom import at_300, linux, score
 from tests.test_wait import restore_signals  # noqa: F401  (fixture)
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -251,7 +253,12 @@ def _kill_poller(home: Path) -> None:
 
 
 def _service(
-    home: Path, *args: str, cron: Path | None = None, service: Path = SERVICE, **extra: str
+    home: Path,
+    *args: str,
+    cron: Path | None = None,
+    service: Path = SERVICE,
+    preexec_fn=None,
+    **extra: str,
 ):
     # Tests never reach a real crontab: ORCH_CRONTAB is always a fake or
     # a path that does not exist.
@@ -278,6 +285,7 @@ def _service(
         capture_output=True,
         timeout=60,
         check=False,
+        preexec_fn=preexec_fn,
     )
 
 
@@ -783,7 +791,8 @@ def _deploy_copy(tmp_path: Path, calls: Path) -> Path:
     records each call."""
     deploy = tmp_path / "deploy"
     deploy.mkdir()
-    for name in ("poller-service.sh", "run-poller.sh", "poller-ensure-loop.sh", "host-pidns.sh"):
+    for name in ("poller-service.sh", "run-poller.sh", "poller-ensure-loop.sh", "host-pidns.sh",
+                 "contain.sh"):
         shutil.copy(ROOT / "deploy" / name, deploy)
     fake = deploy / "waiter-service.sh"
     fake.write_text(f'#!/bin/sh\necho "$1 $2" >>{calls}\n', encoding="utf-8")
@@ -1329,3 +1338,93 @@ def test_a_host_retired_while_queued_on_the_service_lock_restores_and_starts_not
     assert not starts.exists()
     assert not _lost_db(home).exists()
     assert not _pidfile(home).exists()
+
+
+FAKE_SYSTEMD_RUN = """#!/bin/sh
+case " $* " in *" --help "*) echo "  --expand-environment=BOOL"; exit 0 ;; esac
+case " $* " in *" --unit="*) ;; *) {probe} ;; esac
+options=
+while [ "$1" != -- ]; do options="$options $1"; shift; done
+shift
+echo "${{options# }}" >>{log}
+exec "$@"
+"""
+
+
+STALL = "exec sleep 600"
+
+
+def fake_systemd(
+    tmp_path: Path, linger: str, *, stall_loginctl: bool = False, stall_probe: bool = False
+) -> tuple[str, Path]:
+    fake_bin = tmp_path / "systemd-bin"
+    fake_bin.mkdir()
+    log = tmp_path / "systemd-run.log"
+    loginctl = STALL if stall_loginctl else f"echo {linger}"
+    probe = STALL if stall_probe else "exit 0"
+    for name, text in (("loginctl", f"#!/bin/sh\n{loginctl}\n"),
+                       ("systemd-run", FAKE_SYSTEMD_RUN.format(log=log, probe=probe))):
+        (fake_bin / name).write_text(text, encoding="utf-8")
+        (fake_bin / name).chmod(0o755)
+    return f"{fake_bin}:/usr/bin:/bin", log
+
+
+def scope_units(log: Path) -> list[str]:
+    lines = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    for line in lines:
+        assert line.split()[:2] == ["--user", "--scope"], line
+    return [match for line in lines for match in re.findall(r"--unit=(\S+)", line)]
+
+
+@linux
+def test_start_and_restart_run_the_poller_in_a_new_user_scope_at_the_oom_floor(
+    home: Path, tmp_path: Path
+) -> None:
+    path, log = fake_systemd(tmp_path, "yes")
+    started = _service(home, "start", preexec_fn=at_300, PATH=path)
+    assert started.returncode == 0, started.stderr
+    pid = int(_pidfile(home).read_text())
+    assert f"started orch poll (pid {pid})" in started.stdout
+    assert score(pid) < 300
+
+    restarted = _service(home, "restart", preexec_fn=at_300, PATH=path)
+    assert restarted.returncode == 0, restarted.stderr
+    again = int(_pidfile(home).read_text())
+    assert f"started orch poll (pid {again})" in restarted.stdout
+    assert score(again) < 300
+
+    units = scope_units(log)
+    assert len(units) == 2 and units[0] != units[1], units
+    assert all(re.fullmatch(r"orch-poll-\d+-\d+\.scope", unit) for unit in units), units
+    assert "uncontained" not in (home / ".local/state/factory/poller.log").read_text()
+
+
+@linux
+def test_without_a_user_scope_the_poller_starts_uncontained_at_the_oom_floor(
+    home: Path, tmp_path: Path
+) -> None:
+    path, log = fake_systemd(tmp_path, "no")
+    started = _service(home, "start", preexec_fn=at_300, PATH=path)
+    assert started.returncode == 0, started.stderr
+    pid = int(_pidfile(home).read_text())
+    assert f"started orch poll (pid {pid})" in started.stdout
+    assert score(pid) < 300
+    assert scope_units(log) == []
+    poller_log = (home / ".local/state/factory/poller.log").read_text()
+    assert "orch-poll: uncontained (no systemd user scope)" in poller_log
+
+
+@linux
+@pytest.mark.parametrize("stall", ["stall_loginctl", "stall_probe"])
+def test_a_stalled_user_manager_still_starts_the_poller_uncontained(
+    home: Path, tmp_path: Path, stall: str
+) -> None:
+    path, log = fake_systemd(tmp_path, "yes", **{stall: True})
+    started = _service(home, "start", preexec_fn=at_300, PATH=path)
+    assert started.returncode == 0, started.stdout + started.stderr
+    pid = int(_pidfile(home).read_text())
+    assert f"started orch poll (pid {pid})" in started.stdout
+    assert score(pid) < 300
+    assert scope_units(log) == []
+    poller_log = (home / ".local/state/factory/poller.log").read_text()
+    assert "orch-poll: uncontained (no systemd user scope)" in poller_log
