@@ -66,6 +66,10 @@ is forgotten, as is a row whose worker no check can name. An unreachable
 device ends its sweep for the poll after one failed check. A requeue
 placed back on the same device carries a new tag and is never stopped by
 mistake.
+
+Sign-ins. After reconcile, `check_sign_ins` runs the account doctor
+(lib/account_doctor.py) on the first poll, every `INTERVAL_SECONDS` after,
+and once on the poll after reload adopts a changed machines.yml.
 """
 
 from __future__ import annotations
@@ -77,7 +81,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from lib import live_settings
+from lib import account_doctor, live_settings
 from lib.device_pool import DevicePool, HeldSlot, Orphan, Placement
 from lib.job_state import Liveness, liveness, never_started
 from lib.machines_yml import Device, MachinesConfig
@@ -98,6 +102,7 @@ from lib.worktrees import pid_alive
 Log = Callable[[str], None]
 OnLost = Callable[[str, str, str], None]  # job_id, device, reason
 Alive = Callable[[int | None, str | None], bool]
+SignIns = Callable[[MachinesConfig, float], object]
 
 
 @dataclass(frozen=True)
@@ -162,6 +167,7 @@ class DeviceMonitor:
         kill: Callable[[int, int], None] = os.kill,
         scan: Callable[[str | None], dict[int, Process]] = processes,
         machines_path: Path | None = None,
+        sign_ins: SignIns | None = None,
     ):
         self.pool = pool
         self.config = config
@@ -170,7 +176,9 @@ class DeviceMonitor:
         self.kill = kill
         self.scan = scan
         self.machines_path = machines_path
+        self.sign_ins = sign_ins
         self._stamp: str | None = None
+        self._signed: tuple[float, str | None] | None = None
 
     def reload(self) -> None:
         """Adopt machines.yml again if it or its overlay changed since the last
@@ -188,6 +196,18 @@ class DeviceMonitor:
             connection.commit()
         self.config = self.pool.config = config
         self._stamp = stamp
+
+    def check_sign_ins(self, now: float) -> bool:
+        """Run the account doctor when due; an error waits for the next interval."""
+        if self.sign_ins is None:
+            return False
+        if self._signed is not None:
+            last, stamp = self._signed
+            if stamp == self._stamp and now - last < account_doctor.INTERVAL_SECONDS:
+                return False
+        self._signed = (now, self._stamp)
+        self.sign_ins(self.config, now)
+        return True
 
     def reconcile(self, now: float, lost_after: float, on_lost: OnLost) -> MonitorResult:
         released: list[str] = []

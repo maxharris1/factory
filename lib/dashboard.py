@@ -174,7 +174,7 @@ from typing import NamedTuple
 
 import yaml
 
-from lib import exposure
+from lib import account_doctor, exposure
 from lib import health as component_health
 from lib import live_settings
 from lib.config_overlay import apply_overlay
@@ -278,7 +278,7 @@ TRACKERS = ("github", "linear")
 ATTENTION_REASONS = (
     "ship-failed", "dedupe-dropped", "edited-comment", "base-mismatch", "deploy-conflict",
     SLOW_CYCLE, LOCK_ERRORS, CI_INFRA_BLOCKED_REASON, CI_RERUN_REFUSED, CI_STALE_REASON,
-    *FEEDER_ATTENTION_REASONS,
+    *FEEDER_ATTENTION_REASONS, account_doctor.REASON,
 )
 
 HANDOFF_SAVINGS_DEFINITION = (

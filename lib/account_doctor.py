@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import re
 import shlex
 import sqlite3
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
+from lib import attention
 from lib.machines_yml import Device, MachinesConfig
 from lib.remote import (
     _UNTRACE,
@@ -21,10 +24,15 @@ from lib.remote import (
     _login,
 )
 
+if TYPE_CHECKING:
+    from lib.queue import SQLiteJobQueue
+
 Status = Literal["ok", "signed-out", "mismatch", "unreachable"]
 Harness = Literal["claude", "codex"]
 
 TABLE = "account_signins"
+REASON = "account-signin"
+INTERVAL_SECONDS = 30 * 60
 
 _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS {TABLE} (
@@ -312,12 +320,52 @@ def judge(probes: Sequence[Probe], now: float) -> list[SignIn]:
     ]
 
 
+_LOGIN: dict[Harness, str] = {"claude": "claude auth login", "codex": "codex login"}
+_THEN = ", then orch accounts doctor"
+_STEP: dict[Status, str] = {
+    "signed-out": "sign in as {login} on {device}: {home}{command}" + _THEN,
+    "mismatch": "sign {account} in to its own account as {login} on {device}: {home}{command}" + _THEN,
+    "unreachable": "fix ssh to {device} for {harness}" + _THEN,
+}
+_TOKEN_STEP = "remove the token export from {login}'s login profile on {device}" + _THEN
+
+
+def _step(row: SignIn, config: MachinesConfig) -> str:
+    harness = config.account(row.account).harness
+    path = None if row.status == "unreachable" else config.account_home(row.device, harness, row.account)
+    template = _TOKEN_STEP if row.detail == TOKEN_AUTH else _STEP[row.status]
+    return template.format(
+        account=row.account,
+        device=row.device,
+        harness=harness,
+        login=config.device(row.device).login_for(harness),
+        home="" if path is None else f"{_STATUS[harness].home_variable}={path} ",
+        command=_LOGIN[harness],
+    )
+
+
+def flags(rows: Sequence[SignIn], config: MachinesConfig, repo: str) -> dict[tuple[str, str, str], str]:
+    return {
+        (repo.lower(), f"{row.account}@{row.device}", REASON):
+            f"{row.status}: {row.detail}; run: {_step(row, config)}"
+        for row in rows
+        if row.status != "ok"
+    }
+
+
 def ensure_table(connection: sqlite3.Connection) -> None:
     connection.execute(_SCHEMA)
 
 
-def write(connection: sqlite3.Connection, rows: Sequence[SignIn]) -> None:
+def write(
+    connection: sqlite3.Connection,
+    rows: Sequence[SignIn],
+    repo: str | None,
+    flagged: Mapping[tuple[str, str, str], str],
+    now: float,
+) -> None:
     ensure_table(connection)
+    attention.ensure_table(connection)
     connection.execute("BEGIN IMMEDIATE")
     try:
         connection.execute(f"DELETE FROM {TABLE}")
@@ -327,19 +375,31 @@ def write(connection: sqlite3.Connection, rows: Sequence[SignIn]) -> None:
             [(row.account, row.device, row.status, row.auth_method, row.subscription_type,
               row.fingerprint, row.checked_at, row.detail) for row in rows],
         )
+        if repo is not None:
+            attention.sync(connection, (REASON,), (repo,), flagged, now)
         connection.execute("COMMIT")
     except BaseException:
         connection.execute("ROLLBACK")
         raise
 
 
-def run(connection: sqlite3.Connection, config: MachinesConfig, transport: ByteTransport, now: float) -> list[SignIn]:
-    probes = [
-        item
-        for device in config.devices
-        for harness in _STATUS
-        for item in probe(transport, config, device, harness)
-    ]
-    rows = judge(probes, now)
-    write(connection, rows)
+def run(
+    connection: sqlite3.Connection,
+    config: MachinesConfig,
+    transport: ByteTransport,
+    now: float,
+    repo: str | None,
+) -> list[SignIn]:
+    pairs = [(device, harness) for device in config.devices for harness in _STATUS]
+    with ThreadPoolExecutor(max_workers=max(len(pairs), 1)) as pool:
+        probed = list(pool.map(lambda pair: probe(transport, config, *pair), pairs))
+    rows = judge([item for items in probed for item in items], now)
+    write(connection, rows, repo, {} if repo is None else flags(rows, config, repo), now)
     return rows
+
+
+def check(
+    queue: SQLiteJobQueue, transport: ByteTransport, repo: str | None, config: MachinesConfig, now: float
+) -> None:
+    with contextlib.closing(queue.connect()) as connection:
+        run(connection, config, transport, now, repo)
