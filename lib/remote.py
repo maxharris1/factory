@@ -1078,6 +1078,75 @@ def env_clear_script(target: RemoteTarget) -> str:
     return _sh(f"rm -f -- {shlex.quote(run_file(target, ENV_FILE))}")
 
 
+# --- #1233: the waiter's sweep of finished jobs' leftover runs ----------------
+SWEPT_FILE = "swept"
+LEFTOVER_MARK = "orch-leftover:"
+REAP_MARK = "orch-reap:"
+
+
+@dataclass(frozen=True)
+class ListedRun:
+    job_id: str
+    tag: str
+    ended: bool
+
+
+def leftovers_script(jobs_dir: str) -> str:
+    """Print `LEFTOVER_MARK <job> <tag> <ended>` per run directory under jobs_dir not yet swept.
+
+    ended is 1 once `exit` exists, or when no pid in `pid` answers `kill -0`.
+    """
+    return _sh(
+        f"cd -- {shlex.quote(jobs_dir)} 2>/dev/null || exit 0; "
+        'for r in *.run/*/; do r=${r%/}; j=${r%%.run/*}; t=${r#*.run/}; '
+        '[ -d "$r" ] && [ ! -L "$r" ] && [ ! -L "$j.run" ] || continue; '
+        'case "$j" in ""|*[!A-Za-z0-9_-]*) continue;; esac; '
+        'case "$t" in *[!0-9a-f]*) continue;; esac; '
+        f'[ ${{#t}} = 32 ] && [ ! -e "$r/{SWEPT_FILE}" ] || continue; '
+        'e=1; if [ ! -e "$r/exit" ]; then p=; { read -r p < "$r/pid"; } 2>/dev/null; '
+        'for q in $p; do kill -0 "$q" 2>/dev/null && e=0; done; fi; '
+        f'echo "{LEFTOVER_MARK} $j $t $e"; done'
+    )
+
+
+def read_leftovers(stdout: str) -> tuple[list[ListedRun], int]:
+    """The listed runs, and how many marked lines could not be read."""
+    runs: list[ListedRun] = []
+    unreadable = 0
+    for line in stdout.splitlines():
+        if not line.startswith(LEFTOVER_MARK):
+            continue
+        match line[len(LEFTOVER_MARK):].split():
+            case [job_id, tag, ("0" | "1") as ended] if _JOB_ID.fullmatch(job_id) and _TAG.fullmatch(tag):
+                runs.append(ListedRun(job_id, tag, ended == "1"))
+            case _:
+                unreadable += 1
+    return runs, unreadable
+
+
+def reap_script(target: RemoteTarget) -> str:
+    """Check the run; unless gone, kill it and check again. Print `REAP_MARK <before> <after|->`.
+
+    Once a check says gone, the run's SWEPT_FILE keeps it out of later listings.
+    """
+    check = worker_check_script(target.job_dir, target.require_tag())
+    swept = shlex.quote(run_file(target, SWEPT_FILE))
+    return _sh(
+        f"({check}); b=$?; a=-; "
+        f'if [ "$b" != 0 ]; then ({stop_script(target, kill=True)}); ({check}); a=$?; fi; '
+        f'if [ "$b" = 0 ] || [ "$a" = 0 ]; then {{ : > {swept}; }} 2>/dev/null; fi; '
+        f'echo "{REAP_MARK} $b $a"'
+    )
+
+
+def read_reap(stdout: str) -> tuple[int, int | None] | None:
+    """reap_script's (before, after) check codes; after is None when no kill was needed."""
+    fields = (_marked(stdout, REAP_MARK) or "").split()
+    if len(fields) != 2 or not fields[0].isdigit() or not (fields[1].isdigit() or fields[1] == "-"):
+        return None
+    return int(fields[0]), None if fields[1] == "-" else int(fields[1])
+
+
 def launch_script(
     target: RemoteTarget,
     start: str,

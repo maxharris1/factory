@@ -140,7 +140,7 @@ from lib.device_pool import UNREACHABLE_BACKOFF_SECONDS, DevicePool, Placement, 
 from lib.factory_md import FactoryContext, parse_factory_context
 from lib.load import load_yaml
 from lib.machines_yml import Device, MachinesConfig, orch_host
-from lib import containers, device_deploy, job_token, stacks
+from lib import containers, device_deploy, job_token, leftovers, stacks
 from lib.device_monitor import remote_target
 from lib.harness_env import ApproverProfileExposed, harness_environ
 from lib.handoff_check import (
@@ -1165,12 +1165,12 @@ class Waiter:
         if now - self._containers_swept_at < CONTAINER_SWEEP_SECONDS:
             return
         self._containers_swept_at = now
-        runners = [(orch_host(self.pool.config), containers.local_runner(), [str(work_root(None))])]
+        runners = [(orch_host(self.pool.config), containers.local_runner(), [str(work_root(None))], None)]
         for device in self.pool.config.devices:
             target = remote_target(device, self.recipient, "containers")
             if target is not None:
                 roots = [root for harness in device.harnesses if (root := device.workdir_for(harness))]
-                runners.append((device.name, containers.remote_runner(self.transport, target), roots))
+                runners.append((device.name, containers.remote_runner(self.transport, target), roots, target))
         lines: set[str] = set()
 
         def note(line: str) -> None:
@@ -1179,12 +1179,24 @@ class Waiter:
             lines.add(line)
 
         ledger = functools.cache(lambda: self._stack_ledger(note))
-        for name, runner, roots in runners:
+        held_tags = functools.cache(lambda: self._held_tags(note))
+        for name, runner, roots, target in runners:
             for line in containers.sweep(runner, self._job_state_name, name):
                 note(line)
             for line in stacks.sweep(runner, ledger, name, roots):
                 note(line)
+            if target is not None:
+                for line in leftovers.sweep(runner, target, self._job_state_name, held_tags):
+                    note(line)
         self._container_lines = lines
+
+    def _held_tags(self, note: Log) -> frozenset[str] | None:
+        try:
+            held = retry_locked(self.pool.held)
+        except (QueueError, sqlite3.Error, OSError) as exc:
+            note(f"runs kept, orch.db is unreadable ({_one_line(exc)})")
+            return None
+        return frozenset(slot.placement.worker_tag for slot in held if slot.placement.worker_tag)
 
     def _stack_ledger(self, note: Log) -> stacks.Ledger | None:
         def read() -> stacks.Ledger:
@@ -1201,7 +1213,7 @@ class Waiter:
         try:
             state = retry_locked(lambda: self._job_state(job_id))
         except (QueueError, sqlite3.Error, OSError) as exc:
-            self.log(f"job {job_id}: containers kept, its state is unreadable ({_one_line(exc)})")
+            self.log(f"job {job_id}: what it left is kept, its state is unreadable ({_one_line(exc)})")
             return "unreadable"
         return None if state is None else state[0]
 
