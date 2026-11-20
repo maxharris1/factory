@@ -68,7 +68,7 @@ from lib.factory_md import EXAMPLE_PATHS, QA_RUNNERS, FactoryConfig, load_factor
 from lib.github_actions import GitHubAdapterError, _status as gh_status
 from lib.grok_delivery import GrokDeliveryError, wake_delivery
 from lib.handoff import format_header
-from lib.harness_env import account_tokens, harness_env
+from lib.harness_env import CPU_CAP, account_tokens, harness_env
 from lib.hold import MergeUpdate
 from lib.hook_t7 import T7Hook
 from lib.hook_t8 import T8Hook
@@ -2536,6 +2536,7 @@ def _job_run_command(argv: list[str]) -> int:
                 output=session.consume if session is not None else None,
                 execed=placed.execed,
                 budget=budget,
+                cpu_cap=CPU_CAP,
             )
         return code
     except placed_run.CheckoutError as exc:

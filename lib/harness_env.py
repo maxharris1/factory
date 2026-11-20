@@ -6,6 +6,10 @@ variables. Claude print mode stops background tasks a while after its last
 turn, which killed a fix job's test run before it pushed; a ceiling of 0
 lifts that. Claude reads it only in print mode.
 
+Every harness also gets cpu_cap_env (#1221): test runners default to one
+worker per host CPU, and the cap contains that. It is a constant in code,
+not a machines.yml knob.
+
 harness_environ keeps Max's approver gh profile out of every run once the
 GitHub App switch is on (#122).
 """
@@ -14,7 +18,7 @@ from __future__ import annotations
 
 import os
 import stat
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, NamedTuple
@@ -25,6 +29,7 @@ if TYPE_CHECKING:
     from lib.orch_yml import Approvals
 
 CLAUDE_BG_WAIT_ENV = "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"
+CPU_CAP = 4
 
 _BY_HARNESS = {"claude": {CLAUDE_BG_WAIT_ENV: "0"}}
 
@@ -45,8 +50,32 @@ ACCOUNT_ISOLATION = MappingProxyType(
 )
 
 
+def cpu_cap_env(cap: int = CPU_CAP) -> dict[str, str]:
+    """Vitest 1 and 2 default a pool's minimum to host CPUs - 1 and refuse a
+    maximum below it, so each maximum goes with a minimum of 1."""
+    workers = str(max(cap - 1, 1))
+    return {
+        "ORCH_CPU_CAP": str(cap),
+        "PYTEST_XDIST_AUTO_NUM_WORKERS": workers,
+        "VITEST_MAX_THREADS": workers,
+        "VITEST_MAX_FORKS": workers,
+        "VITEST_MIN_THREADS": "1",
+        "VITEST_MIN_FORKS": "1",
+    }
+
+
+def cpu_window(allowed: Iterable[int], cap: int, tag: str) -> frozenset[int] | None:
+    """cap consecutive CPUs of allowed, starting where the run's tag points,
+    so concurrent runs spread across the host; None when allowed fits the cap."""
+    cpus = sorted(allowed)
+    if len(cpus) <= cap:
+        return None
+    start = int(tag[:8], 16) % len(cpus)
+    return frozenset(cpus[(start + i) % len(cpus)] for i in range(cap))
+
+
 def harness_env(harness: str, home: str | None = None) -> dict[str, str]:
-    env = dict(_BY_HARNESS.get(harness, {}))
+    env = {**cpu_cap_env(), **_BY_HARNESS.get(harness, {})}
     if home is not None:
         env[_isolation(harness).home] = home
     return env

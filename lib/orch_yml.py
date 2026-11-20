@@ -85,6 +85,7 @@ _TOP_KEYS = {
     "approver_linear_users",
     "approver_gh_config_dir",
     "github_app",
+    "poller_reads_app",
     "qa",
 }
 _QA_KEYS = {"max_cloud_lanes", "shares_usage_with"}
@@ -332,6 +333,7 @@ class OrchConfig:
     # no waiter for them.
     refused_harnesses: tuple[str, ...] = ()
     github_app: GitHubApps | None = None
+    poller_reads_app: str | None = None
     approver_logins: frozenset[str] | None = None
     approver_linear_users: frozenset[str] | None = None
     approver_gh_config_dir: Path | None = None
@@ -622,6 +624,7 @@ def _validate(
         data, "approver_gh_config_dir", "approver_gh_config_dir", findings
     )
     github_app = _github_app(data, findings)
+    poller_reads_app = _poller_reads_app(data, github_app, findings)
     qa = _qa(data, findings)
     if github_app is not None and github_app.enabled:
         _app_switch(github_app, approver_logins, trusted_logins, projects, findings)
@@ -666,6 +669,7 @@ def _validate(
             job_states=job_states or JobStateConfig(),
             refused_harnesses=refused_harnesses,
             github_app=github_app,
+            poller_reads_app=poller_reads_app,
             approver_logins=approver_logins,
             approver_linear_users=approver_linear_users,
             approver_gh_config_dir=approver_gh_config_dir,
@@ -1507,6 +1511,29 @@ def _github_app(data: dict, findings: list[Finding]) -> GitHubApps | None:
     if len(findings) > start:
         return None
     return GitHubApps(apps=MappingProxyType(apps), enabled=enabled)
+
+
+def _poller_reads_app(
+    data: dict, github_app: GitHubApps | None, findings: list[Finding]
+) -> str | None:
+    if "poller_reads_app" not in data:
+        return None
+    bot = data["poller_reads_app"]
+    if not isinstance(bot, str):
+        findings.append(Finding("error", "poller_reads_app must be a bot name"))
+        return None
+    if bot not in APP_BOTS:
+        findings.append(
+            Finding("error", f"poller_reads_app {bot} is not a bot ({', '.join(APP_BOTS)})")
+        )
+        return None
+    github_app_failed = "github_app" in data and github_app is None
+    if github_app_failed:
+        return None
+    if github_app is None or bot not in github_app.apps:
+        findings.append(Finding("error", f"poller_reads_app {bot} has no github_app.apps.{bot}"))
+        return None
+    return bot
 
 
 def _one_app(bot: str, value: object, findings: list[Finding]) -> GitHubApp | None:

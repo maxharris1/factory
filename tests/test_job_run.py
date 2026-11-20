@@ -15,6 +15,7 @@ import pytest
 
 from lib import exposure, job_run, process_tree, usage_readings
 from lib.brief.skills import Router, resolve, section
+from lib.harness_env import CPU_CAP, cpu_cap_env
 from lib.job_state import JobStateConfig
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
 from tests.fake_docker import Docker
@@ -629,7 +630,7 @@ def test_cli_job_run_heartbeats_and_passes_the_job_to_the_command(tmp_path: Path
     out = tmp_path / "env.json"
     script = (
         "import json, os, sys, time; "
-        f"json.dump({{k: os.environ.get(k) for k in ('ORCH_JOB_ID', 'ORCH_JOB_BOT', 'ORCH_DB')}}, open({str(out)!r}, 'w')); "
+        f"json.dump({{k: os.environ.get(k) for k in ('ORCH_JOB_ID', 'ORCH_JOB_BOT', 'ORCH_DB', 'ORCH_CPU_CAP', 'PYTEST_XDIST_AUTO_NUM_WORKERS')}}, open({str(out)!r}, 'w')); "
         "time.sleep(1.0)"
     )
     proc = _orch(
@@ -644,6 +645,8 @@ def test_cli_job_run_heartbeats_and_passes_the_job_to_the_command(tmp_path: Path
         "ORCH_JOB_ID": job.id,
         "ORCH_JOB_BOT": "codex-bot",
         "ORCH_DB": str(tmp_path / "orch.db"),
+        "ORCH_CPU_CAP": "4",
+        "PYTEST_XDIST_AUTO_NUM_WORKERS": "3",
     }
     after = _last_activity(queue, job.id)
     time.sleep(0.6)
@@ -1473,3 +1476,111 @@ def test_cli_job_run_runs_a_box_job_as_its_slots_account(
     expected = placed if account == "placed" else f"{owner}-default"
     assert rows == [(expected, "five_hour", 0.125), (expected, "seven_day", 0.345)]
     assert login_rows == ([] if account == "placed" else rows), "only the device's login writes the old row"
+
+
+CAPPED_ENV = {
+    "ORCH_CPU_CAP": "4",
+    "PYTEST_XDIST_AUTO_NUM_WORKERS": "3",
+    "VITEST_MAX_THREADS": "3",
+    "VITEST_MAX_FORKS": "3",
+    "VITEST_MIN_THREADS": "1",
+    "VITEST_MIN_FORKS": "1",
+}
+CAP_NAMES = tuple(CAPPED_ENV)
+LINUX_AFFINITY = pytest.mark.skipif(
+    not hasattr(os, "sched_getaffinity"), reason="needs the Linux affinity API"
+)
+_GRANDCHILD = f"""\
+import json, os, shutil, subprocess
+seen = {{"cpus": len(os.sched_getaffinity(0)), "env": {{k: os.environ.get(k) for k in {CAP_NAMES!r}}}}}
+node = shutil.which("node")
+if node:
+    seen["node"] = subprocess.run(
+        [node, "-e", "const os = require('os'); console.log(os.availableParallelism ? os.availableParallelism() : 'none')"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+print(json.dumps(seen))
+"""
+_WORKER = f"""\
+import json, os, subprocess, sys
+grandchild = subprocess.run([sys.executable, "-c", {_GRANDCHILD!r}], capture_output=True, text=True, check=True)
+json.dump({{"cpus": len(os.sched_getaffinity(0)), "grandchild": json.loads(grandchild.stdout)}}, open(sys.argv[1], "w"))
+"""
+
+
+@LINUX_AFFINITY
+@pytest.mark.skipif(
+    hasattr(os, "sched_getaffinity") and len(os.sched_getaffinity(0)) <= CPU_CAP,
+    reason="the host has no more CPUs than the cap",
+)
+def test_cli_job_run_caps_the_worker_and_its_grandchildren_at_four_cpus(tmp_path: Path) -> None:
+    queue = _queue(tmp_path)
+    job = _running_job(queue)
+    out = tmp_path / "seen.json"
+    proc = _orch(
+        "job", "run", "codex-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--db", str(tmp_path / "orch.db"),
+        "--interval", "0.2", "--", sys.executable, "-c", _WORKER, str(out),
+    )
+    _, stderr = proc.communicate(timeout=30)
+
+    assert proc.returncode == 0, stderr
+    seen = json.loads(out.read_text())
+    assert seen["cpus"] == CPU_CAP
+    assert seen["grandchild"]["cpus"] == CPU_CAP
+    assert seen["grandchild"]["env"] == CAPPED_ENV
+    node = seen["grandchild"].get("node", "none")
+    if node != "none":
+        assert int(node) == CPU_CAP and int(node) - 1 <= 3
+
+
+@LINUX_AFFINITY
+def test_a_cap_of_one_is_set_before_the_gate_opens_and_reaches_a_grandchild(tmp_path: Path) -> None:
+    out = tmp_path / "seen.json"
+    at_gate: list[int] = []
+    code = job_run.run(
+        [sys.executable, "-c", _WORKER, str(out)],
+        beat=lambda: None,
+        interval=1,
+        log=lambda _m: None,
+        env={**os.environ, **cpu_cap_env(1)},
+        started=lambda pid: at_gate.append(len(os.sched_getaffinity(pid))),
+        cpu_cap=1,
+    )
+
+    assert code == 0
+    assert at_gate == [1], "the worker pid was capped before started ran and go was written"
+    seen = json.loads(out.read_text())
+    assert seen["cpus"] == 1
+    assert seen["grandchild"]["cpus"] == 1
+    if seen["grandchild"].get("node", "none") != "none":
+        assert seen["grandchild"]["node"] == "1"
+
+
+def _fail_affinity(*_args) -> None:
+    raise OSError(22, "Invalid argument")
+
+
+@pytest.mark.parametrize("broken", ["fails", "missing"])
+def test_a_missing_or_failing_affinity_call_is_logged_and_the_run_goes_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, broken: str
+) -> None:
+    monkeypatch.setattr(os, "sched_getaffinity", lambda _pid: set(range(64)), raising=False)
+    if broken == "fails":
+        monkeypatch.setattr(os, "sched_setaffinity", _fail_affinity, raising=False)
+    else:
+        monkeypatch.delattr(os, "sched_setaffinity", raising=False)
+    out = tmp_path / "cap"
+    logs: list[str] = []
+    code = job_run.run(
+        [sys.executable, "-c", f"import os; open({str(out)!r}, 'w').write(os.environ['ORCH_CPU_CAP'])"],
+        beat=lambda: None,
+        interval=1,
+        log=logs.append,
+        env={**os.environ, **cpu_cap_env()},
+        started=lambda _pid: None,
+        cpu_cap=CPU_CAP,
+    )
+
+    assert code == 0
+    assert out.read_text() == "4"
+    assert any("affinity path skipped" in line and "ORCH_CPU_CAP=4" in line for line in logs), logs
