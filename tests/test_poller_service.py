@@ -1342,7 +1342,7 @@ def test_a_host_retired_while_queued_on_the_service_lock_restores_and_starts_not
 
 FAKE_SYSTEMD_RUN = """#!/bin/sh
 case " $* " in *" --help "*) echo "  --expand-environment=BOOL"; exit 0 ;; esac
-case " $* " in *" --unit="*) ;; *) exit 0 ;; esac
+case " $* " in *" --unit="*) ;; *) {probe} ;; esac
 options=
 while [ "$1" != -- ]; do options="$options $1"; shift; done
 shift
@@ -1351,12 +1351,19 @@ exec "$@"
 """
 
 
-def fake_systemd(tmp_path: Path, linger: str) -> tuple[str, Path]:
+STALL = "exec sleep 600"
+
+
+def fake_systemd(
+    tmp_path: Path, linger: str, *, stall_loginctl: bool = False, stall_probe: bool = False
+) -> tuple[str, Path]:
     fake_bin = tmp_path / "systemd-bin"
     fake_bin.mkdir()
     log = tmp_path / "systemd-run.log"
-    for name, text in (("loginctl", f"#!/bin/sh\necho {linger}\n"),
-                       ("systemd-run", FAKE_SYSTEMD_RUN.format(log=log))):
+    loginctl = STALL if stall_loginctl else f"echo {linger}"
+    probe = STALL if stall_probe else "exit 0"
+    for name, text in (("loginctl", f"#!/bin/sh\n{loginctl}\n"),
+                       ("systemd-run", FAKE_SYSTEMD_RUN.format(log=log, probe=probe))):
         (fake_bin / name).write_text(text, encoding="utf-8")
         (fake_bin / name).chmod(0o755)
     return f"{fake_bin}:/usr/bin:/bin", log
@@ -1399,6 +1406,22 @@ def test_without_a_user_scope_the_poller_starts_uncontained_at_the_oom_floor(
     path, log = fake_systemd(tmp_path, "no")
     started = _service(home, "start", preexec_fn=at_300, PATH=path)
     assert started.returncode == 0, started.stderr
+    pid = int(_pidfile(home).read_text())
+    assert f"started orch poll (pid {pid})" in started.stdout
+    assert score(pid) < 300
+    assert scope_units(log) == []
+    poller_log = (home / ".local/state/factory/poller.log").read_text()
+    assert "orch-poll: uncontained (no systemd user scope)" in poller_log
+
+
+@linux
+@pytest.mark.parametrize("stall", ["stall_loginctl", "stall_probe"])
+def test_a_stalled_user_manager_still_starts_the_poller_uncontained(
+    home: Path, tmp_path: Path, stall: str
+) -> None:
+    path, log = fake_systemd(tmp_path, "yes", **{stall: True})
+    started = _service(home, "start", preexec_fn=at_300, PATH=path)
+    assert started.returncode == 0, started.stdout + started.stderr
     pid = int(_pidfile(home).read_text())
     assert f"started orch poll (pid {pid})" in started.stdout
     assert score(pid) < 300

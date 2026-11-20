@@ -837,3 +837,18 @@ def test_without_a_user_scope_the_supervisor_starts_uncontained_at_the_oom_floor
     assert scope_units(log) == []
     waiter_log = (home / ".local/state/factory/waiter-claude-bot.log").read_text()
     assert "orch-wait-claude-bot: uncontained (no systemd user scope)" in waiter_log
+
+
+@linux
+@pytest.mark.parametrize("stall", ["stall_loginctl", "stall_probe"])
+def test_a_stalled_user_manager_still_starts_the_supervisor_uncontained(
+    home: Path, tmp_path: Path, stall: str
+) -> None:
+    path, log = fake_systemd(tmp_path, "yes", **{stall: True})
+    started = _service(home, "claude-bot", "start", preexec_fn=at_300, PATH=path)
+    assert started.returncode == 0, started.stdout + started.stderr
+    assert score(_supervisor(home)) < 300
+    _wait_for(lambda: _starts(home))
+    assert scope_units(log) == []
+    waiter_log = (home / ".local/state/factory/waiter-claude-bot.log").read_text()
+    assert "orch-wait-claude-bot: uncontained (no systemd user scope)" in waiter_log
