@@ -1,7 +1,13 @@
-"""The live scenarios a builder fixed before the code existed, for QA (#761).
+"""The live scenarios QA drives, from the brief's journeys or a builder's section (#761, #1105).
 
-A pure function: the caller passes only comments it already trusts, and this
-decides nothing about trust. The scenarios come from the latest `kind=plan`
+Pure functions: the caller passes only comments it already trusts, and this
+decides nothing about trust. `qa_scenarios` is the one reader. When the
+canonical brief carries a QA plan (`### QA journeys`, lib.journeys), the
+scenarios come from it alone, one per `qa` criterion, and no plan or ready
+comment is read. When the ticket's `qa` tags no longer match the brief's,
+the result is an `EditedTag` naming the first ac id that differs.
+
+Without a plan in the brief, the scenarios come from the latest `kind=plan`
 comment's `## Verify, live` section. When there is no plan, or its section is
 missing or empty, they come from the latest `kind=ready` comment's. A plan
 whose section is invalid is returned as invalid; a later ready does not
@@ -35,7 +41,9 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
 
 from lib.dispatcher import Comment, _comment_order
+from lib.evidence.criteria import Criterion
 from lib.handoff import HandoffError, parse_comment
+from lib.journeys import QaCheck, QaPlan, qa_tag
 
 HEADING = "## Verify, live"
 SOURCE_KINDS = ("plan", "ready")
@@ -80,6 +88,13 @@ class LiveScenarios:
 class InvalidSection:
     line: int
     text: str
+    reason: str
+    source_url: str | None = None
+
+
+@dataclass(frozen=True)
+class EditedTag:
+    criterion: str
     reason: str
     source_url: str | None = None
 
@@ -149,7 +164,7 @@ _SHAPES: tuple[tuple[re.Pattern[str], Callable[[re.Match[str]], LiveScenarios | 
 )
 
 
-def parse_live(body: str) -> LiveScenarios | InvalidSection:
+def _parse_live(body: str) -> LiveScenarios | InvalidSection:
     """The `## Verify, live` section of one text. See the module doc."""
     found = LiveScenarios()
     for entry in _entries(_section(body.splitlines())):
@@ -175,7 +190,62 @@ def parse_live(body: str) -> LiveScenarios | InvalidSection:
     return found
 
 
-def live_scenarios(comments: Sequence[Comment]) -> LiveScenarios | InvalidSection:
+def qa_scenarios(
+    brief: Comment | None,
+    criteria: Sequence[Criterion] | None,
+    comments: Sequence[Comment],
+) -> LiveScenarios | InvalidSection | EditedTag:
+    """The brief's QA plan when it has one, else the builder's section. See the module doc."""
+    plan = QaPlan.parse(brief.body) if brief is not None else None
+    if brief is None or plan is None:
+        return _live_scenarios(comments)
+    edited = _edited_tag(plan, criteria) if criteria is not None else None
+    return replace(edited or from_plan(plan), source_url=brief.url)
+
+
+def from_plan(plan: QaPlan) -> LiveScenarios:
+    """One scenario per qa check; a check that drives a new journey stays out of base regression."""
+    new = {journey.id for journey in plan.journeys if journey.new}
+    scenarios = tuple(
+        Scenario(f"qa-{n}", check.ac, _steps(plan, check, new), check.text, None, ())
+        for n, check in enumerate(plan.checks, start=1)
+    )
+    regression = tuple(
+        scenario.id for scenario, check in zip(scenarios, plan.checks) if not new & set(check.journeys)
+    )
+    return LiveScenarios(scenarios=scenarios, regression=regression)
+
+
+def _steps(plan: QaPlan, check: QaCheck, new: set[str]) -> str:
+    names = ", ".join(f"`{journey}`" for journey in check.journeys)
+    noun = "journey" if len(check.journeys) == 1 else "journeys"
+    steps = [
+        f"Follow {noun} {names} in the features/ folder beside the verify skill `{plan.verify}`'s "
+        f"SKILL.md at the commit under test, and check the app meets {check.ac}."
+    ]
+    steps += [
+        f"`features/{journey}.md` is new in this pull request. If your clone has no such file, "
+        "do not drive this scenario: mark it failed with cause `product`."
+        for journey in check.journeys
+        if journey in new
+    ]
+    return " ".join(steps)
+
+
+def _edited_tag(plan: QaPlan, criteria: Sequence[Criterion]) -> EditedTag | None:
+    every = tuple(journey.id for journey in plan.journeys)
+    checks = {check.ac: check for check in plan.checks}
+    for criterion in criteria:
+        tag = qa_tag(criterion.text)
+        check = checks.pop(criterion.id, None)
+        if (tag and (tag.journeys or every)) != (check and check.journeys):
+            return EditedTag(criterion.id, f"{criterion.id}'s qa tag changed after the brief")
+    for ac in checks:
+        return EditedTag(ac, f"{ac} is not in the ticket any more")
+    return None
+
+
+def _live_scenarios(comments: Sequence[Comment]) -> LiveScenarios | InvalidSection:
     """The latest plan's section, else the latest ready's. See the module doc."""
     latest: dict[str, Comment] = {}
     for comment in sorted(comments, key=_comment_order):
@@ -189,7 +259,7 @@ def live_scenarios(comments: Sequence[Comment]) -> LiveScenarios | InvalidSectio
         comment = latest.get(kind)
         if comment is None:
             continue
-        found = parse_live(comment.body)
+        found = _parse_live(comment.body)
         if found != LiveScenarios():
             return replace(found, source_url=comment.url)
     return LiveScenarios()

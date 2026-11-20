@@ -261,7 +261,7 @@ class QaMixin:
                     (*key, head, patch_id),
                 )
         touched, lines = _under_paths(qa, diff)
-        live = self._qa_live(ticket)
+        live = self._qa_live(self._fresh_issue(ticket))
         live_ids = None if live is None else tuple(scenario.id for scenario in live.scenarios)
         decision = decide_scope(
             ScopeInput(
@@ -404,12 +404,15 @@ class QaMixin:
         return tuple(qa_id for qa_id in live_ids if latest.get(qa_id) != "Verified")
 
     def _qa_live(self, ticket: TrackedTicket) -> LiveScenarios | None:
-        from lib.evidence.scenarios import InvalidSection, live_scenarios
+        from lib.evidence.criteria import issue_criteria
+        from lib.evidence.scenarios import LiveScenarios, qa_scenarios
 
-        found = live_scenarios(
-            [comment for comment in ticket.comments if self._trusted_builder_post(ticket, comment)]
+        found = qa_scenarios(
+            ticket.brief_comment,
+            issue_criteria(ticket.issue_body),
+            [comment for comment in ticket.comments if self._trusted_builder_post(ticket, comment)],
         )
-        if isinstance(found, InvalidSection) or not found.scenarios:
+        if not isinstance(found, LiveScenarios) or not found.scenarios:
             return None
         return found
 
@@ -586,6 +589,7 @@ class QaMixin:
         assert qa is not None
         key = (ticket.repo.lower(), ticket.ticket_id)
         generation = self._generation(ticket.repo, ticket.ticket_id)
+        live = self._qa_live(self._fresh_issue(ticket))
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             last = connection.execute(
@@ -610,7 +614,7 @@ class QaMixin:
             self._queue_qa_run(
                 connection, ticket, qa, comment, head, last["patch_id"], int(last["round"]),
                 generation, Run(last["scope"], scenarios), last["runner"], "primary",
-                self._qa_live(ticket), attempt=int(last["attempt"]) + 1,
+                live, attempt=int(last["attempt"]) + 1,
             )
             connection.commit()
 

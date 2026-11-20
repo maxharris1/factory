@@ -11,9 +11,9 @@ import pytest
 from markdown_it import MarkdownIt
 
 from lib.brief import render_brief
-from lib.dispatcher import CIResult, FailedCheck, TrackedTicket
+from lib.dispatcher import CIResult, Comment, FailedCheck, TrackedTicket
 from lib.evidence.ci import ci_evidence
-from lib.evidence.scenarios import parse_live
+from lib.evidence.scenarios import qa_scenarios
 from lib.github_actions import GhResult, GitHubReviewActions
 from lib.factory_md import parse_factory_context
 from tests.regenerate_brief_snapshots import FACTORY_MD, HEAD, QA_FACTORY_MD, _job
@@ -718,7 +718,8 @@ def test_the_example_the_plan_brief_shows_parses_to_its_two_scenarios():
     fences = [token.content for token in MarkdownIt("commonmark").parse(task) if token.type == "fence"]
     examples = [text for text in fences if text.startswith("## Verify, live")]
     assert len(examples) == 1
-    found = parse_live(examples[0])
+    header = "<!-- orch:v1 kind=plan from=claude-bot role=builder -->"
+    found = qa_scenarios(None, None, [Comment(id="1", author="claude-bot", body=f"{header}\n{examples[0]}", created_at=1.0)])
     assert [scenario.id for scenario in found.scenarios] == ["qa-1", "qa-2"]
     assert found.regression == ("qa-1",)
     assert [item.criterion for item in found.not_live] == ["ac-3", "ac-4"]

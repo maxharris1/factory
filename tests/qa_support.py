@@ -178,6 +178,8 @@ class Harness:
         qa_diff: Callable | None = None,
         ship: str = "handoff",
         approvals: Approvals = APPROVALS,
+        brief: Comment | None = None,
+        issue_body: str | None = None,
     ):
         self.now = [1000.0]
         path = tmp_path / "orch.db"
@@ -203,6 +205,8 @@ class Harness:
             risk="high",
             ready_starts_review=True,
             pr_number="812",
+            brief_comment=brief,
+            issue_body=issue_body,
         )
         self.thread = Thread(base)
         self.thread.dispatcher = self.dispatcher
