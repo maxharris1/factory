@@ -30,6 +30,7 @@ from urllib.request import (
     Request,
     build_opener,
 )
+from zoneinfo import ZoneInfo
 
 from lib.dispatcher import (
     CIResult,
@@ -149,6 +150,7 @@ mutation FactoryReadyForReview($issue: String!, $state: String!) {
 }
 """.strip()
 BACKOFF_SECONDS = 300.0
+RATE_RESET_GRACE_SECONDS = 5.0
 GH_CALL_TIMEOUT_SECONDS = 20.0
 GH_CALL_ATTEMPTS = 3
 GH_RETRY_BACKOFF_SECONDS = 2.0
@@ -222,6 +224,17 @@ class _BudgetSpent(PollSourceError):
 
 class RetryablePollSourceError(PollSourceError, RetryableStateError):
     pass
+
+
+class QuotaDeferred(RetryablePollSourceError):
+    pass
+
+
+@dataclass(frozen=True)
+class RateWindow:
+    limit: int
+    remaining: int
+    reset_epoch: float
 
 
 @dataclass(frozen=True)
@@ -497,6 +510,7 @@ class LivePollSource:
         deferral_sink: DeferralSink | None = None,
         terminal_sink: TerminalSink | None = None,
         clock: Callable[[], float] = time.monotonic,
+        wall: Callable[[], float] = time.time,
         sleep: Callable[[float], None] = time.sleep,
         gh_call_timeout_seconds: float = GH_CALL_TIMEOUT_SECONDS,
         read_deadline_seconds: float = READ_DEADLINE_SECONDS,
@@ -515,6 +529,7 @@ class LivePollSource:
         self.deferral_sink = deferral_sink
         self.terminal_sink = terminal_sink
         self.clock = clock
+        self.wall = wall
         self.sleep = sleep
         self.gh_call_timeout_seconds = gh_call_timeout_seconds
         self.read_deadline_seconds = read_deadline_seconds
@@ -542,6 +557,8 @@ class LivePollSource:
         self._linear_branch_pulls: dict[str, str | None] = {}
         self._closed_reads: set[tuple[str, str]] = set()
         self._backoff_until = 0.0
+        self._rate_window: RateWindow | None = None
+        self._throttled = False
         self._linear_backoff_until = 0.0
         self._linear_requests = 0
         self._linear_complexity = 0
@@ -2323,9 +2340,6 @@ class LivePollSource:
         fresh: bool = False,
         _unconditional: bool = False,
     ) -> str:
-        now = self.clock()
-        if now < self._backoff_until:
-            raise PollSourceError("GitHub rate-limit backoff is active")
         conditional = "--paginate" not in args and not fresh
         cache_key = tuple(args)
         argv = [*self.gh, "api"]
@@ -2349,8 +2363,6 @@ class LivePollSource:
                 if included is not None
                 else _status_code(result.stderr)
             )
-            if rate_limited(status, result.stdout, result.stderr):
-                self._backoff_until = now + BACKOFF_SECONDS
             route = f"gh api {_route(args)}"
             if status is not None:
                 raise GhHttpError(f"{route} returned HTTP {status}", status)
@@ -2402,6 +2414,9 @@ class LivePollSource:
                 self.cycle_clock.add_source(name, self.clock() - began)
 
     def _run_gh_read(self, argv: list[str]) -> GhResult:
+        left = self._backoff_until - self.clock()
+        if left > 0:
+            raise QuotaDeferred(f"GitHub rate-limit backoff is active ({left:.0f}s left)")
         self._check_hangs("github")
         route = f"gh api {_route(argv[argv.index('api') + 1 :])}" if "api" in argv else "gh"
         with self._timed(_gh_source(argv)):
@@ -2411,7 +2426,7 @@ class LivePollSource:
                 left = deadline - self.clock()
                 timeout = min(self.gh_call_timeout_seconds, left, self._require_budget())
                 try:
-                    return self.gh_runner(argv, timeout)
+                    result = self.gh_runner(argv, timeout)
                 except subprocess.TimeoutExpired:
                     self._require_budget()
                     pause = GH_RETRY_BACKOFF_SECONDS * 2 ** (attempt - 1)
@@ -2425,8 +2440,86 @@ class LivePollSource:
                     raise PollSourceError(
                         f"{route} could not run: {type(exc).__name__}"
                     ) from exc
+                else:
+                    self._observe_quota(route.removeprefix("gh api "), result)
+                    return result
                 self.sleep(pause)
                 attempt += 1
+
+    def _observe_quota(self, route: str, result: GhResult) -> None:
+        status = _status_code(result.stderr)
+        headers: dict[str, str] = {}
+        if result.stdout.startswith("HTTP/"):
+            try:
+                status, headers, _ = _included_response(result.stdout)
+            except PollSourceError:
+                pass
+        own = _rate_window(
+            headers.get("x-ratelimit-limit"),
+            headers.get("x-ratelimit-remaining"),
+            headers.get("x-ratelimit-reset"),
+        )
+        if own is not None:
+            self._rate_window = _merged_window(self._rate_window, own)
+        if result.returncode == 0 or not rate_limited(status, result.stdout, result.stderr):
+            self._throttled = False
+            return
+        seconds, basis = self._quota_wait(headers.get("retry-after"))
+        self._backoff_until = max(self._backoff_until, self.clock() + seconds)
+        if self._throttled:
+            return
+        self._throttled = True
+        if self.warning_sink is None:
+            return
+        window = self._live_window()
+        core = "" if window is None else f"; core {window.remaining}/{window.limit} left"
+        http = "" if status is None else f"HTTP {status} "
+        minutes, secs = divmod(round(seconds), 60)
+        until = datetime.fromtimestamp(
+            self.wall() + seconds, ZoneInfo("America/New_York")
+        ).strftime("%H:%M:%S")
+        self.warning_sink(
+            f"github throttle: {http}rate limit on {route}{core}; "
+            f"github reads paused {minutes}m{secs:02d}s until {until} ET ({basis})"
+        )
+
+    def _quota_wait(self, retry_after: str | None) -> tuple[float, str]:
+        try:
+            seconds = float(retry_after)
+        except (TypeError, ValueError):
+            seconds = math.nan
+        if 0 <= seconds < math.inf:
+            return seconds, "retry-after"
+        basis = "reset"
+        window = self._live_window()
+        if window is None:
+            self._probe_rate_window()
+            basis = "probe"
+            window = self._live_window()
+        if window is None:
+            return BACKOFF_SECONDS, "default"
+        return window.reset_epoch - self.wall() + RATE_RESET_GRACE_SECONDS, basis
+
+    def _live_window(self) -> RateWindow | None:
+        window = self._rate_window
+        return window if window is not None and window.reset_epoch > self.wall() else None
+
+    def _probe_rate_window(self) -> None:
+        try:
+            result = self.gh_runner([*self.gh, "api", "rate_limit"], self.gh_call_timeout_seconds)
+        except (subprocess.TimeoutExpired, OSError):
+            return
+        if result.returncode != 0:
+            return
+        try:
+            core = json.loads(result.stdout)["resources"]["core"]
+        except (ValueError, KeyError, TypeError):
+            return
+        if not isinstance(core, dict):
+            return
+        window = _rate_window(core.get("limit"), core.get("remaining"), core.get("reset"))
+        if window is not None:
+            self._rate_window = _merged_window(self._rate_window, window)
 
     def _timed(self, name: str) -> AbstractContextManager[None]:
         return nullcontext() if self.cycle_clock is None else self.cycle_clock.source(name)
@@ -2452,6 +2545,9 @@ class LivePollSource:
 
     def _record(self, repo: str, ticket_id: str, exc: Exception) -> None:
         if isinstance(exc, _BudgetSpent):
+            return
+        if isinstance(exc, QuotaDeferred):
+            self._defer("github quota")
             return
         reason = _safe_reason(exc)
         for name in self.config.secret_env_names:
@@ -2560,6 +2656,23 @@ def _on_branch(pull: Mapping[str, Any], repo: str, branch: str) -> bool:
     head_repo = head.get("repo")
     full_name = head_repo.get("full_name") if isinstance(head_repo, dict) else None
     return head.get("ref", branch) == branch and str(full_name or repo).lower() == repo.lower()
+
+
+def _rate_window(limit: object, remaining: object, reset: object) -> RateWindow | None:
+    try:
+        return RateWindow(int(limit), int(remaining), float(int(reset)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _merged_window(old: RateWindow | None, new: RateWindow) -> RateWindow:
+    if (
+        old is None
+        or new.reset_epoch > old.reset_epoch
+        or (new.reset_epoch == old.reset_epoch and new.remaining < old.remaining)
+    ):
+        return new
+    return old
 
 
 def _included_response(text: str) -> tuple[int, dict[str, str], str]:
