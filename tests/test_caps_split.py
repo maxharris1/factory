@@ -21,6 +21,8 @@ RULE_MODULE = {
     "_t1": "t1",
     "_go_once": "t1",
     "_resume_after_cap": "resume",
+    "_reopen_on_reviews": "resume",
+    "_after_lift": "resume",
     "_resume_for_max": "resume",
     "_parked_for_max": "resume",
     "_lift_cap": "resume",
