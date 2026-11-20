@@ -71,6 +71,7 @@ LOCK_HELD = "lock-held"
 CLAIMED_SINCE = "claimed-since"
 WORKTREE_RECORD = "worktree-record"
 WORKTREE_OWNER_LIVE = "worktree-owner-live"
+WORKTREE_WORK = "worktree-work"
 WORKER_LIVE = "worker-live"
 WORKER_UNSURE = "worker-unsure"
 HOLD = "hold"
@@ -368,14 +369,19 @@ def _worker_reason(folder: Path, job_id: str) -> str | None:
     return None
 
 
-def _worktree_reason(jobs: Path, job_id: str) -> str | None:
-    record = jobs / f"{job_id}.json"
+def _worktree_reason(folder: Path, job_id: str) -> str | None:
+    record = folder.parent / f"{job_id}.json"
     if not record.exists() and not record.is_symlink():
         return None
     live = worktrees.record_owner_live(record)
     if live is None:
         return WORKTREE_RECORD
-    return WORKTREE_OWNER_LIVE if live else None
+    if live:
+        return WORKTREE_OWNER_LIVE
+    if not (folder / ".git").is_file():
+        return WORKTREE_WORK
+    held = worktrees.keep_reason(folder, worktrees.recorded_start(record))
+    return None if held is None else WORKTREE_WORK
 
 
 def _live_reason(folder: Path, job_id: str, own_finish: float,
@@ -383,7 +389,7 @@ def _live_reason(folder: Path, job_id: str, own_finish: float,
     jobs = folder.parent
     if any(_changed_after(jobs / f"{job_id}{mark}", own_finish) for mark in (CLAIMED, LAUNCHED)):
         return CLAIMED_SINCE
-    return (_worktree_reason(jobs, job_id) or _worker_reason(folder, job_id)
+    return (_worktree_reason(folder, job_id) or _worker_reason(folder, job_id)
             or _in_use(folder, scan))
 
 

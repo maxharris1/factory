@@ -20,7 +20,7 @@ from types import MappingProxyType
 
 import pytest
 
-from lib import job_cleanup, remote
+from lib import job_cleanup, remote, worktrees
 from lib.job_cleanup import Plan
 from lib.machines_yml import Device, MachinesConfig
 from lib.queue import SQLiteJobQueue
@@ -987,7 +987,6 @@ def live_cases_unchanged(root: Path, job_id: str, reason: str,
 def test_leftover_claimed_and_lock_from_the_jobs_own_run_do_not_block(tmp_path: Path) -> None:
     root = work_root(tmp_path)
     folder = finished_with_leftovers(root, "j")
-    (root / "jobs" / "j.json").write_text(json.dumps({"job_id": "j", "pid": dead_pid()}))
     db = database(tmp_path, [("j", "t1", "done", OLD)])
 
     [(_, report)] = job_cleanup.run(db, machines(tmp_path, "pc"), InProcessTransport(root),
@@ -995,6 +994,84 @@ def test_leftover_claimed_and_lock_from_the_jobs_own_run_do_not_block(tmp_path: 
 
     assert set(report.removed) == {"j"} and report.kept == {}
     assert not (folder / "repo").exists() and not (folder / "top-file").exists()
+
+
+def stale_worktree(tmp_path: Path, root: Path, job_id: str = "j") -> Path:
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    git = ["git", "-C", str(origin), "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+    subprocess.run([*git, "init", "-q", "-b", "main"], check=True)
+    (origin / "tracked.txt").write_text("original\n")
+    subprocess.run([*git, "add", "."], check=True)
+    subprocess.run([*git, "commit", "-qm", "initial"], check=True)
+    head = subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True,
+                          check=True).stdout.strip()
+    checkout = worktrees.prepare(root, job_id, "acme/widgets", head,
+                                 url_template=str(origin), pid=dead_pid())
+    jobs = root / "jobs"
+    (jobs / f"{job_id}.claimed").touch()
+    (jobs / f"{job_id}.lock").touch()
+    return checkout.path
+
+
+def make_work(folder: Path, work: str) -> None:
+    if work == "uncommitted-edit":
+        (folder / "tracked.txt").write_text("valuable uncommitted edit\n")
+    elif work == "untracked-file":
+        (folder / "notes.md").write_text("valuable new file\n")
+    else:
+        (folder / "tracked.txt").write_text("committed, never pushed\n")
+        subprocess.run(["git", "-C", str(folder), "-c", "user.name=t", "-c",
+                        "user.email=t@example.invalid", "commit", "-qam", "work"], check=True)
+
+
+def age_job(root: Path, job_id: str) -> None:
+    for path in (root / "jobs").glob(f"{job_id}*"):
+        age(path, OLD - HOUR)
+
+
+@pytest.mark.parametrize("work", ["uncommitted-edit", "untracked-file", "unpushed-commit"])
+def test_a_dead_owners_worktree_holding_work_keeps_the_folder(tmp_path: Path, work: str) -> None:
+    root = work_root(tmp_path)
+    make_work(stale_worktree(tmp_path, root), work)
+    age_job(root, "j")
+    live_cases_unchanged(root, "j", "worktree-work", [("j", "t1", "done", OLD)], tmp_path)
+
+
+def test_work_made_in_a_dead_owners_worktree_after_hold_keeps_it_at_finish(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    stale_worktree(tmp_path, root)
+    age_job(root, "j")
+    jobs = root / "jobs"
+    plan = Plan(frozenset({"j"}), NOW - 6 * HOUR, False, finished_at={"j": OLD})
+    assert job_cleanup.device_step(root, plan).held == ("j",)
+    make_work(jobs / "j.cleanup", "uncommitted-edit")
+
+    done = job_cleanup.device_step(
+        root, Plan(frozenset({"j"}), plan.cutoff, False, job_cleanup.FINISH, {"j": OLD}))
+
+    assert done.removed == {} and done.kept == {"j": "worktree-work"}
+    assert (jobs / "j" / "tracked.txt").read_text() == "valuable uncommitted edit\n"
+
+
+def test_a_dead_owners_record_beside_a_folder_that_is_no_worktree_keeps_it(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    finished_with_leftovers(root, "j")
+    (root / "jobs" / "j.json").write_text(json.dumps({"job_id": "j", "pid": dead_pid()}))
+    live_cases_unchanged(root, "j", "worktree-work", [("j", "t1", "done", OLD)], tmp_path)
+
+
+def test_a_dead_owners_clean_worktree_no_longer_keeps_the_folder(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    folder = stale_worktree(tmp_path, root)
+    age_job(root, "j")
+    db = database(tmp_path, [("j", "t1", "done", OLD)])
+
+    [(_, report)] = job_cleanup.run(db, machines(tmp_path, "pc"), InProcessTransport(root),
+                                    now=NOW, grace_hours=6, dry_run=False)
+
+    assert set(report.removed) == {"j"} and report.kept == {}
+    assert not (folder / "tracked.txt").exists()
 
 
 def test_a_held_lock_keeps_the_folder_without_waiting(tmp_path: Path) -> None:

@@ -144,7 +144,7 @@ def prepare(
         if checkout.path.exists():
             if not checkout.record.is_file() or not (checkout.path / ".git").is_file():
                 raise WorktreeError(f"{checkout.path} exists and is not this job's worktree")
-            reused = replace(checkout, start=_recorded_start(checkout.record))
+            reused = replace(checkout, start=recorded_start(checkout.record))
             _write_record(reused, pid)
             return reused
         if adopt is not None:
@@ -507,7 +507,7 @@ def _write_record(checkout: JobCheckout, pid: int | None) -> None:
     os.replace(tmp, checkout.record)
 
 
-def _recorded_start(record: Path) -> str | None:
+def recorded_start(record: Path) -> str | None:
     try:
         return _valid_start(json.loads(record.read_text(encoding="utf-8")).get("start"))
     except (OSError, ValueError, AttributeError):
