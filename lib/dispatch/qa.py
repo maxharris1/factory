@@ -261,7 +261,7 @@ class QaMixin:
                     (*key, head, patch_id),
                 )
         touched, lines = _under_paths(qa, diff)
-        live = self._qa_live(ticket)
+        live = self._qa_live(self._fresh_issue(ticket))
         live_ids = None if live is None else tuple(scenario.id for scenario in live.scenarios)
         decision = decide_scope(
             ScopeInput(
@@ -360,6 +360,7 @@ class QaMixin:
                             for scenario in chosen
                         ],
                         "regression": [qa_id for qa_id in (live.regression if live else ()) if qa_id in run.scenario_ids],
+                        "new": [qa_id for qa_id in (live.new if live else ()) if qa_id in run.scenario_ids],
                         "run_id": run_id,
                         "pr_number": ticket.pr_number,
                     },
@@ -404,12 +405,15 @@ class QaMixin:
         return tuple(qa_id for qa_id in live_ids if latest.get(qa_id) != "Verified")
 
     def _qa_live(self, ticket: TrackedTicket) -> LiveScenarios | None:
-        from lib.evidence.scenarios import InvalidSection, live_scenarios
+        from lib.evidence.criteria import issue_criteria
+        from lib.evidence.scenarios import LiveScenarios, qa_scenarios
 
-        found = live_scenarios(
-            [comment for comment in ticket.comments if self._trusted_builder_post(ticket, comment)]
+        found = qa_scenarios(
+            ticket.brief_comment,
+            issue_criteria(ticket.issue_body),
+            [comment for comment in ticket.comments if self._trusted_builder_post(ticket, comment)],
         )
-        if isinstance(found, InvalidSection) or not found.scenarios:
+        if not isinstance(found, LiveScenarios) or not found.scenarios:
             return None
         return found
 
@@ -582,6 +586,8 @@ class QaMixin:
                 return EnvFailed(sum(_env_failure(item) for item in rows))
 
     def _retry_qa(self, ticket: TrackedTicket, comment: Comment, head: str) -> None:
+        from lib.evidence.scenarios import LiveScenarios, Scenario
+
         qa = ticket.factory.qa
         assert qa is not None
         key = (ticket.repo.lower(), ticket.ticket_id)
@@ -599,7 +605,19 @@ class QaMixin:
                 """,
                 (*key, head),
             ).fetchone()
-            scenarios = tuple(json.loads(last["detail"]).get("scenarios") or ())
+            detail = json.loads(last["detail"])
+            scenarios = tuple(detail.get("scenarios") or ())
+            live = LiveScenarios(
+                scenarios=tuple(
+                    Scenario(
+                        item["id"], item["criterion"], item["steps"], item["passes"], item["pack"],
+                        tuple(item["saves"]),
+                    )
+                    for item in detail.get("live") or ()
+                ),
+                regression=tuple(detail.get("regression") or ()),
+                new=tuple(detail.get("new") or ()),
+            )
             connection.execute(
                 """
                 UPDATE qa_runs SET state = 'cancelled', reason = 'env-retry'
@@ -610,7 +628,7 @@ class QaMixin:
             self._queue_qa_run(
                 connection, ticket, qa, comment, head, last["patch_id"], int(last["round"]),
                 generation, Run(last["scope"], scenarios), last["runner"], "primary",
-                self._qa_live(ticket), attempt=int(last["attempt"]) + 1,
+                live, attempt=int(last["attempt"]) + 1,
             )
             connection.commit()
 

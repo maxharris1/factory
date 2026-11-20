@@ -106,8 +106,7 @@ def criteria_evidence(
 ) -> CriteriaEvidence:
     """The issue fields and acceptance criteria. See the module doc."""
     candidates: list[tuple[str, str | None, str | None]] = []
-    section = _section(issue_body.splitlines()) if issue_body is not None else None
-    if section is not None and _items(_trim(section), False):
+    if _lists_criteria(issue_body):
         candidates.append(("issue", issue_url, issue_body))
     if brief is not None:
         candidates.append(("brief", brief.url, quoted_ticket(parse_comment(brief.body).body)))
@@ -124,6 +123,16 @@ def criteria_evidence(
 def numbered(body: str) -> tuple[Criterion, ...]:
     """The evidence ids criteria_evidence gives body's criteria, each with its whole leading paragraph."""
     return _criteria(body, TEXT_LIMIT, whole=True)[1]
+
+
+def issue_criteria(body: str | None) -> tuple[Criterion, ...] | None:
+    """body's numbered criteria when its Acceptance criteria section lists any, else None."""
+    return numbered(body) if body is not None and _lists_criteria(body) else None
+
+
+def _lists_criteria(body: str | None) -> bool:
+    section = _section(body.splitlines()) if body is not None else None
+    return section is not None and bool(_items(_trim(section), False))
 
 
 def canonical_brief(
