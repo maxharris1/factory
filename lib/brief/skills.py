@@ -65,8 +65,7 @@ ADAPTERS = {
     "codex-bot": _factory("harness/codex.md"),
 }
 _READ_WITH = {
-    "claude-bot": "Read each file with `Read`: the Skill tool refuses most pstack skills "
-    "(`{adapter}`, Tools).",
+    "claude-bot": "Read each file with `Read`, not the Skill tool (`{adapter}`, Tools).",
     "codex-bot": "Read each file with the shell (`{adapter}`, Tools).",
 }
 _GENERAL_HELPER = {
