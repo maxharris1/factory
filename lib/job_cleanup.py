@@ -436,7 +436,7 @@ def _put_back(aside: Path, job_id: str) -> str | None:
     return None
 
 
-def _settle(root: Path, plan: Plan, locks: bool) -> tuple[dict[str, int], dict[str, str]]:
+def _finish_crashed(root: Path, plan: Plan, locks: bool) -> tuple[dict[str, int], dict[str, str]]:
     jobs = root / "jobs"
     removed: dict[str, int] = {}
     kept: dict[str, str] = {}
@@ -457,7 +457,8 @@ def _settle(root: Path, plan: Plan, locks: bool) -> tuple[dict[str, int], dict[s
                                              removed_bytes=size)
                     removed[job_id] = size
                 else:
-                    removed[job_id] = 0 if plan.dry_run else job_leftovers.commit(root, job_id)
+                    removed[job_id] = (0 if plan.dry_run
+                                       else job_leftovers.commit_record(root, job_id))
         except OSError as exc:
             kept[job_id] = f"error: {exc}".splitlines()[0]
     return removed, kept
@@ -466,7 +467,7 @@ def _settle(root: Path, plan: Plan, locks: bool) -> tuple[dict[str, int], dict[s
 def _hold(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None]) -> Report:
     jobs = root / "jobs"
     locks = runner_locks()
-    removed, kept = _settle(root, plan, locks)
+    removed, kept = _finish_crashed(root, plan, locks)
     held = list(_job_folders(jobs, SET_ASIDE))
     folders = _job_folders(jobs)
     away = job_leftovers.cross_device(root) if folders else None

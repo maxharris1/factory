@@ -117,10 +117,10 @@ def retire(root: Path, job_id: str, gone: Path, *, siblings: bool, finished_at: 
     failed = scratch.remove(gone)
     if failed is not None:
         raise OSError(failed)
-    commit(root, job_id)
+    commit_record(root, job_id)
 
 
-def commit(root: Path, job_id: str) -> int:
+def commit_record(root: Path, job_id: str) -> int:
     dest = root / KEPT_ROOT / job_id
     os.replace(dest / PENDING, dest / KEPT_JSON)
     return int(json.loads((dest / KEPT_JSON).read_text())["removed_bytes"])
