@@ -6,12 +6,16 @@ and the builder's ready at a new head re-enters review at the next round.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from lib.brief.common import detail_of
-from lib.dispatch.types import LinearState
+from lib.dispatch.types import LinearState, RetryableStateError
 from lib.orch_yml import Approvals
 from lib.dispatch.helpers import _comment_link
+from tests.test_dispatch_answers_handoff import HANDOFF
 from tests.test_dispatcher import GO
 from tests.test_lifecycle import HEADS, REPO, TICKET, Flow, attention, jobs, outcome, round_of
 
@@ -265,3 +269,68 @@ def test_after_the_go_the_builders_ready_reenters_review_at_the_next_round(
     assert (review["head"], round_of(review)) == (HEADS[6], "4/4")
     assert flow.state()["workflow_state"] == "review"
     assert attention(flow.queue) == []
+
+
+def test_a_go_replayed_after_a_failed_label_write_reopens_linear_once(tmp_path: Path) -> None:
+    flow = Flow(tmp_path)
+    flow.factory = replace(flow.factory, tickets="linear")
+    with flow.queue.connect() as connection:
+        connection.execute("UPDATE tracked_tickets SET tracker = 'linear'")
+    flow.hand_off_at(2)
+    before = len(fixes(flow))
+    original = flow.actions.set_state
+
+    def fail_fixing(ticket, state):
+        if state == "fixing":
+            raise RuntimeError("transient label failure")
+        original(ticket, state)
+
+    flow.actions.set_state = fail_fixing
+    with pytest.raises(RetryableStateError):
+        flow.go("go-2")
+    flow.actions.set_state = original
+    flow.dispatcher.process(flow.snapshot())
+    flow.dispatcher.process(flow.snapshot())
+
+    assert outcome(flow.queue, "go-2") == "queued-fix"
+    assert flow.actions.linear_reopens == [TICKET]
+    assert [fix["source_comment_id"] for fix in fixes(flow)[before:]] == ["go-2"]
+    assert flow.actions.states[-1] == "fixing"
+
+
+def capped_after_a_reopen_then_handed_off(tmp_path: Path) -> Flow:
+    """APPROVE round 1, reopen, REVISE rounds 2 and 3 to the cap, then a manual handoff."""
+    flow = Flow(tmp_path)
+    flow.dispatcher.approvals = Approvals(logins=frozenset({"grok-login"}))
+    flow.hand_off_at(1)
+    assert flow.go("go-reopen") == "queued-fix"
+    for number in (2, 3):
+        flow.finish("claude", f"ready-{HEADS[number][:6]}")
+        assert flow.ready(HEADS[number]) == "queued-review"
+        flow.finish("codex", f"revise-{number}/3")
+        flow.revise(f"{number}/3")
+    assert flow.state()["review_round"] == 3
+    assert flow.post("manual-handoff", HANDOFF, "grok-login") == "handed-off"
+    return flow
+
+
+def test_a_go_after_a_capped_reopen_is_handed_off_grants_the_round_past_the_cap(
+    tmp_path: Path,
+) -> None:
+    flow = capped_after_a_reopen_then_handed_off(tmp_path)
+
+    assert flow.go("go-after-cap-handoff") == "queued-fix"
+
+    row = flow.state()
+    actual = (row["review_round"], row["cap_extra"], round_of(fixes(flow)[-1]))
+    assert actual == (3, 1, "4/4")
+
+
+def test_a_ready_after_a_capped_reopen_is_handed_off_waits_for_a_go(tmp_path: Path) -> None:
+    flow = capped_after_a_reopen_then_handed_off(tmp_path)
+    reviews = len(jobs(flow.queue, "review"))
+
+    assert flow.ready(HEADS[4]) == "ready-after-cap"
+
+    assert len(jobs(flow.queue, "review")) == reviews
+    assert attention(flow.queue) == ["ready-after-cap"]

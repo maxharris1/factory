@@ -43,9 +43,9 @@ class ResumeMixin:
         if queued:
             self.clear_attention(ticket.repo, ticket.ticket_id, "ready-after-cap")
             self.clear_attention(ticket.repo, ticket.ticket_id, UNANNOUNCED_AFTER_CAP)
-        self._write_state_label(ticket, "fixing")
         if reopened:
             self._reopen_linear(ticket)
+        self._write_state_label(ticket, "fixing")
         return True, outcome
 
     def _lift_cap(
