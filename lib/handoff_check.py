@@ -20,7 +20,9 @@ ticket before its PR is known) the PR is the comment's own: every handoff
 kind, questions included, must be on a PR, and on the job's branch when the
 job names one. A plan needs an `Estimate: <n>` body line (#1021). A ready
 for a job whose detail lists `proof` needs a `## Proof` entry for each
-criterion it names (lib/proof.py, #1032).
+criterion it names (lib/proof.py, #1032). A plan or ready posted, by its
+GitHub created_at, from 2026-12-15 on may not carry a `## Verify, live`
+section (lib/evidence/scenarios.py live_section_refusal).
 """
 
 from __future__ import annotations
@@ -31,11 +33,13 @@ import subprocess
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from urllib.parse import quote
 
 from lib.approve_rule import approve_refusal
 from lib.brief import brief_kind
 from lib.brief.common import BriefError, detail_of, facts_of
+from lib.evidence.scenarios import live_section_refusal
 from lib.github_actions import GH
 from lib.handoff import HandoffError, parse_comment, plan_estimate, plan_estimate_text
 from lib.proof import Required, from_detail, missing
@@ -238,6 +242,11 @@ def problems(
         )
     if kind == "ready" and expected.proof is not None:
         found.extend(missing(expected.proof, handoff.body))
+    posted = _posted_at(comment.get("created_at"))
+    if kind in ("plan", "ready") and posted is not None:
+        live = live_section_refusal(handoff.body, posted)
+        if live is not None:
+            found.append(f"{kind} {live}")
     refusal = approve_refusal(fields, handoff.body)
     if refusal is not None:
         found.append(refusal.message)
@@ -250,6 +259,13 @@ def problems(
             f"head={fields['head']} is not the head of #{number} ({pull.sha or 'unknown'})"
         )
     return found
+
+
+def _posted_at(created_at: object) -> float | None:
+    try:
+        return datetime.fromisoformat(str(created_at)).timestamp() if created_at else None
+    except ValueError:
+        return None
 
 
 @dataclass(frozen=True)

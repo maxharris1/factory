@@ -61,7 +61,7 @@ def lead(job: Job, facts: dict) -> Lead:
             "Before `ready`, run the router's \"Before ready\" steps.",
             base_step(4, facts),
             "5. Push, then post the ready handoff below with the head you pushed.",
-            *(live_lines("ready") if facts["qa"] and not (facts["plan_text"] or facts["plan"]) else []),
+            *(live_lines("ready", job.created_at) if facts["qa"] and not (facts["plan_text"] or facts["plan"]) else []),
             *answers_lines(detail_of(job)),
             *builder_notes(job, facts),
         ),

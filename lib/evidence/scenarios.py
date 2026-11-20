@@ -16,6 +16,12 @@ missing or empty, they come from the latest `kind=ready` comment's. A plan
 whose section is invalid is returned as invalid; a later ready does not
 replace it.
 
+From 2026-12-15T00:00Z (LIVE_SECTION_CUTOFF) QA journeys come from the
+ticket's `Features:` line and `qa:` criteria. A plan or ready posted at or
+after the cutoff with a `## Verify, live` heading, even an empty section,
+reads as having no section, so a later plan falls back to an earlier ready.
+`orch job done` refuses such a comment with `live_section_refusal`'s reason.
+
 The section starts at the first line that is exactly `## Verify, live`
 (trailing spaces allowed) outside a ``` or ~~~ code fence, and runs to the
 next level 1 or 2 ATX heading outside a fence, or the end. In it, a line
@@ -43,6 +49,7 @@ import re
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
 
+from lib.brief.common import LIVE_SECTION_CUTOFF
 from lib.dispatcher import Comment, _comment_order
 from lib.evidence.criteria import Criterion
 from lib.handoff import HandoffError, parse_comment
@@ -171,7 +178,7 @@ _SHAPES: tuple[tuple[re.Pattern[str], Callable[[re.Match[str]], LiveScenarios | 
 def _parse_live(body: str) -> LiveScenarios | InvalidSection:
     """The `## Verify, live` section of one text. See the module doc."""
     found = LiveScenarios()
-    for entry in _entries(_section(body.splitlines())):
+    for entry in _entries(_section(body.splitlines()) or []):
         if isinstance(entry, InvalidSection):
             return entry
         part: LiveScenarios | str = _UNKNOWN_ENTRY
@@ -192,6 +199,16 @@ def _parse_live(body: str) -> LiveScenarios | InvalidSection:
             not_live=found.not_live + part.not_live,
         )
     return found
+
+
+def live_section_refusal(body: str, created_at: float) -> str | None:
+    """Why a plan or ready posted at `created_at` may not carry a live section; None when it may."""
+    if created_at < LIVE_SECTION_CUTOFF.timestamp() or _section(body.splitlines()) is None:
+        return None
+    return (
+        f"has a `{HEADING}` section, refused since 2026-12-15: QA journeys now come from the "
+        "ticket's `Features:` line and `qa:` criteria (docs/decisions/204-intake-template.md)"
+    )
 
 
 def qa_scenarios(
@@ -263,7 +280,7 @@ def _live_scenarios(comments: Sequence[Comment]) -> LiveScenarios | InvalidSecti
             latest[kind] = comment
     for kind in SOURCE_KINDS:
         comment = latest.get(kind)
-        if comment is None:
+        if comment is None or live_section_refusal(comment.body, comment.created_at) is not None:
             continue
         found = _parse_live(comment.body)
         if found != LiveScenarios():
@@ -271,7 +288,7 @@ def _live_scenarios(comments: Sequence[Comment]) -> LiveScenarios | InvalidSecti
     return LiveScenarios()
 
 
-def _section(lines: list[str]) -> list[tuple[int, str]]:
+def _section(lines: list[str]) -> list[tuple[int, str]] | None:
     section: list[tuple[int, str]] | None = None
     fence: str | None = None
     for number, line in enumerate(lines, start=1):
@@ -283,7 +300,7 @@ def _section(lines: list[str]) -> list[tuple[int, str]]:
             section.append((number, line))
         elif outside and line.rstrip() == HEADING:
             section = []
-    return section or []
+    return section
 
 
 def _fence_after(fence: str | None, line: str) -> str | None:

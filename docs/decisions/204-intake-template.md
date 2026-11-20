@@ -68,3 +68,7 @@ These are the defaults the builder picked for issue #204. They are listed in the
 - **Decision:** The parser and the brief live in `lib/feeder.py`, so that file and `tests/test_feeder_template.py` carry the change. The ticket's Touches line named `lib/intake_live.py` and `tests/test_intake_live.py`, which hold the GitHub and Linear readers and do not change.
 - **When:** 2026-11-19 ET, by Factory decided (technical)
 - **Source:** https://github.com/maxharris1/factory/pull/1137
+
+- **Decision:** The builder-written `## Verify, live` section is retired at 2026-12-15T00:00Z (`LIVE_SECTION_CUTOFF` in `lib/brief/common.py`), compared with the plan or ready comment's own GitHub `created_at`. From then, `orch job done` refuses a plan or ready that has the heading outside a code fence, even with an empty section, with the reason "has a `## Verify, live` section, refused since 2026-12-15: QA journeys now come from the ticket's `Features:` line and `qa:` criteria (docs/decisions/204-intake-template.md)". The QA reader ignores the section in such a comment, so a later plan falls back to an earlier ready. Briefs stop asking for the section by the job's queue time (`created_at`), not the wall clock, so a job's brief and the brief snapshots do not change as the date passes. A comment with a missing or unreadable `created_at` is not refused. Deleting the legacy reader and `live_lines` is a later cleanup ticket.
+- **When:** 2026-11-19 ET, by Factory decided (technical)
+- **Source:** https://github.com/maxharris1/factory/issues/1106
