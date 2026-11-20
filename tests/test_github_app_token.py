@@ -906,3 +906,49 @@ def test_only_the_configured_worker_apps_get_tokens_and_a_bot_with_no_app_gets_n
     request = io.StringIO("protocol=https\nhost=github.com\npath=maxharris1/factory.git\n\n")
     assert broker.credential(no_app, "get", request, answer, clock.now) == 0
     assert answer.getvalue() == ""
+
+
+def _broker_token_root(env: dict[str, str]) -> Path:
+    assignments = "\n".join(
+        line for line in SERVICE.read_text(encoding="utf-8").splitlines()
+        if line.startswith(("STATE=", "TOKEN_ROOT="))
+    )
+    done = subprocess.run(
+        ["/bin/bash", "-c", f'{assignments}\nprintf "%s" "$TOKEN_ROOT"'],
+        env=env, capture_output=True, text=True, check=True,
+    )
+    return Path(done.stdout)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"ORCH_STATE_DIR": "/tmp/review-state"},
+        {"ORCH_APP_TOKEN_ROOT": "/tmp/review-tokens", "ORCH_STATE_DIR": "/tmp/review-state"},
+        {},
+        {"ORCH_STATE_DIR": ""},
+        {"ORCH_STATE_DIR": "/tmp/review-state", "ORCH_APP_TOKEN_ROOT": ""},
+    ],
+)
+def test_the_poller_read_helper_uses_the_brokers_token_root(
+    extra: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = {"HOME": "/tmp/review-home", "PATH": "/usr/bin:/bin", **extra}
+    monkeypatch.setattr(broker.shutil, "which", lambda *args, **kwargs: "/fake/gh")
+    prefix = broker.reads_prefix((), "claude-bot", env)
+    assert prefix[prefix.index("--dir") + 1] == str(_broker_token_root(env) / "claude-bot")
+
+
+def test_refresh_writes_under_the_state_dir_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    from tests.test_github_apps_config import orch_text
+
+    orch = tmp_path / "orch.yml"
+    orch.write_text(orch_text(enabled=False), encoding="utf-8")
+    monkeypatch.setattr(broker, "github_mint", FakeMint())
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("ORCH_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("ORCH_APP_TOKEN_ROOT", raising=False)
+    broker.main(["refresh", "--orch", str(orch), "--machines", str(tmp_path / "none.yml")])
+    assert (tmp_path / "state" / "app-tokens" / "grok-bot" / "owner.json").exists()

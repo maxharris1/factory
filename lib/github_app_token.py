@@ -35,6 +35,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -502,7 +503,7 @@ def _command_refresh(args: argparse.Namespace) -> int:
                 remotes.setdefault(bot, []).append(Remote(device.name, login, alias, shared))
     apps = list(config.github_app.apps.values())
     holders = box_holders((app.bot for app in apps), users)
-    token_root = Path(args.token_root).expanduser()
+    token_root = Path(args.token_root).expanduser() if args.token_root else token_root_of(os.environ)
     token_root.mkdir(parents=True, exist_ok=True)
     os.chmod(token_root, 0o711)
     status = refresh(
@@ -685,13 +686,37 @@ def gh_env(
     return env
 
 
+def token_root_of(environ: Mapping[str, str]) -> Path:
+    home = environ["HOME"] if "HOME" in environ else str(Path.home())
+    state = environ.get("ORCH_STATE_DIR") or f"{home}/.local/state/factory"
+    return Path(environ.get("ORCH_APP_TOKEN_ROOT") or f"{state}/app-tokens")
+
+
+def reads_prefix(env_prefix: Sequence[str], bot: str, environ: Mapping[str, str]) -> tuple[str, ...]:
+    gh = shutil.which("gh", path=environ.get("PATH"))
+    if gh is None:
+        raise BrokerError("gh is not on PATH")
+    return (
+        *env_prefix,
+        sys.executable,
+        "-I",
+        str(Path(__file__).resolve()),
+        "gh",
+        "--dir",
+        str(token_root_of(environ) / plain_bot(bot)),
+        "--gh",
+        str(Path(gh).absolute()),
+        "--",
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="github_app_token", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     refresh_cmd = sub.add_parser("refresh", help="mint tokens due for renewal (box user)")
     refresh_cmd.add_argument("--orch", required=True)
     refresh_cmd.add_argument("--machines", required=True)
-    refresh_cmd.add_argument("--token-root", default="~/.local/state/factory/app-tokens")
+    refresh_cmd.add_argument("--token-root")
     cred = sub.add_parser("credential", help="git credential helper (harness user)")
     cred.add_argument("--dir", required=True)
     cred.add_argument("operation")
