@@ -34,6 +34,8 @@ ET = ZoneInfo("America/New_York")
 TRACKER_NAMES = {"github": "GitHub", "linear": "Linear"}
 SECTION_ORDER = ("liverun", "journey", "next", "chart")
 PHONE = "(max-width:699.98px)"
+COL_GAP, RUNLOG_BASIS, RIGHT_BASIS = 16, 300, 1032
+SIDE_BY_SIDE = RUNLOG_BASIS + COL_GAP + RIGHT_BASIS - 0.02
 PHONE_ORDER = ("liverun", "summary", "journey", "runlog", "next", "exposure", "ended", "chart")
 EXPOSURE_FIELDS = (("model", "model", ""), ("cli_version", "CLI version", ""), ("brief_sha256", "brief sha256", ""),
                    ("skill_paths", "skill paths", ", "), ("host", "host", ""),
@@ -107,14 +109,21 @@ CSS = """\
 .jd-tile>span{font-size:12px;color:var(--muted)}
 .jd-pips{display:flex;gap:2px}.jd-pips span{width:6px;height:6px;background:var(--line-hi)}
 .jd-pips span.done{background:var(--text)}.jd-pips span.now{background:var(--accent)}
-.jd-cols{display:flex;flex-wrap:wrap;align-items:flex-start;gap:16px}
+""" + f"""\
+.jd-cols{{display:flex;flex-wrap:wrap;align-items:flex-start;gap:{COL_GAP}px;container-type:inline-size}}
+.jd-runlog{{flex:1 1 {RUNLOG_BASIS}px}}
+.jd-right{{flex:0 1 {RIGHT_BASIS}px;min-width:0;display:flex;flex-direction:column;gap:16px}}
+""" + """\
 .jd-panel{min-width:0;padding:14px 16px 16px;background:var(--panel);box-shadow:var(--elev)}
 .jd-panel h2{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin:0 0 12px;font:600 13px/1.3 var(--mono);letter-spacing:-.01em;color:var(--text)}
 .jd-panel h2 .t{display:flex;align-items:center;gap:9px}
 .jd-panel h2 .t::before{content:"";width:7px;height:7px;background:var(--ok)}
 .jd-panel h2 .count{font-weight:400;font-size:12px;color:var(--muted)}
-.jd-runlog{flex:1 1 300px}
-.jd-right{flex:0 1 1032px;min-width:0;display:flex;flex-direction:column;gap:16px}
+.jd-runlog>summary{cursor:pointer;list-style:none}
+.jd-runlog>summary::-webkit-details-marker{display:none}
+.jd-runlog:not([open])>summary h2{margin:0}
+.jd-runlog>summary h2 .t::after{content:"▸";font-weight:400;color:var(--muted)}
+.jd-runlog[open]>summary h2 .t::after{content:"▾"}
 .runlog{margin:0;padding:0;list-style:none;font-family:var(--mono)}
 .runlog li{margin:0 -8px;border-bottom:1px solid var(--line)}
 .runlog .visit{display:flex;gap:10px;width:100%;box-sizing:border-box;padding:8px;border:0;text-align:left;font-family:inherit;background:transparent;color:var(--text)}
@@ -134,6 +143,7 @@ CSS = """\
 .runlog .note{display:block;font:12px/1.5 var(--sans);color:var(--text-2)}
 .runlog .exp{width:calc(100% - 46px);table-layout:fixed;margin:0 8px 8px 38px;border-collapse:collapse;font:11px/1.5 var(--mono);color:var(--text-2)}
 .runlog .exp caption{text-align:left;color:var(--muted);padding:0 0 2px}
+.runlog .exp-more>summary{margin:0 8px 8px 38px;cursor:pointer;font:11px/1.5 var(--mono);color:var(--muted)}
 .runlog .exp th{width:104px;padding:0 8px 0 0;text-align:left;font-weight:400;color:var(--muted);vertical-align:top}
 .runlog .exp td{padding:0;word-break:break-all}
 .jd-foot{margin:12px 0 0;font:12px/1.5 var(--mono);color:var(--muted)}
@@ -245,9 +255,7 @@ CSS = """\
 
 PHONE_CSS = """\
 .ticketpage{gap:12px}
-.ticketpage .jd-cols{flex-direction:column;flex-wrap:nowrap;align-items:stretch;gap:12px}
-.ticketpage .jd-right{display:contents}
-.ticketpage .jd-cols>*,.ticketpage .jd-right>*{flex:none}
+.ticketpage .jd-cols{gap:12px}
 .ticketpage .jd-hero .body{flex-direction:column;align-items:stretch;gap:12px;padding:12px}
 .ticketpage .jd-hero .who,.ticketpage .jd-tiles{flex:none}
 .ticketpage .jd-hero .who{gap:8px}
@@ -283,9 +291,12 @@ PHONE_CSS = """\
 .lr-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}
 """
 
-CSS += f"@media {PHONE}{{\n{PHONE_CSS}" + "".join(
-    f".ticketpage [data-sec={name}]{{order:{i}}}\n" for i, name in enumerate(PHONE_ORDER, 1)
-) + "}\n"
+CSS += (
+    f"@container (max-width:{SIDE_BY_SIDE:g}px){{\n.ticketpage .jd-right{{display:contents}}\n"
+    ".ticketpage .jd-cols>*,.ticketpage .jd-right>*{flex:1 1 100%}\n"
+    + "".join(f".ticketpage [data-sec={name}]{{order:{i}}}\n" for i, name in enumerate(PHONE_ORDER, 1))
+    + f"}}\n@media {PHONE}{{\n{PHONE_CSS}}}\n"
+)
 
 
 def _who_tint(who: object) -> str:
@@ -644,7 +655,7 @@ def _reason(visit: dict) -> str:
     return FIRST_REASON if visit["index"] == 0 else ""
 
 
-def _runlog_row(visit: dict, model: dict) -> str:
+def _runlog_row(key: str, visit: dict, model: dict) -> str:
     tint = _who_tint(visit["who"])
     tag = _visit_tag(visit, model)
     cls = " ".join(c for c in ("visit", tag, "stop" if visit["stop"] else "") if c)
@@ -661,22 +672,32 @@ def _runlog_row(visit: dict, model: dict) -> str:
         f'{_span("dur", _visit_dur(visit, model))}'
         + (_span("offchip", "off-chart") if visit["off_chart"] else "")
         + f'</span>{_span("note", _reason(visit))}</span></button>'
-        + "".join(
-            f'<table class="exp"><caption>{_e(job["job"])} · {_e(job["action"])}</caption>'
-            f'<tbody>{_exposure_rows(job["exposure"])}</tbody></table>'
-            for job in visit.get("jobs") or []
-        )
+        + _runlog_jobs(key, visit)
         + "</li>"
     )
 
 
-def _runlog(model: dict) -> str:
-    rows = "".join(_runlog_row(v, model) for v in model["visits"])
+def _runlog_jobs(key: str, visit: dict) -> str:
+    jobs = visit.get("jobs") or []
+    if not jobs:
+        return ""
+    tables = "".join(
+        f'<table class="exp"><caption>{_e(job["job"])} · {_e(job["action"])}</caption>'
+        f'<tbody>{_exposure_rows(job["exposure"])}</tbody></table>'
+        for job in jobs
+    )
+    label = f'{len(jobs)} job{"" if len(jobs) == 1 else "s"} · metadata'
+    return f'<details class="exp-more" data-key="runlog-jobs:{_e(key)}:{visit["index"]}"><summary>{label}</summary>{tables}</details>'
+
+
+def _runlog(key: str, model: dict) -> str:
+    rows = "".join(_runlog_row(key, v, model) for v in model["visits"])
     count = f"{len(model['visits'])} visits · oldest first"
     body = f'<ol class="runlog">{rows}</ol>' if rows else '<p class="empty">no visits recorded</p>'
     return (
-        f'<section class="jd-panel jd-runlog" data-sec="runlog"><h2>{_span("t", "Run log")}{_span("count", count)}</h2>{body}'
-        '<p class="jd-foot">Pick a step here or on the chart; both follow.</p></section>'
+        f'<details class="jd-panel jd-runlog" data-sec="runlog" data-key="runlog:{_e(key)}">'
+        f'<summary><h2>{_span("t", "Run log")}{_span("count", count)}</h2></summary>{body}'
+        '<p class="jd-foot">Pick a step here or on the chart; both follow.</p></details>'
     )
 
 
@@ -1097,7 +1118,7 @@ SECTIONS = {
 
 def _cols(part: dict, sections: tuple[str, ...]) -> str:
     right = "".join(SECTIONS[name](part) for name in sections)
-    return f'<div class="jd-cols">{_runlog(part["model"])}<div class="jd-right">{right}</div></div>'
+    return f'<div class="jd-cols">{_runlog(part["key"], part["model"])}<div class="jd-right">{right}</div></div>'
 
 
 _PICK = {
@@ -1573,8 +1594,18 @@ _SCRIPT = r"""
     span(h, 'count', count);
     return sec;
   }
-  function runlog(r, m, buttons) {
-    var sec = jdPanel('jd-runlog', 'runlog', 'Run log', m.visits.length + ' visits · oldest first');
+  function keepOpen(box, key) {
+    box.setAttribute('data-key', key);
+    box.open = !!openDetails[key];
+    box.addEventListener('toggle', function () { openDetails[key] = box.open; });
+  }
+  function runlog(key, m, buttons) {
+    var sec = el('details', 'jd-panel jd-runlog');
+    sec.setAttribute('data-sec', 'runlog');
+    keepOpen(sec, 'runlog:' + key);
+    var h = add(add(sec, el('summary')), el('h2'));
+    span(h, 't', 'Run log');
+    span(h, 'count', m.visits.length + ' visits · oldest first');
     if (!m.visits.length) add(sec, el('p', 'empty', 'no visits recorded'));
     else {
       var ol = add(sec, el('ol', 'runlog'));
@@ -1602,8 +1633,13 @@ _SCRIPT = r"""
         else d.textContent = v.duration_seconds === null || v.duration_seconds === undefined ? '—' : dur(v.duration_seconds);
         if (v.off_chart) span(top, 'offchip', 'off-chart');
         span(main, 'note', reasonOf(v));
-        (v.jobs || []).forEach(function (j) {
-          var table = add(btn.parentNode, el('table', 'exp'));
+        var jobs = v.jobs || [];
+        if (!jobs.length) return;
+        var more = add(btn.parentNode, el('details', 'exp-more'));
+        keepOpen(more, 'runlog-jobs:' + key + ':' + v.index);
+        add(more, el('summary', null, jobs.length + ' job' + (jobs.length === 1 ? '' : 's') + ' · metadata'));
+        jobs.forEach(function (j) {
+          var table = add(more, el('table', 'exp'));
           add(table, el('caption', null, j.job + ' · ' + j.action));
           exposureRows(add(table, el('tbody')), j.exposure);
         });
@@ -2100,7 +2136,7 @@ _SCRIPT = r"""
   function detailCols(art, c, sections) {
     var s = c.s, scales = c.scales, hitButtons = c.hitButtons;
     var cols = add(art, el('div', 'jd-cols'));
-    add(cols, runlog(c.r, c.m, c.logButtons));
+    add(cols, runlog(c.key, c.m, c.logButtons));
     var right = add(cols, el('div', 'jd-right'));
     sections.forEach(function (name) { add(right, SECTIONS[name](c)); });
     var jp = c.jp, cp = c.cp, start = firstStart(c.m);
