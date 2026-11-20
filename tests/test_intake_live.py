@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import json
 import re
+from urllib.parse import quote
 
 import pytest
 
+from lib.feeder import IssueRecord
 from lib.github_actions import GhResult, GitHubAdapterError
 from lib.intake_live import (
     LINEAR_COMMENT_MUTATION,
@@ -607,3 +609,63 @@ def test_linear_relation_pages_without_a_cursor_fail_the_read() -> None:
 
     with pytest.raises(GitHubAdapterError, match="endCursor"):
         LinearIntakeClient(NoCursor(), {"proj-1": "acme/app"}).linear_intake(frozenset({"proj-1"}), "In Progress", {})
+
+
+SINCE = 1_795_000_000.0
+CLOSED = ("--paginate", f"{REPO}/issues?state=closed&since=2026-11-18T11:06:40Z&per_page=100")
+
+
+def test_closed_issues_since_lists_issues_closed_after_the_time() -> None:
+    gh = RecordedGh()
+    gh.route(CLOSED, ok([
+        {"number": 1264, "body": "Split from #1259", "state": "closed", "state_reason": "completed",
+         "closed_at": "2026-11-18T12:00:00Z"},
+        {"number": 1265, "body": None, "state": "closed", "state_reason": "not_planned",
+         "closed_at": "2026-11-18T11:10:00Z"},
+        {"number": 1200, "body": "old", "state": "closed", "state_reason": "completed",
+         "closed_at": "2026-11-01T00:00:00Z"},
+        {"number": 1266, "body": "a PR", "state": "closed", "state_reason": None,
+         "closed_at": "2026-11-18T12:00:00Z", "pull_request": {}},
+    ]))
+
+    found = GitHubIntakeClient(gh).closed_issues_since("owner/app", SINCE)
+
+    assert found == (
+        IssueRecord(number=1264, state="closed", reason="completed", body="Split from #1259"),
+        IssueRecord(number=1265, state="closed", reason="not_planned", body=""),
+    )
+
+
+def search(parent: int) -> tuple[str, ...]:
+    query = quote(f'repo:owner/app is:issue in:body "Split from #{parent}"', safe="")
+    return ("--paginate", f"search/issues?q={query}&per_page=100")
+
+
+def test_split_children_returns_every_issue_split_from_the_parent() -> None:
+    gh = RecordedGh()
+    gh.route(search(12), GhResult(0, json.dumps({"incomplete_results": False, "items": [
+        {"number": 21, "body": "Split from #12 (plan url).", "state": "closed",
+         "state_reason": "completed"},
+        {"number": 30, "body": "Split from #123", "state": "open", "state_reason": None},
+        {"number": 31, "body": "```\nSplit from #12\n```", "state": "open", "state_reason": None},
+    ]}) + json.dumps({"incomplete_results": False, "items": [
+        {"number": 22, "body": "Context.\n\nSplit from #12\n", "state": "open",
+         "state_reason": "reopened"},
+    ]}), ""))
+
+    found = GitHubIntakeClient(gh).split_children("owner/app", 12)
+
+    assert found == (
+        IssueRecord(number=21, state="closed", reason="completed", body="Split from #12 (plan url)."),
+        IssueRecord(number=22, state="open", reason="reopened", body="Context.\n\nSplit from #12\n"),
+    )
+
+
+def test_split_children_raises_on_incomplete_search_results() -> None:
+    gh = RecordedGh()
+    gh.route(search(12), ok({"incomplete_results": True, "items": [
+        {"number": 21, "body": "Split from #12", "state": "open", "state_reason": None},
+    ]}))
+
+    with pytest.raises(GitHubAdapterError, match="incomplete"):
+        GitHubIntakeClient(gh).split_children("owner/app", 12)
