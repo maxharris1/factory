@@ -11,6 +11,7 @@ import sqlite3
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -1509,7 +1510,7 @@ def test_long_failing_test_ids_leave_every_log_tail_in_the_brief(tmp_path: Path)
 
 
 def overlap(tmp_path: Path, *, advance: float = 0, slow_logs: bool = False,
-            during_post: bool = False):
+            during_post: bool = False, lose: Literal["crash", "response"] | None = None):
     now = [10_000.0]
     feeder, queue, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD, now=now)
     red_main(github)
@@ -1543,7 +1544,8 @@ def overlap(tmp_path: Path, *, advance: float = 0, slow_logs: bool = False,
         if args == ["user"]:
             return GhResult(0, json.dumps({"login": "maxharris1"}), "")
         assert args[:2] == ["-X", "POST"], args
-        if during_post and not triggered[0]:
+        stale = during_post and not triggered[0]
+        if stale:
             interleave()
         fields = dict(arg.split("=", 1) for arg in args if "=" in arg)
         number = 900 + len(remote)
@@ -1552,10 +1554,18 @@ def overlap(tmp_path: Path, *, advance: float = 0, slow_logs: bool = False,
         github.issues.setdefault("owner/app", []).append(
             issue(number, body=fields["body"], title=fields["title"],
                   labels=("factory:ready", "factory:main-fix"), template=False))
+        if stale and lose == "crash":
+            raise KeyboardInterrupt
+        if stale and lose == "response":
+            return GhResult(1, "", "connection reset")
         return GhResult(0, json.dumps({"number": number}), "")
 
     github.file_repo_issue = GitHubReviewActions(runner=runner).file_repo_issue
-    assert feeder.feed_once().errors == 0
+    if lose == "crash":
+        with pytest.raises(KeyboardInterrupt):
+            feeder.feed_once()
+    else:
+        assert feeder.feed_once().errors == (1 if lose == "response" else 0)
     return remote, github
 
 
@@ -1590,6 +1600,103 @@ def test_a_post_in_flight_past_its_lease_is_closed_as_a_duplicate_of_the_lowest(
     assert open_main_fixes(github) == [900]
     assert "#900" in github.posted["owner/app", 901][-1].body
     assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
+
+
+def test_review_crash_after_duplicate_post(tmp_path, monkeypatch):
+    captured = {}
+    reconcile = Feeder._close_main_fix_duplicates
+
+    def crash(self, repo, row, posted):
+        if posted == 901:
+            captured["feeder"] = self
+            raise KeyboardInterrupt
+        return reconcile(self, repo, row, posted)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Feeder, "_close_main_fix_duplicates", crash)
+        with pytest.raises(KeyboardInterrupt):
+            overlap(tmp_path, advance=CLAIM_SECONDS + 1, during_post=True)
+
+    feeder = captured["feeder"]
+    for _ in range(3):
+        assert feeder.feed_once().errors == 0
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
+    assert open_main_fixes(feeder.github) == [900]
+
+
+def assert_one_open_main_fix(tmp_path: Path, github: FakeGitHub) -> None:
+    assert open_main_fixes(github) == [900]
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
+    assert [comment.body for comment in github.posted.get(("owner/app", 901), [])] == [
+        "Closing as a duplicate of #900, the main-fix issue for this red streak."
+    ]
+    assert sorted(pull["head"] for pull in github.pulls.values()) == ["factory/issue-900"]
+
+
+@pytest.mark.parametrize("lose", ["crash", "response"])
+def test_a_stale_owner_post_that_lands_unreconciled_leaves_one_open_main_fix(
+    tmp_path: Path, lose: Literal["crash", "response"]
+) -> None:
+    remote, github = overlap(tmp_path, advance=CLAIM_SECONDS + 1, during_post=True, lose=lose)
+    assert [item["number"] for item in remote] == [900, 901]
+    restarted, queue, _, _ = make_feeder(
+        tmp_path, github=github, factory_text=REQUIRED_MD, now=[10_000.0 + CLAIM_SECONDS + 60]
+    )
+    other = another_feeder(restarted, queue, github)
+
+    for feeder in (restarted, other, restarted):
+        assert feeder.feed_once().errors == 0
+        assert_one_open_main_fix(tmp_path, github)
+
+
+def test_a_stale_owner_whose_post_response_is_lost_closes_its_duplicate_in_the_same_poll(
+    tmp_path: Path,
+) -> None:
+    remote, github = overlap(tmp_path, advance=CLAIM_SECONDS + 1, during_post=True, lose="response")
+
+    assert [item["number"] for item in remote] == [900, 901]
+    assert_one_open_main_fix(tmp_path, github)
+
+
+MIXED_ORCH = GITHUB_ORCH.replace("grok:", "linear:\n  api_key_env: LINEAR_API_KEY\ngrok:") + """\
+  - repo: other/app
+    factory_ref: main
+    intake:
+      label: factory:ready
+  - repo: acme/linear-app
+    factory_ref: dev
+    linear_project_id: proj-1
+    intake:
+      linear_state: In Progress
+trusted_linear_users:
+  max-linear-id: [grok-bot]
+"""
+
+
+def test_a_ticket_quoting_an_active_main_fix_in_another_project_still_feeds(tmp_path: Path) -> None:
+    feeder, _, github, linear = make_feeder(tmp_path, orch=MIXED_ORCH, factory_text=REQUIRED_MD)
+    red_main(github)
+    assert feeder.feed_once().errors == 0
+    [number] = main_fixes(github)
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", number)]
+    quoted = f"Seen during the outage:\n\n```\n{github.filed[('owner/app', number)]['body']}\n```\n"
+    github.issues["owner/app"].append(issue(43, body=quoted))
+    github.issues["other/app"] = [
+        issue(42, repo="other/app", body=quoted),
+        issue(44, repo="other/app", body=quoted, labels=("factory:ready", "factory:main-fix")),
+    ]
+    linear.issues = [replace(linear_issue(labels=("factory:main-fix",)), body=quoted + TEMPLATE)]
+
+    candidates, _, errors = feeder._candidates(feeder._contexts()[0])
+
+    assert errors == 0
+    assert {(c.issue.repo, c.issue.key) for c in candidates} >= {
+        ("owner/app", "43"), ("other/app", "42"), ("other/app", "44"), ("acme/linear-app", "AUT-7")
+    }
+    assert ("owner/app", 43) not in github.posted
+    assert ("other/app", 42) not in github.posted
+    assert ("other/app", 44) not in github.posted
+    assert open_main_fixes(github) == [number]
 
 
 def test_an_owner_whose_claim_lapsed_before_the_post_does_not_post(tmp_path: Path) -> None:
