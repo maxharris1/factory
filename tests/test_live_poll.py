@@ -3412,3 +3412,75 @@ def test_a_not_modified_read_counts_as_free(date_age: float, kind: str) -> None:
     source._gh_call("repos/acme/widgets/contents/factory.md")
 
     assert clock.end().endswith(f"; github core 0, free 1 ({kind}), graphql 0")
+
+
+def comment_rows(count: int) -> list[dict[str, object]]:
+    return [
+        {"id": i, "user": {"login": "tester"}, "body": "", "created_at": "2026-11-20T00:00:00Z"}
+        for i in range(1, count + 1)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stderr"), [(0, ""), (1, "gh: Server Error (HTTP 502)\n")]
+)
+def test_each_page_of_a_paginated_read_counts_as_one_billed_call(
+    returncode: int, stderr: str
+) -> None:
+    rows = comment_rows(101)
+    pages = json.dumps(rows[:100]) + ("\n" + json.dumps(rows[100:]) if returncode == 0 else "")
+
+    def runner(argv, timeout):
+        assert "--paginate" in argv
+        return GhResult(returncode, pages, stderr)
+
+    source = LivePollSource(config(), gh_runner=runner, wall=lambda: 1_800_000_000.0)
+    source.cycle_clock = clock = CycleClock(wall=lambda: 1_800_000_000.0)
+    clock.start()
+    if returncode == 0:
+        assert len(source.github.list_comments("acme/widgets", "12")) == 101
+        assert len(source._gh_pages("repos/acme/widgets/pulls/12/files?per_page=100")) == 2
+    else:
+        with pytest.raises(GitHubAdapterError):
+            source.github.list_comments("acme/widgets", "12")
+        with pytest.raises(PollSourceError):
+            source._gh_pages("repos/acme/widgets/pulls/12/files?per_page=100")
+
+    assert clock.end().endswith(
+        "; github core 4 [GET issues/<value>/comments 2, GET pulls/<value>/files 2], "
+        "free 0 (304 0, cached 0), graphql 0"
+    )
+
+
+@pytest.mark.parametrize(
+    ("read", "route", "pages"),
+    [
+        (lambda source: source.github.list_runners("acme/widgets"), "GET actions/runners", 1),
+        (
+            lambda source: source._gh_pages("repos/acme/widgets/pulls/12/files?per_page=100"),
+            "GET pulls/<value>/files",
+            2,
+        ),
+    ],
+)
+def test_a_read_gh_replays_from_its_cache_counts_as_cached(read, route, pages) -> None:
+    now = [1_800_000_000.0]
+    body = "\n".join(['{"runners":[]}'] * pages)
+
+    def runner(argv, timeout):
+        assert "--cache" in argv and "--include" not in argv
+        return GhResult(0, body, "")
+
+    source = LivePollSource(config(), gh_runner=runner, wall=lambda: now[0])
+    source.cycle_clock = clock = CycleClock(wall=lambda: now[0])
+    lines = []
+    for wait in (0, 30, 31):
+        now[0] += wait
+        clock.start()
+        read(source)
+        lines.append(clock.end())
+
+    billed = f"; github core {pages} [{route} {pages}], free 0 (304 0, cached 0), graphql 0"
+    assert lines[0].endswith(billed)
+    assert lines[1].endswith(f"; github core 0, free {pages} (304 0, cached {pages}), graphql 0")
+    assert lines[2].endswith(billed)
