@@ -1,10 +1,12 @@
 ===== box =====
 # Factory job brief: implement
 
+## Goal
 You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`. Nobody will message you while this job runs: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins.
+Build ticket 42 on PR #42 so every acceptance criterion is met.
 
 ## Method
-Build the ticket. Follow the router in Skills below.
+Follow the router in Skills below.
 1. Read the ticket's brief in the Ticket section below. The plan handoff is quoted in the Plan section below (https://github.com/owner/repo/pull/42#issuecomment-5): it is the plan.
 2. Work on PR #42's branch (`gitBranchName` in Job data). Write tests first, as the `tdd` skill says.
 3. Run only the tests for the files you touched plus a short smoke set, in the foreground; never the whole suite, in the background or in chunks. Before `ready`, run the router's "Before ready" steps.
@@ -19,6 +21,9 @@ This job resumes a paused step after an `answers` comment from Max or the orches
 Use the v2 table.
 ````
 Do what it says within this brief's rules.
+
+## Proof
+The ready names the pushed head and each criterion's test or command with its output.
 
 ## Job
 - action: build
@@ -98,7 +103,7 @@ Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, 
 
 <!-- orch:v1 kind=ready from=claude-bot role=builder head=<pushed-head-sha> -->
 
-Then plain prose for people and agents: What changed, the tests and their results, and anything left open. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
+Then plain prose for people and agents: What changed, the Proof above, and anything left open. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
 
 Write the comment to `handoff.md` (never commit that file) and post it with this command, which prints the new comment's id:
 
@@ -187,10 +192,12 @@ Ship: `ship: merge`, `finish_line: merge`. After an APPROVE of the covered head 
 ===== remote (mac) =====
 # Factory job brief: implement
 
+## Goal
 You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`. Nobody will message you while this job runs: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins.
+Build ticket 42 on PR #42 so every acceptance criterion is met.
 
 ## Method
-Build the ticket. Follow the router in Skills below.
+Follow the router in Skills below.
 1. Read the ticket's brief in the Ticket section below. The plan handoff is quoted in the Plan section below (https://github.com/owner/repo/pull/42#issuecomment-5): it is the plan.
 2. Work on PR #42's branch (`gitBranchName` in Job data). Write tests first, as the `tdd` skill says.
 3. Run only the tests for the files you touched plus a short smoke set, in the foreground; never the whole suite, in the background or in chunks. Before `ready`, run the router's "Before ready" steps.
@@ -205,6 +212,9 @@ This job resumes a paused step after an `answers` comment from Max or the orches
 Use the v2 table.
 ````
 Do what it says within this brief's rules.
+
+## Proof
+The ready names the pushed head and each criterion's test or command with its output.
 
 ## Job
 - action: build
@@ -284,7 +294,7 @@ Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, 
 
 <!-- orch:v1 kind=ready from=claude-bot role=builder head=<pushed-head-sha> -->
 
-Then plain prose for people and agents: What changed, the tests and their results, and anything left open. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
+Then plain prose for people and agents: What changed, the Proof above, and anything left open. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
 
 Write the comment to `handoff.md` (never commit that file) and post it with this command, which prints the new comment's id:
 

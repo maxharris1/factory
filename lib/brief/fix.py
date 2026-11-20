@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from lib.brief.build import base_step, builder_notes
-from lib.brief.common import GH, TEST_SCOPE, Lead, code_span, comment_url, detail_of, evidence_part, fenced
+from lib.brief.build import base_step, builder_notes, proof_lines
+from lib.brief.common import GH, TEST_SCOPE, Lead, code_span, comment_url, detail_of, evidence_part, fenced, pr_ref
 from lib.queue import Job
 
 
@@ -10,12 +10,12 @@ def lead(job: Job, facts: dict) -> Lead:
     qa = detail.get("qa_findings")
     verdict = _revise_verdict_url(detail, facts)
     if _qa_only(detail):
-        lines = _qa_fix(qa, facts)
+        goal, lines, proof = _qa_fix(qa, facts)
     elif verdict:
-        lines = _review_fix(detail, facts, verdict)
+        goal, lines, proof = _review_fix(detail, facts, verdict)
     else:
-        lines = _ci_fix(detail, facts)
-    return Lead((*lines, *builder_notes(job, facts)))
+        goal, lines, proof = _ci_fix(detail, facts)
+    return Lead(goal, (*lines, *builder_notes(job, facts)), (proof, *proof_lines(detail)))
 
 
 def quoted_findings(detail: dict[str, object], facts: dict) -> list[dict[str, object]]:
@@ -52,7 +52,7 @@ def _checkout(facts: dict) -> str:
     return f"1. Check out the PR branch (`gitBranchName` in Job data) and confirm `git rev-parse HEAD` is {head}."
 
 
-def _review_fix(detail: dict[str, object], facts: dict, verdict: str) -> list[str]:
+def _review_fix(detail: dict[str, object], facts: dict, verdict: str) -> tuple[str, list[str], str]:
     findings = _open_findings(detail)
     if findings:
         shown = [
@@ -75,11 +75,15 @@ def _review_fix(detail: dict[str, object], facts: dict, verdict: str) -> list[st
             f"rerun it once with `{GH} run rerun <run-id> --failed`, with the run id from "
             f"`{GH} run list --commit {head}`."
         )
-    return [
-        f"Fix the `[blocking]` findings of the REVISE verdict at {verdict}. Follow the router in Skills below.",
-        *shown,
-        *_class_fix_steps(facts, "finding", "Fixing only the line the reviewer quoted is not a fix."),
-    ]
+    return (
+        f"Fix the `[blocking]` findings of the REVISE verdict at {verdict}.",
+        [
+            "Follow the router in Skills below.",
+            *shown,
+            *_class_fix_steps(facts, "finding", "Fixing only the line the reviewer quoted is not a fix."),
+        ],
+        _class_fix_proof("finding"),
+    )
 
 
 def _qa_report(qa: dict[str, object], facts: dict) -> object:
@@ -99,15 +103,18 @@ def _qa_shown(qa: dict[str, object]) -> str:
     return shown
 
 
-def _qa_fix(qa: dict[str, object], facts: dict) -> list[str]:
-    return [
-        f"Fix the failed QA scenarios of the QA report at {_qa_report(qa, facts)}. "
-        "Follow the router in Skills below.",
-        _qa_shown(qa),
-        *_class_fix_steps(
-            facts, "failed scenario", "Fixing only the step the scenario drove is not a fix."
-        ),
-    ]
+def _qa_fix(qa: dict[str, object], facts: dict) -> tuple[str, list[str], str]:
+    return (
+        f"Fix the failed QA scenarios of the QA report at {_qa_report(qa, facts)}.",
+        [
+            "Follow the router in Skills below.",
+            _qa_shown(qa),
+            *_class_fix_steps(
+                facts, "failed scenario", "Fixing only the step the scenario drove is not a fix."
+            ),
+        ],
+        _class_fix_proof("failed scenario"),
+    )
 
 
 def _class_fix_steps(facts: dict, item: str, narrow: str) -> list[str]:
@@ -118,9 +125,12 @@ def _class_fix_steps(facts: dict, item: str, narrow: str) -> list[str]:
         f"3. Run only the new tests and the tests for the files you touched, plus a short smoke set, {TEST_SCOPE} "
         "Then run the router's \"Before ready\" steps.",
         base_step(4, facts),
-        f"5. Push, then post the ready handoff below with the head you pushed. Say, for each {item}, "
-        "the rule, the paths you fixed and the test that covers it.",
+        "5. Push, then post the ready handoff below with the head you pushed.",
     ]
+
+
+def _class_fix_proof(item: str) -> str:
+    return f"The ready names the pushed head and, for each {item}, the rule, the paths fixed and the test that covers it."
 
 
 def _finding(item: dict[str, object]) -> str:
@@ -133,7 +143,7 @@ def _finding(item: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
-def _ci_fix(detail: dict[str, object], facts: dict) -> list[str]:
+def _ci_fix(detail: dict[str, object], facts: dict) -> tuple[str, list[str], str]:
     ci = evidence_part(detail, "ci")
     checks = [name for name in ci.get("failed_checks") or () if isinstance(name, str)]
     instruction = str(detail.get("instruction") or "")
@@ -158,22 +168,25 @@ def _ci_fix(detail: dict[str, object], facts: dict) -> list[str]:
             f"`{GH} run rerun <run-id> --failed`, with the run id from "
             f"`{GH} run list --commit {head}`"
         )
-    return [
-        f"Fix the red CI on this PR. {failed} {where} "
-        "Follow the router in Skills below.",
-        *_read_cause(ci.get("cause"), jobs),
-        *_job_logs(jobs, facts),
-        _checkout(facts),
-        "2. First decide whether this PR caused the failure. If it's infrastructure, don't patch the repo; "
-        f"rerun the failed check and post `ready` at the same head. Rerun it with {rerun}, "
-        "once, and skip steps 3 to 5.",
-        "3. If this PR caused it: a test that fails on the current head and covers the whole class of the "
-        "failure. Then fix the class. Run only that test and the tests for the files you touched, plus a "
-        f"short smoke set, {TEST_SCOPE} "
-        "Then run the router's \"Before ready\" steps.",
-        base_step(4, facts),
-        "5. Push, then post the ready handoff below with the head you pushed.",
-    ]
+    return (
+        f"Fix the red CI on {pr_ref(facts)} at {head}.",
+        [
+            f"{failed} {where} Follow the router in Skills below.",
+            *_read_cause(ci.get("cause"), jobs),
+            *_job_logs(jobs, facts),
+            _checkout(facts),
+            "2. First decide whether this PR caused the failure. If it's infrastructure, don't patch the repo; "
+            f"rerun the failed check and post `ready` at the same head. Rerun it with {rerun}, "
+            "once, and skip steps 3 to 5.",
+            "3. If this PR caused it: a test that fails on the current head and covers the whole class of the "
+            "failure. Then fix the class. Run only that test and the tests for the files you touched, plus a "
+            f"short smoke set, {TEST_SCOPE} "
+            "Then run the router's \"Before ready\" steps.",
+            base_step(4, facts),
+            "5. Push, then post the ready handoff below with the head you pushed.",
+        ],
+        "The ready names the pushed head, and the failing checks pass there or were rerun once for infrastructure.",
+    )
 
 
 def _read_cause(cause: object, jobs: list[dict[str, object]]) -> list[str]:

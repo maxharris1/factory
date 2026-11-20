@@ -19,7 +19,7 @@ def test_update_from_main_uses_the_merge_only_brief() -> None:
 
 def test_update_brief_names_base_head_and_one_side_per_hunk() -> None:
     text = render_brief(update_job(), bot="claude-bot", context=None)
-    assert "Merge-only job: bring `origin/dev` into the PR branch, nothing else." in text
+    assert "Bring `origin/dev` into PR #42 by a merge commit, nothing else." in text
     assert f"Check out the PR branch at {HEAD}" in text
     assert "`git merge origin/dev`: a merge commit only, no rebase, no force-push." in text
     assert "taking exactly one side" in text
@@ -39,5 +39,5 @@ def test_update_brief_ends_with_a_ready_naming_only_the_head() -> None:
 
 def test_a_merge_only_fix_job_has_no_approval_line() -> None:
     text = render_brief(job("fix", head=HEAD, kind="merge-only"), bot="claude-bot", context=None)
-    assert "Merge-only job" in text
+    assert "by a merge commit, nothing else." in text
     assert "taking exactly one side" not in text

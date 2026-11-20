@@ -1,10 +1,12 @@
 ===== box =====
 # Factory job brief: implement
 
+## Goal
 You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`. Nobody will message you while this job runs: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins.
+Plan ticket 42 on PR #42: map every acceptance criterion to work and a proof.
 
 ## Method
-This is a plan job. Follow the router in Skills below.
+Follow the router in Skills below.
 1. Read the ticket's brief in the Ticket section below. Start with an architect scaffold.
 The first plan left `ac-2` unmapped. Map it, and keep what the first plan already mapped.
 The first plan is quoted in the First plan section below.
@@ -14,6 +16,9 @@ The first plan is quoted in the First plan section below.
 5. Post the plan handoff below with `round=2/2`: `ac=met` when every criterion is mapped, `ac=unmet` when one is not. With `ac=unmet`, name the unmapped criterion as `unsat=<ac-n>`; leave `unsat=` out otherwise.
 Title the PR with the source issue, then a Conventional Commits title: `#<issue>: type(scope): subject` (the issue's number, not the PR's), or `<KEY>: type(scope): subject` for a Linear ticket. Fix any other title with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh pr edit --title`.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
+
+## Proof
+The plan maps every `ac-<n>` to work and a named proof, and carries the `Estimate:` line.
 
 ## Job
 - action: plan
@@ -166,10 +171,12 @@ Ship: `ship: merge`, `finish_line: merge`. After an APPROVE of the covered head 
 ===== remote (mac) =====
 # Factory job brief: implement
 
+## Goal
 You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`. Nobody will message you while this job runs: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins.
+Plan ticket 42 on PR #42: map every acceptance criterion to work and a proof.
 
 ## Method
-This is a plan job. Follow the router in Skills below.
+Follow the router in Skills below.
 1. Read the ticket's brief in the Ticket section below. Start with an architect scaffold.
 The first plan left `ac-2` unmapped. Map it, and keep what the first plan already mapped.
 The first plan is quoted in the First plan section below.
@@ -179,6 +186,9 @@ The first plan is quoted in the First plan section below.
 5. Post the plan handoff below with `round=2/2`: `ac=met` when every criterion is mapped, `ac=unmet` when one is not. With `ac=unmet`, name the unmapped criterion as `unsat=<ac-n>`; leave `unsat=` out otherwise.
 Title the PR with the source issue, then a Conventional Commits title: `#<issue>: type(scope): subject` (the issue's number, not the PR's), or `<KEY>: type(scope): subject` for a Linear ticket. Fix any other title with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh pr edit --title`.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
+
+## Proof
+The plan maps every `ac-<n>` to work and a named proof, and carries the `Estimate:` line.
 
 ## Job
 - action: plan

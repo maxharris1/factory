@@ -41,3 +41,20 @@ The plan's fifth cut, the ready example rewritten as "What changed, the Proof ab
 | "and leave the posted one as it is" | `NO_EDIT_RULE`, Handoff, every brief | "Never edit a comment after you post it" | Stated twice in one rule. |
 | "They never post to GitHub or push." | Skills, builder briefs | The factory-builder router, Owner duties 1: "It never posts, pushes or opens a PR." Rules: "Post only this job's handoff" | Stated in the router and in Rules. |
 | "Where any other model config differs, these lines win:" (now "They win over any other model config:") | Skills, every brief | The same rule, shorter. | Shorter wording. |
+
+## Lead sections
+
+Part 1028-c2b of #1149 (plan at https://github.com/maxharris1/factory/pull/1154, built as one PR per https://github.com/maxharris1/factory/pull/1154#issuecomment-7028598943) opens every builder and reviewer brief with `## Goal`, `## Method` and `## Proof`, right after the title. The QA lane brief keeps its own opening.
+
+- `Lead` in `lib/brief/common.py` holds `goal`, `method` and `proof`. `lead_sections(bot, lead)` renders all three, so no kind can skip one. Plan, build, resume, retry, review fix, QA fix, CI fix, merge-only, update-from-main, review and both questions-only briefs go through it.
+- Goal is the identity paragraph, word for word, then one sentence from job facts only, never ticket text. `opening` is gone. `title` and `identity` replace it.
+- Method keeps today's steps. Only a first sentence that restated the goal left it. The CI-gate and no-polling sentences stay in Method.
+- Proof states what the handoff must show. The per-criterion `## Proof` lines from #1136 (`proof_lines` in `lib/brief/build.py`) moved there from Method. They still render for build, fix and merge-only briefs that carry proof items. The fix step 5 clause "Say, for each finding, the rule, the paths you fixed and the test that covers it." moved to Proof as one sentence.
+- `CONTRADICTIONS` gains `proof-ready-vs-verdict` (a builder Proof against a reviewer Proof) and `questions-only-vs-ready` (the questions-only Proof against the builder's push step).
+
+The box half of `tests/snapshots/brief/build.txt` was 8,651 bytes before this part. It is 8,789 bytes after, 28 under the 8,817-byte pin. The pin did not move, and the reserve cut the plan named was not needed.
+
+| Removed text | Where it was | Still stated in | Why it was cut |
+| --- | --- | --- | --- |
+| "Build the ticket." | Method, build briefs | Goal: "Build ticket <n> on PR #<n> so every acceptance criterion is met." | The Goal states it. |
+| "the tests and their results" (ready example, now "What changed, the Proof above, and anything left open.") | Handoff, builder briefs | Proof | The Proof section names what the ready shows. Moved here from 1028-c2a. |

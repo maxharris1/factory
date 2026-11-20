@@ -1,10 +1,11 @@
 ===== box =====
 # Factory job brief: merge-only
 
+## Goal
 You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`. Nobody will message you while this job runs: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins.
+Bring `origin/dev` into PR #42 by a merge commit, nothing else.
 
 ## Method
-Merge-only job: bring `origin/dev` into the PR branch, nothing else.
 1. Check out the PR branch at 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6 and run `git fetch origin dev`.
 2. `git merge origin/dev`: a merge commit only, no rebase, no force-push.
 3. Resolve any conflict without changing behavior. Change nothing besides the merge resolution.
@@ -14,6 +15,9 @@ Title the PR with the source issue, then a Conventional Commits title: `#<issue>
 CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
 Never poll, watch or wait on GitHub Actions or any other CI from inside this job.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
+
+## Proof
+The ready names the pushed head, a merge commit of `origin/dev` that changes only conflict hunks.
 
 ## Job
 - action: fix
@@ -37,7 +41,7 @@ Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, 
 
 <!-- orch:v1 kind=ready from=claude-bot role=builder head=<pushed-head-sha> -->
 
-Then plain prose for people and agents: What changed, the tests and their results, and anything left open. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
+Then plain prose for people and agents: What changed, the Proof above, and anything left open. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
 
 Write the comment to `handoff.md` (never commit that file) and post it with this command, which prints the new comment's id:
 
@@ -105,10 +109,11 @@ Ship: `ship: merge`, `finish_line: merge`. After an APPROVE of the covered head 
 ===== remote (mac) =====
 # Factory job brief: merge-only
 
+## Goal
 You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`. Nobody will message you while this job runs: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins.
+Bring `origin/dev` into PR #42 by a merge commit, nothing else.
 
 ## Method
-Merge-only job: bring `origin/dev` into the PR branch, nothing else.
 1. Check out the PR branch at 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6 and run `git fetch origin dev`.
 2. `git merge origin/dev`: a merge commit only, no rebase, no force-push.
 3. Resolve any conflict without changing behavior. Change nothing besides the merge resolution.
@@ -118,6 +123,9 @@ Title the PR with the source issue, then a Conventional Commits title: `#<issue>
 CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
 Never poll, watch or wait on GitHub Actions or any other CI from inside this job.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
+
+## Proof
+The ready names the pushed head, a merge commit of `origin/dev` that changes only conflict hunks.
 
 ## Job
 - action: fix
@@ -141,7 +149,7 @@ Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, 
 
 <!-- orch:v1 kind=ready from=claude-bot role=builder head=<pushed-head-sha> -->
 
-Then plain prose for people and agents: What changed, the tests and their results, and anything left open. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
+Then plain prose for people and agents: What changed, the Proof above, and anything left open. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
 
 Write the comment to `handoff.md` (never commit that file) and post it with this command, which prints the new comment's id:
 

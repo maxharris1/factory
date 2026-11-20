@@ -60,8 +60,8 @@ from lib.brief.common import (
     handoff_section,
     job_section,
     lead_sections,
-    opening,
     questions_handoff_section,
+    title,
 )
 from lib.brief.context import context_section
 from lib.brief.inline import PLAN_TEXT_LIMIT, quoted_section, ticket_section
@@ -159,8 +159,8 @@ def render_brief(
             _handoff(job, bot, kind, facts),
         ]
     parts = [
-        opening(bot, kind),
-        lead_sections(lead),
+        title(kind),
+        lead_sections(bot, lead),
         job_section(job, bot, kind, facts, remote_device),
         *middle,
         finish_section(job, bot, remote_device),

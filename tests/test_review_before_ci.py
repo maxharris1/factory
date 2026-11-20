@@ -239,7 +239,7 @@ def test_on_a_revise_with_red_ci_the_fix_brief_keeps_the_findings_and_names_the_
     assert board.outcome("7001") == "queued-review-fix"
 
     brief = render_brief(board.claim("claude"), bot="claude-bot", context=None, factory_root="/srv/orch/factory")
-    task = brief.split("## Method\n", 1)[1].split("\n## Job\n", 1)[0]
+    task = brief.split("## Goal\n", 1)[1].split("\n## Job\n", 1)[0]
     assert "Fix the `[blocking]` findings of the REVISE verdict at" in task
     assert "f-1 The poller writes the row directly." in task
     assert "f-2 The cap ignores the stored risk." in task

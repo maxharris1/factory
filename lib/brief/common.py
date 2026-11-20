@@ -54,7 +54,9 @@ class BriefError(ValueError):
 
 @dataclass(frozen=True)
 class Lead:
+    goal: str
     method: tuple[str, ...]
+    proof: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -258,26 +260,45 @@ def local_checks(facts: dict) -> str:
     return checks[0] if len(checks) == 1 else ", ".join(checks[:-1]) + " and " + checks[-1]
 
 
-def lead_sections(lead: Lead) -> str:
-    return "## Method\n" + "\n".join(lead.method)
+def pr_ref(facts: dict) -> str:
+    return f"PR #{facts['pr']}" if facts["pr"] else "the PR"
 
 
-def blocked_lead(reason: str) -> Lead:
-    return Lead((
-        f"Do not start the work. This brief cannot name the pinned skill files it needs: {reason}.",
-        "1. Post the `questions` handoff below. Name the problem above and ask Max to fix the "
-        "factory checkout or the pin.",
-        "2. Then stop: no branch, no commit, no push, no other handoff.",
-    ))
+def ticket_ref(facts: dict) -> str:
+    ticket = f"ticket {facts['ticket']}" if facts["ticket"] else "the ticket"
+    return f"{ticket} on {pr_ref(facts)}" if facts["pr"] else ticket
 
 
-def opening(bot: str, kind: str) -> str:
+def title(kind: str) -> str:
+    return f"# Factory job brief: {kind}"
+
+
+def identity(bot: str) -> str:
     return (
-        f"# Factory job brief: {kind}\n\n"
         f"You are {BOTS[bot]} ({bot}). `orch wait {bot} --autostart` claimed this job and "
         "started you under `orch job run`. "
         "Nobody will message you while this job runs: this brief is the whole hand-off. "
         "Where this brief and the router skill or pstack differ, this brief wins."
+    )
+
+
+def lead_sections(bot: str, lead: Lead) -> str:
+    return "\n\n".join((
+        f"## Goal\n{identity(bot)}\n{lead.goal}",
+        "## Method\n" + "\n".join(lead.method),
+        "## Proof\n" + "\n".join(lead.proof),
+    ))
+
+
+def blocked_lead(reason: str) -> Lead:
+    return Lead(
+        f"Do not start the work. This brief cannot name the pinned skill files it needs: {reason}.",
+        (
+            "1. Post the `questions` handoff below. Name the problem above and ask Max to fix the "
+            "factory checkout or the pin.",
+            "2. Then stop: no branch, no commit, no push, no other handoff.",
+        ),
+        ("The questions handoff is this job's only output.",),
     )
 
 

@@ -2,25 +2,31 @@
 
 from __future__ import annotations
 
-from lib.brief.build import builder_notes
-from lib.brief.common import TEST_SCOPE, Lead
+from lib.brief.build import builder_notes, proof_lines
+from lib.brief.common import TEST_SCOPE, Lead, detail_of, pr_ref
 from lib.queue import Job
 
 
 def lead(job: Job, facts: dict) -> Lead:
     base = facts["base"] or "<base branch>"
     head = facts["head"] or "the PR head"
-    return Lead((
-        f"Merge-only job: bring `origin/{base}` into the PR branch, nothing else.",
-        f"1. Check out the PR branch at {head} and run `git fetch origin {base}`.",
-        f"2. `git merge origin/{base}`: a merge commit only, no rebase, no force-push.",
-        "3. Resolve any conflict without changing behavior. Change nothing besides the merge resolution.",
-        "4. Run only the tests for the files you touched while resolving the merge, plus a short "
-        f"smoke set, {TEST_SCOPE} With no conflicts to resolve, the smoke set is enough.",
-        "5. Push, post the ready handoff below with the head you pushed, and finish the job.",
-        *_approved_note(job),
-        *builder_notes(job, facts),
-    ))
+    return Lead(
+        f"Bring `origin/{base}` into {pr_ref(facts)} by a merge commit, nothing else.",
+        (
+            f"1. Check out the PR branch at {head} and run `git fetch origin {base}`.",
+            f"2. `git merge origin/{base}`: a merge commit only, no rebase, no force-push.",
+            "3. Resolve any conflict without changing behavior. Change nothing besides the merge resolution.",
+            "4. Run only the tests for the files you touched while resolving the merge, plus a short "
+            f"smoke set, {TEST_SCOPE} With no conflicts to resolve, the smoke set is enough.",
+            "5. Push, post the ready handoff below with the head you pushed, and finish the job.",
+            *_approved_note(job),
+            *builder_notes(job, facts),
+        ),
+        (
+            f"The ready names the pushed head, a merge commit of `origin/{base}` that changes only conflict hunks.",
+            *proof_lines(detail_of(job)),
+        ),
+    )
 
 
 def _approved_note(job: Job) -> list[str]:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from lib.brief.common import _HEAD, _URL, Lead, evidence_part, fenced, local_checks
+from lib.brief.common import _HEAD, _URL, Lead, evidence_part, fenced, local_checks, pr_ref
 from lib.factory_md import padded_estimate
 from lib.followups import followup_start, followups_active
 
@@ -256,12 +256,15 @@ def lead(facts: dict) -> Lead:
         "out of the header when they do not apply. Post the verdict handoff below on the head you reviewed. "
         "Do not merge. Do not push to the PR.",
     ]
-    return Lead((
-        f"Review the PR at head {head} against `{base}`. You are the one cross-family reviewer. "
-        "Follow the router in Skills below.",
-        f"Mode: `{mode}`. {reason} {summary}",
-        *(f"{number}. {step}" for number, step in enumerate(steps, 1)),
-    ))
+    return Lead(
+        f"Review {pr_ref(facts)} at {head} against every acceptance criterion and post one verdict.",
+        (
+            f"Review against `{base}`. You are the one cross-family reviewer. Follow the router in Skills below.",
+            f"Mode: `{mode}`. {reason} {summary}",
+            *(f"{number}. {step}" for number, step in enumerate(steps, 1)),
+        ),
+        ("The verdict names each `ac-<n>` with an owner, a state and evidence, and each finding in the Handoff form.",),
+    )
 
 
 def _size_flag_step(facts: dict) -> str:
