@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import dataclasses
+import functools
 import io
 import json
 import os
@@ -22,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import device_monitor, exposure, job_run, live_settings, process_tree, remote, telemetry
+from lib import device_monitor, device_pool, exposure, job_run, live_settings, process_tree, remote, telemetry
 from lib.device_monitor import DeviceMonitor, remote_target, stranded
 from lib.device_pool import DevicePool, hold_memory
 from lib.dispatcher import Dispatcher
@@ -3744,3 +3745,102 @@ def test_a_memory_check_error_is_recorded_and_never_stops_the_poll(tmp_path: Pat
         rows = connection.execute("SELECT repo, error FROM poll_errors").fetchall()
     assert [tuple(row) for row in rows] == [("devices", "memory: OperationalError: database is locked")]
     assert signed == [0.0]
+
+
+def memory_poller(tmp_path: Path, now: list[float], config: MachinesConfig, memory) -> Dispatcher:
+    path = tmp_path / "d.db"
+    queue = SQLiteJobQueue(path, clock=lambda: now[0])
+    return Dispatcher(
+        path,
+        queue,
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+        devices=DeviceMonitor(DevicePool(queue, config), config, FakeTransport(), memory=memory),
+        log=lambda _line: None,
+    )
+
+
+def blocked_devices(dispatcher: Dispatcher) -> set[str]:
+    return set(device_pool.placement_blocks(dispatcher.queue, dispatcher.devices.config, None).devices)
+
+
+@pytest.mark.parametrize(
+    "recovered", [(AMPLE, CALM), (None, None), TimeoutError("ssh timed out")]
+)
+def test_clearing_a_memory_hold_neither_prolongs_nor_erases_an_unreachable_backoff(
+    tmp_path: Path, recovered
+) -> None:
+    readings: dict[str, object] = {"box": (LOW, CALM), "pc": (AMPLE, CALM)}
+
+    def reader(device, *_):
+        reading = readings[device.name]
+        if isinstance(reading, Exception):
+            raise reading
+        return reading
+
+    now = [1000.0]
+    dispatcher = memory_poller(tmp_path, now, config_of(machines_file(tmp_path)), reader)
+    with dispatcher.queue.connect() as connection:
+        device_pool.back_off(connection, "box", until=1300.0, reason="unreachable preflight")
+    for at in (1000.0, 1060.0, 1120.0, 1180.0, 1240.0):
+        poll_at(now, dispatcher, at)
+        assert "box" in blocked_devices(dispatcher)
+
+    readings["box"] = recovered
+    poll_at(now, dispatcher, 1250.0)
+    assert "box" in blocked_devices(dispatcher), "the unreachable backoff still runs to 1300"
+    poll_at(now, dispatcher, 1301.0)
+    assert "box" not in blocked_devices(dispatcher), "the memory renewals never extended it"
+
+
+def test_the_orch_host_is_read_directly_even_when_it_is_not_the_local_device(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "machines.yml"
+    path.write_text(
+        f"""
+orch_host: pc
+devices:
+  - name: pc
+    tailscale_name: pc.example.ts.net
+    slot_max: 3
+    harnesses: {{claude: claude-bot}}
+    workdir_root: {tmp_path}/remote/{{bot}}/work
+    ssh_alias: fakepc-{{bot}}
+    factory_root: /srv/factory
+""".lstrip(),
+        encoding="utf-8",
+    )
+    config = config_of(path)
+    assert config.orch_host == "pc" and not config.devices[0].local
+    host_proc = fake_proc(tmp_path / "host-proc", LOW, CALM)
+    transport = MemoryTransport(fake_proc(tmp_path / "ssh-proc", AMPLE, CALM))
+    now = [1000.0]
+    dispatcher = memory_poller(
+        tmp_path, now, config, functools.partial(device_monitor.read_memory, transport, proc=host_proc)
+    )
+
+    dispatcher.reconcile_jobs()
+
+    assert transport.captured == [], "no SSH from the orch host to itself"
+    assert blocked_devices(dispatcher) == {"pc"}
+
+
+def test_a_hold_runs_180s_from_when_the_slow_reads_finish(tmp_path: Path) -> None:
+    now = [1000.0]
+
+    def slow_reader(device, *_):
+        now[0] += 200.0
+        return (LOW, CALM)
+
+    dispatcher = memory_poller(tmp_path, now, config_of(machines_file(tmp_path)), slow_reader)
+
+    dispatcher.reconcile_jobs()
+
+    assert now[0] == 1400.0
+    assert blocked_devices(dispatcher) == {"box", "pc"}
+    now[0] = 1579.0
+    assert blocked_devices(dispatcher) == {"box", "pc"}
+    now[0] = 1580.0
+    assert blocked_devices(dispatcher) == set()
