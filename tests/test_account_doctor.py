@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import sqlite3
+import subprocess
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -843,21 +844,22 @@ def sign_in(account: str, status: str, detail: str, device: str = "pc") -> SignI
 
 @pytest.mark.parametrize("row, expected", [
     (sign_in("claude-b", "signed-out", account_doctor.NOT_LOGGED_IN),
-     f"signed-out: not logged in; run: sign in as claude-bot on pc: CLAUDE_CONFIG_DIR={CLAUDE_B_HOME} "
-     "claude auth login, then orch accounts doctor"),
+     f"signed-out; run: sign in as claude-bot on pc: CLAUDE_CONFIG_DIR={CLAUDE_B_HOME} "
+     "claude auth login, then orch accounts doctor; not logged in"),
     (sign_in("codex-default", "signed-out", account_doctor.NOT_LOGGED_IN),
-     "signed-out: not logged in; run: sign in as codex-bot on pc: codex login, then orch accounts doctor"),
+     "signed-out; run: sign in as codex-bot on pc: env -u CODEX_HOME codex login, "
+     "then orch accounts doctor; not logged in"),
     (sign_in("claude-default", "signed-out", account_doctor.TOKEN_AUTH),
-     f"signed-out: {account_doctor.TOKEN_AUTH}; run: remove the token export from claude-bot's login "
-     "profile on pc, then orch accounts doctor"),
+     "signed-out; run: remove the token export from claude-bot's login profile on pc, "
+     f"then orch accounts doctor; {account_doctor.TOKEN_AUTH}"),
     (sign_in("claude-b", "mismatch", "same sign-in as account claude-default"),
-     "mismatch: same sign-in as account claude-default; run: sign claude-b in to its own account as "
-     f"claude-bot on pc: CLAUDE_CONFIG_DIR={CLAUDE_B_HOME} claude auth login, then orch accounts doctor"),
+     "mismatch; run: sign claude-b in to its own account as claude-bot on pc: "
+     f"CLAUDE_CONFIG_DIR={CLAUDE_B_HOME} claude auth login, then orch accounts doctor; "
+     "same sign-in as account claude-default"),
     (sign_in("codex-default", "unreachable", account_doctor.SSH_DOWN),
-     "unreachable: device unreachable over ssh; run: fix ssh to pc for codex, then orch accounts doctor"),
+     "unreachable; run: fix ssh to pc for codex, then orch accounts doctor; device unreachable over ssh"),
     (sign_in("claude-b", "unreachable", account_doctor.PLACEHOLDER_DEVICE, device="mac"),
-     "unreachable: device has install placeholders; run: fix ssh to mac for claude, "
-     "then orch accounts doctor"),
+     "unreachable; run: fix ssh to mac for claude, then orch accounts doctor; device has install placeholders"),
     (sign_in("claude-default", "ok", ""), None),
 ], ids=["signed-out", "signed-out-default", "token-auth", "mismatch", "unreachable", "placeholder", "ok"])
 def test_flags_name_the_operator_step_for_each_failing_status(
@@ -874,6 +876,67 @@ def test_a_default_account_flag_names_no_account_folder(tmp_path: Path) -> None:
     for row in rows:
         (detail,) = account_doctor.flags([row], flag_config(tmp_path), "owner/factory").values()
         assert "CLAUDE_CONFIG_DIR=" not in detail
+
+
+SPACED_MACHINES = DOCTOR_MACHINES.replace(
+    "  - {id: claude-b, harness: claude, signed_in_on: [pc, mac]}",
+    "  - {id: claude-b, harness: claude, signed_in_on: [pc]}\n"
+    "  - {id: codex-b, harness: codex, signed_in_on: [pc]}",
+).replace("home: /home/{bot}", "home: /home/{bot}/Bot Home")
+FAKE_LOGIN = "#!/bin/sh\nprintf 'login %s %s\\n' \"$0\" \"${CLAUDE_CONFIG_DIR-${CODEX_HOME-unset}}\"\n"
+
+
+def run_step(tmp_path: Path, detail: str, environ: dict[str, str]) -> str:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    for name in ("claude", "codex"):
+        (bin_dir / name).write_text(FAKE_LOGIN, encoding="utf-8")
+        (bin_dir / name).chmod(0o755)
+    command = detail.split(" on pc: ", 1)[1].split(", then orch accounts doctor", 1)[0]
+    done = subprocess.run(
+        ["bash", "-c", command], env={"PATH": f"{bin_dir}:/usr/bin:/bin", **environ},
+        capture_output=True, text=True, check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    return done.stdout.strip()
+
+
+@pytest.mark.parametrize("account, variable, expected", [
+    ("claude-default", "CLAUDE_CONFIG_DIR", "claude unset"),
+    ("codex-default", "CODEX_HOME", "codex unset"),
+    ("claude-b", "CLAUDE_CONFIG_DIR", "claude /home/claude-bot/Bot Home/.factory-accounts/claude-b"),
+    ("codex-b", "CODEX_HOME", "codex /home/codex-bot/Bot Home/.factory-accounts/codex-b"),
+], ids=["claude-default", "codex-default", "claude-named", "codex-named"])
+@pytest.mark.parametrize("status", ["signed-out", "mismatch"])
+def test_the_flagged_login_command_signs_in_the_home_the_doctor_probes(
+    tmp_path: Path, account: str, variable: str, expected: str, status: str
+) -> None:
+    path = tmp_path / "spaced.yml"
+    path.write_text(SPACED_MACHINES, encoding="utf-8")
+    (detail,) = account_doctor.flags([sign_in(account, status, "x")], config_of(path), "owner/factory").values()
+    ran = run_step(tmp_path, detail, {variable: "/synthetic/other-account"})
+    program, home = expected.split(" ", 1)
+    assert ran == f"login {tmp_path / 'bin' / program} {home}"
+
+
+def test_a_stored_flag_keeps_its_operator_step_however_long_the_explanation(tmp_path: Path) -> None:
+    accounts = [f"claude-{index}-" + "x" * 45 for index in range(10)]
+    path = tmp_path / "long.yml"
+    path.write_text(POLLER_MACHINES.replace(
+        "  - {id: claude-b, harness: claude, signed_in_on: [pc]}",
+        "\n".join(f"  - {{id: {account}, harness: claude, signed_in_on: [pc]}}" for account in accounts),
+    ), encoding="utf-8")
+    config = config_of(path)
+    probes = [account_doctor.parse_claude(account, "pc", 0, claude_reply())
+              for account in config.accounts_on("pc", "claude")]
+    rows = account_doctor.judge(probes, NOW)
+    connection = connect(tmp_path / "orch.db")
+    account_doctor.write(connection, rows, "owner/factory", account_doctor.flags(rows, config, "owner/factory"), NOW)
+    details = {str(row[1]): str(row[3]) for row in attention_rows(connection)}
+    assert len(details) == 11
+    for detail in details.values():
+        assert "claude auth login, then orch accounts doctor" in detail
+    assert "run: sign claude-default in to its own account" in details["claude-default@pc"]
 
 
 def test_run_without_a_repo_writes_the_table_and_raises_no_flag(tmp_path: Path) -> None:

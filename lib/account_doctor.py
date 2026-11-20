@@ -330,6 +330,10 @@ _STEP: dict[Status, str] = {
 _TOKEN_STEP = "remove the token export from {login}'s login profile on {device}" + _THEN
 
 
+def _home(variable: str, path: str | None) -> str:
+    return f"env -u {variable} " if path is None else f"{variable}={shlex.quote(path)} "
+
+
 def _step(row: SignIn, config: MachinesConfig) -> str:
     harness = config.account(row.account).harness
     path = None if row.status == "unreachable" else config.account_home(row.device, harness, row.account)
@@ -339,7 +343,7 @@ def _step(row: SignIn, config: MachinesConfig) -> str:
         device=row.device,
         harness=harness,
         login=config.device(row.device).login_for(harness),
-        home="" if path is None else f"{_STATUS[harness].home_variable}={path} ",
+        home=_home(_STATUS[harness].home_variable, path),
         command=_LOGIN[harness],
     )
 
@@ -347,7 +351,7 @@ def _step(row: SignIn, config: MachinesConfig) -> str:
 def flags(rows: Sequence[SignIn], config: MachinesConfig, repo: str) -> dict[tuple[str, str, str], str]:
     return {
         (repo.lower(), f"{row.account}@{row.device}", REASON):
-            f"{row.status}: {row.detail}; run: {_step(row, config)}"
+            f"{row.status}; run: {_step(row, config)}; {row.detail}"
         for row in rows
         if row.status != "ok"
     }
