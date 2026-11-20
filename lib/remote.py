@@ -166,6 +166,7 @@ from typing import Protocol, runtime_checkable
 
 from lib.github_app_token import TOKEN_VARIABLES
 from lib.handoff_marker import MARKER_LINE_LIMIT, MARKER_PREFIX, MARKER_SEARCH_LINES, RUNNER_LOG_PREFIX
+from lib.harness_env import CPU_CAP
 from lib.oom import raise_sh
 from lib.ssh_mux import Multiplexer
 
@@ -642,6 +643,23 @@ def _contain(tag: str) -> str:
     )
 
 
+def _cap_cpus(tag: str, cap: int) -> str:
+    """POSIX sh that pins the current shell to cap of its nproc CPUs, the
+    window lib/harness_env.py cpu_window picks for tag, or says it could not."""
+    skipped = f"orch: cpu cap: affinity skipped ($why); env cap ORCH_CPU_CAP={cap} still applies"
+    return (
+        "why=; cpus=$(nproc 2>/dev/null) || cpus=; "
+        "case $cpus in ''|*[!0-9]*) why='no nproc' ;; "
+        f'*) if [ "$cpus" -gt {cap} ]; then '
+        f"i=0; list=; while [ $i -lt {cap} ]; do "
+        f"list=${{list:+$list,}}$(( ({int(tag[:8], 16)} + i) % cpus )); i=$((i + 1)); done; "
+        "if ! command -v taskset >/dev/null 2>&1; then why='no taskset'; "
+        'elif ! taskset -pc "$list" $$ >/dev/null 2>&1; then why="taskset -pc $list failed"; fi; '
+        "fi ;; esac; "
+        f'if [ -n "$why" ]; then echo "{skipped}" >&2; fi; '
+    )
+
+
 def start_script(
     target: RemoteTarget,
     command: Sequence[str],
@@ -653,6 +671,7 @@ def start_script(
     report_env: bool = False,
     env_file: str | None = None,
     unset: Sequence[str] = (),
+    cpu_cap: int = CPU_CAP,
 ) -> str:
     """The remote script that runs command as the job's tagged worker.
 
@@ -664,7 +683,9 @@ def start_script(
     With report_env, the start first prints the WORKER_ENV_MARK line, or
     writes it to env_file (mode 600) when one is given. Each name in unset
     is dropped after the profile, as TOKEN_VARIABLES are; one the profile
-    cannot drop refuses the start.
+    cannot drop refuses the start. On Linux (#1222) the start pins itself to
+    cpu_cap CPUs before it execs, so the harness and its descendants inherit
+    the pin; where it cannot, one line on stderr says so.
     """
     tag = target.require_tag()
     if not command:
@@ -750,6 +771,7 @@ def start_script(
         f'< /dev/null 2> /dev/null &); [ -n "$k" ] || exit {START_REFUSED}; fi; '
         f"{_contain(tag)}"
         f"{raise_sh()}"
+        f"{_cap_cpus(tag, cpu_cap)}"
         f'exec "$@" {login}'
     )
     return f"exec env {TAG_ENV}={tag} sh -c {shlex.quote(inner)}"
