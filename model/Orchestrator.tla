@@ -86,7 +86,8 @@ TypeOK ==
   /\ cap \in {0, 1, 3}
   /\ configOk \in BOOLEAN
   /\ flags \in [
-       covered: BOOLEAN, planOk: BOOLEAN, questionsDone: BOOLEAN, byHand: BOOLEAN
+       covered: BOOLEAN, planOk: BOOLEAN, questionsDone: BOOLEAN, byHand: BOOLEAN,
+       reopenHold: BOOLEAN
      ]
   /\ external \in {"none"} \cup HandoffFrom
   /\ counts \in [
@@ -108,7 +109,7 @@ Init ==
   /\ configOk \in BOOLEAN
   /\ flags = [
        covered |-> FALSE, planOk |-> FALSE, questionsDone |-> FALSE,
-       byHand |-> FALSE
+       byHand |-> FALSE, reopenHold |-> FALSE
      ]
   /\ counts = [
        round |-> 0, acUnmet |-> 0, gate |-> 0,
@@ -195,7 +196,7 @@ T5Abandon ==
   /\ external' = external
   /\ cap' = cap
   /\ configOk' = configOk
-  /\ flags' = flags
+  /\ flags' = [flags EXCEPT !.reopenHold = FALSE]
   /\ counts' = counts
   /\ QaFollowsHead
 
@@ -348,7 +349,7 @@ T2ReadyCovered ==
   /\ flags.covered
   /\ state' = "ship"
   /\ keep
-  /\ flags' = flags
+  /\ flags' = [flags EXCEPT !.reopenHold = FALSE]
   /\ counts' = [counts EXCEPT !.gate = 0, !.deaths = 0]
   /\ QaFollowsHead
 
@@ -436,7 +437,7 @@ T4Approve ==
   /\ state = "review"
   /\ state' = "ship"
   /\ keep
-  /\ flags' = [flags EXCEPT !.covered = TRUE]
+  /\ flags' = [flags EXCEPT !.covered = TRUE, !.reopenHold = FALSE]
   /\ counts' = [counts EXCEPT !.deaths = 0]
   /\ QaFollowsHead
 
@@ -716,6 +717,17 @@ ReenterAfterHandoff ==
   /\ counts' = [counts EXCEPT !.round = @ + 1, !.deaths = 0, !.gate = 0]
   /\ QaFollowsHead
 
+\* #1197. Max's go under the effective cap reopens a handed-off ticket.
+ReopenAfterHandoff ==
+  /\ state = "handed-off"
+  /\ cap' \in HandoffCaps
+  /\ counts.round + 1 < cap' + counts.extra
+  /\ state' = "fixing"
+  /\ configOk' = configOk /\ paused' = "none" /\ external' = external
+  /\ flags' = [flags EXCEPT !.covered = FALSE, !.byHand = FALSE, !.reopenHold = TRUE]
+  /\ counts' = [counts EXCEPT !.round = @ + 1, !.deaths = 0, !.gate = 0]
+  /\ QaFollowsHead
+
 \* #108. The poll sees the PR merged, by the factory or by hand: merged, with
 \* stuck, paused and every counter that marks stuck cleared.
 MergeObserved ==
@@ -725,7 +737,7 @@ MergeObserved ==
   /\ keep
   /\ flags' = [flags EXCEPT !.byHand = ~flags.covered \/ ~QaCovers \/ state \notin
        {"ship", "awaiting-ok", "waiting-external", "handed-off", "merge-queue",
-        "updating"}]
+        "updating"}, !.reopenHold = FALSE]
   /\ counts' = [counts EXCEPT !.gate = 0, !.deaths = 0, !.declines = 0,
        !.planGaps = 0, !.updates = 0]
   /\ QaFollowsHead
@@ -876,6 +888,7 @@ LinearHandoff ==
   /\ "TL" \notin Omit
   /\ state \in HandoffFrom
   /\ PastGo
+  /\ ~flags.reopenHold
   /\ state' = "handed-off-externally"
   /\ external' = state
   /\ UNCHANGED <<paused, cap, configOk, flags, counts, qa>>
@@ -907,12 +920,12 @@ LinearSettle ==
 LinearDone ==
   /\ LinearSettle
   /\ state' \in {"merged", "done"}
-  /\ flags' = [flags EXCEPT !.byHand = TRUE]
+  /\ flags' = [flags EXCEPT !.byHand = TRUE, !.reopenHold = FALSE]
 
 LinearCanceled ==
   /\ LinearSettle
   /\ state' = "abandoned"
-  /\ flags' = flags
+  /\ flags' = [flags EXCEPT !.reopenHold = FALSE]
 
 \* #891. Max hands off a ticket that waits on him (answers state=handed-off,
 \* approver only). A ticket with a running job is not a source: that job's
@@ -926,7 +939,7 @@ T5Handoff ==
      \/ state = "waiting-max" /\ PastGo
   /\ state' = "handed-off"
   /\ keep
-  /\ flags' = [flags EXCEPT !.byHand = TRUE]
+  /\ flags' = [flags EXCEPT !.byHand = TRUE, !.reopenHold = FALSE]
   /\ counts' = [counts EXCEPT !.gate = 0, !.deaths = 0, !.declines = 0,
        !.planGaps = 0, !.updates = 0]
   /\ qa' = QaReset
@@ -949,7 +962,7 @@ Factory ==
   \/ T9PostMerge \/ MergedDone \/ T9Pass \/ T9Fail
   \/ MaxOkAnotherRound \/ MaxGoAfterBlocked \/ ReenterAfterHandoff \/ MergeObserved
   \/ T1UnsatFix
-  \/ MaxOkAfterHandoff
+  \/ MaxOkAfterHandoff \/ ReopenAfterHandoff
   \/ T4ShipQueue \/ QueueMerge \/ QueueConflict \/ QueueClosed
   \/ QueueGoPlan \/ QueueGoBuild
   \/ UpdateTrivial \/ UpdateNonTrivial \/ UpdateRetry \/ UpdateStuck
@@ -1085,12 +1098,19 @@ HandedOffDecided ==
   /\ state = "handed-off" /\ cap = 0 => ENABLED ReenterAfterHandoff
   /\ state = "handed-off" /\ counts.round + 1 < cap + counts.extra =>
        ENABLED ReenterAfterHandoff
+  /\ state = "handed-off" /\ cap = 0 => ENABLED ReopenAfterHandoff
+  /\ state = "handed-off" /\ counts.round + 1 < cap + counts.extra =>
+       ENABLED ReopenAfterHandoff
   /\ state = "handed-off" /\ counts.round + 1 >= cap + counts.extra
      /\ counts.extra = 0 => ENABLED MaxOkAfterHandoff
 
 \* #118. Leaving handoff for more work counts the approved round as completed.
 HandoffCountsApprovedRound ==
-  [][MaxOkAfterHandoff \/ ReenterAfterHandoff => counts'.round = counts.round + 1]_vars
+  [][MaxOkAfterHandoff \/ ReenterAfterHandoff \/ ReopenAfterHandoff
+       => counts'.round = counts.round + 1]_vars
+
+ReopenHoldOnlyAtWork ==
+  flags.reopenHold => state \in HandoffFrom
 
 \* #130. A ticket in merge-queue can always leave it: merged, abandoned,
 \* updating, or back to work on a go or a ready. An update can always end:
@@ -1120,7 +1140,7 @@ ExternalKeepsPrior ==
   /\ state = "handed-off-externally" => ~ENABLED Factory
 
 HandedOffExternallyDecided ==
-  /\ state \in HandoffFrom /\ PastGo => ENABLED LinearHandoff
+  /\ state \in HandoffFrom /\ PastGo /\ ~flags.reopenHold => ENABLED LinearHandoff
   /\ state \in LinearFrom /\ PastGo => ENABLED LinearDone /\ ENABLED LinearCanceled
   /\ state = "handed-off-externally" => ENABLED LinearResume
 
@@ -1164,6 +1184,7 @@ ChartSlice ==
   /\ ~qa.gate \/ GatedFirstRoundToQaPark
   /\ counts.acUnmet = 0
   /\ counts.extra = 0 \/ state = "fixing"
+  /\ ~flags.reopenHold \/ (state = "fixing" /\ counts.gate = 0 /\ counts.deaths = 0)
   /\ cap \in {0, 3}
   /\ counts.deaths = 0 \/ counts.gate = 0
   /\ \/ ~flags.planOk

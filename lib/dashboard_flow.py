@@ -63,6 +63,7 @@ QUEUE_JOB_BEFORE_ROW = frozenset(
         "t3",
         "t5-answers",
         "cap-resume",
+        "handoff-reopen",
         "blocked-resume",
         "unsat-fix",
         "update-queued",

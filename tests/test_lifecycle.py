@@ -508,13 +508,13 @@ def test_verdict_after_handoff_without_reentry_is_silent(tmp_path: Path) -> None
     assert flow.state()["workflow_state"] == "handed-off"
 
 
-def test_go_after_handoff_changes_nothing(tmp_path: Path) -> None:
+def test_a_planning_go_after_handoff_changes_nothing(tmp_path: Path) -> None:
     flow = Flow(tmp_path)
     flow.hand_off_at(1)
     before = len(jobs(flow.queue))
     flow.actions.states.clear()
 
-    assert flow.go("go-2") == "go-after-handoff"
+    assert flow.post("go-2", GO.format(state="planning"), "grok-login") == "go-after-handoff"
 
     assert len(jobs(flow.queue)) == before
     assert flow.state()["workflow_state"] == "handed-off"
