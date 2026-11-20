@@ -6,8 +6,10 @@ from datetime import datetime, timezone
 
 import pytest
 
+from lib import containers
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.stacks import (
+    KINDS,
     Container,
     Keep,
     Ledger,
@@ -15,11 +17,15 @@ from lib.stacks import (
     Remove,
     TicketFacts,
     decide,
+    list_script,
     listing_format,
     parse_listing,
     read_ledger,
+    remove_script,
     stack_name,
+    sweep,
 )
+from tests.fake_docker import Docker
 
 OWNER = ("aut0-code/aut0", "AUT-2129")
 OTHER = ("aut0-code/aut0", "AUT-7")
@@ -397,3 +403,55 @@ def test_read_ledger_without_slot_tables(orch_db):
 def test_read_ledger_raises_on_a_database_without_jobs(tmp_path):
     with pytest.raises(sqlite3.Error):
         read_ledger(sqlite3.connect(tmp_path / "empty.db"), live=())
+
+
+@pytest.mark.parametrize("kind", sorted(KINDS))
+def test_a_stack_the_fake_starts_parses_back_from_its_listing(tmp_path, monkeypatch, kind):
+    docker = Docker(tmp_path)
+    monkeypatch.setenv("PATH", docker.path())
+    started = docker.start_stack(NAME, kind, working_dir=f"{BOX_JOB}/job1/repo", created=GOOD_AT)
+    docker.start(app="web")
+
+    listed = containers.local_runner()(list_script(kind))
+
+    assert listed.code == 0, listed.stderr
+    assert parse_listing(kind, listed.stdout) == (
+        [Project(kind, NAME, (Container(started, epoch(2026, 11, 20, 13, 5, 1), f"{BOX_JOB}/job1/repo", False),))],
+        0,
+    )
+
+
+def test_a_container_started_after_the_listing_stops_the_removal_before_networks_and_volumes(
+    tmp_path, monkeypatch
+):
+    docker = Docker(tmp_path)
+    monkeypatch.setenv("PATH", docker.path())
+    listed = docker.start_stack(NAME)
+    run = containers.local_runner()
+    started = []
+
+    def runner(script):
+        if "docker rm" in script:
+            started.append(docker.start(**{KINDS["compose"]: NAME}))
+        return run(script)
+
+    finished = ledger({OWNER: facts(last=epoch(2027, 1, 1))}, {})
+    lines = sweep(runner, lambda: finished, "pc", ROOTS)
+
+    assert docker.ids() == set(started)
+    assert listed not in docker.ids()
+    assert docker.networks() == [f"{NAME}_default"]
+    assert docker.volumes() == [f"{NAME}_db"]
+    assert lines == [f"kept compose project {NAME} on pc: a container started after the listing"]
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        Project("compose", "$(touch pwned)", (Container("0123456789ab", 0.0, "", False),)),
+        Project("compose", NAME, (Container("$(touch pwned)", 0.0, "", False),)),
+    ],
+)
+def test_remove_script_refuses_a_hostile_name_or_id(hostile):
+    with pytest.raises(ValueError):
+        remove_script(hostile)

@@ -78,7 +78,7 @@ def remote_runner(
     return run
 
 
-def _failed(result: Called) -> str | None:
+def failure(result: Called) -> str | None:
     if result.code == 0:
         return None
     reason = "unreachable over ssh" if result.code == SSH_UNREACHABLE else f"exit {result.code}"
@@ -87,10 +87,10 @@ def _failed(result: Called) -> str | None:
 
 
 def remove(job_id: str, runner: Runner, device: str) -> str | None:
-    failure = _failed(runner(remove_script(job_id)))
-    if failure is None:
+    failed = failure(runner(remove_script(job_id)))
+    if failed is None:
         return None
-    return f"could not remove job {job_id}'s {LABEL} containers on {device} ({failure})"
+    return f"could not remove job {job_id}'s {LABEL} containers on {device} ({failed})"
 
 
 def _by_job(listing: str) -> tuple[dict[str, list[str]], int]:
@@ -107,8 +107,8 @@ def _by_job(listing: str) -> tuple[dict[str, list[str]], int]:
 
 def sweep(runner: Runner, job_state: Callable[[str], str | None], device: str) -> list[str]:
     listed = runner(list_script())
-    if (failure := _failed(listed)) is not None:
-        return [f"could not list {LABEL} containers on {device} ({failure})"]
+    if (failed := failure(listed)) is not None:
+        return [f"could not list {LABEL} containers on {device} ({failed})"]
     by_job, unreadable = _by_job(listed.stdout)
     lines = [f"kept {unreadable} {LABEL} container(s) on {device}: not a container id"] if unreadable else []
     for job_id, ids in sorted(by_job.items()):
@@ -120,10 +120,10 @@ def sweep(runner: Runner, job_state: Callable[[str], str | None], device: str) -
         if state is None:
             lines.append(f"kept {count} container(s) on {device} of job {job_id}: not in orch.db")
         elif state in FINISHED_STATES:
-            failure = _failed(runner(remove_ids_script(ids)))
+            failed = failure(runner(remove_ids_script(ids)))
             lines.append(
-                f"could not remove {count} container(s) on {device} of finished job {job_id} ({failure})"
-                if failure is not None
+                f"could not remove {count} container(s) on {device} of finished job {job_id} ({failed})"
+                if failed is not None
                 else f"removed {count} container(s) on {device} of finished job {job_id}"
             )
     return lines

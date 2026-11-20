@@ -3,18 +3,21 @@ from __future__ import annotations
 import json
 import posixpath
 import re
+import shlex
 import sqlite3
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
-from lib.containers import _CONTAINER_ID, FINISHED_STATES, LABEL
+from lib.containers import _CONTAINER_ID, _NO_DOCKER, FINISHED_STATES, LABEL, Runner, failure
 from lib.device_pool import QA_SLOTS_TABLE, _has_table
 from lib.queue import SLOTS_TABLE
 from lib.remote import _JOB_ID
 
 KINDS = {"compose": "com.docker.compose.project", "supabase": "com.supabase.cli.project"}
 WORKING_DIR = "com.docker.compose.project.working_dir"
+NO_OWNER = "no ticket owns it"
+NEW_CONTAINER = 3
 
 _NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}")
 _CREATED = re.compile(
@@ -193,7 +196,7 @@ def decide(project: Project, ledger: Ledger, device: str, roots: Collection[str]
     }
     owners |= {ticket for ticket in ledger.tickets if stack_name(*ticket, device) == project.name}
     if len(owners) != 1:
-        return Keep(f"claimed by {len(owners)} tickets" if owners else "no ticket owns it")
+        return Keep(f"claimed by {len(owners)} tickets" if owners else NO_OWNER)
     (owner,) = owners
     facts = ledger.tickets[owner]
     ticket = owner[1]
@@ -208,3 +211,63 @@ def decide(project: Project, ledger: Ledger, device: str, roots: Collection[str]
     if max(container.created for container in project.containers) > facts.last_finished_at:
         return Keep(f"newer than {ticket}'s last finish")
     return Remove(owner)
+
+
+def list_script(kind: str) -> str:
+    template = shlex.quote(listing_format(kind))
+    return _NO_DOCKER + f"docker ps -a --no-trunc --filter label={KINDS[kind]} --format {template}\n"
+
+
+def remove_script(project: Project) -> str:
+    ids = [container.id for container in project.containers]
+    if not _NAME.fullmatch(project.name) or not all(_CONTAINER_ID.fullmatch(i) for i in ids):
+        raise ValueError(f"project {project.name!r} or one of its container ids is not a plain token")
+    label = shlex.quote(f"label={KINDS[project.kind]}={project.name}")
+    return (
+        _NO_DOCKER
+        + f"docker rm -f -v {' '.join(map(shlex.quote, ids))} >/dev/null || exit\n"
+        + f"left=$(docker ps -aq --filter {label}) || exit\n"
+        + f'[ -z "$left" ] || exit {NEW_CONTAINER}\n'
+        + f"nets=$(docker network ls -q --filter {label}) || exit\n"
+        + '[ -z "$nets" ] || docker network rm $nets >/dev/null || exit\n'
+        + f"vols=$(docker volume ls -q --filter {label}) || exit\n"
+        + '[ -z "$vols" ] || docker volume rm $vols >/dev/null\n'
+    )
+
+
+def sweep(
+    runner: Runner, ledger: Callable[[], Ledger | None], device: str, roots: Collection[str]
+) -> list[str]:
+    lines: list[str] = []
+    projects: list[Project] = []
+    seen: set[str] = set()
+    # The Supabase CLI also puts the compose label on everything it starts, so its stacks
+    # are listed by their own label first and skipped when the compose listing repeats them.
+    for kind in ("supabase", "compose"):
+        listed = runner(list_script(kind))
+        if (failed := failure(listed)) is not None:
+            lines.append(f"could not list {kind} containers on {device} ({failed})")
+            continue
+        found, unreadable = parse_listing(kind, listed.stdout)
+        if unreadable:
+            lines.append(f"kept {unreadable} {kind} container(s) on {device}: unreadable")
+        ids = [{container.id for container in project.containers} for project in found]
+        projects.extend(project for project, own in zip(found, ids) if not own & seen)
+        seen.update(*ids)
+    if not projects or (facts := ledger()) is None:
+        return lines
+    for project in projects:
+        name = project.name if _NAME.fullmatch(project.name) else repr(project.name)
+        where = f"{project.kind} project {name} on {device}"
+        match decide(project, facts, device, roots):
+            case Remove(owner):
+                removed = runner(remove_script(project))
+                if removed.code == NEW_CONTAINER:
+                    lines.append(f"kept {where}: a container started after the listing")
+                elif (failed := failure(removed)) is not None:
+                    lines.append(f"could not remove {where} ({failed})")
+                else:
+                    lines.append(f"removed {where} (ticket {owner[1]} finished)")
+            case Keep(reason) if reason != NO_OWNER:
+                lines.append(f"kept {where}: {reason}")
+    return lines
