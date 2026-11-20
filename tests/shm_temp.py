@@ -2,8 +2,6 @@
 
 Loaded from pytest.ini with `-p tests.shm_temp`. Each session gets its own
 `pytest-factory-<pid>-*` dir, so concurrent suites never share a basetemp.
-When /dev/shm is missing, unwritable, mounted noexec or short of space,
-nothing changes.
 An explicit `--basetemp` keeps pytest's basetemp; TMPDIR still moves.
 """
 
