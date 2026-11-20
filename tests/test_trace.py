@@ -219,6 +219,7 @@ def test_the_database_is_opened_read_only(db: Db, monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(sqlite3, "connect", spy)
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("trace ran a subprocess"))
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("trace ran a subprocess"))
+    gc.collect()
     before = db.path.read_bytes()
 
     assert cli.main(["trace", f"{REPO}#{TICKET}", "--db", str(db.path)]) == 0
