@@ -116,18 +116,18 @@ def cgroup_kill(unit: str, members: Iterable[Process], root: Path = CGROUP_ROOT)
     """Write 1 to the cgroup.kill of scope `unit`, found from a member's cgroup path.
 
     The kernel then kills every process in the scope at once. Nothing is
-    written when no member is in the scope or the file is absent (a kernel
-    before 5.14), or the write fails; the caller's kill rounds do the work then.
+    written when no member is in the scope, the file is absent (a kernel
+    before 5.14) or unreachable, or the write fails.
     """
     for process in members:
         if process.scope != unit or process.cgroup is None:
             continue
         kill = root / process.cgroup.lstrip("/") / "cgroup.kill"
-        if kill.exists():
-            try:
+        try:
+            if kill.exists():
                 kill.write_text("1")
-            except OSError:
-                pass
+        except OSError:
+            pass
         return
 
 

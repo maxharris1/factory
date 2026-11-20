@@ -733,6 +733,29 @@ def test_the_kill_writes_cgroup_kill_of_the_runs_scope_before_its_rounds(
         victim.wait()
 
 
+@linux_path
+def test_the_kill_still_runs_its_rounds_when_cgroup_kill_is_unreachable(tmp_path: Path) -> None:
+    device = SyntheticDevice(tmp_path)
+    target = device.target
+    unit = f"orch-run-{target.tag}.scope"
+    (device.job / remote.scope_record(target.require_tag())).write_text(f"{unit}\n")
+    cgroup = tmp_path / "cgroup"
+    slice_dir = cgroup / SCOPE_SLICE.lstrip("/")
+    kill_file = slice_dir / unit / "cgroup.kill"
+    kill_file.parent.mkdir(parents=True)
+    kill_file.write_text("")
+    slice_dir.chmod(0)
+    victim = subprocess.Popen(["sleep", "60"])
+    device.show(victim, session=victim.pid, cgroup=f"{SCOPE_SLICE}/{unit}")
+    try:
+        device.run(remote.stop_script(target, kill=True).replace("/sys/fs/cgroup", str(cgroup)))
+        assert victim.wait(timeout=5) == -signal.SIGKILL, "the rounds kill it"
+    finally:
+        slice_dir.chmod(0o755)
+        victim.kill()
+        victim.wait()
+
+
 HARNESS_KILLS_ITSELF = """\
 import os, signal, subprocess, sys, time
 from pathlib import Path

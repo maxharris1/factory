@@ -525,6 +525,24 @@ def test_a_worker_that_ignores_sigterm_is_killed_and_followed_until_gone(
     assert clock.now < transport.killed_at + 10
 
 
+class ExitsWhenKilled(IgnoresTerm):
+    def exchange(self, argv, *, timeout, input=b""):
+        answer = Script.exchange(self, argv, timeout=timeout, input=input)
+        return polled(0, "exited 137") if self.killed_at is not None else answer
+
+
+def test_a_cancelled_run_ends_with_the_runners_signal_not_the_workers_sigkill(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    control = Stop()
+    control.signum = signal.SIGTERM
+    transport = ExitsWhenKilled(clock)
+    end = follower(transport, clock, (tmp_path / "out").open("wb")).run("LAUNCH", b"", control)
+    assert transport.killed_at is not None
+    assert (end.kind, end.code) == (STOPPED, 128 + signal.SIGTERM)
+
+
 def test_a_worker_alive_after_sigkill_is_not_confirmed_stopped_after_two_minutes(
     tmp_path: Path,
 ) -> None:

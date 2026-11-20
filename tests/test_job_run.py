@@ -568,18 +568,27 @@ def test_a_setsid_child_of_a_command_killed_by_sigkill_is_gone_once_run_returns(
 SCOPE_SLICE = "/user.slice/user-1000.slice/user@1000.service/app.slice"
 
 
-@pytest.mark.parametrize("has_kill_file", [True, False], ids=["cgroup-kill", "no-cgroup-kill"])
+@pytest.mark.parametrize(
+    "cgroup", ["writable", "absent", "unwritable", "unreachable"],
+    ids=["cgroup-kill", "no-cgroup-kill", "unwritable-cgroup-kill", "unreachable-cgroup-kill"],
+)
 def test_a_scoped_trees_kill_round_writes_cgroup_kill_then_kills_each_member(
-    tmp_path: Path, has_kill_file: bool
+    tmp_path: Path, cgroup: str
 ) -> None:
     """#1210: cgroup.kill of the run's scope comes first; the SIGSTOP/SIGKILL
-    rounds follow, and stand alone where the kernel has no cgroup.kill."""
+    rounds follow, and stand alone where cgroup.kill is absent, refuses the
+    write, or sits under a directory this user cannot search."""
     unit = process_tree.scope_unit("a" * 32)
-    scope_dir = tmp_path / "cgroup" / SCOPE_SLICE.lstrip("/") / unit
+    slice_dir = tmp_path / "cgroup" / SCOPE_SLICE.lstrip("/")
+    scope_dir = slice_dir / unit
     scope_dir.mkdir(parents=True)
     kill_file = scope_dir / "cgroup.kill"
-    if has_kill_file:
+    if cgroup != "absent":
         kill_file.write_text("")
+    if cgroup == "unwritable":
+        kill_file.chmod(0o444)
+    if cgroup == "unreachable":
+        slice_dir.chmod(0)
     live = {
         41: process_tree.Process(41, 1, "s41", False, 41, unit, f"{SCOPE_SLICE}/{unit}"),
         42: process_tree.Process(42, 41, "s42", False, 41, unit, f"{SCOPE_SLICE}/{unit}"),
@@ -596,11 +605,16 @@ def test_a_scoped_trees_kill_round_writes_cgroup_kill_then_kills_each_member(
         41, None, scan=lambda _tag: dict(live), signal_pid=signal_pid, known={},
         scope=unit, cgroup_root=tmp_path / "cgroup",
     )
-    tree.end(lambda _m: None)
-    if has_kill_file:
+    try:
+        tree.end(lambda _m: None)
+    finally:
+        slice_dir.chmod(0o755)
+    if cgroup == "writable":
         assert kill_file.read_text() == "1", "the scope's cgroup.kill was written"
-    else:
+    elif cgroup == "absent":
         assert not kill_file.exists(), "no cgroup.kill is made where the kernel has none"
+    else:
+        assert kill_file.read_text() == "", "cgroup.kill could not be written"
     assert sorted(pid for pid, signum in signals if signum == signal.SIGKILL) == [41, 42]
     assert 43 in live, "a process outside the scope is never signalled"
 
