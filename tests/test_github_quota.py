@@ -5,7 +5,7 @@ import pytest
 
 from lib.dispatch.cycle_clock import CycleClock
 from lib.dispatcher import TicketRef
-from lib.github_actions import GhResult
+from lib.github_actions import GhResult, GitHubAdapterError
 from lib.poll_source import (
     BACKOFF_SECONDS,
     MAX_POLL_INTERVAL_SECONDS,
@@ -21,6 +21,12 @@ from lib.poll_source import (
 from tests.test_live_poll import FACTORY, FakeGh, config
 
 WALL = 1_800_000_000.0
+SHA = "a" * 40
+CORE_NEARLY_FULL = {
+    "X_RateLimit_Limit": 5000,
+    "X_RateLimit_Remaining": 4655,
+    "X_RateLimit_Reset": int(WALL + 2927),
+}
 FACTORY_BODY = json.dumps(
     {
         "encoding": "base64",
@@ -49,11 +55,16 @@ def limited(status: int = 403, **headers: object) -> GhResult:
     )
 
 
+def secondary(**headers: object) -> GhResult:
+    return response(403, '{"message": "You have exceeded a secondary rate limit"}', **headers)
+
+
 class Quota:
     def __init__(self) -> None:
         self.mono = 1_000.0
         self.wall = WALL
         self.factory: list[GhResult] = []
+        self.checks: list[GhResult] = []
         self.probe: GhResult = GhResult(1, "", "gh: HTTP 500")
         self.calls: list[list[str]] = []
         self.lines: list[str] = []
@@ -74,6 +85,8 @@ class Quota:
             return self.probe
         if any("/contents/factory.md" in part for part in call):
             return self.factory.pop(0)
+        if any("/check-runs" in part for part in call):
+            return self.checks.pop(0)
         return GhResult(0, "[]", "")
 
     def read_factory(self) -> None:
@@ -90,11 +103,19 @@ class Quota:
         with pytest.raises(PollSourceError):
             self.read_factory()
 
+    def hit_checks(self, result: GhResult) -> None:
+        self.checks.append(result)
+        with pytest.raises(GitHubAdapterError):
+            self.source.github.ci_status("o/r", SHA)
 
+
+@pytest.mark.parametrize("remaining", [0, RATE_PAUSE_REMAINING])
 @pytest.mark.parametrize("status", [403, 429])
-def test_rate_limit_pauses_every_read_until_the_reset_not_300s(status) -> None:
+def test_rate_limit_pauses_every_read_until_the_reset_not_300s(status, remaining) -> None:
     quota = Quota()
-    quota.hit_limit(limited(status, X_RateLimit_Reset=int(WALL + 900)))
+    quota.hit_limit(
+        limited(status, X_RateLimit_Remaining=remaining, X_RateLimit_Reset=int(WALL + 900))
+    )
     reads = quota.reads()
 
     quota.mono += BACKOFF_SECONDS + 1
@@ -132,6 +153,89 @@ def test_retry_after_wins_over_the_reset_header() -> None:
         quota.comments()
     quota.mono += 1
     quota.comments()
+
+
+def test_retry_after_on_a_secondary_403_with_core_nearly_full() -> None:
+    quota = Quota()
+    quota.hit_checks(secondary(**CORE_NEARLY_FULL, Retry_After=90))
+
+    quota.mono += 89
+    with pytest.raises(QuotaDeferred):
+        quota.comments()
+    quota.mono += 1
+    quota.comments()
+    assert quota.lines[0].endswith("(retry-after)")
+
+
+def test_retry_after_on_an_exhausted_core_still_holds_reads_until_the_reset() -> None:
+    quota = Quota()
+    quota.hit_limit(limited(X_RateLimit_Reset=int(WALL + 900), Retry_After=30))
+
+    assert "paused 0m30s" in quota.lines[0]
+    assert quota.lines[0].endswith("(retry-after)")
+    quota.mono += 30
+    quota.wall += 30
+    with pytest.raises(QuotaDeferred):
+        quota.comments()
+    quota.mono += 870
+    quota.wall += 870
+    quota.comments()
+
+
+def test_secondary_403_with_core_nearly_full_resumes_within_minutes() -> None:
+    quota = Quota()
+    quota.hit_checks(secondary(**CORE_NEARLY_FULL))
+    calls = len(quota.calls)
+
+    quota.mono += 59
+    quota.wall += 59
+    with pytest.raises(QuotaDeferred):
+        quota.comments()
+    assert len(quota.calls) == calls
+    quota.mono += 1
+    quota.wall += 1
+    quota.comments()
+    assert len(quota.calls) == calls + 1
+
+    assert len(quota.lines) == 1
+    line = quota.lines[0]
+    assert "core 4655/5000 left" in line
+    assert "paused 1m00s" in line
+    assert line.endswith("(secondary)")
+    assert "(reset)" not in line
+
+
+def test_repeated_secondary_hits_double_the_wait_up_to_the_cap() -> None:
+    quota = Quota()
+
+    def deferred_for() -> float:
+        quota.hit_checks(secondary(**CORE_NEARLY_FULL))
+        waited = 0.0
+        while True:
+            try:
+                quota.comments()
+            except QuotaDeferred:
+                quota.mono += 1
+                waited += 1
+            else:
+                return waited
+
+    assert [deferred_for() for _ in range(5)] == [60, 120, 240, 300, 300]
+    quota.mono += 300
+    assert deferred_for() == 60
+
+
+def test_secondary_403_without_rate_headers_backs_off_briefly() -> None:
+    quota = Quota()
+    quota.hit_checks(secondary())
+
+    assert any("rate_limit" in call for call in quota.calls)
+    quota.mono += 59
+    with pytest.raises(QuotaDeferred):
+        quota.comments()
+    quota.mono += 1
+    quota.comments()
+    assert quota.lines[0].endswith("(secondary)")
 
 
 def test_no_reset_header_and_no_probe_falls_back_to_300s() -> None:
@@ -193,6 +297,7 @@ def test_one_throttle_line_per_episode() -> None:
     assert line.startswith("github throttle: HTTP 403 rate limit on GET contents/factory.md")
     assert "core 0/5000 left" in line
     assert "paused 15m05s" in line
+    assert line.endswith("(reset)")
 
     quota.mono += 65
     quota.wall += 65
@@ -241,6 +346,44 @@ def test_replayed_headers_do_not_overwrite_a_newer_window() -> None:
     quota.hit_limit(response(403, '{"message": "API rate limit exceeded"}'))
 
     assert "core 70/5000 left" in quota.lines[0]
+    assert quota.lines[0].endswith("(secondary)")
+    quota.mono += 59
+    with pytest.raises(QuotaDeferred):
+        quota.comments()
+    quota.mono += 1
+    quota.comments()
+
+
+def test_replayed_headers_keep_an_exhausted_window_paused_until_the_reset() -> None:
+    quota = Quota()
+    reset = int(WALL + 600)
+    quota.factory.append(
+        response(
+            200,
+            FACTORY_BODY,
+            X_RateLimit_Limit=5000,
+            X_RateLimit_Remaining=4900,
+            X_RateLimit_Reset=reset,
+        )
+    )
+    quota.read_factory()
+    quota.source.begin_cycle()
+    quota.factory.append(
+        response(
+            200,
+            FACTORY_BODY,
+            X_RateLimit_Limit=5000,
+            X_RateLimit_Remaining=4999,
+            X_RateLimit_Reset=reset - 3600,
+        )
+    )
+    quota.read_factory()
+    quota.source.begin_cycle()
+
+    quota.hit_limit(limited(X_RateLimit_Reset=reset))
+
+    assert "core 0/5000 left" in quota.lines[0]
+    assert quota.lines[0].endswith("(reset)")
     quota.mono += 600 + RATE_RESET_GRACE_SECONDS - 1
     with pytest.raises(QuotaDeferred):
         quota.comments()

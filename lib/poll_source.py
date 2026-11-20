@@ -158,6 +158,8 @@ mutation FactoryReadyForReview($issue: String!, $state: String!) {
 }
 """.strip()
 BACKOFF_SECONDS = 300.0
+SECONDARY_BACKOFF_SECONDS = 60.0
+SECONDARY_BACKOFF_MAX_SECONDS = 300.0
 RATE_RESET_GRACE_SECONDS = 5.0
 RATE_SHED_FRACTION = 0.20
 RATE_PAUSE_REMAINING = 50
@@ -651,6 +653,8 @@ class LivePollSource:
         self._backoff_until = 0.0
         self._rate_window: RateWindow | None = None
         self._throttled = False
+        self._secondary_wait = 0.0
+        self._secondary_calm_at = 0.0
         self._linear_backoff_until = 0.0
         self._linear_requests = 0
         self._linear_complexity = 0
@@ -2658,7 +2662,9 @@ class LivePollSource:
         if result.returncode == 0 or not rate_limited(status, result.stdout, result.stderr):
             self._throttled = False
             return
-        seconds, basis = self._quota_wait(headers.get("retry-after"))
+        seconds, basis = self._quota_wait(
+            headers.get("retry-after"), f"{result.stdout}\n{result.stderr}"
+        )
         self._backoff_until = max(self._backoff_until, self.clock() + seconds)
         if self._throttled:
             return
@@ -2693,7 +2699,7 @@ class LivePollSource:
             self.gh_cache.keep(key, started_wall + ttl, started_wall)
         return False
 
-    def _quota_wait(self, retry_after: str | None) -> tuple[float, str]:
+    def _quota_wait(self, retry_after: str | None, text: str) -> tuple[float, str]:
         try:
             seconds = float(retry_after)
         except (TypeError, ValueError):
@@ -2706,9 +2712,17 @@ class LivePollSource:
             self._probe_rate_window()
             basis = "probe"
             window = self._live_window()
-        if window is None:
+        if window is not None and window.remaining <= RATE_PAUSE_REMAINING:
+            return window.reset_epoch - self.wall() + RATE_RESET_GRACE_SECONDS, basis
+        if window is None and "secondary rate limit" not in text.lower():
             return BACKOFF_SECONDS, "default"
-        return window.reset_epoch - self.wall() + RATE_RESET_GRACE_SECONDS, basis
+        now = self.clock()
+        if now < self._secondary_calm_at:
+            self._secondary_wait = min(2 * self._secondary_wait, SECONDARY_BACKOFF_MAX_SECONDS)
+        else:
+            self._secondary_wait = SECONDARY_BACKOFF_SECONDS
+        self._secondary_calm_at = now + self._secondary_wait + SECONDARY_BACKOFF_MAX_SECONDS
+        return self._secondary_wait, "secondary"
 
     def _spend(self, kind: CallKind, requests: int) -> None:
         window = self._live_window()
