@@ -1,0 +1,189 @@
+from __future__ import annotations
+
+import dataclasses
+from collections.abc import Sequence
+from pathlib import Path
+
+from tests.qa_support import Harness, qa_report, ready, scenarios, verdict
+from tests.test_approver_credential import MAX, AppFlow
+from tests.test_auto_extra_round import AutoFlow, capped_wakes
+from tests.test_dispatcher import GO, VERDICT, job_count
+from tests.test_qa_gate_table import blocking
+from tests.test_rounds_and_caps import HEADS, round_of
+from tests.test_unsatisfiable_criterion import revise, to_first_review
+
+
+class ConvergingFlow(AutoFlow):
+    def __init__(self, tmp_path: Path, stop_on: str) -> None:
+        super().__init__(tmp_path, auto_extra_rounds=0)
+        self.factory = dataclasses.replace(self.factory, stop_on=stop_on)
+        self.next_id = 1
+
+    def revise_with(self, round_text: str, ids: Sequence[str], repeat: str | None = None) -> str:
+        body = VERDICT.format(round=round_text, head=self.head, verdict="REVISE", risk="high")
+        if repeat is not None:
+            body = body.replace(" -->", f" repeat={repeat} -->", 1)
+        body += "".join(f"- [blocking] {rule_id}: still open.\n" for rule_id in ids)
+        return self.post(f"revise-{round_text}", body, "codex-login")
+
+    def fresh(self, count: int) -> list[str]:
+        ids = [f"f-{self.next_id + offset}" for offset in range(count)]
+        self.next_id += count
+        return ids
+
+    def review(self, number: int, cap: int = 3) -> None:
+        assert self.ready(HEADS[number]) == "queued-review"
+        assert round_of(self.finish("codex")) == f"{number}/{cap}"
+
+    def falling_to_round_three(self) -> str:
+        assert self.go("go-1") == "queued-build"
+        self.finish("claude")
+        for number, count in ((1, 4), (2, 2)):
+            self.review(number)
+            assert self.revise_with(f"{number}/3", self.fresh(count)) == "queued-review-fix"
+            self.finish("claude")
+        self.review(3)
+        return self.revise_with("3/3", self.fresh(1))
+
+    def grok_jobs(self) -> int:
+        with self.queue.connect() as connection:
+            return int(
+                connection.execute("SELECT count(*) FROM jobs WHERE recipient = 'grok'").fetchone()[0]
+            )
+
+
+def test_a_converging_round_at_the_cap_gets_a_round(tmp_path: Path) -> None:
+    flow = ConvergingFlow(tmp_path, "convergence")
+    assert flow.falling_to_round_three() == "queued-review-fix"
+    state = flow.state()
+    assert (state["workflow_state"], state["cap_extra"]) == ("fixing", 1)
+    assert job_count(flow.queue, "fix") == 3
+    assert round_of(flow.finish("claude")) == "4/4"
+    [notice] = flow.actions.posted
+    assert notice.startswith("Extra round 1: this round cut the open blocking findings to a new low")
+    assert "`review.stop_on: convergence`" in notice
+    assert capped_wakes(flow) == 0
+    assert flow.grok_jobs() == 0
+
+
+def test_rounds_still_caps(tmp_path: Path) -> None:
+    flow = ConvergingFlow(tmp_path, "rounds")
+    assert flow.falling_to_round_three() == "capped-review"
+    state = flow.state()
+    assert (state["workflow_state"], state["cap_extra"]) == ("capped", 0)
+    assert job_count(flow.queue, "fix") == 2
+    assert capped_wakes(flow) == 1
+    assert flow.grok_jobs() == 1
+    assert flow.actions.posted == []
+
+
+def test_a_flat_round_gets_one_round_then_a_second_flat_round_caps(tmp_path: Path) -> None:
+    flow = ConvergingFlow(tmp_path, "convergence")
+    assert flow.go("go-1") == "queued-build"
+    flow.finish("claude")
+    for number, count in ((1, 2), (2, 1)):
+        flow.review(number)
+        assert flow.revise_with(f"{number}/3", flow.fresh(count)) == "queued-review-fix"
+        flow.finish("claude")
+    flow.review(3)
+    assert flow.revise_with("3/3", flow.fresh(1)) == "queued-review-fix"
+    [notice] = flow.actions.posted
+    assert notice.startswith("Extra round 1: this round did not cut the open blocking findings.")
+    flow.finish("claude")
+    flow.review(4, cap=4)
+    assert flow.revise_with("4/4", flow.fresh(1)) == "capped-review"
+    assert (flow.state()["workflow_state"], flow.state()["cap_extra"]) == ("capped", 1)
+    assert capped_wakes(flow) == 1
+    assert len(flow.actions.posted) == 1
+
+
+def _carried(tmp_path: Path, stop_on: str) -> str:
+    tmp_path.mkdir()
+    flow = ConvergingFlow(tmp_path, stop_on)
+    assert flow.go("go-1") == "queued-build"
+    flow.finish("claude")
+    flow.review(1)
+    assert flow.revise_with("1/3", ["f-1", "f-2", "f-3"]) == "queued-review-fix"
+    flow.finish("claude")
+    flow.review(2)
+    return flow.revise_with("2/3", ["f-1", "f-4"], repeat="f-1")
+
+
+def test_a_carried_id_on_a_new_low_continues(tmp_path: Path) -> None:
+    assert _carried(tmp_path / "convergence", "convergence") == "queued-review-fix"
+    assert _carried(tmp_path / "rounds", "rounds") == "waiting-max-repeat"
+
+
+def test_a_superseded_unsat_verdict_does_not_set_the_low(tmp_path: Path) -> None:
+    flow = AppFlow(tmp_path, enabled=True)
+    flow.factory = dataclasses.replace(flow.factory, stop_on="convergence")
+    to_first_review(flow)
+    unsat = "- ac-1: unsatisfiable. Owner: review. Needs a rewrite.\n"
+    assert revise(flow, "1/3", "unsat", " unsat=ac-1", body=unsat) == "waiting-max-unsat"
+    assert flow.post("rewrite", "/go\nac-1 now reads: the CLI exits 2.", MAX) == "resumed-review"
+    flow.finish("codex")
+    for number, count in ((1, 4), (2, 2), (3, 1)):
+        if number > 1:
+            flow.finish("claude")
+            assert flow.ready(HEADS[number]) == "queued-review"
+            flow.finish("codex")
+        body = "".join(f"- [blocking] f-{i}: still open.\n" for i in range(1, count + 1))
+        assert revise(flow, f"{number}/3", f"v{number}", body=body) == "queued-review-fix"
+    assert flow.state()["cap_extra"] == 1
+
+
+def _qa_round(run: Harness, number: int, failed: Sequence[str], cap: int = 3) -> None:
+    head = str(number) * 40
+    if number > 1:
+        run.finish("claude", f"r{number}")
+    run.post(f"r{number}", ready(head, f"{number}/{cap}", body=scenarios("qa-1", "qa-2")), head=head)
+    run.poll()
+    run.finish("codex", f"v{number}")
+    run.post(f"v{number}", verdict(head, "APPROVE", f"{number}/{cap}"))
+    rows = "".join(
+        f"| {qa_id} | ac-1 | {'Failed' if qa_id in failed else 'Passed'} | https://example.test/run/1 |\n"
+        for qa_id in ("qa-1", "qa-2")
+    )
+    body = "- [blocking] f-1 saved draft disappears\nEvidence: https://example.test/run/1\n" + rows
+    run.post(f"q{number}", qa_report(head, "FAIL", body=body, cause="product"))
+    run.poll(3)
+
+
+def _converging_qa(tmp_path: Path) -> Harness:
+    run = Harness(tmp_path, blocking())
+    run.thread.base = dataclasses.replace(
+        run.thread.base, factory=dataclasses.replace(run.thread.base.factory, stop_on="convergence")
+    )
+    return run
+
+
+def test_a_resumed_qa_repeat_keeps_its_failed_scenarios(tmp_path: Path) -> None:
+    run = _converging_qa(tmp_path)
+    _qa_round(run, 1, ["qa-1", "qa-2"])
+    _qa_round(run, 2, ["qa-1", "qa-2"])
+    assert run.rows("SELECT workflow_state FROM ticket_state") == [("waiting-max",)]
+    run.post("go-again", "/go")
+    run.poll()
+    _qa_round(run, 3, ["qa-1"])
+    assert run.rows("SELECT workflow_state, review_round, cap_extra FROM ticket_state") == [("fixing", 3, 1)]
+
+
+def test_a_capped_round_keeps_its_failed_scenarios(tmp_path: Path) -> None:
+    run = Harness(tmp_path, blocking())
+    for number, failed in enumerate((["qa-1"], ["qa-2"], ["qa-1"]), start=1):
+        _qa_round(run, number, failed)
+    assert run.rows("SELECT workflow_state, review_round FROM ticket_state") == [("capped", 3)]
+    run.post("go-again", GO.format(state="building"))
+    run.now[0] += 3600
+    run.poll()
+    _qa_round(run, 4, ["qa-1"], cap=4)
+    assert run.rows("SELECT workflow_state FROM ticket_state") == [("waiting-max",)]
+
+
+def test_an_upgraded_database_recovers_failed_scenarios_from_fix_jobs(tmp_path: Path) -> None:
+    run = Harness(tmp_path, blocking())
+    _qa_round(run, 1, ["qa-2", "qa-1"])
+    with run.queue.connect() as connection:
+        connection.execute("ALTER TABLE review_events DROP COLUMN qa_failed")
+    upgraded = Harness(tmp_path, blocking())
+    assert upgraded.rows("SELECT comment_id, qa_failed FROM review_events") == [("v1", '["qa-1","qa-2"]')]

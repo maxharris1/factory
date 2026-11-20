@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import json
 import re
-import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
+from itertools import groupby
 from typing import Literal
 
 from lib.dispatch.constants import REVISE_ROUND_STATES
 from lib.dispatch.decisions import Decision, chosen_words
+from lib.dispatch.qa import QaFix, failed_column
 from lib.dispatch.helpers import _comment_link, _comment_order, _matching_head, _round_number, _scope
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
+from lib.dispatch.verdict.convergence import Continue, Convergence, Repeated, RoundFindings, converge
 from lib.handoff import HandoffError, parse_comment, repeat_id
 from lib.markdown_items import MARKDOWN
 from lib.queue import JobRequest
@@ -76,12 +78,6 @@ _ACCEPTED_REVISE = (
     "waiting-max-repeat",
     "waiting-max-unsat",
 )
-
-
-@dataclass(frozen=True)
-class RepeatBlock:
-    rule_id: str
-    earlier: Comment | None
 
 
 @dataclass(frozen=True)
@@ -169,40 +165,41 @@ def _stop_choice(stop: Stop, words: str, default: str) -> str:
     return words if words.lower().startswith(name.lower()) else f"{name}: {words}"
 
 
-def _qa_failed(connection: sqlite3.Connection, ticket: TrackedTicket, comment_id: str) -> set[str]:
-    row = connection.execute(
-        "SELECT detail FROM jobs WHERE dedupe_key = ?",
-        (f"t3:{_scope(ticket.repo, ticket.ticket_id)}:{comment_id}",),
-    ).fetchone()
-    findings = json.loads(row["detail"] or "{}").get("qa_findings") if row else None
-    return set(findings.get("failed") or ()) if isinstance(findings, dict) else set()
-
-
 def _stopped_rule(wake: str) -> str:
     return str(json.loads(wake)["detail"]).split(", ", 1)[0].removeprefix("repeat-block: ")
 
 
 class RepeatBlockMixin:
-    def _repeat_trigger(
+    def _convergence(
         self,
         ticket: TrackedTicket,
         comment: Comment,
         reported_round: int | None,
         qa_ids: frozenset[str] = frozenset(),
-    ) -> RepeatBlock | None:
+    ) -> Convergence:
         from lib.evidence.findings import blocking_ids
 
         handoff = parse_comment(comment.body)
         named = repeat_id(handoff)
-        earlier = self._accepted_revises(ticket, reported_round)
+        earlier = [
+            next(revises)
+            for _, revises in groupby(self._accepted_revises(ticket, reported_round), key=lambda item: item.round)
+        ]
+        if ticket.factory.stop_on == "convergence":
+            current = RoundFindings(
+                reported_round or 0,
+                frozenset(blocking_ids(handoff.body) | qa_ids | ({named} if named else set())),
+                named,
+            )
+            return converge([RoundFindings(item.round, item.blocking, None) for item in earlier], current)
         previous = next((item for item in earlier if item.round == (reported_round or 0) - 1), None)
         if named is not None:
             holding = next((item for item in earlier if named in item.blocking), previous)
-            return RepeatBlock(named, None if holding is None else holding.comment)
+            return Repeated(named, 0 if holding is None else holding.round)
         if previous is None:
-            return None
+            return Continue(reduced=False)
         shared = (blocking_ids(handoff.body) | qa_ids) & previous.blocking
-        return RepeatBlock(min(shared), previous.comment) if shared else None
+        return Repeated(min(shared), previous.round) if shared else Continue(reduced=False)
 
     def _accepted_revises(
         self, ticket: TrackedTicket, reported_round: int | None
@@ -211,18 +208,15 @@ class RepeatBlockMixin:
 
         with self._connect() as connection:
             accepted = {
-                str(row["comment_id"])
+                str(row["comment_id"]): set(json.loads(row["qa_failed"] or "[]"))
                 for row in connection.execute(
                     f"""
-                    SELECT comment_id FROM review_events
+                    SELECT comment_id, qa_failed FROM review_events
                     WHERE repo = ? AND ticket_id = ?
                       AND outcome IN ({",".join("?" * len(_ACCEPTED_REVISE))})
                     """,
                     (ticket.repo.lower(), ticket.ticket_id, *_ACCEPTED_REVISE),
                 )
-            }
-            qa_failed = {
-                comment_id: _qa_failed(connection, ticket, comment_id) for comment_id in accepted
             }
         found = []
         for item in ticket.comments:
@@ -235,7 +229,7 @@ class RepeatBlockMixin:
             number = _round_number(handoff.as_dict().get("round"))
             if number is not None and number < (reported_round or 0):
                 named = repeat_id(handoff)
-                blocking = blocking_ids(handoff.body) | ({named} if named else set()) | qa_failed[item.id]
+                blocking = blocking_ids(handoff.body) | ({named} if named else set()) | accepted[item.id]
                 found.append(_EarlierRevise(number, item, blocking))
         return sorted(found, key=lambda entry: (entry.round, _comment_order(entry.comment)), reverse=True)
 
@@ -351,11 +345,22 @@ class RepeatBlockMixin:
             ).fetchall()
         return 1 + sum(_stopped_rule(str(row["detail"])) == rule_id for row in wakes)
 
-    def _repeat_detail(self, ticket: TrackedTicket, comment: Comment, block: RepeatBlock) -> str:
-        earlier = "no earlier verdict" if block.earlier is None else _comment_link(block.earlier)
-        stops = self._repeat_stops(ticket, comment, block.rule_id)
+    def _repeat_detail(
+        self, ticket: TrackedTicket, comment: Comment, repeated: Repeated, reported_round: int | None
+    ) -> str:
+        same_round = [
+            item
+            for item in self._accepted_revises(ticket, reported_round)
+            if item.round == repeated.earlier_round
+        ]
+        holding = next(
+            (item for item in same_round if repeated.rule_id in item.blocking),
+            same_round[0] if same_round else None,
+        )
+        earlier = "no earlier verdict" if holding is None else _comment_link(holding.comment)
+        stops = self._repeat_stops(ticket, comment, repeated.rule_id)
         fields = [
-            f"repeat-block: {block.rule_id}",
+            f"repeat-block: {repeated.rule_id}",
             earlier,
             _comment_link(comment),
             f"stops={stops}",
@@ -369,14 +374,15 @@ class RepeatBlockMixin:
         self,
         ticket: TrackedTicket,
         comment: Comment,
-        block: RepeatBlock,
+        repeated: Repeated,
         reported_round: int | None,
         *,
+        qa: QaFix | None,
         states: tuple[str, ...] = REVISE_ROUND_STATES,
     ) -> tuple[bool, str]:
         key = (ticket.repo.lower(), ticket.ticket_id)
-        detail = self._repeat_detail(ticket, comment, block)
-        question = self._stop_question(ticket, comment, "repeat", frozenset({block.rule_id}))
+        detail = self._repeat_detail(ticket, comment, repeated, reported_round)
+        question = self._stop_question(ticket, comment, "repeat", frozenset({repeated.rule_id}))
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             prior = connection.execute(
@@ -424,10 +430,10 @@ class RepeatBlockMixin:
             )
             connection.execute(
                 """
-                INSERT INTO review_events (repo, ticket_id, comment_id, outcome)
-                VALUES (?, ?, ?, 'waiting-max-repeat')
+                INSERT INTO review_events (repo, ticket_id, comment_id, outcome, qa_failed)
+                VALUES (?, ?, ?, 'waiting-max-repeat', ?)
                 """,
-                (*key, comment.id),
+                (*key, comment.id, failed_column(qa)),
             )
             self.queue.enqueue_in_transaction(
                 connection,

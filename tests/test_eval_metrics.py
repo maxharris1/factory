@@ -123,7 +123,7 @@ def _verdict(connection: sqlite3.Connection, ticket_id: str, comment_id: str, ve
     repo = AUT0 if ticket_id == "5" else "owner/repo"
     if verdict == "R":
         connection.execute(
-            "INSERT INTO review_events VALUES (?, ?, ?, 'queued-review-fix')",
+            "INSERT INTO review_events (repo, ticket_id, comment_id, outcome) VALUES (?, ?, ?, 'queued-review-fix')",
             (repo, ticket_id, comment_id),
         )
     else:
@@ -155,7 +155,7 @@ def _seeded(directory: Path) -> Path:
         _ticket(connection, "5", state="handed-off", approved=True, repo=AUT0)
         _ticket(connection, "6", state="handed-off", approved=True)
         connection.execute(
-            "INSERT INTO review_events VALUES ('owner/repo', '7', 'c7', 'capped-review')"
+            "INSERT INTO review_events (repo, ticket_id, comment_id, outcome) VALUES ('owner/repo', '7', 'c7', 'capped-review')"
         )
         connection.execute(
             "INSERT INTO handled_comments VALUES ('owner/repo', '1', 'v1', 'duplicate-verdict')"
@@ -214,10 +214,10 @@ def _seeded(directory: Path) -> Path:
         for event in ("submitted-invalid", "submitted-invalid", "pre-ready-failed"):
             _job_event(connection, build_1, event, "bad handoff")
         connection.execute(
-            "INSERT INTO review_events VALUES ('owner/repo', '8', 'stop-r', 'waiting-max-repeat')"
+            "INSERT INTO review_events (repo, ticket_id, comment_id, outcome) VALUES ('owner/repo', '8', 'stop-r', 'waiting-max-repeat')"
         )
         connection.execute(
-            "INSERT INTO review_events VALUES ('owner/repo', '9', 'stop-u', 'waiting-max-unsat')"
+            "INSERT INTO review_events (repo, ticket_id, comment_id, outcome) VALUES ('owner/repo', '9', 'stop-u', 'waiting-max-unsat')"
         )
     return queue.path
 
@@ -718,7 +718,7 @@ def _head_verdict(
         )
     elif outcome == "R":
         connection.execute(
-            "INSERT INTO review_events VALUES ('owner/repo', ?, ?, 'queued-review-fix')",
+            "INSERT INTO review_events (repo, ticket_id, comment_id, outcome) VALUES ('owner/repo', ?, ?, 'queued-review-fix')",
             (ticket_id, comment_id),
         )
 

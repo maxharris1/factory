@@ -168,6 +168,10 @@ class QaFix:
     failed: tuple[str, ...]
 
 
+def failed_column(qa: QaFix | None) -> str | None:
+    return json.dumps(sorted(qa.failed)) if qa is not None and qa.failed else None
+
+
 def decide_gate(verdict: str, status: QaStatus, *, waited_out: bool = False) -> GateAction:
     match verdict, status:
         case "APPROVE", Covered():

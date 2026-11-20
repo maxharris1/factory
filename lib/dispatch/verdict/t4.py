@@ -22,6 +22,7 @@ from lib.dispatch.types import (
     RetryableStateError,
     TrackedTicket,
 )
+from lib.dispatch.verdict.convergence import Repeated
 from lib.handoff import parse_comment
 
 
@@ -171,14 +172,15 @@ class T4Mixin:
             case FixFromQa(report_id):
                 self._wake_skill_drift(ticket, report_id, head)
                 qa = self._qa_fix(ticket, report_id)
-                repeat = self._repeat_trigger(ticket, comment, reported_round, frozenset(qa.failed))
-                if repeat is not None:
-                    return self._t3_repeat(
-                        ticket, comment, repeat, reported_round, states=APPROVE_ROUND_STATES
-                    )
-                return self._spend_review_round(
-                    ticket, comment, reported_round, qa=qa, from_approve=True
-                )
+                match self._convergence(ticket, comment, reported_round, frozenset(qa.failed)):
+                    case Repeated() as repeated:
+                        return self._t3_repeat(
+                            ticket, comment, repeated, reported_round, qa=qa, states=APPROVE_ROUND_STATES
+                        )
+                    case convergence:
+                        return self._spend_review_round(
+                            ticket, comment, reported_round, qa=qa, from_approve=True, convergence=convergence
+                        )
         return None
 
     def _ship_approval(

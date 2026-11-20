@@ -1169,3 +1169,48 @@ def test_no_trust_change_when_qa_is_identical() -> None:
     base = _with_root_qa(ROOT_FACTORY_MD, "qa:\n  enabled: true\n")
     head = _with_root_qa(_edit("## Review\n", "## Review\nA new Review sentence.\n"), "qa:\n  enabled: true\n")
     assert trust_front_matter_changed(base, head) is False
+
+
+STOP_ON_MESSAGE = "review.stop_on must be rounds or convergence"
+
+
+def _stop_on(value: object) -> str:
+    data = copy.deepcopy(VALID)
+    data["review"]["stop_on"] = value
+    return "---\n" + yaml.safe_dump(data, sort_keys=False) + "---\n"
+
+
+def test_stop_on_defaults_to_rounds() -> None:
+    config, findings = parse_factory_md("---\n" + yaml.safe_dump(VALID, sort_keys=False) + "---\n")
+    assert findings == []
+    assert config is not None and config.stop_on == "rounds"
+
+
+@pytest.mark.parametrize("value", ["rounds", "convergence"])
+def test_stop_on_parses_both_values(value: str) -> None:
+    config, findings = parse_factory_md(_stop_on(value))
+    assert findings == []
+    assert config is not None and config.stop_on == value
+
+
+@pytest.mark.parametrize("value", ["always", 3, True, None, ["convergence"]])
+def test_stop_on_refuses_anything_else(value: object) -> None:
+    config, findings = parse_factory_md(_stop_on(value))
+    assert config is None
+    assert [(f.severity, f.message) for f in findings] == [("error", STOP_ON_MESSAGE)]
+    lenient, warned = parse_factory_md(_stop_on(value), strict=False)
+    assert lenient is not None and lenient.stop_on == "rounds"
+    assert [(f.severity, f.message) for f in warned] == [("warning", STOP_ON_MESSAGE)]
+
+
+def test_check_config_refuses_an_unknown_stop_on(tmp_path: Path) -> None:
+    path = tmp_path / "factory.md"
+    path.write_text(_stop_on("always"), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "bin/orch"), "check-config", "--factory", str(path)],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    assert result.returncode != 0
+    assert STOP_ON_MESSAGE in result.stdout + result.stderr
