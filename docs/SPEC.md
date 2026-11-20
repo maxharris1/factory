@@ -1106,7 +1106,9 @@ a close marker, so a crash between the comment and the close posts nothing more
 on the retry. A `closing` row is closed on every later poll until the close
 lands, then ends as `closed-unfed`. A feed starts only in a write that finds
 no `closing` or `closed-unfed` row for its issue, so a feed and a close of one
-issue never both begin. A fed issue stays open and only its row ends. While
+issue never both begin. No write moves a row out of `closing` except to
+`closed-unfed`, and none moves it out of `closed-unfed`, so a stale retire or a
+late filer cannot clear that barrier. A fed issue stays open and only its row ends. While
 the issue's state cannot be read, the green read keeps the row and the next
 poll tries again. A ticket that waits is
 `waiting-blocked` with its reason, takes no room and is re-checked every poll; a blocker cycle, a blocker closed without finishing and a blocker that

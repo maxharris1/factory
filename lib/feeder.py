@@ -307,6 +307,10 @@ _FEED_BEGUN = (
     f"FROM {FEEDER_TABLE} WHERE repo = ? AND issue = ? "
     f"AND (branch IS NOT NULL OR state IN ({','.join('?' * len(HOLDING))}))"
 )
+_CLOSED_ON_GREEN = (
+    f"SELECT 1 FROM {MAIN_FIX_TABLE} WHERE repo = ? AND CAST(issue AS TEXT) = ? "
+    "AND state IN ('closing', 'closed-unfed')"
+)
 _BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
 _KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,63}$")
 
@@ -1340,7 +1344,7 @@ class Feeder:
                         if claim is None:
                             continue
                     if isinstance(action, Retire):
-                        self._retire_main_fix(action.row.marker)
+                        self._retire_main_fix(action.row)
                     elif claim is not None:
                         self._post_main_fix(line, action.row, claim)
             except Exception as exc:
@@ -1418,9 +1422,12 @@ class Feeder:
                 (marker, claim),
             )
 
-    def _retire_main_fix(self, marker: str) -> None:
+    def _retire_main_fix(self, row: MainFixRow) -> None:
         with self.queue.connect() as connection:
-            connection.execute(f"UPDATE {MAIN_FIX_TABLE} SET state = 'closed' WHERE marker = ?", (marker,))
+            connection.execute(
+                f"UPDATE {MAIN_FIX_TABLE} SET state = 'closed' WHERE marker = ? AND state = ?",
+                (row.marker, row.state),
+            )
 
     def _main_fix_body(self, line: _MainLine, base: str, red: MainRed, tag: str) -> str:
         runs = self._main_fix_runs(line.project.repo, red)
@@ -1470,7 +1477,7 @@ class Feeder:
         with self.queue.connect() as connection:
             connection.execute(
                 f"UPDATE {MAIN_FIX_TABLE} SET state = 'open', issue = ? "
-                "WHERE marker = ? AND state != 'closed'",
+                "WHERE marker = ? AND state IN ('filing', 'open')",
                 (keep, row.marker),
             )
         self._release_main_fix(row.marker, claim)
@@ -2051,20 +2058,14 @@ class Feeder:
         closing: list[bool] = []
 
         def work(connection: sqlite3.Connection) -> None:
-            closing[:] = [
-                connection.execute(
-                    f"SELECT 1 FROM {MAIN_FIX_TABLE} WHERE repo = ? AND CAST(issue AS TEXT) = ? "
-                    "AND state IN ('closing', 'closed-unfed')",
-                    (write.repo, write.issue),
-                ).fetchone()
-                is not None
-            ]
-            if not closing[0]:
-                connection.execute(
-                    f"UPDATE {FEEDER_TABLE} SET state = ?, error = ?, waiting_reason = ? "
-                    "WHERE repo = ? AND issue = ? AND state NOT IN ('fed', 'done', 'closed')",
-                    write,
-                )
+            connection.execute(
+                f"UPDATE {FEEDER_TABLE} SET state = ?, error = ?, waiting_reason = ? "
+                "WHERE repo = ? AND issue = ? AND state NOT IN ('fed', 'done', 'closed') "
+                f"AND NOT EXISTS ({_CLOSED_ON_GREEN})",
+                (*write, write.repo, write.issue),
+            )
+            found = connection.execute(_CLOSED_ON_GREEN, (write.repo, write.issue)).fetchone()
+            closing[:] = [found is not None]
 
         must_write(bookkeeping_write(self.queue.connect, work, site="_start_feed", ledger=self.ledger))
         if closing[0]:

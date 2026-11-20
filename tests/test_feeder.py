@@ -1589,6 +1589,62 @@ def test_a_feed_from_a_list_read_before_the_green_close_does_not_begin(tmp_path:
     assert ("owner/app", "factory/issue-900") not in github.branches
 
 
+def test_stale_retire_cannot_remove_the_close_feed_barrier(tmp_path: Path) -> None:
+    closer, feeder, github, green, now = two_feeders_on_a_green_main_fix(tmp_path)
+    late_closer = another_feeder(closer, closer.queue, github)
+    read_state = github.issue_state
+    feed = feeder._feed
+
+    def close_during_the_read(repo: str, number: int) -> str:
+        github.issue_state = read_state
+        assert late_closer._file_main_fixes(green, now[0]) == 0
+        assert main_fix_rows(tmp_path / "orch.db") == [("closed-unfed", 900)]
+        return read_state(repo, number)
+
+    def stale_green_then_feed(candidate, *args):
+        github.issue_state = close_during_the_read
+        assert closer._file_main_fixes(green, now[0]) == 0
+        return feed(candidate, *args)
+
+    feeder._feed = stale_green_then_feed
+
+    assert feeder.feed_once().errors == 0
+
+    assert main_fix_rows(tmp_path / "orch.db") == [("closed-unfed", 900)]
+    assert not github.pulls
+    assert ("owner/app", "factory/issue-900") not in github.branches
+    assert fed_and_closed(tmp_path, github) == ("waiting-blocked", "closed")
+    assert len(issue_comments(github)) == 1
+
+
+def test_a_late_filer_cannot_reopen_a_main_fix_closed_on_green(tmp_path: Path) -> None:
+    now = [10_000.0]
+    filer, queue, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD, now=now)
+    resumer = another_feeder(filer, queue, github)
+    closer = another_feeder(filer, queue, github)
+    red_main(github)
+    red, _ = filer._main_reads(filer._contexts()[0])
+    green_main(github)
+    green, _ = filer._main_reads(filer._contexts()[0])
+    file_issue = github.file_repo_issue
+
+    def lapse_resume_and_close_then_return(*args, **kwargs) -> int:
+        github.file_repo_issue = file_issue
+        number = file_issue(*args, **kwargs)
+        now[0] += CLAIM_SECONDS + 1
+        assert resumer._file_main_fixes(red, now[0]) == 0
+        assert closer._file_main_fixes(green, now[0]) == 0
+        assert main_fix_rows(tmp_path / "orch.db") == [("closed-unfed", 900)]
+        return number
+
+    github.file_repo_issue = lapse_resume_and_close_then_return
+
+    assert filer._file_main_fixes(red, now[0]) == 0
+
+    assert main_fix_rows(tmp_path / "orch.db") == [("closed-unfed", 900)]
+    assert github.filed[MAIN[0], 900]["state"] == "closed"
+
+
 def red_head(github: FakeGitHub, n: int) -> str:
     head = f"{n:x}" * 40
     red_main(github, head=head[:40], run_id=str(900 + n))
