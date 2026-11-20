@@ -571,6 +571,21 @@ def test_the_contradiction_set_is_a_real_list() -> None:
     assert len(set(ids)) == len(ids)
 
 
+NO_EDIT = (
+    "Never edit a comment after you post it: the dispatcher refuses an edited `orch:v1` comment. "
+    "Put any correction in a new comment."
+)
+
+
+def test_every_brief_states_the_no_edit_rule_once_in_its_short_form() -> None:
+    long_form = ("a typo, an updated test count", "leave the posted one as it is")
+    found = {
+        name: (text.count(NO_EDIT), [phrase for phrase in long_form if phrase in text])
+        for name, text in _corpus().items()
+    }
+    assert {name: seen for name, seen in found.items() if seen != (1, [])} == {}
+
+
 TICKET_FIELDS = ("brief_text", "brief", "criteria_text", "criteria")
 LEFT_OUT = "(left out: this job does not use it)"
 QUOTED = "(quoted in the Ticket section)"

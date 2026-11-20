@@ -154,8 +154,7 @@ def section(router: Router) -> str:
         "",
         *(f"- `{path}`" for path in router.paths),
         "",
-        "Helper models, one `<role>: <value>` line per pstack role. "
-        "Where any other model config differs, these lines win:",
+        "Helper models, one `<role>: <value>` line per pstack role. They win over any other model config:",
         "",
         "```",
         router.models.rstrip("\n"),
@@ -163,7 +162,7 @@ def section(router: Router) -> str:
         "",
     ]
     if router.role == "builder":
-        lines.append("You may start helper agents as pstack recommends. They never post to GitHub or push.")
+        lines.append("You may start helper agents as pstack recommends.")
         lines.append(
             "If your harness does not know an agent name the router uses (`comment-sicko`, "
             f"`poteto-agent`), start a general helper ({_GENERAL_HELPER[router.bot]}) and "
