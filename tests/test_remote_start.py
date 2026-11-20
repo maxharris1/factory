@@ -7,7 +7,6 @@ the CLI, or FakeTransport in process. No test reaches a real host.
 from __future__ import annotations
 
 import concurrent.futures
-import functools
 import io
 import json
 import os
@@ -39,6 +38,7 @@ from tests.test_dispatcher import (
     comment,
     ticket,
 )
+from tests.user_manager import scope_refusal
 
 ROOT = Path(__file__).resolve().parents[1]
 ORCH = ROOT / "bin" / "orch"
@@ -1511,19 +1511,6 @@ sys.exit(run([sys.executable, __file__, str(here), "worker", sys.argv[3]], beat=
 """
 
 
-@functools.cache
-def systemd_scopes() -> bool:
-    if not sys.platform.startswith("linux"):
-        return False
-    try:
-        return subprocess.run(
-            ["systemd-run", "--user", "--scope", "--quiet", "--collect", "true"],
-            capture_output=True, timeout=10,
-        ).returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return False
-
-
 FAKE_SYSTEMD_RUN = f"""#!{sys.executable}
 import json, os, re, sys
 
@@ -1595,8 +1582,8 @@ def fake_linger(
 def test_a_lost_box_jobs_untagged_orphan_born_after_the_last_look_is_killed(
     tmp_path: Path, leaf_session: str
 ) -> None:
-    if sys.platform != "darwin" and not systemd_scopes():
-        pytest.skip("Linux without a user manager")
+    if sys.platform != "darwin" and (refusal := scope_refusal()):
+        pytest.skip(refusal)
     script = tmp_path / "unrecorded_orphan.py"
     script.write_text(UNRECORDED_ORPHAN)
     runner = subprocess.Popen(
@@ -1747,8 +1734,8 @@ def test_a_box_jobs_slot_records_its_scope_or_says_the_run_is_uncontained(
     from lib import placed_run
 
     contained = linger == "yes" and not busctl_fails
-    if contained and not systemd_scopes():
-        pytest.skip("needs Linux with a working systemd user manager")
+    if contained and (refusal := scope_refusal()):
+        pytest.skip(refusal)
     if not sys.platform.startswith("linux"):
         pytest.skip("systemd scopes are Linux only")
     monkeypatch.setenv("PATH", fake_linger(tmp_path, linger, busctl_fails=busctl_fails))
@@ -1784,7 +1771,7 @@ def test_a_box_jobs_slot_records_its_scope_or_says_the_run_is_uncontained(
         ).fetchone()
     uncontained = [line for line in lines if "the run is uncontained" in line]
     if contained:
-        assert scope == process_tree.scope_unit(tag)
+        assert scope == process_tree.scope_unit(tag), lines
         assert uncontained == []
     else:
         assert scope is None
@@ -2918,9 +2905,9 @@ def test_an_uncontained_start_says_so_in_the_run_log_and_still_runs(tmp_path: Pa
 def test_a_contained_start_reaches_the_command_verbatim_whatever_systemd_run_expands(
     tmp_path: Path, systemd_run: str
 ) -> None:
+    if refusal := scope_refusal(stripped=True):
+        pytest.skip(refusal)
     real = shutil.which("systemd-run")
-    if real is None or not systemd_scopes():
-        pytest.skip("needs Linux with a working systemd user manager")
     if subprocess.run(
         [real, "--user", "--scope", "--quiet", "--collect", "--expand-environment=yes", "true"],
         capture_output=True, timeout=10,
@@ -2949,7 +2936,9 @@ def test_a_contained_start_reaches_the_command_verbatim_whatever_systemd_run_exp
         env={"PATH": path, "HOME": str(tmp_path)},
     )
     assert result.returncode == 0, result.stderr
-    assert (Path(target.job_dir) / remote.scope_record(target.tag)).exists(), "the run is contained"
+    assert (Path(target.job_dir) / remote.scope_record(target.tag)).exists(), (
+        f"the run is contained: {result.stderr}"
+    )
     assert "uncontained" not in result.stderr
     assert json.loads(report.read_text(encoding="utf-8")) == [
         "--add-dir", str(tmp_path), "a b", "$(touch pwn6)", "$HOME", "'"
