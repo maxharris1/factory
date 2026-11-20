@@ -1108,10 +1108,13 @@ class Feeder:
                 continue
             read.add(project.repo.lower())
             trusted = intake_trusted(self.config, project)
+            local = [active for active in rows if active.repo.lower() == project.repo.lower()]
             for issue in issues:
                 if issue.repo.lower() != project.repo.lower() or not _KEY.fullmatch(issue.key):
                     continue
-                row = next((active for active in rows if has_marker(issue.body, active.marker)), None)
+                row = None
+                if issue.tracker == "github" and is_main_fix(issue.labels):
+                    row = next((active for active in local if has_marker(issue.body, active.marker)), None)
                 fate = "feed" if row is None else marked_issue_fate(row, int(issue.key))
                 if fate == "close":
                     try:

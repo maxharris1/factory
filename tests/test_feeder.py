@@ -1658,6 +1658,47 @@ def test_a_stale_owner_whose_post_response_is_lost_closes_its_duplicate_in_the_s
     assert_one_open_main_fix(tmp_path, github)
 
 
+MIXED_ORCH = GITHUB_ORCH.replace("grok:", "linear:\n  api_key_env: LINEAR_API_KEY\ngrok:") + """\
+  - repo: other/app
+    factory_ref: main
+    intake:
+      label: factory:ready
+  - repo: acme/linear-app
+    factory_ref: dev
+    linear_project_id: proj-1
+    intake:
+      linear_state: In Progress
+trusted_linear_users:
+  max-linear-id: [grok-bot]
+"""
+
+
+def test_a_ticket_quoting_an_active_main_fix_in_another_project_still_feeds(tmp_path: Path) -> None:
+    feeder, _, github, linear = make_feeder(tmp_path, orch=MIXED_ORCH, factory_text=REQUIRED_MD)
+    red_main(github)
+    assert feeder.feed_once().errors == 0
+    [number] = main_fixes(github)
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", number)]
+    quoted = f"Seen during the outage:\n\n```\n{github.filed[('owner/app', number)]['body']}\n```\n"
+    github.issues["owner/app"].append(issue(43, body=quoted))
+    github.issues["other/app"] = [
+        issue(42, repo="other/app", body=quoted),
+        issue(44, repo="other/app", body=quoted, labels=("factory:ready", "factory:main-fix")),
+    ]
+    linear.issues = [replace(linear_issue(labels=("factory:main-fix",)), body=quoted + TEMPLATE)]
+
+    candidates, _, errors = feeder._candidates(feeder._contexts()[0])
+
+    assert errors == 0
+    assert {(c.issue.repo, c.issue.key) for c in candidates} >= {
+        ("owner/app", "43"), ("other/app", "42"), ("other/app", "44"), ("acme/linear-app", "AUT-7")
+    }
+    assert ("owner/app", 43) not in github.posted
+    assert ("other/app", 42) not in github.posted
+    assert ("other/app", 44) not in github.posted
+    assert open_main_fixes(github) == [number]
+
+
 def test_an_owner_whose_claim_lapsed_before_the_post_does_not_post(tmp_path: Path) -> None:
     now = [10_000.0]
     feeder, _, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD, now=now)
