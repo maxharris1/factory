@@ -2085,6 +2085,16 @@ class Feeder:
         number = int(recorded)
         return number if self.github.pull_state(repo, number) == "open" else None
 
+    def main_fix_pr(self, repo: str, ticket_id: str) -> bool:
+        with self.queue.connect() as connection:
+            row = connection.execute(
+                f"SELECT 1 FROM {FEEDER_TABLE} AS item JOIN {MAIN_FIX_TABLE} AS fix "
+                "ON fix.repo = item.repo AND CAST(fix.issue AS TEXT) = item.issue "
+                "WHERE item.repo = ? AND item.ticket_id = ?",
+                (repo.lower(), ticket_id),
+            ).fetchone()
+        return row is not None
+
     def review_base_unless_stacked(self, ticket: TrackedTicket, head: str) -> str | None:
         number = int(ticket.pr_number) if ticket.pr_number else None
         base = ticket.factory.base_branch

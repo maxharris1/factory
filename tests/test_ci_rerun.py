@@ -17,6 +17,7 @@ from lib.dispatch.constants import (
 from lib.dispatcher import CIResult, Dispatcher, FailedCheck
 from lib.dispatch.types import BaseCheck
 from lib.factory_md import HoldConfig
+from lib.feeder import Feeder
 from lib.github_actions import GitHubAdapterError, GitHubReviewActions, GhResult, RerunOutcome
 from lib.queue import SQLiteJobQueue
 from lib.update_check import RebaseScope
@@ -27,6 +28,15 @@ from tests.test_dispatcher import (
     TRUSTED_LOGINS,
     FakeGrokDelivery,
     FakeReviewActions,
+)
+from tests.test_feeder import (
+    FACTORY_MD,
+    GITHUB_ORCH,
+    FakeGitHub,
+    FakeLinear,
+    context_for,
+    machines,
+    orch_config,
 )
 from tests.test_hold_merge_queue import APPROVER
 
@@ -1253,6 +1263,69 @@ def test_a_red_the_base_shares_holds_with_no_charge_rerun_or_fix(tmp_path: Path)
     assert board.jobs("fix") == []
     assert board.ci_events() == []
     assert board.base_reads == [("owner/repo", "main"), ("owner/repo", "main")]
+
+
+def feed_main_fix(board: RerunBoard, tmp_path: Path, ticket_id: str = "42") -> None:
+    feeder = Feeder(
+        board.queue,
+        orch_config(tmp_path, GITHUB_ORCH),
+        machines(tmp_path),
+        github=FakeGitHub(),
+        linear=FakeLinear(),
+        factory_for=lambda project: context_for(FACTORY_MD),
+        head=lambda: None,
+        log=lambda line: None,
+    )
+    with board.queue.connect() as connection:
+        connection.execute(
+            "INSERT INTO feeder_main_fix (marker, repo, base, state, issue, last_head, filed_at, title, body) "
+            "VALUES ('m', 'owner/repo', 'main', 'open', 900, ?, 1.0, 'main is red', '')",
+            (sha(9),),
+        )
+        connection.execute(
+            "INSERT INTO feeder_items (repo, issue, tracker, title, harness, state, risk, "
+            "issue_created_at, branch, pr_number, ticket_id, first_seen_at, seen_at) "
+            "VALUES ('owner/repo', '900', 'github', 'main is red', 'claude', 'fed', 'high', "
+            "1.0, 'factory/issue-900', ?, ?, 1.0, 1.0)",
+            (ticket_id, ticket_id),
+        )
+    board.dispatcher.feeder = feeder
+
+
+def test_a_main_fix_pr_that_fails_as_the_base_does_is_rerun_not_held(tmp_path: Path) -> None:
+    board, pr = built(tmp_path)
+    feed_main_fix(board, tmp_path)
+    board.base_red("pytest-11")
+    board.red(pr, pr.head, "11", cause="code")
+    board.ready(pr, pr.head)
+    board.poll()
+
+    assert board.ci_wait() == ["ci-rerun"]
+    assert board.reruns == [("owner/repo", RUN)]
+    assert board.state("42")["gate_count"] == 0
+
+
+def test_a_held_pr_is_released_once_it_is_known_as_the_main_fix(tmp_path: Path) -> None:
+    board, pr, _ready = base_red_ready(tmp_path)
+    assert board.ci_wait() == ["ci-base-red"]
+
+    feed_main_fix(board, tmp_path)
+    board.poll()
+
+    assert board.ci_wait() == ["ci-rerun"]
+    assert board.reruns == [("owner/repo", RUN)]
+
+
+def test_a_feeder_holds_an_ordinary_pr_that_fails_as_the_base_does(tmp_path: Path) -> None:
+    board, pr = built(tmp_path)
+    feed_main_fix(board, tmp_path, ticket_id="43")
+    board.base_red("pytest-11")
+    board.red(pr, pr.head, "11", cause="code")
+    board.ready(pr, pr.head)
+    board.poll()
+
+    assert board.ci_wait() == ["ci-base-red"]
+    assert board.reruns == []
 
 
 def test_a_green_base_reruns_the_failed_jobs_then_charges_a_red_that_remains(
