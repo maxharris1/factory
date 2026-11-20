@@ -84,6 +84,7 @@ from lib.orch_yml import (
     approvals,
     bot_approver_findings,
     hold_approver_findings,
+    project_device_findings,
     qa_storage_findings,
     linear_approver_findings,
     load_approvals,
@@ -696,11 +697,12 @@ def _check_config(argv: list[str]) -> int:
     machines_path = args.machines
     if machines_path is None and args.orch is None:
         machines_path = ROOT / "machines.yml"
+    machines_config = None
     if machines_path is not None:
-        failed = _report(
-            machines_path,
-            load_machines_yml(machines_path)[1],
-        ) or failed
+        machines_config, machines_findings = load_machines_yml(machines_path)
+        failed = _report(machines_path, machines_findings) or failed
+    if orch_config is not None and machines_config is not None:
+        failed = _report(orch_path, project_device_findings(orch_config, machines_config)) or failed
     for repo, path in factory_paths:
         factory, findings = load_factory_md(path)
         if orch_config is not None and factory is not None:

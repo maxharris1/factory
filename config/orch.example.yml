@@ -9,6 +9,12 @@ projects:
     # Optional driver inbox (issue #737): copy each Grok wake to this issue.
     # driver_inbox: owner/name#123
     # grok_webhook: false             # only with driver_inbox; default true
+    # Optional devices (issue #1171): machines.yml device names this project's
+    # jobs may run on. Omitted means every device. check-config refuses a value
+    # that is not a non-empty list of names, and, with --machines, a name
+    # machines.yml does not list; a disabled device is a warning. Placement
+    # honours it once the placement part of #1082 lands.
+    # devices: [pc]
 # Optional read-only dashboard push (README "Dashboard"); omit `dashboard`
 # to push nothing. `orch poll` pushes status.json and index.html to the
 # pc-wsl-bots node as cursor-bot after every poll cycle (add every_minutes: N

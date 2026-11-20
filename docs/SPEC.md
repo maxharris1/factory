@@ -700,6 +700,7 @@ projects:
     # driver_inbox: owner/name#123    # optional: copy each Grok wake to this issue
     # grok_webhook: true              # false only with driver_inbox
     # qa_storage: {...}               # host value in orch.local.yml; see "QA storage" below
+    # devices: [pc]                   # optional; omitted means every device; see "Project devices" below
     # optional job_timeout: 60
     # Optional backlog feeder intake (issue #85). Absent: not fed.
     # intake:
@@ -1153,6 +1154,26 @@ retried on the next poll, like a failed Grok POST. That includes HTTP 429 from
 the routine limits of 30 fires per hour per task and 100 per hour per account.
 `grok_webhook: false` with `driver_inbox` keeps its meaning under either
 driver. Heal and deploy escalations still use the `grok:` webhook.
+
+### Project devices
+
+`projects[].devices` (optional, issue #1171) lists the machines.yml device
+names a project's jobs may run on, for example `devices: [pc]`. Omitted
+means every device, as before the key existed. `orch check-config` checks it
+in two steps:
+
+- Shape, wherever orch.yml loads. The value must be a non-empty list of
+  non-empty strings. Any other value (a bare string, `[]`, a number, an
+  empty string) is an error, and the file does not load. Duplicate names
+  count once.
+- Names, only when check-config also checks machines.yml (`--machines`, or
+  neither `--orch` nor `--machines`). A name machines.yml does not list is an
+  error. A name whose device has `enabled: false` is a warning. Names match
+  exactly, case included.
+
+Placement does not read the key yet. Until the placement part of issue #1082
+lands, `devices` is accepted and checked but has no effect on which device
+runs a job. Once it lands, placement honours it.
 ### QA storage and evidence intake
 
 A QA lane runs pull-request code on a machine that is thrown away when the
