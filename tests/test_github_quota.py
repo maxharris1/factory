@@ -167,19 +167,44 @@ def test_retry_after_on_a_secondary_403_with_core_nearly_full() -> None:
     assert quota.lines[0].endswith("(retry-after)")
 
 
-def test_retry_after_on_an_exhausted_core_still_holds_reads_until_the_reset() -> None:
+@pytest.mark.parametrize("remaining", [0, RATE_PAUSE_REMAINING])
+def test_retry_after_on_an_exhausted_core_wins_over_the_reset(remaining) -> None:
     quota = Quota()
-    quota.hit_limit(limited(X_RateLimit_Reset=int(WALL + 900), Retry_After=30))
+    quota.hit_limit(
+        limited(X_RateLimit_Remaining=remaining, X_RateLimit_Reset=int(WALL + 900), Retry_After=30)
+    )
 
     assert "paused 0m30s" in quota.lines[0]
     assert quota.lines[0].endswith("(retry-after)")
-    quota.mono += 30
-    quota.wall += 30
+    quota.mono += 29
+    quota.wall += 29
     with pytest.raises(QuotaDeferred):
         quota.comments()
-    quota.mono += 870
-    quota.wall += 870
+    quota.mono += 1
+    quota.wall += 1
+    assert quota.source.pacing(30.0, 1, 0.0).reason != "pause"
     quota.comments()
+
+
+def test_fresh_headers_at_the_floor_after_a_retry_after_pause_until_the_reset() -> None:
+    quota = Quota()
+    quota.hit_limit(limited(X_RateLimit_Reset=int(WALL + 900), Retry_After=30))
+    quota.mono += 30
+    quota.wall += 30
+    quota.factory.append(
+        response(
+            200,
+            FACTORY_BODY,
+            X_RateLimit_Limit=5000,
+            X_RateLimit_Remaining=RATE_PAUSE_REMAINING,
+            X_RateLimit_Reset=int(WALL + 900),
+        )
+    )
+    quota.read_factory()
+
+    with pytest.raises(QuotaDeferred, match="at the floor"):
+        quota.comments()
+    assert quota.source.pacing(30.0, 1, 0.0).reason == "pause"
 
 
 def test_secondary_403_with_core_nearly_full_resumes_within_minutes() -> None:

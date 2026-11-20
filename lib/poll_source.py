@@ -653,6 +653,7 @@ class LivePollSource:
         self._backoff_until = 0.0
         self._rate_window: RateWindow | None = None
         self._throttled = False
+        self._floor_lifted = False
         self._secondary_wait = 0.0
         self._secondary_calm_at = 0.0
         self._linear_backoff_until = 0.0
@@ -2581,7 +2582,7 @@ class LivePollSource:
         left = self._backoff_until - self.clock()
         if left > 0:
             raise QuotaDeferred(f"GitHub rate-limit backoff is active ({left:.0f}s left)")
-        window = self._rate_window
+        window = self._gate_window()
         state = quota_state(window, self.wall())
         if state == "pause":
             if not self._throttled:
@@ -2652,6 +2653,7 @@ class LivePollSource:
         requests = _request_count(argv, result)
         if own is not None:
             self._rate_window = _merged_window(self._rate_window, own)
+            self._floor_lifted = False
         if self.cycle_clock is not None:
             self.cycle_clock.add_call(route, kind, requests)
             if own is not None:
@@ -2666,6 +2668,7 @@ class LivePollSource:
             headers.get("retry-after"), f"{result.stdout}\n{result.stderr}"
         )
         self._backoff_until = max(self._backoff_until, self.clock() + seconds)
+        self._floor_lifted = basis == "retry-after"
         if self._throttled:
             return
         self._throttled = True
@@ -2730,7 +2733,13 @@ class LivePollSource:
             self._rate_window = replace(window, remaining=max(window.remaining - requests, 0))
 
     def pacing(self, base_interval: float, recent_billed: int, cycle_seconds: float) -> Pacing:
-        return pace(self._rate_window, self.wall(), base_interval, recent_billed, cycle_seconds)
+        return pace(self._gate_window(), self.wall(), base_interval, recent_billed, cycle_seconds)
+
+    def _gate_window(self) -> RateWindow | None:
+        window = self._rate_window
+        if self._floor_lifted and quota_state(window, self.wall()) == "pause":
+            return None
+        return window
 
     def _live_window(self) -> RateWindow | None:
         window = self._rate_window
