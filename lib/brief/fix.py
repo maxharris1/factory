@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from lib.brief.build import base_step, builder_notes
-from lib.brief.common import GH, TEST_SCOPE, code_span, comment_url, detail_of, evidence_part, fenced
+from lib.brief.common import GH, TEST_SCOPE, Lead, code_span, comment_url, detail_of, evidence_part, fenced
 from lib.queue import Job
 
 
-def task_lines(job: Job, facts: dict) -> list[str]:
+def lead(job: Job, facts: dict) -> Lead:
     detail = detail_of(job)
     qa = detail.get("qa_findings")
     verdict = _revise_verdict_url(detail, facts)
@@ -15,7 +15,7 @@ def task_lines(job: Job, facts: dict) -> list[str]:
         lines = _review_fix(detail, facts, verdict)
     else:
         lines = _ci_fix(detail, facts)
-    return [*lines, *builder_notes(job, facts)]
+    return Lead((*lines, *builder_notes(job, facts)))
 
 
 def quoted_findings(detail: dict[str, object], facts: dict) -> list[dict[str, object]]:
@@ -76,7 +76,7 @@ def _review_fix(detail: dict[str, object], facts: dict, verdict: str) -> list[st
             f"`{GH} run list --commit {head}`."
         )
     return [
-        f"Fix the `[blocking]` findings of the REVISE verdict at {verdict}. Follow the router in Skills above.",
+        f"Fix the `[blocking]` findings of the REVISE verdict at {verdict}. Follow the router in Skills below.",
         *shown,
         *_class_fix_steps(facts, "finding", "Fixing only the line the reviewer quoted is not a fix."),
     ]
@@ -102,7 +102,7 @@ def _qa_shown(qa: dict[str, object]) -> str:
 def _qa_fix(qa: dict[str, object], facts: dict) -> list[str]:
     return [
         f"Fix the failed QA scenarios of the QA report at {_qa_report(qa, facts)}. "
-        "Follow the router in Skills above.",
+        "Follow the router in Skills below.",
         _qa_shown(qa),
         *_class_fix_steps(
             facts, "failed scenario", "Fixing only the step the scenario drove is not a fix."
@@ -160,7 +160,7 @@ def _ci_fix(detail: dict[str, object], facts: dict) -> list[str]:
         )
     return [
         f"Fix the red CI on this PR. {failed} {where} "
-        "Follow the router in Skills above.",
+        "Follow the router in Skills below.",
         *_read_cause(ci.get("cause"), jobs),
         *_job_logs(jobs, facts),
         _checkout(facts),

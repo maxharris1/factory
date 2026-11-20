@@ -36,7 +36,11 @@ builder criterion, a `Risk: low|high` line, a `Plan first: yes|no` line and
 a `Depends on:` line. Risk is never defaulted to low. A criterion about
 other PRs' state (SF-5, the N-02 case) is refused: PR order belongs in
 `Blocked by` / `Conflicts with`. A criterion that needs an operator action
-is not refused; it goes into the brief's separate ops step. A ticket that
+is not refused; it goes into the brief's separate ops step. Optional
+`Assumed environment` and `Out of scope` sections (#1033) go into the brief
+beside the criteria; a builder criterion with an unbounded quantifier
+("every", "all", "never") on a ticket with no `Out of scope` section adds an
+intake warning to the brief and is never refused. A ticket that
 fails is `refused-intake` with its reasons, takes no room and no holds,
 posts nothing, raises needs-attention (`intake-refused`) and queues one
 Grok `refused` wake per distinct defect set. It is re-checked every poll,
@@ -294,7 +298,19 @@ Log = Callable[[str], None]
 
 _FENCE = re.compile(r"^\s*(```|~~~)")
 _HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
-_CRITERIA_HEADING = re.compile(r"^(?:\*\*|__)?acceptance\s+criteria(?:\*\*|__)?:?$", re.IGNORECASE)
+_SECTION_HEADING = r"^(?:\*\*|__)?{name}(?:\*\*|__)?:?$"
+_SECTIONS = {
+    key: (re.compile(_SECTION_HEADING.format(name=name), re.IGNORECASE), paragraphs)
+    for key, name, paragraphs in (
+        ("criteria", r"acceptance\s+criteria", False),
+        ("assumed_environment", r"assumed\s+environment", True),
+        ("out_of_scope", r"out\s+of\s+scope", True),
+    )
+}
+_UNBOUNDED = re.compile(
+    r"\b(?:every|everything|everywhere|all|any|anything|each|always|never|whatever|whenever)\b",
+    re.IGNORECASE,
+)
 _LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s*)?(.*)$")
 _FIELD = r"^\s*(?:[-*+]\s+)?(?:\*\*|__)?\s*{name}\s*(?:\*\*|__)?\s*:\s*(?:\*\*|__)?\s*(?P<value>.*?)\s*$"
 _RISK_LINE = re.compile(_FIELD.format(name=r"risk"), re.IGNORECASE)
@@ -343,6 +359,9 @@ class IntakeTemplate:
     journeys: tuple[Journey, ...] = ()
     qa_criteria: tuple[QaCriterion, ...] = ()
     defects: tuple[Defect, ...] = ()
+    assumed_environment: tuple[str, ...] = ()
+    out_of_scope: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
 
 
 def _unfenced(body: str) -> list[str]:
@@ -395,25 +414,28 @@ def _prose_and_link_targets(item: str, document: dict[str, object]) -> tuple[str
     return ("".join(words), *targets)
 
 
-def _criteria_items(lines: Sequence[str]) -> list[str]:
-    items: list[str] = []
-    level: int | None = None
+def _section_items(lines: Sequence[str]) -> dict[str, list[str]]:
+    sections: dict[str, list[str]] = {key: [] for key in _SECTIONS}
+    section: str | None = None
+    level = 0
     open_item = blank = False
     for line in lines:
         heading = _HEADING.match(line)
         if heading:
             open_item = blank = False
             depth = len(heading.group(1))
-            if level is not None and depth <= level:
-                level = None
-            if level is None and 2 <= depth <= 4 and _CRITERIA_HEADING.match(heading.group(2)):
-                level = depth
+            if section is not None and depth <= level:
+                section = None
+            named = next((key for key, (pattern, _) in _SECTIONS.items() if pattern.match(heading.group(2))), None)
+            if named is not None and named != section and 2 <= depth <= 4:
+                section, level = named, depth
             continue
-        if level is None:
+        if section is None:
             continue
         if not line.strip():
             blank = True
             continue
+        items = sections[section]
         item = _LIST_ITEM.match(line)
         if item:
             current = item.group(1).strip()
@@ -423,10 +445,13 @@ def _criteria_items(lines: Sequence[str]) -> list[str]:
             continue
         if open_item and (not blank or line[:1].isspace()):
             items[-1] = f"{items[-1]} {line.strip()}"
+        elif _SECTIONS[section][1]:
+            items.append(line.strip())
+            open_item = True
         else:
             open_item = False
         blank = False
-    return items
+    return sections
 
 
 def parse_intake(body: str, labels: Collection[str]) -> IntakeTemplate:
@@ -436,7 +461,8 @@ def parse_intake(body: str, labels: Collection[str]) -> IntakeTemplate:
     criteria: list[str] = []
     ops: list[str] = []
     qa: list[QaCriterion] = []
-    for item in _criteria_items(lines):
+    sections = _section_items(lines)
+    for item in sections["criteria"]:
         tagged = _OPS_TAG.match(item)
         tag = None if tagged else qa_tag(item)
         if tagged:
@@ -455,14 +481,21 @@ def parse_intake(body: str, labels: Collection[str]) -> IntakeTemplate:
         ))
     document: dict[str, object] = {}
     _MARKDOWN.parse(body or "", document)
+    warnings: list[str] = []
     for item in criteria:
-        if any(pattern.search(text) for text in _prose_and_link_targets(item, document)
-               for pattern in _OTHER_PRS):
+        texts = _prose_and_link_targets(item, document)
+        if any(pattern.search(text) for text in texts for pattern in _OTHER_PRS):
             defects.append(Defect(
                 "other-prs-criterion",
                 f"criterion about other PRs' state ({item!r}): move PR order into "
                 "`Blocked by` / `Conflicts with` lines",
             ))
+        unbounded = _UNBOUNDED.search(texts[0])
+        if unbounded and not sections["out_of_scope"]:
+            warnings.append(
+                f"criterion {item!r} says {unbounded.group(0)!r} with no `Out of scope` section: "
+                "add one to bound it, or narrow the criterion"
+            )
     risk_text = _field(lines, _RISK_LINE)
     risk = risk_text.lower() if risk_text and risk_text.lower() in ("low", "high") else None
     source = "Risk line" if risk else None
@@ -496,6 +529,9 @@ def parse_intake(body: str, labels: Collection[str]) -> IntakeTemplate:
         journeys=journeys,
         qa_criteria=qa_criteria,
         defects=tuple(defects),
+        assumed_environment=tuple(sections["assumed_environment"]),
+        out_of_scope=tuple(sections["out_of_scope"]),
+        warnings=tuple(warnings),
     )
 
 
@@ -2262,14 +2298,15 @@ def _brief(
         why = "the ticket names 3 files or fewer, so it starts building"
     source = template.risk_source if template.risk == risk else None
     sections: list[str] = []
-    if template.criteria:
-        sections += ["", "### Acceptance criteria", *(f"- {item}" for item in template.criteria)]
-    if template.ops_criteria:
-        sections += [
-            "",
-            "### Ops step (operator action, not the builder's)",
-            *(f"- {item}" for item in template.ops_criteria),
-        ]
+    for title, items in (
+        ("Acceptance criteria", template.criteria),
+        ("Assumed environment", template.assumed_environment),
+        ("Out of scope", template.out_of_scope),
+        ("Intake warnings", template.warnings),
+        ("Ops step (operator action, not the builder's)", template.ops_criteria),
+    ):
+        if items:
+            sections += ["", f"### {title}", *(f"- {item}" for item in items)]
     prose = re.sub(r"^(#{1,5}) ", r"#\1 ", context.body.strip(), flags=re.MULTILINE)
     text = "\n".join(
         [

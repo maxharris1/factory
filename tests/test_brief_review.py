@@ -9,7 +9,7 @@ import pytest
 
 import tests.regenerate_brief_snapshots as snapshots
 from lib.brief import render_brief
-from lib.brief.review import task_lines as review_task_lines
+from lib.brief.review import lead as review_lead
 from lib.dispatcher import Comment
 from lib.evidence.findings import blocking_ids, findings_evidence
 from lib.factory_md import parse_factory_context, parse_factory_md
@@ -28,7 +28,7 @@ def review_brief(round_text: str) -> str:
 
 
 def steps(brief: str) -> list[str]:
-    task = brief.split("## What to do\n", 1)[1].split("\n## ", 1)[0]
+    task = brief.split("## Method\n", 1)[1].split("\n## ", 1)[0]
     return [line for line in task.splitlines() if re.match(r"\d+\. ", line)]
 
 
@@ -159,7 +159,7 @@ def brief_from(factory_md: str, round_text: str) -> str:
 
 
 def task(brief: str) -> str:
-    return brief.split("## What to do\n", 1)[1].split("\n## ", 1)[0]
+    return brief.split("## Method\n", 1)[1].split("\n## ", 1)[0]
 
 
 def merge_update_task(verify: str, block_on: str = "user-impact") -> str:
@@ -179,7 +179,7 @@ def merge_update_task(verify: str, block_on: str = "user-impact") -> str:
         "local_checks": (),
         "qa_gate": None,
     }
-    return "\n".join(review_task_lines(facts))
+    return "\n".join(review_lead(facts).method)
 
 
 REVIEW_TASKS = {
@@ -429,7 +429,7 @@ def test_a_fix_check_closes_each_finding_reruns_the_gates_and_never_boots_the_ap
 def test_a_fix_check_round_closes_findings_by_id_and_reruns_the_gates() -> None:
     text = MODE_CASES["user-impact-fix-round"][1]()
     assert (
-        "For each `f-<n>` in **Earlier rounds** above, and each earlier unmet `ac-<n>`, "
+        "For each `f-<n>` in **Earlier rounds** below, and each earlier unmet `ac-<n>`, "
         "say whether this head closes it."
     ) in text
     assert "Rerun the gates on this head" in text

@@ -207,6 +207,6 @@ def test_resumed_plan_quotes_the_answer_that_resumed_it(tmp_path: Path) -> None:
     resumed = queue.claim("claude")
     assert resumed is not None and resumed.request.action == "plan"
     text = render_brief(resumed, bot="claude-bot", factory_root="/srv/orch/factory", context=None)
-    task = text.split("## What to do\n")[1].split("## Handoff comment")[0]
+    task = text.split("## Method\n")[1].split("## Handoff comment")[0]
 
     assert task.count(f"````\n{TRUSTED_TEXT}\n````") == 1

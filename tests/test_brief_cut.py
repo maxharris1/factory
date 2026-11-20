@@ -134,7 +134,7 @@ def test_a_round_two_fix_brief_shows_each_open_finding_once() -> None:
         "round": "2/3",
         "evidence": evidence,
     })
-    task = _section(text, "## What to do")
+    task = _section(text, "## Method")
     data = _section(text, "## Job data")
     findings = evidence["findings"]["findings"]
     assert findings

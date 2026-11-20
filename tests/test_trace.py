@@ -1,3 +1,4 @@
+import gc
 import json
 import sqlite3
 import subprocess
@@ -212,11 +213,13 @@ def test_the_database_is_opened_read_only(db: Db, monkeypatch: pytest.MonkeyPatc
 
     def spy(database: str, *args: object, **kwargs: object) -> sqlite3.Connection:
         opened.append(str(database))
+        gc.collect()
         return real(database, *args, **kwargs)
 
     monkeypatch.setattr(sqlite3, "connect", spy)
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("trace ran a subprocess"))
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("trace ran a subprocess"))
+    gc.collect()
     before = db.path.read_bytes()
 
     assert cli.main(["trace", f"{REPO}#{TICKET}", "--db", str(db.path)]) == 0

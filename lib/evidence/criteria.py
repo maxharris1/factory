@@ -23,7 +23,8 @@ prose after it never supplies criteria.
 
 The source is parsed as CommonMark. When it has an "Acceptance criteria"
 heading outside any list, quote or code block, the text is the first such
-section, up to the next such heading of the same or a higher level. A
+section, up to the next such heading of the same or a higher level, or the
+next "Out of scope" or "Assumed environment" heading of level 2 to 4. A
 top-level paragraph whose first line is only a bold "Acceptance criteria"
 label, as lib.orchestrate.brief_comment writes, counts as a heading below
 level 6: its section ends at the next heading of any level or the next bold
@@ -61,6 +62,7 @@ ORCHESTRATOR = "grok-bot"
 SOURCES = ("brief", "issue", "pr", "none")
 
 _AC_HEADING = re.compile(r"^acceptance criteria\b", re.IGNORECASE)
+_END_HEADING = re.compile(r"^(?:\*\*|__)?(assumed\s+environment|out\s+of\s+scope)(?:\*\*|__)?:?$", re.IGNORECASE)
 _TICKET_HEADING = re.compile(r"^ticket$", re.IGNORECASE)
 _CHECKBOX = re.compile(r"^\[[ xX]\]\s+(.+)$")
 _BULLETS = frozenset("-*+")
@@ -222,8 +224,8 @@ def _section(lines: list[str]) -> list[str] | None:
     if not starts:
         return None
     start, level = starts[0]
-    for _, line, other, _ in headings:
-        if line > start and other <= level:
+    for _, line, other, title in headings:
+        if line > start and (other <= level or (2 <= other <= 4 and _END_HEADING.match(title))):
             return lines[start:line]
     return lines[start:]
 

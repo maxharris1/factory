@@ -22,6 +22,9 @@ from lib.brief import render_brief
 from lib.brief.skills import Router, pinned_paths, resolve, section
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.remote import Exchanged, RemoteTarget, ssh_argv
+from tests.regenerate_brief_snapshots import HEAD as SNAPSHOT_HEAD
+from tests.regenerate_brief_snapshots import _job as _snapshot_job
+from tests.regenerate_brief_snapshots import ci_bundle
 from tests.test_brief import job
 
 FACTORY_ROOT = "/home/claude-bot/factory"
@@ -93,6 +96,33 @@ def test_pinned_paths_reads_the_router_paths_from_a_full_rendered_brief(
         job(action, recipient, **extra), bot=f"{recipient}-bot", context=None, factory_root=FACTORY_ROOT
     )
     assert pinned_paths(brief) == _router(role, f"{recipient}-bot", action).paths
+
+
+def test_exposure_records_the_router_paths_when_a_quoted_ci_log_holds_a_skills_section() -> None:
+    log = (
+        "2026-11-19T12:00:00Z ## Skills\n"
+        "2026-11-19T12:00:01Z - `/tmp/log-only/SKILL.md`\n"
+        "2026-11-19T12:00:02Z ## Result\n"
+        "2026-11-19T12:00:03Z FAILED tests/test_docs.py::test_docs"
+    )
+    ci_job = _snapshot_job("fix", "claude", 1, SNAPSHOT_HEAD, {"evidence": ci_bundle({"31000000004": log})})
+    brief = render_brief(ci_job, bot="claude-bot", context=None, factory_root=FACTORY_ROOT)
+    assert "\n## Skills\n- `/tmp/log-only/SKILL.md`\n" in brief
+    found = exposure.gather(
+        argv=["claude", "-p"], binary="claude", harness="claude", brief=brief.encode(), host="box",
+        factory_root=FACTORY_ROOT, shell=_shell({}), launch_dir=None,
+    )
+    assert found.skill_paths == _router("builder", "claude-bot", "fix").paths
+
+
+def test_pinned_paths_skips_skills_headings_and_section_ends_inside_fences() -> None:
+    brief = (
+        "## Method\n````\n## Skills\n- `/quoted/SKILL.md`\n````\n\n"
+        "## Skills\n- `/a/SKILL.md`\n```\n## Not a section\n```\n- `/b/SKILL.md`\n\n"
+        "## Job\n- `/c/SKILL.md`\n"
+    )
+    assert pinned_paths(brief) == ("/a/SKILL.md", "/b/SKILL.md")
+    assert pinned_paths("## Method\n`````ticket\n## Skills\n- `/quoted/SKILL.md`\n`````\n") is None
 
 
 def test_pinned_paths_is_none_without_a_skills_section_or_any_path() -> None:
