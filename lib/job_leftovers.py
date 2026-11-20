@@ -7,8 +7,10 @@ regular file that HEAD does not track, every `.orch-worker*` record, and the
 same one level down in a subfolder that is a checkout (the local layout's
 `repo/`). `venv/` and `interrogate-*` trees are scratch and never kept, even
 when they hold their own `.git`. Other trees, symlinks and the checkout itself
-are not kept. `kept.json` is written last, once the folder is deleted, so its
-presence means the archive is whole.
+are not kept. The record goes to `kept.json.tmp` before the folder is deleted
+and is renamed to `kept.json` last, so a `kept.json` means the archive is whole.
+A crash after the `.gone` rename leaves `jobs/<id>.gone` or a `kept.json.tmp`
+behind, and `unsettled` lists both for the next pass to finish.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from lib import scratch
 KEPT_ROOT = "jobs-kept"
 GONE = ".gone"
 KEPT_JSON = "kept.json"
+PENDING = f"{KEPT_JSON}.tmp"
 WORKER_RECORD = ".orch-worker"
 ARCHIVED_SIBLINGS = (".run", ".brief.md", ".launched")
 DELETED_SIBLINGS = (".claimed",)
@@ -101,18 +104,31 @@ def retire(root: Path, job_id: str, gone: Path, *, siblings: bool, finished_at: 
     if siblings:
         for suffix in DELETED_SIBLINGS:
             (root / "jobs" / f"{job_id}{suffix}").unlink(missing_ok=True)
-    failed = scratch.remove(gone)
-    if failed is not None:
-        raise OSError(failed)
     dest = root / KEPT_ROOT / job_id
     dest.mkdir(parents=True, exist_ok=True)
-    record = dest / KEPT_JSON
-    temporary = dest / f"{KEPT_JSON}.tmp"
+    record, pending = dest / KEPT_JSON, dest / PENDING
     archived = sorted(
         path.relative_to(dest).as_posix()
         for base, _, names in os.walk(dest) for path in (Path(base, name) for name in names)
-        if path not in (record, temporary) and not path.is_symlink() and path.is_file())
-    temporary.write_text(json.dumps({
+        if path not in (record, pending) and not path.is_symlink() and path.is_file())
+    pending.write_text(json.dumps({
         "id": job_id, "finished_at": finished_at, "archived": archived,
         "removed_bytes": removed_bytes, "at": time.time()}))
-    os.replace(temporary, record)
+    failed = scratch.remove(gone)
+    if failed is not None:
+        raise OSError(failed)
+    commit(root, job_id)
+
+
+def commit(root: Path, job_id: str) -> int:
+    dest = root / KEPT_ROOT / job_id
+    os.replace(dest / PENDING, dest / KEPT_JSON)
+    return int(json.loads((dest / KEPT_JSON).read_text())["removed_bytes"])
+
+
+def unsettled(root: Path) -> list[str]:
+    jobs = root / "jobs"
+    gone = {path.name.removesuffix(GONE) for path in (jobs.iterdir() if jobs.is_dir() else ())
+            if path.name.endswith(GONE) and path.is_dir() and not path.is_symlink()}
+    pending = {path.parent.name for path in (root / KEPT_ROOT).glob(f"*/{PENDING}")}
+    return sorted(gone | pending)
