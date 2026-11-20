@@ -7,6 +7,8 @@ the CLI, or FakeTransport in process. No test reaches a real host.
 from __future__ import annotations
 
 import concurrent.futures
+import dataclasses
+import functools
 import io
 import json
 import os
@@ -21,9 +23,9 @@ from pathlib import Path
 
 import pytest
 
-from lib import device_monitor, exposure, job_run, live_settings, process_tree, remote, telemetry
+from lib import device_monitor, device_pool, exposure, job_run, live_settings, process_tree, remote, telemetry
 from lib.device_monitor import DeviceMonitor, remote_target, stranded
-from lib.device_pool import DevicePool
+from lib.device_pool import DevicePool, hold_memory
 from lib.dispatcher import Dispatcher
 from lib.harness_env import account_tokens, harness_env
 from lib.machines_yml import MachinesConfig, load_machines_yml
@@ -3427,3 +3429,424 @@ def test_a_contained_start_hands_the_command_its_argv_whatever_systemd_expands(
         [options] = launches
         assert f"--unit=orch-run-{target.tag}.scope" in options
         assert [o for o in options if o.startswith("--expand-environment")] == launch
+
+
+# --- memory-wait: each poll reads device memory and fails open (#1226) --------
+
+
+LOW = "MemTotal: 33554432 kB\nMemAvailable: 6291456 kB\n"
+AMPLE = "MemTotal: 33554432 kB\nMemAvailable: 16777216 kB\n"
+CALM = "some avg10=0.50 avg60=0.20 avg300=0.10 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+PRESSED = "some avg10=42.00 avg60=20.00 avg300=5.00 total=9\nfull avg10=1.00 avg60=0.00 avg300=0.00 total=0\n"
+
+
+def memory_rows(queue: SQLiteJobQueue) -> dict[str, tuple[float, str]]:
+    with queue.connect() as connection:
+        try:
+            rows = connection.execute("SELECT device, until, reason FROM device_memory_holds").fetchall()
+        except sqlite3.OperationalError:
+            return {}
+    return {str(row[0]): (float(row[1]), str(row[2])) for row in rows}
+
+
+def memory_setup(tmp_path: Path, readings: dict, *, config: MachinesConfig | None = None):
+    now = [1000.0]
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: now[0])
+    config = config or config_of(machines_file(tmp_path))
+    pool = DevicePool(queue, config)
+    read: list[str] = []
+
+    def reader(device, _on_host):
+        read.append(device.name)
+        reading = readings[device.name]
+        if isinstance(reading, Exception):
+            raise reading
+        return reading
+
+    monitor = DeviceMonitor(pool, config, FakeTransport(), memory=reader)
+    return queue, pool, monitor, read, now
+
+
+def test_an_over_limit_device_is_held_180s_renewed_each_poll_and_a_good_reading_clears_it(
+    tmp_path: Path,
+) -> None:
+    readings = {"box": (LOW, CALM), "pc": (AMPLE, CALM)}
+    queue, pool, monitor, read, now = memory_setup(tmp_path, readings)
+    lines: list[str] = []
+
+    held = monitor.check_memory(lines.append)
+
+    assert read == ["box", "pc"]
+    assert held == (("box", "memory-wait: MemAvailable 6.0 GiB < 8 GiB"),)
+    assert memory_rows(queue) == {"box": (1180.0, "memory-wait: MemAvailable 6.0 GiB < 8 GiB")}
+    assert lines == ["memory-wait on box: memory-wait: MemAvailable 6.0 GiB < 8 GiB"]
+
+    readings["box"] = (AMPLE, PRESSED)
+    now[0] = 1060.0
+    monitor.check_memory(lines.append)
+    assert memory_rows(queue) == {"box": (1240.0, "memory-wait: PSI some avg10 42 > 10")}
+    assert len(lines) == 1
+
+    readings["box"] = (AMPLE, CALM)
+    now[0] = 1120.0
+    held = monitor.check_memory(lines.append)
+    assert held == ()
+    assert memory_rows(queue) == {}
+    assert lines[1:] == ["memory-wait off box"]
+    assert read == ["box", "pc"] * 3
+
+
+def test_a_memory_held_device_takes_no_placement_until_it_clears(tmp_path: Path) -> None:
+    readings = {"box": (LOW, CALM), "pc": (LOW, CALM)}
+    queue, pool, monitor, _, _ = memory_setup(tmp_path, readings)
+    enqueue(queue, "claude", "1")
+    monitor.check_memory(lambda _line: None)
+    assert pool.claim("claude") is None
+
+    readings["pc"] = (AMPLE, CALM)
+    monitor.check_memory(lambda _line: None)
+    claimed = pool.claim("claude")
+    assert claimed is not None and claimed[1].device == "pc"
+
+
+def test_memory_is_read_outside_any_database_transaction(tmp_path: Path) -> None:
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 1000.0)
+    config = config_of(machines_file(tmp_path))
+    pool = DevicePool(queue, config)
+    with queue.connect() as connection:
+        hold_memory(connection, "pc", until=1100.0, reason="memory-wait: earlier")
+    free: list[str] = []
+
+    def reader(device, _on_host):
+        other = sqlite3.connect(tmp_path / "d.db", timeout=0)
+        try:
+            other.execute("BEGIN IMMEDIATE")
+            other.rollback()
+            free.append(device.name)
+        finally:
+            other.close()
+        return (AMPLE, CALM)
+
+    DeviceMonitor(pool, config, FakeTransport(), memory=reader).check_memory(lambda _l: None)
+    assert free == ["box", "pc"]
+    assert memory_rows(queue) == {}
+
+
+def test_a_disabled_or_draining_device_is_never_read(tmp_path: Path) -> None:
+    base = config_of(machines_file(tmp_path, box_enabled=False))
+    config = dataclasses.replace(
+        base, devices=tuple(dataclasses.replace(d, drain=d.name == "pc") for d in base.devices)
+    )
+    _, _, monitor, read, _ = memory_setup(tmp_path, {}, config=config)
+    assert monitor.check_memory(lambda _l: None) == ()
+    assert read == []
+
+
+class MemoryTransport(FakeTransport):
+    """Runs each SSH script locally with /proc swapped for a fake device's dir."""
+
+    def __init__(self, proc: Path):
+        super().__init__()
+        self.proc = proc
+        self.code: int | None = None
+        self.captured: list[tuple[list[str], float]] = []
+
+    def call(self, argv, *, timeout: float, input=None):
+        self.captured.append((list(argv), timeout))
+        if self.code is not None:
+            return remote.Called(self.code, "", "ssh: connect to host fakepc: timed out")
+        result = subprocess.run(
+            ["sh", "-c", argv[-1].replace("/proc/", f"{self.proc}/")],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+        return remote.Called(result.returncode, result.stdout, result.stderr)
+
+
+def fake_proc(root: Path, meminfo: str | None, pressure: str | None) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    for name, text in (("meminfo", meminfo), ("pressure/memory", pressure)):
+        path = root / name
+        if text is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+    return root
+
+
+def real_reader_setup(tmp_path: Path):
+    box = fake_proc(tmp_path / "box-proc", AMPLE, CALM)
+    pc = fake_proc(tmp_path / "pc-proc", AMPLE, CALM)
+    transport = MemoryTransport(pc)
+    now = [1000.0]
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: now[0])
+    config = config_of(machines_file(tmp_path))
+    monitor = DeviceMonitor(
+        DevicePool(queue, config),
+        config,
+        transport,
+        memory=functools.partial(device_monitor.read_memory, transport, proc=box),
+    )
+    return queue, monitor, transport, box, pc, now
+
+
+def test_a_remote_device_is_read_in_one_ssh_call_with_a_10_second_timeout(tmp_path: Path) -> None:
+    queue, monitor, transport, box, pc, now = real_reader_setup(tmp_path)
+    fake_proc(pc, LOW, CALM)
+    lines: list[str] = []
+
+    held = monitor.check_memory(lines.append)
+
+    assert held == (("pc", "memory-wait: MemAvailable 6.0 GiB < 8 GiB"),)
+    [(argv, timeout)] = transport.captured
+    assert timeout == 10.0
+    assert argv[0] == "ssh" and argv[-2].startswith("fakepc-")
+    assert "/proc/meminfo" in argv[-1] and "/proc/pressure/memory" in argv[-1]
+    assert lines == ["memory-wait on pc: memory-wait: MemAvailable 6.0 GiB < 8 GiB"]
+
+    fake_proc(pc, AMPLE, PRESSED)
+    fake_proc(box, AMPLE, PRESSED)
+    now[0] = 1060.0
+    held = monitor.check_memory(lines.append)
+    assert dict(held) == {
+        "box": "memory-wait: PSI some avg10 42 > 10",
+        "pc": "memory-wait: PSI some avg10 42 > 10",
+    }
+    assert len(transport.captured) == 2
+
+
+@pytest.mark.parametrize("code", [255, 124])
+def test_a_failed_or_timed_out_ssh_read_is_logged_and_clears_the_hold(
+    tmp_path: Path, code: int
+) -> None:
+    queue, monitor, transport, _, pc, now = real_reader_setup(tmp_path)
+    fake_proc(pc, LOW, CALM)
+    lines: list[str] = []
+    monitor.check_memory(lines.append)
+    assert set(memory_rows(queue)) == {"pc"}
+
+    transport.code = code
+    now[0] = 1060.0
+    assert monitor.check_memory(lines.append) == ()
+
+    assert memory_rows(queue) == {}
+    assert [line for line in lines[1:] if line.startswith("memory read pc")]
+    assert lines[-1].startswith("memory-wait off pc")
+
+
+def test_a_reader_that_raises_fails_open_for_that_device_alone(tmp_path: Path) -> None:
+    readings = {"box": (LOW, CALM), "pc": (LOW, CALM)}
+    queue, _, monitor, _, now = memory_setup(tmp_path, readings)
+    lines: list[str] = []
+    monitor.check_memory(lines.append)
+    assert set(memory_rows(queue)) == {"box", "pc"}
+
+    readings["box"] = PermissionError(13, "Permission denied", "/proc/meminfo")
+    now[0] = 1060.0
+    held = monitor.check_memory(lines.append)
+
+    assert [name for name, _ in held] == ["pc"]
+    assert set(memory_rows(queue)) == {"pc"}
+    assert any(line.startswith("memory read box") and "Permission denied" in line for line in lines)
+    assert "memory-wait off box" in [line.split(" (")[0] for line in lines]
+
+
+@pytest.mark.parametrize(
+    ("meminfo", "pressure", "reason"),
+    [
+        (LOW, None, "memory-wait: MemAvailable 6.0 GiB < 8 GiB"),
+        (None, PRESSED, "memory-wait: PSI some avg10 42 > 10"),
+        ("MemAvailable: garbage kB\n", PRESSED, "memory-wait: PSI some avg10 42 > 10"),
+        (AMPLE, None, None),
+        (None, CALM, None),
+    ],
+)
+def test_a_missing_file_is_logged_and_a_good_reading_of_the_other_still_judges(
+    tmp_path: Path, meminfo: str | None, pressure: str | None, reason: str | None
+) -> None:
+    queue, monitor, _, box, _, _ = real_reader_setup(tmp_path)
+    fake_proc(box, meminfo, pressure)
+    lines: list[str] = []
+
+    held = monitor.check_memory(lines.append)
+
+    assert held == ((("box", reason),) if reason else ())
+    assert set(memory_rows(queue)) == ({"box"} if reason else set())
+    if meminfo is None or pressure is None:
+        missing = "meminfo" if meminfo is None else "pressure/memory"
+        assert any(line.startswith("memory read box") and missing in line for line in lines)
+
+
+def test_a_device_with_no_proc_is_never_held(tmp_path: Path) -> None:
+    queue, monitor, transport, box, pc, now = real_reader_setup(tmp_path)
+    fake_proc(pc, LOW, PRESSED)
+    monitor.check_memory(lambda _l: None)
+    assert set(memory_rows(queue)) == {"pc"}
+    shutil.rmtree(box)
+    shutil.rmtree(pc)
+    pc.mkdir()
+
+    for at in (1060.0, 1120.0, 1500.0):
+        now[0] = at
+        assert monitor.check_memory(lambda _l: None) == ()
+        assert memory_rows(queue) == {}
+    assert len(transport.captured) == 4
+
+
+def test_the_poll_checks_memory_and_logs_each_enter_and_leave(tmp_path: Path) -> None:
+    readings = {"box": (AMPLE, CALM), "pc": (LOW, CALM)}
+    now = [1000.0]
+    path = tmp_path / "d.db"
+    queue = SQLiteJobQueue(path, clock=lambda: now[0])
+    config = config_of(machines_file(tmp_path))
+    lines: list[str] = []
+    dispatcher = Dispatcher(
+        path,
+        queue,
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+        devices=DeviceMonitor(
+            DevicePool(queue, config), config, FakeTransport(), memory=lambda d, _on_host: readings[d.name]
+        ),
+        log=lines.append,
+    )
+    dispatcher.reconcile_jobs()
+    assert memory_rows(queue) == {"pc": (1180.0, "memory-wait: MemAvailable 6.0 GiB < 8 GiB")}
+    readings["pc"] = (AMPLE, CALM)
+    poll_at(now, dispatcher, 1060.0)
+    assert memory_rows(queue) == {}
+    memory_lines = [line for line in lines if line.startswith("memory")]
+    assert memory_lines == [
+        "memory-wait on pc: memory-wait: MemAvailable 6.0 GiB < 8 GiB",
+        "memory-wait off pc",
+    ]
+
+
+def test_a_memory_check_error_is_recorded_and_never_stops_the_poll(tmp_path: Path) -> None:
+    path = tmp_path / "d.db"
+    queue = SQLiteJobQueue(path, clock=lambda: 0.0)
+    signed: list[float] = []
+
+    class Exploding:
+        def reconcile(self, now, lost_after, on_lost):
+            return None
+
+        def check_memory(self, log):
+            raise sqlite3.OperationalError("database is locked")
+
+        def check_sign_ins(self, now):
+            signed.append(now)
+
+    dispatcher = Dispatcher(
+        path,
+        queue,
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+        devices=Exploding(),
+    )
+    dispatcher.reconcile_jobs()
+    with queue.connect() as connection:
+        rows = connection.execute("SELECT repo, error FROM poll_errors").fetchall()
+    assert [tuple(row) for row in rows] == [("devices", "memory: OperationalError: database is locked")]
+    assert signed == [0.0]
+
+
+def memory_poller(tmp_path: Path, now: list[float], config: MachinesConfig, memory) -> Dispatcher:
+    path = tmp_path / "d.db"
+    queue = SQLiteJobQueue(path, clock=lambda: now[0])
+    return Dispatcher(
+        path,
+        queue,
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+        devices=DeviceMonitor(DevicePool(queue, config), config, FakeTransport(), memory=memory),
+        log=lambda _line: None,
+    )
+
+
+def blocked_devices(dispatcher: Dispatcher) -> set[str]:
+    return set(device_pool.placement_blocks(dispatcher.queue, dispatcher.devices.config, None).devices)
+
+
+@pytest.mark.parametrize(
+    "recovered", [(AMPLE, CALM), (None, None), TimeoutError("ssh timed out")]
+)
+def test_clearing_a_memory_hold_neither_prolongs_nor_erases_an_unreachable_backoff(
+    tmp_path: Path, recovered
+) -> None:
+    readings: dict[str, object] = {"box": (LOW, CALM), "pc": (AMPLE, CALM)}
+
+    def reader(device, *_):
+        reading = readings[device.name]
+        if isinstance(reading, Exception):
+            raise reading
+        return reading
+
+    now = [1000.0]
+    dispatcher = memory_poller(tmp_path, now, config_of(machines_file(tmp_path)), reader)
+    with dispatcher.queue.connect() as connection:
+        device_pool.back_off(connection, "box", until=1300.0, reason="unreachable preflight")
+    for at in (1000.0, 1060.0, 1120.0, 1180.0, 1240.0):
+        poll_at(now, dispatcher, at)
+        assert "box" in blocked_devices(dispatcher)
+
+    readings["box"] = recovered
+    poll_at(now, dispatcher, 1250.0)
+    assert "box" in blocked_devices(dispatcher), "the unreachable backoff still runs to 1300"
+    poll_at(now, dispatcher, 1301.0)
+    assert "box" not in blocked_devices(dispatcher), "the memory renewals never extended it"
+
+
+def test_the_orch_host_is_read_directly_even_when_it_is_not_the_local_device(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "machines.yml"
+    path.write_text(
+        f"""
+orch_host: pc
+devices:
+  - name: pc
+    tailscale_name: pc.example.ts.net
+    slot_max: 3
+    harnesses: {{claude: claude-bot}}
+    workdir_root: {tmp_path}/remote/{{bot}}/work
+    ssh_alias: fakepc-{{bot}}
+    factory_root: /srv/factory
+""".lstrip(),
+        encoding="utf-8",
+    )
+    config = config_of(path)
+    assert config.orch_host == "pc" and not config.devices[0].local
+    host_proc = fake_proc(tmp_path / "host-proc", LOW, CALM)
+    transport = MemoryTransport(fake_proc(tmp_path / "ssh-proc", AMPLE, CALM))
+    now = [1000.0]
+    dispatcher = memory_poller(
+        tmp_path, now, config, functools.partial(device_monitor.read_memory, transport, proc=host_proc)
+    )
+
+    dispatcher.reconcile_jobs()
+
+    assert transport.captured == [], "no SSH from the orch host to itself"
+    assert blocked_devices(dispatcher) == {"pc"}
+
+
+def test_a_hold_runs_180s_from_when_the_slow_reads_finish(tmp_path: Path) -> None:
+    now = [1000.0]
+
+    def slow_reader(device, *_):
+        now[0] += 200.0
+        return (LOW, CALM)
+
+    dispatcher = memory_poller(tmp_path, now, config_of(machines_file(tmp_path)), slow_reader)
+
+    dispatcher.reconcile_jobs()
+
+    assert now[0] == 1400.0
+    assert blocked_devices(dispatcher) == {"box", "pc"}
+    now[0] = 1579.0
+    assert blocked_devices(dispatcher) == {"box", "pc"}
+    now[0] = 1580.0
+    assert blocked_devices(dispatcher) == set()
