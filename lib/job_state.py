@@ -12,7 +12,9 @@ dashboard (lib/dashboard.py) and `orch status` (lib/status.py) all call it.
 * dead: a runner_pid was recorded, that process is gone, and so is its
   worker (the local command's pid, or a remote worker the device confirms
   gone over SSH with lib/remote.py check_worker). A worker that may still
-  run is not dead: its heartbeat has stopped, so it turns stale.
+  run is not dead: its heartbeat has stopped, so it turns stale. #1209:
+  the dispatcher, not `derive`, settles a job whose runner is gone and
+  whose handoff is already posted while tagged leftovers still run.
 * stale: no heartbeat for more than stale_seconds (orch.yml
   job_states.stale_minutes, default 2 minutes).
 * running: the heartbeat is fresh.
