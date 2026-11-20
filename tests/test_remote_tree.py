@@ -569,6 +569,9 @@ def stat_line(pid: int, session: int, start: int) -> str:
 
 
 SCOPE_SLICE = "/user.slice/user-1000.slice/user@1000.service/app.slice"
+contained_path = pytest.mark.skipif(
+    scope_refusal(stripped=True) is not None, reason=scope_refusal(stripped=True) or ""
+)
 RECORDED_SESSION = 456789
 
 
@@ -742,8 +745,9 @@ time.sleep(120)
 subprocess.Popen([sys.executable, '-c', vite % sys.argv[1]], start_new_session=True)
 watchdog = subprocess.Popen(['sh', '-c', 'trap "" TERM; while :; do sleep 1; done'])
 Path(sys.argv[2]).write_text(str(watchdog.pid))
-while not Path(sys.argv[1]).exists():
+while not Path(sys.argv[1]).exists() or not Path(sys.argv[4]).exists():
     time.sleep(.02)
+Path(sys.argv[3]).write_text(str(os.getpid()))
 os.kill(os.getpid(), signal.SIGKILL)
 """
 
@@ -760,9 +764,13 @@ def test_a_harness_killed_by_sigkill_leaves_no_process_once_exit_appears(
     config = config_of(machines_file(tmp_path))
     target = device_monitor.remote_target(config.device("pc"), "claude", "job-1", uuid.uuid4().hex)
     assert target is not None
-    vite, watchdog = tmp_path / "vite.pid", tmp_path / "watchdog.pid"
+    vite, watchdog, harness = tmp_path / "vite.pid", tmp_path / "watchdog.pid", tmp_path / "harness"
+    go = tmp_path / "go"
+    go.touch()
     start = remote.start_script(
-        target, [sys.executable, "-c", HARNESS_KILLS_ITSELF, str(vite), str(watchdog)], {}
+        target,
+        [sys.executable, "-c", HARNESS_KILLS_ITSELF, str(vite), str(watchdog), str(harness), str(go)],
+        {},
     )
     launch = remote.launch_script(
         target, start, size=0, not_after=int(time.time()) + 600, budget=budget, grace=1
@@ -783,6 +791,48 @@ def test_a_harness_killed_by_sigkill_leaves_no_process_once_exit_appears(
         assert remote.check_worker(LocalShell(), target) == remote.GONE
     finally:
         remote.stop_worker(LocalShell(), target, kill=True)
+        for path in (vite, watchdog):
+            if path.exists():
+                kill_quietly(int(path.read_text()))
+
+
+@contained_path
+def test_a_contained_harness_killed_by_sigkill_has_its_scopes_cgroup_killed_before_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1210: the same harness in its `orch-run-<tag>.scope`. Once it dies by
+    SIGKILL, the wrapper writes `1` to the scope's cgroup.kill (under a fake
+    cgroup root, so the kill rounds still do the real work) before `exit`."""
+    box = Box(tmp_path, monkeypatch)
+    tools = tmp_path / "device-bin"
+    tools.mkdir()
+    (tools / "loginctl").write_text("#!/bin/sh\necho yes\n")
+    (tools / "loginctl").chmod(0o755)
+    monkeypatch.setenv("FAKE_SSH_PATH", f"{tools}{os.pathsep}{os.environ['PATH']}")
+    vite, watchdog, ready, go = (tmp_path / name for name in ("vite.pid", "watchdog.pid", "ready", "go"))
+    root, unit = tmp_path / "cgroup", f"orch-run-{box.target.tag}.scope"
+    command = [sys.executable, "-c", HARNESS_KILLS_ITSELF, str(vite), str(watchdog), str(ready), str(go)]
+    launch = box.launch(command=command).replace(remote.CGROUP_ROOT, str(root))
+    try:
+        result = box.send(launch)
+        assert result.stdout.decode().strip() == f"{remote.LAUNCH_MARK} started", result.stderr
+        wait_file(vite)
+        cgroup = Path(f"/proc/{int(wait_file(watchdog))}/cgroup").read_text().strip()
+        assert cgroup.startswith("0::/") and cgroup.endswith(f"/{unit}"), cgroup
+        kill_file = root / cgroup.removeprefix("0::/") / "cgroup.kill"
+        kill_file.parent.mkdir(parents=True)
+        kill_file.write_text("")
+        go.touch()
+        assert box.wait_exit() == str(128 + signal.SIGKILL)
+        assert kill_file.read_text() == "1\n", "the scope's cgroup.kill was written"
+        leftovers = [int(path.read_text()) for path in (vite, watchdog)]
+        assert [pid for pid in leftovers if pid_alive(pid, None) and not zombie(pid)] == [], (
+            "the vite-like child and the watchdog sh are gone once exit appears"
+        )
+        assert remote.check_worker(box.transport, box.target, fence=False) == remote.GONE
+    finally:
+        remote.stop_worker(box.transport, box.target, kill=True)
+        box.cleanup()
         for path in (vite, watchdog):
             if path.exists():
                 kill_quietly(int(path.read_text()))
@@ -848,11 +898,6 @@ def test_an_uncontained_runs_reused_session_number_is_never_killed(tmp_path: Pat
         assert state == "S", "a process outside the run is never signalled"
     finally:
         kill_quietly(sleeper)
-
-
-contained_path = pytest.mark.skipif(
-    scope_refusal(stripped=True) is not None, reason=scope_refusal(stripped=True) or ""
-)
 
 
 @pytest.mark.parametrize(
