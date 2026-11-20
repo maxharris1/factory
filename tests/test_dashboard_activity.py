@@ -912,6 +912,18 @@ def test_each_thread_ends_on_where_its_ticket_is_now_in_both_renders(tmp_path: P
     assert "rl-now" not in _row(relay, "211")
 
 
+def test_a_stale_ending_whose_runner_is_gone_says_so(tmp_path: Path, snapshot: dict) -> None:
+    snap = _endings(snapshot)
+    next(row for row in snap["running"] if row["job"] == "run-203")["stale_cause"] = "runner-gone"
+    relays = [_server(snap)["relay"]]
+    if layout.NODE:
+        relays.append(_script(tmp_path, snap)["html"]["relay"])
+    for relay in relays:
+        ending = _now(relay, "203")
+        assert re.findall(r'<span class="chip (\w+)">([^<]*)</span>', ending) == [("warn", "runner gone, worker alive")]
+        assert '<span class="rl-late">no heartbeat for 4m 10s</span>' in ending
+
+
 @layout.needs_node
 def test_the_ending_counts_toward_the_six(tmp_path: Path, snapshot: dict) -> None:
     for steps, button in ((5, None), (6, "+1 earlier")):

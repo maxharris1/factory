@@ -21,6 +21,11 @@ The whole tree is checked, not a list of named files: the routers reach
 other skills by reference (interrogate runs arena; figure-it-out runs
 show-me-your-work and architect).
 
+A job placed on a non-default account runs with the harness config at that
+account's folder (~/.factory-accounts/<id>), so for Claude each installed file
+is also checked under <folder>/skills/. install-skills never makes that link;
+`orch accounts prepare` does.
+
 On a remote device the same ssh call first reads the checkout's HEAD
 (#297). When it is not the box checkout's HEAD (the commit whose
 skills.lock the waiter checks against), or the checkout does not exist, the
@@ -74,6 +79,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lib import device_sync
+from lib.account_home import LINKS as ACCOUNT_LINKS
 from lib.device_monitor import remote_target
 from lib.health import checkout_sha
 from lib.device_pool import Placement
@@ -145,6 +151,7 @@ class Report:
     commit: str
     found: dict[str, str]
     error: str | None
+    account_home: str | None
 
     def entry(self) -> dict[str, object]:
         entry: dict[str, object] = {
@@ -154,6 +161,8 @@ class Report:
             "commit": self.commit,
             "files": dict(sorted(self.found.items())),
         }
+        if self.account_home is not None:
+            entry["account_home"] = self.account_home
         if self.error is not None:
             entry["error"] = self.error
         return entry
@@ -196,9 +205,19 @@ def skills_dir(bot: str) -> str:
         raise PreflightError(f"preflight: no skills directory for {bot}") from None
 
 
-def wanted(skills: str, checkout: str, pinned: Pinned) -> dict[str, str]:
+def account_skills(account_home: str | None, harness: str) -> str | None:
+    if account_home is None or "skills" not in ACCOUNT_LINKS.get(harness, ()):
+        return None
+    return f"{account_home}/skills"
+
+
+def wanted(
+    skills: str, checkout: str, pinned: Pinned, account_skills: str | None = None
+) -> dict[str, str]:
     """{path on the device: sha256}, ~/-prefixed under the home, else absolute."""
     paths = {f"{HOME_PREFIX}{skills}/{rel}": digest for rel, digest in pinned.installed.items()}
+    if account_skills is not None:
+        paths |= {f"{account_skills}/{rel}": digest for rel, digest in pinned.installed.items()}
     paths |= {f"{checkout}/{rel}": digest for rel, digest in pinned.checkout.items()}
     return paths
 
@@ -369,6 +388,7 @@ def check(
     root: Path = ROOT,
     held: device_sync.Row | None = None,
     host: str = DEFAULT_ORCH_HOST,
+    account_home: str | None = None,
 ) -> Report:
     skills = skills_dir(bot)
     try:
@@ -378,7 +398,7 @@ def check(
     if checkout is None:
         name = device.name if device is not None else host
         raise PreflightError(f"preflight: {name} has no factory_root for {OWNING_BOTS[bot]}")
-    expected = wanted(skills, checkout, pinned)
+    expected = wanted(skills, checkout, pinned, account_skills(account_home, OWNING_BOTS[bot]))
     paths = sorted(expected)
     install_errors: list[str] = []
     if device is None or device.local or placement is None:
@@ -401,7 +421,7 @@ def check(
     error = compare(expected, found)
     if error is not None and install_errors:
         error = f"{error} (install-skills: {install_errors[0]})"
-    return Report(name, skills, checkout, pinned.commit, found, error)
+    return Report(name, skills, checkout, pinned.commit, found, error, account_home)
 
 
 def record(queue: SQLiteJobQueue, job: Job, entry: dict[str, object]) -> None:
@@ -450,6 +470,7 @@ def preflight(
     root: Path | None = None,
     held: device_sync.Row | None = None,
     host: str = DEFAULT_ORCH_HOST,
+    account_home: str | None = None,
 ) -> Report:
     """Check the pinned skills on the job's device, under the checkout the brief names,
     and record the result. Raises PreflightError."""
@@ -464,6 +485,7 @@ def preflight(
             root=root if root is not None else ROOT,
             held=held,
             host=host,
+            account_home=account_home,
         )
     except PreflightError as exc:
         record(queue, job, {"device": device.name if device is not None else host, "error": str(exc)})

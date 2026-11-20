@@ -676,7 +676,7 @@ class Beater:
                 self._failing = False
             except Exception as exc:  # a heartbeat never stops its component
                 if not self._failing:
-                    self.log(f"health: {self.component} heartbeat failed: {type(exc).__name__}")
+                    self.log(f"health: {self.component} heartbeat failed: {_failure(exc)}")
                 self._failing = True
 
     def start(self) -> Beater:
@@ -728,8 +728,13 @@ def beat_once(
         )
         return True
     except Exception as exc:
-        log(f"health: {component} heartbeat failed: {type(exc).__name__}")
+        log(f"health: {component} heartbeat failed: {_failure(exc)}")
         return False
+
+
+def _failure(exc: Exception) -> str:
+    message = " ".join(str(exc).split())
+    return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
 
 
 def push_result(db: Path, ok: bool, *, interval: float, log: Log = _stderr) -> bool:

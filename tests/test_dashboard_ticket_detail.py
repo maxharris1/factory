@@ -640,6 +640,7 @@ CHIPS = [
     ("running", _set(), None),
     ("claimed", _set(job_state="claimed"), "claimed, not started"),
     ("stale", _set(job_state="stale"), "stale heartbeat"),
+    ("runner-gone", _set(job_state="stale", stale_cause="runner-gone"), "runner gone, worker alive"),
     ("dead", _set(job_state="dead"), "runner dead"),
     ("overdue", _set(overdue=True), "OVERDUE"),
     ("retries", _set(retries=2), "retried 2x"),

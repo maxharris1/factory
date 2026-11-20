@@ -577,6 +577,13 @@ class JobsMixin:
                     and self._link_drop_settled(job, now)
                 ):
                     self._fail_dead(job, placement.runner_pid, now, link_drop=placement.device)
+                elif (
+                    placement is not None
+                    and facts.runner_alive is False
+                    and facts.worker_gone is False
+                    and (handoff := self._handoff_candidate(job, skip_unread=True)) is not None
+                ):
+                    self._fail_with_leftovers(job, placement.runner_pid, handoff.comment, now)
                 elif state == DEAD:
                     assert placement is not None
                     self._fail_dead(job, placement.runner_pid, now)
@@ -745,6 +752,39 @@ class JobsMixin:
             if ended is not None:
                 detail += f" (its command: {ended[1]})"  # #91: the exit reason
             self._record_job_event(connection, job, "dead", detail, now)
+            connection.commit()
+        self._log_job_event(job, "dead", detail)
+
+    def _fail_with_leftovers(
+        self, job: Job, runner_pid: int | None, handoff: Comment, now: float
+    ) -> None:
+        """#1209: fail a job whose runner is gone and whose handoff is posted,
+        while leftovers keep its worker check RUNNING, so T6 settles it from
+        that handoff and the orphan sweep stops its scope."""
+        kind = parse_comment(handoff.body).as_dict()["kind"]
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
+                f"""
+                UPDATE jobs
+                SET state = 'failed', finished_at = ?, last_activity_at = ?,
+                    failure_handled = 0
+                WHERE id = ? AND state = 'running' AND last_activity_at = ?
+                  AND EXISTS (
+                    SELECT 1 FROM {SLOTS_TABLE} WHERE job_id = ? AND runner_pid = ?
+                  )
+                """,
+                (now, now, job.id, job.last_activity_at, job.id, runner_pid),
+            ).rowcount
+            if changed != 1:
+                connection.commit()
+                return
+            detail = (
+                f"runner pid {runner_pid} is gone and its {kind} comment {handoff.id} "
+                "is posted, but its worker check still says running; slot orphaned, failed for T6"
+            )
+            self._record_job_event(connection, job, "dead", detail, now)
+            orphan_slot(connection, job.id, now)
             connection.commit()
         self._log_job_event(job, "dead", detail)
 
@@ -1258,7 +1298,7 @@ class JobsMixin:
         return _HANDOFF_UNREAD if candidate.unread else candidate.comment
 
     def _handoff_candidate(
-        self, job: Job, ticket: TrackedTicket | None = None
+        self, job: Job, ticket: TrackedTicket | None = None, *, skip_unread: bool = False
     ) -> HandoffCandidate | None:
         if ticket is None:
             ticket = self._polled.get((job.request.repo.lower(), job.request.ticket_id))
@@ -1346,6 +1386,8 @@ class JobsMixin:
                 and outcome is None
                 and _matching_head(head, ticket.current_head) is None
             )
+            if unread and skip_unread:
+                continue
             return HandoffCandidate(item, unread)
         return None
 

@@ -130,6 +130,20 @@ def test_each_slot_state_has_its_strip_chip_and_link(tmp_path: Path, name: str) 
     assert "running" not in re.sub(r"<[^>]+>", " ", tile).lower()
 
 
+@pytest.mark.parametrize("name", ["stale", "overdue"])
+def test_a_tile_whose_runner_is_gone_says_so_in_both_renders(tmp_path: Path, name: str) -> None:
+    snapshot = _tiles(tmp_path)
+    row = next(r for r in snapshot["running"] if r["job"] == f"t-{name}")
+    row.update(job_state="stale", stale_cause="runner-gone")
+    renders = [_no_script(render_pages(snapshot)["index.html"])]
+    if NODE:
+        renders.append(_run_page(tmp_path, snapshot, "main", BAR + ["hud", "lanes"])["html"]["lanes"])
+    for html in renders:
+        tile = _tile(html, name)
+        assert re.findall(r'<span class="chip (\w+)">([^<]*)</span>', tile) == [("warn", "runner gone, worker alive")]
+        assert f'data-px="{EFFECT[name]}"' in tile
+
+
 def _line(tile: str, n: int) -> str:
     return re.search(rf'<div class="tile-l{n}">(.*?)</div>(?=<div class="tile-l{n + 1}">|</div></a>)', tile, re.S).group(1)
 

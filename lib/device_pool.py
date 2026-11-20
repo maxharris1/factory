@@ -79,10 +79,12 @@ from fractions import Fraction
 from pathlib import Path
 
 from lib import device_sync, lane_limit, live_settings
+from lib.device_memory import MEMORY_WAIT
 from lib.device_sync import NOTHING_BLOCKED, Blocked
 from lib.machines_yml import (
     Device,
     MachinesConfig,
+    default_account,
     orch_host,
     shared_tailscale_names,
 )
@@ -187,6 +189,13 @@ def placed_account(config: MachinesConfig, placement: Placement) -> str | None:
         return placement.account
     device = config.device(placement.device)
     return None if device is None else device.account_for(placement.harness)
+
+
+def run_account(config: MachinesConfig, placement: Placement) -> tuple[str, str | None]:
+    """The account the placed run uses and its folder, None for the device's own login.
+    Raises ValueError when the account is not signed in on the device."""
+    account = placed_account(config, placement) or default_account(placement.harness)
+    return account, config.account_home(placement.device, placement.harness, account)
 
 
 def choose_device(
@@ -947,8 +956,7 @@ def _float(value: object) -> float | None:
     return float(value) if isinstance(value, (int, float)) else None
 
 
-def back_off(connection: sqlite3.Connection, device: str, *, until: float, reason: str) -> None:
-    """Keep new placements off device until `until`, in the caller's transaction (#460)."""
+def _backoff_table(connection: sqlite3.Connection) -> None:
     connection.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {BACKOFF_TABLE} (
@@ -958,12 +966,45 @@ def back_off(connection: sqlite3.Connection, device: str, *, until: float, reaso
         )
         """
     )
+
+
+def back_off(connection: sqlite3.Connection, device: str, *, until: float, reason: str) -> None:
+    """Keep new placements off device until `until`, in the caller's transaction (#460)."""
+    _backoff_table(connection)
     connection.execute(
         f"""
         INSERT INTO {BACKOFF_TABLE} (device, until, reason) VALUES (?, ?, ?)
-        ON CONFLICT(device) DO UPDATE SET until = excluded.until, reason = excluded.reason
+        ON CONFLICT(device) DO UPDATE SET
+            until = MAX(until, excluded.until),
+            reason = excluded.reason
         """,
         (device, until, reason),
+    )
+
+
+def hold_memory(
+    connection: sqlite3.Connection, device: str, *, until: float, reason: str, now: float
+) -> None:
+    _backoff_table(connection)
+    connection.execute(
+        f"""
+        INSERT INTO {BACKOFF_TABLE} (device, until, reason) VALUES (?, ?, ?)
+        ON CONFLICT(device) DO UPDATE SET
+            until = MAX(until, excluded.until),
+            reason = CASE
+                WHEN until > ? AND reason NOT LIKE ? THEN reason
+                ELSE excluded.reason
+            END
+        """,
+        (device, until, reason, now, f"{MEMORY_WAIT}%"),
+    )
+
+
+def clear_memory_hold(connection: sqlite3.Connection, device: str) -> None:
+    _backoff_table(connection)
+    connection.execute(
+        f"DELETE FROM {BACKOFF_TABLE} WHERE device = ? AND reason LIKE ?",
+        (device, f"{MEMORY_WAIT}%"),
     )
 
 

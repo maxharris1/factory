@@ -80,7 +80,7 @@ from typing import IO, BinaryIO
 
 from lib.codex_sandbox import for_device
 from lib.device_monitor import remote_target
-from lib.device_pool import DevicePool, Placement, link_drop_detail, placed_account, read_autostart
+from lib.device_pool import DevicePool, Placement, link_drop_detail, read_autostart, run_account
 from lib.harness_env import account_tokens
 from lib.job_run import OUTPUT_GRACE_SECONDS, Budget
 from lib.job_state import (
@@ -92,7 +92,7 @@ from lib.job_state import (
     record_job_event,
     requeue_unstarted,
 )
-from lib.machines_yml import Device, MachinesConfig, default_account
+from lib.machines_yml import Device, MachinesConfig
 from lib.process_tree import run_tag, scope_of, scope_unit
 from lib.queue import SLOTS_TABLE, Proof, QueueError, SQLiteJobQueue, require_proof
 from lib.remote import (
@@ -676,9 +676,8 @@ def prepare(
         mapped = device.harnesses.get(placement.harness)
         if mapped != bot:
             raise PlacementError(f"device {device.name} maps {owner} to {mapped}, not {bot}")
-    account = placed_account(config, placement) or default_account(owner)
     try:
-        account_home = config.account_home(device.name, owner, account)
+        account, account_home = run_account(config, placement)
     except ValueError as exc:
         raise PlacementError(f"job {job_id}: {exc}") from None
     runner = os.getpid() if pid is None else pid
