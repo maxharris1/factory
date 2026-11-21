@@ -2524,8 +2524,9 @@ def test_r1_f12_malformed_or_unsafe_pid_records_are_unknown_and_never_stopped(
 # F1.3: a new runner must not start while an earlier runner's worker lives.
 
 
+@pytest.mark.parametrize("sigkill", ["prompt", "late"])
 def test_r1_f13_box_takeover_is_refused_while_the_dead_runners_worker_lives(
-    tmp_path: Path,
+    tmp_path: Path, sigkill: str
 ) -> None:
     machines = machines_file(tmp_path, pc=False)
     queue = SQLiteJobQueue(tmp_path / "orch.db", clock=time.time)
@@ -2557,12 +2558,27 @@ def test_r1_f13_box_takeover_is_refused_while_the_dead_runners_worker_lives(
         assert pool.placement(job_id).worker_pid == worker  # identity kept
 
         queue.finish(job_id, owner="claude", handoff_comment_id="c1")
-        monitor = DeviceMonitor(pool, config_of(machines), FakeTransport())
-        assert monitor.reconcile(time.time(), 600.0, lambda *_: None).released == ()
-        assert pool.placement(job_id) is not None
-        kill_quietly(worker)
+        late: list[int] = []
+
+        def kill(pid: int, sig: int) -> None:
+            if sigkill == "late" and sig == signal.SIGKILL:
+                late.append(pid)
+            else:
+                os.kill(pid, sig)
+
+        monitor = DeviceMonitor(pool, config_of(machines), FakeTransport(), kill=kill)
+        first_look = monitor.reconcile(time.time(), 600.0, lambda *_: None)
+        assert first_look.stopped == (job_id,)
+        if sigkill == "late":
+            assert first_look.released == () and late == [worker]
+            assert pool.placement(job_id) is not None
+            os.kill(worker, signal.SIGKILL)
         assert wait_gone(worker)
-        assert monitor.reconcile(time.time(), 600.0, lambda *_: None).released == (job_id,)
+        released = first_look.released or monitor.reconcile(
+            time.time(), 600.0, lambda *_: None
+        ).released
+        assert released == (job_id,)
+        assert pool.placement(job_id) is None
     finally:
         kill_quietly(worker)
         if first.poll() is None:
