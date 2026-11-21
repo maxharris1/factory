@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from typing import TYPE_CHECKING, Literal, Protocol
 
+from lib.followups import split_record
+
 if TYPE_CHECKING:
+    from lib.dispatcher import Comment
     from lib.feeder import IssueRecord
 
 ABANDONED_LABEL = "orch:state/abandoned"
@@ -25,6 +28,27 @@ class SplitParentGitHub(Protocol):
 
 def _done(child: IssueRecord, merged: Collection[int]) -> bool:
     return (child.state == "closed" and child.reason == "completed") or child.number in merged
+
+
+def split_evidence(
+    body: str,
+    comments: Iterable[Comment],
+    trusted: Collection[str],
+    children: Sequence[IssueRecord],
+) -> str | None:
+    if children:
+        return "split into " + ", ".join(f"#{child.number}" for child in children)
+    if record := split_record(body):
+        return record
+    trusted = {login.lower() for login in trusted}
+    return next(
+        (
+            record
+            for comment in comments
+            if comment.author.lower() in trusted and (record := split_record(comment.body))
+        ),
+        None,
+    )
 
 
 def close_split_parent(

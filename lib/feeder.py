@@ -255,7 +255,7 @@ from lib.queue import (
     rank,
     set_ticket_priority,
 )
-from lib.split_parent import close_split_parent
+from lib.split_parent import close_split_parent, split_evidence
 from lib.ticket_type import TICKET_TYPES
 
 FEEDER_TABLE = "feeder_items"
@@ -277,6 +277,7 @@ STATES = (
     "waiting-capacity",
     "waiting-blocked",
     "refused-intake",
+    "split-parent",
     "feeding",
     "error",
     "fed",
@@ -284,7 +285,7 @@ STATES = (
     "closed",
 )
 FEED_NOT_BEGUN = "branch IS NULL"
-UNSTARTED = ("eligible", "waiting-capacity", "waiting-blocked", "refused-intake")
+UNSTARTED = ("eligible", "waiting-capacity", "waiting-blocked", "refused-intake", "split-parent")
 IN_FLIGHT = ("feeding", "error")
 FED = ("fed", "done")
 FINAL = (*FED, "closed")
@@ -636,6 +637,8 @@ class GitHubIntake(Protocol):
 
     def find_pull(self, repo: str, branch: str) -> int | None: ...
 
+    def branch_pulls(self, repo: str, branch: str) -> Sequence[int]: ...
+
     def ahead_commits(self, repo: str, base: str, tip: str) -> Sequence[str]: ...
 
     def open_pull_commits(self, repo: str) -> Mapping[int, OpenPull]: ...
@@ -819,6 +822,12 @@ class _Held(Exception):
     def __init__(self, wait: Wait):
         super().__init__(wait.reason)
         self.wait = wait
+
+
+class _SplitParent(Exception):
+    def __init__(self, evidence: str):
+        super().__init__(evidence)
+        self.evidence = evidence
 
 
 def _key_order(key: str) -> tuple[int, int, str]:
@@ -1080,21 +1089,25 @@ class Feeder:
         self._mark_done()
         states = {candidate.ref: self._state(candidate) for candidate in candidates}
         begun = {c.ref for c in candidates if self._row(c)["branch"] is not None}
+        split = {c.ref for c in candidates if states[c.ref] == "split-parent"}
         unread, map_errors = self._add_map_defects(candidates, states)
         refused = {
             candidate.ref
             for candidate in candidates
-            if states[candidate.ref] in UNSTARTED and candidate.template.defects
+            if states[candidate.ref] in UNSTARTED
+            and candidate.template.defects
+            and candidate.ref not in split
         }
+        skip = refused | split
         writes = [self._refuse(candidate) for candidate in candidates if candidate.ref in refused]
-        writes += [_state_write(c, "eligible") for c in candidates if c.ref in unread - refused]
+        writes += [_state_write(c, "eligible") for c in candidates if c.ref in unread - skip]
         self._sync_intake_attention(
             [c for c in candidates if c.ref in refused], read_repos, now
         )
         waits, critical, holds, capped, gate_read, unblocks, tiers = self._gates(
-            candidates, states, refused
+            candidates, states, skip
         )
-        stops, stop_errors = self._line_stops(candidates, begun, refused, mains)
+        stops, stop_errors = self._line_stops(candidates, begun, skip, mains)
         for candidate in candidates:
             candidate.unblocks = unblocks[candidate.ref]
             candidate.effective_tier = tiers[candidate.ref]
@@ -1116,7 +1129,7 @@ class Feeder:
                 order[0],
             )
             order.remove(candidate)
-            if candidate.ref in refused or candidate.ref in unread:
+            if candidate.ref in skip or candidate.ref in unread:
                 continue
             state = self._state(candidate)
             if state in FINAL:
@@ -1148,6 +1161,13 @@ class Feeder:
                 room[candidate.harness] += 1
                 writes.append(_state_write(candidate, "waiting-blocked", reason=held.wait.reason))
                 blocked += 1
+                continue
+            except _SplitParent as refusal:
+                holds.drop(candidate.ref)
+                room[candidate.harness] += 1
+                reason = f"already split into parts ({refusal.evidence})"
+                writes.append(_state_write(candidate, "split-parent", reason=reason))
+                self.log(f"feeder: {candidate.issue.repo}#{candidate.issue.key} refused: {reason}")
                 continue
             except Exception as exc:  # one ticket's failure never stops the poll
                 errors += 1
@@ -2394,6 +2414,9 @@ class Feeder:
         issue = candidate.issue
         config = candidate.context.config
         row = self._row(candidate)
+        evidence = self._split_evidence(candidate, row)
+        if evidence is not None:
+            raise _SplitParent(evidence)
         branch = row["branch"] or self._branch_for(issue)
         if not _BRANCH.fullmatch(branch) or ".." in branch:
             raise ValueError(f"branch name {branch!r} is not safe")
@@ -2605,6 +2628,22 @@ class Feeder:
         )
         self.log(f"feeder: {repo}#{ticket_id} held: {wait.reason}")
         return wait
+
+    def _split_evidence(self, candidate: _Candidate, row: sqlite3.Row) -> str | None:
+        issue = candidate.issue
+        if issue.tracker != "github":
+            return None
+        repo = candidate.project.repo
+        number = int(issue.key)
+        children = self.github.split_children(repo, number)
+        pulls = set(self.github.branch_pulls(repo, row["branch"] or self._branch_for(issue)))
+        if row["pr_number"]:
+            pulls.add(int(row["pr_number"]))
+        comments = list(self.github.comments(repo, number))
+        for pull in sorted(pulls):
+            comments += self.github.comments(repo, pull)
+        trusted = intake_trusted(self.config, candidate.project) | self._orchestrator_authors("github")
+        return split_evidence(issue.body, comments, trusted, children)
 
     def _orchestrator_authors(self, tracker: str) -> frozenset[str]:
         """Who may have posted the orchestrator's own brief or go (#87 F1.3).

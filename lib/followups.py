@@ -14,6 +14,7 @@ finds the earlier write instead of repeating it.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from markdown_it import MarkdownIt
@@ -23,6 +24,8 @@ from lib.handoff import plan_estimate
 
 ISSUE_BODY_LIMIT = 65536
 _SPLIT_FROM = re.compile(r"^Split from #(\d+)\b")
+_SPLIT_LINK = re.compile(r"<!-- orch-split-link plan=\S+ -->")
+_SPLIT_INTO = re.compile(r"^\W{0,4}Split into #(\d+)\b", re.IGNORECASE)
 _MARKDOWN = MarkdownIt("commonmark")
 _TAG = "[follow-up]"
 _CUT_NOTE = "Some findings were cut to fit GitHub's issue size limit; the verdict has them all."
@@ -274,7 +277,7 @@ def split_issue(
     return (part.title or f"Part {number} of #{issue}")[:256], body
 
 
-def split_parent(body: str) -> int | None:
+def _unfenced_lines(body: str) -> Iterator[str]:
     text = re.sub(r"\r\n?", "\n", body or "")
     code = {
         index
@@ -283,9 +286,23 @@ def split_parent(body: str) -> int | None:
         for index in range(*token.map)
     }
     for index, line in enumerate(text.split("\n")):
-        match = None if index in code else _SPLIT_FROM.match(line)
+        if index not in code:
+            yield line
+
+
+def split_parent(body: str) -> int | None:
+    for line in _unfenced_lines(body):
+        match = _SPLIT_FROM.match(line)
         if match:
             return int(match.group(1))
+    return None
+
+
+def split_record(text: str) -> str | None:
+    for line in _unfenced_lines(text):
+        line = line.strip()
+        if _SPLIT_LINK.fullmatch(line) or _SPLIT_INTO.match(line):
+            return line
     return None
 
 

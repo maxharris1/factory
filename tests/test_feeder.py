@@ -210,6 +210,13 @@ class FakeGitHub:
                 return number
         return None
 
+    def branch_pulls(self, repo: str, branch: str) -> tuple[int, ...]:
+        self.calls.append(f"branch-pulls:{repo}:{branch}")
+        return tuple(
+            number for (pull_repo, number), pull in sorted(self.pulls.items())
+            if pull_repo == repo and pull["head"] == branch
+        )
+
     def pull_state(self, repo: str, number: int) -> str:
         pull = self.pulls[(repo, number)]
         if pull.get("merged"):

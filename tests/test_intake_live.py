@@ -328,6 +328,13 @@ def test_find_pull_takes_the_oldest_of_two_open_prs() -> None:
     assert GitHubIntakeClient(gh).find_pull("owner/app", "factory/issue-85") == 90
 
 
+def test_branch_pulls_lists_every_pr_on_the_branch_whatever_its_state() -> None:
+    gh = RecordedGh()
+    other = pull(7, "open", branch="factory/issue-850")
+    gh.route(FIND, ok([pull(95, "open"), pull(12, "closed", merged=True), pull(14, "closed"), other]))
+    assert GitHubIntakeClient(gh).branch_pulls("owner/app", "factory/issue-85") == (12, 14, 95)
+
+
 @pytest.mark.parametrize(
     ("served", "state"),
     [
