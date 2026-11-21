@@ -250,8 +250,8 @@ def test_the_poller_gates_ticket_ci_on_the_required_checks(
     assert polled(GATED_FACTORY).status == with_key
 
 
-def gated_board(tmp_path: Path, raw: dict[str, CIResult]):
-    board = board_with(tmp_path, on=False)
+def gated_board(tmp_path: Path, raw: dict[str, CIResult], *, on: bool = False):
+    board = board_with(tmp_path, on=on)
     board.factory = replace(board.factory, ci_required_checks=GATE)
     snapshot = board.snapshot
 
@@ -310,12 +310,12 @@ def test_t2_queues_a_ci_fix_on_a_red_ci_ok(tmp_path: Path) -> None:
 
     assert board.outcome(ready) == "queued-ci-fix"
     [fix] = [job for job in board.jobs("fix") if job["source_comment_id"] == ready]
-    assert "ci-ok" in json.dumps(json.loads(fix["detail"]).get("ci_failure"))
+    assert json.loads(fix["detail"])["instruction"] == "failed: ci-ok"
 
 
 def test_ship_proceeds_on_a_green_ci_ok_while_another_job_is_still_queued(tmp_path: Path) -> None:
     raw = {sha(1): CIResult("pending")}
-    board = gated_board(tmp_path, raw)
+    board = gated_board(tmp_path, raw, on=True)
     pr = built_with_ci_pending(board, sha(1))
     reviewed_at_pending_ci(board, pr, pr.head)
     raw[sha(1)] = GREEN_BESIDE_QUEUED
@@ -327,7 +327,7 @@ def test_ship_proceeds_on_a_green_ci_ok_while_another_job_is_still_queued(tmp_pa
 
 def test_ship_waits_on_a_missing_ci_ok_even_when_every_other_job_is_green(tmp_path: Path) -> None:
     raw = {sha(1): CIResult("pending")}
-    board = gated_board(tmp_path, raw)
+    board = gated_board(tmp_path, raw, on=True)
     pr = built_with_ci_pending(board, sha(1))
     reviewed_at_pending_ci(board, pr, pr.head)
     raw[sha(1)] = adapter(row("lint", "success"), row("test (1)", "success"))
