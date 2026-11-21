@@ -81,3 +81,10 @@ def test_a_blocked_brief_still_says_the_brief_wins_and_asks_for_no_title(case: s
     assert "Do not start the work." in text
     assert text.count(OUTRANKS) == 1
     assert title_lines(text) == []
+
+
+@pytest.mark.parametrize("name", ["plan-github#0", "plan-github#1"])
+def test_the_plan_brief_says_the_parent_issue_closes_when_its_last_part_merges(name: str) -> None:
+    text = dict(BRIEFS)[name]
+    assert "closes this one" not in text
+    assert "The parent issue closes when its last part merges." in text
