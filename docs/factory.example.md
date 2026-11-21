@@ -24,6 +24,7 @@ ship: merge
 # ci:  # optional; the bases CI runs on. A PR into another base gets no CI wait, and briefs ask for local results
 #   branches: [main]
 #   local_checks: [pytest]
+#   required_checks: [ci-ok]  # optional; parsed only until #1275's second part adds the PR gate, so leave unset
 # qa:  # optional; what the QA lane must run. The dispatcher queues qa jobs from it (section 4.2.1)
 #   enabled: true
 #   gate: report  # report posts the result; block gates the ship
