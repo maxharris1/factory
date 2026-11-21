@@ -1096,6 +1096,8 @@ def generated_scripts(target: remote.RemoteTarget) -> dict[str, str]:
         "stop": remote.stop_script(target),
         "kill": remote.stop_script(target, kill=True),
         "fenced check": remote.fenced_check_script(target),
+        "leftovers": remote.leftovers_script(f"{target.workdir_root}/jobs"),
+        "reap": remote.reap_script(target),
     }
 
 
