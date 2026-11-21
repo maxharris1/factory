@@ -4,9 +4,13 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import lib.queue
+from lib.dispatch import bookkeeping
+from lib.dispatch.bookkeeping import LockLedger
 from lib.feeder import IntakeIssue, IssueRecord, _pull_body
 from lib.intake_live import GitHubIntakeClient
-from tests.test_feeder import FakeGitHub, make_feeder
+from tests.test_feeder import FakeGitHub, issue, make_feeder, rows
+from tests.test_poll_lock_defer import hold_lock
 from tests.test_github_actions import RecordedGh
 from tests.test_intake_live import ok, reference, search, timeline
 
@@ -377,6 +381,79 @@ def test_a_follow_up_merged_right_after_a_fresh_start_closes_the_parent(tmp_path
 
     assert github.filed[(REPO, 12)]["state"] == "open"
     assert parent(github)["state"] == "closed"
+
+
+def test_a_follow_up_merged_after_a_locked_first_poll_closes_the_parent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(lib.queue, "BUSY_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(bookkeeping, "BOOKKEEPING_BUSY_SECONDS", 0.01)
+    monkeypatch.setattr(bookkeeping.time, "sleep", lambda seconds: None)
+    clock = [START]
+    github = FakeGitHub()
+    github.clock = lambda: clock[0]
+    github.filed[(REPO, PARENT)] = {
+        "title": "Parent", "body": "x\n", "state": "open", "labels": ("factory:ready",),
+    }
+    github.filed[(REPO, 11)] = {
+        "title": "Part", "body": auto_part(1), "state": "closed", "reason": "completed",
+        "closed_at": START - 86_400, "labels": (),
+    }
+    github.filed[(REPO, 12)] = {
+        "title": "Follow-up", "body": FOLLOW_UP, "state": "open", "labels": ("factory:ready",),
+    }
+    github.issues[REPO] = [issue(12, body=FOLLOW_UP)]
+    feeder, queue, github, _ = make_feeder(tmp_path, github=github, now=clock)
+    lock = hold_lock(queue.path)
+    read_mains = feeder._main_reads
+
+    def release_then_read(contexts):
+        lock.execute("ROLLBACK")
+        return read_mains(contexts)
+
+    feeder._main_reads = release_then_read
+    assert len(feeder.feed_once().fed) == 1
+    del feeder._main_reads
+
+    with queue.connect() as connection:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS ticket_state "
+            "(repo TEXT NOT NULL, ticket_id TEXT NOT NULL, workflow_state TEXT, "
+            "PRIMARY KEY (repo, ticket_id))"
+        )
+        connection.execute(
+            "INSERT INTO ticket_state (repo, ticket_id, workflow_state) VALUES (?, ?, 'merged')",
+            (REPO, rows(queue.path)["12"]["ticket_id"]),
+        )
+    for _ in range(5):
+        poll(feeder, clock)
+
+    assert github.filed[(REPO, 12)]["state"] == "open"
+    assert f"issue-record:{REPO}#12" in github.calls
+    assert parent(github)["state"] == "closed"
+
+
+def test_parts_merged_before_the_upgrade_are_never_read(tmp_path: Path) -> None:
+    clock = [START]
+    github = FakeGitHub()
+    github.clock = lambda: clock[0]
+    github.filed[(REPO, PARENT)] = {
+        "title": "Parent", "body": "x\n", "state": "open", "labels": ("factory:ready",),
+    }
+    github.filed[(REPO, 11)] = {
+        "title": "Part", "body": auto_part(1), "state": "open", "labels": (),
+    }
+    _, queue, _, _ = make_feeder(tmp_path, github=github, now=clock)
+    merge_in_orch(queue, 11)
+    with queue.connect() as connection:
+        connection.execute("ALTER TABLE feeder_items DROP COLUMN split_noted")
+
+    feeder, _, github, _ = make_feeder(tmp_path, github=github, now=clock)
+    feeder.feed_once()
+    poll(feeder, clock)
+
+    assert not any(call.startswith("issue-record:") for call in github.calls)
+    assert parent(github)["state"] == "open"
 
 
 def test_a_failed_first_read_does_not_swallow_a_later_merge(tmp_path: Path) -> None:

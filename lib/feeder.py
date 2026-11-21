@@ -904,6 +904,18 @@ def ensure_tables(connection: sqlite3.Connection) -> None:
     for name, kind in _COLUMNS:
         if name not in present:
             connection.execute(f"ALTER TABLE {FEEDER_TABLE} ADD COLUMN {name} {kind}")
+    if "split_noted" not in present and _has_merge_states(connection):
+        connection.execute(
+            f"""
+            UPDATE {FEEDER_TABLE} SET split_noted = 1
+            WHERE tracker = 'github' AND EXISTS (
+                SELECT 1 FROM ticket_state AS ticket
+                WHERE lower(ticket.repo) = {FEEDER_TABLE}.repo
+                  AND ticket.ticket_id = {FEEDER_TABLE}.ticket_id
+                  AND ticket.workflow_state = 'merged'
+            )
+            """
+        )
     attention.ensure_table(connection)
     connection.execute(
         f"CREATE TABLE IF NOT EXISTS {POLL_TABLE} "
@@ -967,13 +979,17 @@ def last_feeder_poll(connection: sqlite3.Connection) -> float | None:
     return None if row is None else float(row[0])
 
 
+def _has_merge_states(connection: sqlite3.Connection) -> bool:
+    if not _has_table(connection, "ticket_state"):
+        return False
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(ticket_state)")}
+    return {"repo", "ticket_id", "workflow_state"} <= columns
+
+
 def _merged_issues(
     connection: sqlite3.Connection, repo: str, *, unnoted: bool = False
 ) -> frozenset[int]:
-    if not _has_table(connection, "ticket_state"):
-        return frozenset()
-    columns = {row[1] for row in connection.execute("PRAGMA table_info(ticket_state)")}
-    if not {"repo", "ticket_id", "workflow_state"} <= columns:
+    if not _has_merge_states(connection):
         return frozenset()
     rows = connection.execute(
         f"""
@@ -1204,13 +1220,11 @@ class Feeder:
             pending = dict(connection.execute(
                 f"SELECT parent, checked_at FROM {SPLIT_UNSETTLED_TABLE} WHERE repo = ?", (key,)
             ).fetchall())
-        if row is not None:
-            cursor = float(row[0])
-        else:
-            started = self._start_split_cursor_noting_merged(key, now)
-            if started is None:
-                return 0
-            cursor = started
+            if row is not None:
+                cursor = float(row[0])
+            else:
+                last = last_feeder_poll(connection)
+                cursor = now if last is None else last - SPLIT_CURSOR_OVERLAP_SECONDS
         try:
             closed = self.github.closed_issues_since(repo, cursor)
         except Exception as exc:
@@ -1274,23 +1288,6 @@ class Feeder:
 
         bookkeeping_write(self.queue.connect, work, site="_close_split_parents", ledger=self.ledger)
         return errors
-
-    def _start_split_cursor_noting_merged(self, key: str, now: float) -> float | None:
-        with self.queue.connect() as connection:
-            last = last_feeder_poll(connection)
-        at = now if last is None else last
-
-        def work(connection: sqlite3.Connection) -> None:
-            connection.execute(f"INSERT INTO {SPLIT_CURSOR_TABLE} (repo, at) VALUES (?, ?)", (key, at))
-            connection.executemany(
-                f"UPDATE {FEEDER_TABLE} SET split_noted = 1 WHERE repo = ? AND issue = ?",
-                [(key, str(issue)) for issue in _merged_issues(connection, key, unnoted=True)],
-            )
-
-        written = bookkeeping_write(
-            self.queue.connect, work, site="_start_split_cursor", ledger=self.ledger
-        )
-        return at if written else None
 
     def _merged_issues(self, repo: str, *, unnoted: bool = False) -> frozenset[int]:
         with self.queue.connect() as connection:

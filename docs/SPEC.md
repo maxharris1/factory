@@ -1129,13 +1129,16 @@ late filer cannot clear that barrier. A fed issue stays open and only its row en
 the issue's state cannot be read, the green read keeps the row and the next
 poll tries again. Split parents (issue #1260): each poll the feeder reads
 the issues closed in each `tickets: github` intake repo since a per-repo
-cursor (`feeder_split_cursor`; with none it reads from the last poll, and a
-first poll reads nothing, so parents closed before are never read). A part
+cursor (`feeder_split_cursor`; with none it reads from the last poll less
+120 seconds, and a first poll reads nothing, so parents closed before are
+never read). A part
 closed completed whose body has an unfenced `Split from #<parent>` line
 triggers its parent. So does a part whose ticket turns `merged` in orch
 while its issue stays open (a stacked PR merged into a non-default base):
 the feeder reads each newly merged issue's body once and marks its row
-`split_noted`. A triggered parent looks up the full sibling set: every issue
+`split_noted`. The schema upgrade that adds `split_noted` marks every row
+already `merged` then, so merges from before the upgrade are never read, and
+a poll writes nothing to start its cursor. A triggered parent looks up the full sibling set: every issue
 in the repo whose body says `Split from #<parent>`, the auto-split parts and
 any later follow-up alike, found by issue search or by the parent's timeline
 cross-references. The search index can lag a new or changed issue, and the
