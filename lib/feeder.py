@@ -637,6 +637,8 @@ class GitHubIntake(Protocol):
 
     def find_pull(self, repo: str, branch: str) -> int | None: ...
 
+    def branch_pulls(self, repo: str, branch: str) -> Sequence[int]: ...
+
     def ahead_commits(self, repo: str, base: str, tip: str) -> Sequence[str]: ...
 
     def open_pull_commits(self, repo: str) -> Mapping[int, OpenPull]: ...
@@ -2634,13 +2636,11 @@ class Feeder:
         repo = candidate.project.repo
         number = int(issue.key)
         children = self.github.split_children(repo, number)
+        pulls = set(self.github.branch_pulls(repo, row["branch"] or self._branch_for(issue)))
+        if row["pr_number"]:
+            pulls.add(int(row["pr_number"]))
         comments = list(self.github.comments(repo, number))
-        pull = (
-            int(row["pr_number"])
-            if row["pr_number"]
-            else self.github.find_pull(repo, row["branch"] or self._branch_for(issue))
-        )
-        if pull is not None:
+        for pull in sorted(pulls):
             comments += self.github.comments(repo, pull)
         trusted = intake_trusted(self.config, candidate.project) | self._orchestrator_authors("github")
         return split_evidence(issue.body, comments, trusted, children)

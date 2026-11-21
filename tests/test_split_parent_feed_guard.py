@@ -167,3 +167,29 @@ def test_split_evidence_trusts_children_body_and_trusted_comments_only() -> None
     said = (comment("Stranger", "Split into #9."),)
     assert split_evidence("x", said, frozenset({"maxharris1"}), ()) is None
     assert split_evidence("x", said, frozenset({"stranger"}), ()) == "Split into #9."
+
+
+def test_a_split_link_only_on_a_closed_pr_is_refused_without_children(tmp_path: Path) -> None:
+    feeder, github, logs, _ = board(tmp_path, 1078)
+    github.branches[(REPO, "factory/issue-1078")] = "b" * 40
+    github.pulls[(REPO, 1181)] = {"head": "factory/issue-1078", "base": "main", "state": "closed"}
+    github.posted[(REPO, 1181)] = [comment("maxharris1", split_comment("7042654207", (1183, 1184)))]
+    before = {key: list(value) for key, value in github.posted.items()}
+
+    row = assert_refused(feeder.feed_once(), github, 1078, before, tmp_path / "orch.db")
+
+    assert "orch-split-link plan=7042654207" in row["waiting_reason"]
+    assert any("owner/app#1078 refused: already split into parts" in line for line in logs)
+
+
+def test_a_split_link_on_an_older_merged_pr_is_refused_beside_a_new_open_one(tmp_path: Path) -> None:
+    feeder, github, _, _ = board(tmp_path, 21)
+    github.branches[(REPO, "factory/issue-21")] = "d" * 40
+    github.pulls[(REPO, 22)] = {"head": "factory/issue-21", "base": "main", "state": "closed", "merged": True}
+    github.pulls[(REPO, 25)] = {"head": "factory/issue-21", "base": "main"}
+    github.posted[(REPO, 22)] = [comment("maxharris1", "Split into #23 and #24.")]
+    before = {key: list(value) for key, value in github.posted.items()}
+
+    row = assert_refused(feeder.feed_once(), github, 21, before, tmp_path / "orch.db")
+
+    assert "Split into #23" in row["waiting_reason"]

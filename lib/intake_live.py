@@ -481,6 +481,17 @@ class GitHubIntakeClient(GitHubReviewActions):
         the poller does not discover it, so its brief and go would go
         nowhere.
         """
+        numbers = sorted(
+            item["number"]
+            for item in self._branch_pull_items(repo, branch)
+            if item.get("state") == "open" and item.get("merged_at") is None
+        )
+        return numbers[0] if numbers else None
+
+    def branch_pulls(self, repo: str, branch: str) -> tuple[int, ...]:
+        return tuple(sorted(item["number"] for item in self._branch_pull_items(repo, branch)))
+
+    def _branch_pull_items(self, repo: str, branch: str) -> list[dict]:
         owner = repo.split("/", 1)[0]
         endpoint = (
             f"{_repo_path(repo)}/pulls?state=all&per_page=100"
@@ -489,17 +500,14 @@ class GitHubIntakeClient(GitHubReviewActions):
         pulls = self._json(endpoint)
         if not isinstance(pulls, list):
             raise GitHubAdapterError("pulls list is not a list")
-        numbers = sorted(
-            item["number"]
+        return [
+            item
             for item in pulls
             if isinstance(item, dict)
             and isinstance(item.get("number"), int)
             and not isinstance(item.get("number"), bool)
-            and item.get("state") == "open"
-            and item.get("merged_at") is None
             and ((item.get("head") or {}).get("ref") == branch)
-        )
-        return numbers[0] if numbers else None
+        ]
 
     def ahead_commits(self, repo: str, base: str, tip: str) -> tuple[str, ...]:
         """The commits on tip that base lacks (#205). The compare read
