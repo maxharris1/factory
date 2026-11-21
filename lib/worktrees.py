@@ -534,7 +534,7 @@ def _live_owner(data: dict) -> int | None:
     if stat is not None and stat.zombie:
         return None
     recorded = data.get("pid_start")
-    if recorded is not None and (stat is None or stat.start != recorded):
+    if recorded is not None and stat is not None and stat.start != recorded:
         return None  # the pid was reused by an unrelated process
     return pid
 
@@ -574,7 +574,7 @@ def pid_gone(pid: int, start: str | None) -> bool:
 
 
 def parent_pid(pid: int) -> int | None:
-    """A pid's parent, from /proc/<pid>/stat (field 4); None if unknown."""
+    """A pid's parent; None if unknown."""
     stat = _proc_stat(pid)
     return stat.ppid if stat is not None else None
 
@@ -592,7 +592,6 @@ def descends_from(pid: int, ancestor: int, *, parent=parent_pid, limit: int = 64
 
 
 def _process_start(pid: int) -> str | None:
-    """Field 22 of /proc/<pid>/stat, so a reused pid is not mistaken for the owner."""
     stat = _proc_stat(pid)
     return stat.start if stat is not None else None
 
@@ -604,6 +603,8 @@ class _ProcStat(NamedTuple):
 
 
 def _proc_stat(pid: int) -> _ProcStat | None:
+    if not os.path.isdir("/proc/self"):
+        return _ps_stat(pid)
     try:
         text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     except OSError:
@@ -614,6 +615,21 @@ def _proc_stat(pid: int) -> _ProcStat | None:
         ppid=int(fields[1]) if len(fields) > 1 and fields[1].isdigit() else None,
         start=fields[19] if len(fields) > 19 else None,
     )
+
+
+def _ps_stat(pid: int) -> _ProcStat | None:
+    try:
+        done = subprocess.run(
+            ["ps", "-o", "stat=,ppid=,lstart=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=30,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    fields = done.stdout.split(None, 2)
+    if done.returncode != 0 or len(fields) < 3 or not fields[1].isdigit():
+        return None
+    return _ProcStat(zombie=fields[0].startswith("Z"), ppid=int(fields[1]), start=fields[2].strip())
 
 
 @contextmanager

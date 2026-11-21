@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import cli, job_run, process_tree
+from lib import cli, job_run, process_tree, worktrees
 from lib.device_pool import DevicePool
 from lib.dispatcher import Dispatcher
 from lib.machines_yml import load_machines_yml
@@ -208,6 +208,46 @@ def test_cleanup_by_ps_never_counts_the_ps_it_ran_as_a_run_process() -> None:
     try:
         process_tree.Tree(child.pid, "tag", scan=scan, adopts=True, others=before).end(lambda _line: None)
         assert child.wait(5) == -signal.SIGKILL
+    finally:
+        child.kill()
+        child.wait()
+
+
+@pytest.mark.parametrize("table", ["proc", "ps"])
+def test_a_recorded_start_is_the_start_the_process_listing_shows(
+    monkeypatch: pytest.MonkeyPatch, table: str
+) -> None:
+    if table == "proc" and not os.path.isdir("/proc/self"):
+        pytest.skip("reads /proc")
+    if table == "ps":
+        isdir = os.path.isdir
+        monkeypatch.setattr(os.path, "isdir", lambda path: path != "/proc/self" and isdir(path))
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+    try:
+        start = worktrees.process_start(child.pid)
+        assert start is not None, "a box run's pids are recorded with a start time"
+        assert start == process_tree.processes(None)[child.pid].start
+        assert worktrees.pid_alive(child.pid, start)
+        assert not worktrees.pid_alive(child.pid, start + "0")
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_a_live_pid_whose_start_cannot_be_read_is_not_taken_for_a_reused_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    isdir = os.path.isdir
+    monkeypatch.setattr(os.path, "isdir", lambda path: path != "/proc/self" and isdir(path))
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+    try:
+        start = worktrees.process_start(child.pid)
+
+        def denied(*_args, **_kwargs):
+            raise PermissionError("ps: Operation not permitted")
+
+        monkeypatch.setattr(worktrees.subprocess, "run", denied)
+        assert worktrees.pid_alive(child.pid, start), "an unreadable start leaves the owner live"
     finally:
         child.kill()
         child.wait()

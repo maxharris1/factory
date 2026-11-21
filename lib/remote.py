@@ -162,7 +162,7 @@ import shlex
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import NamedTuple, Protocol, runtime_checkable
 
 from lib.github_app_token import TOKEN_VARIABLES
 from lib.handoff_marker import MARKER_LINE_LIMIT, MARKER_PREFIX, MARKER_SEARCH_LINES, RUNNER_LOG_PREFIX
@@ -1076,6 +1076,69 @@ def run_file(target: RemoteTarget, name: str) -> str:
 def env_clear_script(target: RemoteTarget) -> str:
     """Remove the start's environment report once the box has it."""
     return _sh(f"rm -f -- {shlex.quote(run_file(target, ENV_FILE))}")
+
+
+SWEPT_FILE = "swept"
+LEFTOVER_MARK = "orch-leftover:"
+REAP_MARK = "orch-reap:"
+
+
+@dataclass(frozen=True)
+class ListedRun:
+    job_id: str
+    tag: str
+    ended: bool
+
+
+def leftovers_script(jobs_dir: str) -> str:
+    return _sh(
+        f"cd -- {shlex.quote(jobs_dir)} 2>/dev/null || exit 0; "
+        'for r in *.run/*/; do r=${r%/}; j=${r%%.run/*}; t=${r#*.run/}; '
+        '[ -d "$r" ] && [ ! -L "$r" ] && [ ! -L "$j.run" ] || continue; '
+        'case "$j" in ""|*[!A-Za-z0-9_-]*) continue;; esac; '
+        'case "$t" in *[!0-9a-f]*) continue;; esac; '
+        f'[ ${{#t}} = 32 ] && [ ! -e "$r/{SWEPT_FILE}" ] || continue; '
+        'e=1; if [ ! -e "$r/exit" ]; then p=; { read -r p < "$r/pid"; } 2>/dev/null; '
+        'for q in $p; do kill -0 "$q" 2>/dev/null && e=0; done; fi; '
+        f'echo "{LEFTOVER_MARK} $j $t $e"; done'
+    )
+
+
+class Listing(NamedTuple):
+    runs: list[ListedRun]
+    unreadable: int
+
+
+def read_leftovers(stdout: str) -> Listing:
+    runs: list[ListedRun] = []
+    unreadable = 0
+    for line in stdout.splitlines():
+        if not line.startswith(LEFTOVER_MARK):
+            continue
+        match line[len(LEFTOVER_MARK):].split():
+            case [job_id, tag, ("0" | "1") as ended] if _JOB_ID.fullmatch(job_id) and _TAG.fullmatch(tag):
+                runs.append(ListedRun(job_id, tag, ended == "1"))
+            case _:
+                unreadable += 1
+    return Listing(runs, unreadable)
+
+
+def reap_script(target: RemoteTarget) -> str:
+    check = worker_check_script(target.job_dir, target.require_tag())
+    swept = shlex.quote(run_file(target, SWEPT_FILE))
+    return _sh(
+        f"({check}); b=$?; a=-; "
+        f'if [ "$b" != 0 ]; then ({stop_script(target, kill=True)}); ({check}); a=$?; fi; '
+        f'if [ "$b" = 0 ] || [ "$a" = 0 ]; then {{ : > {swept}; }} 2>/dev/null; fi; '
+        f'echo "{REAP_MARK} $b $a"'
+    )
+
+
+def read_reap(stdout: str) -> tuple[str, str | None] | None:
+    fields = (_marked(stdout, REAP_MARK) or "").split()
+    if len(fields) != 2 or not fields[0].isdigit() or not (fields[1].isdigit() or fields[1] == "-"):
+        return None
+    return worker_state(int(fields[0])), None if fields[1] == "-" else worker_state(int(fields[1]))
 
 
 def launch_script(
