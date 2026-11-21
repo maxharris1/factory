@@ -574,11 +574,13 @@ class GhCacheExpiries:
         )
 
 
-class RequiredGlobs:
-    """#1286: when each ci.required_checks glob was first seen on a base. The
-    first set seen is a baseline with no time: a running factory cannot tell
-    which of those globs are new."""
+def _dated(
+    stored: Mapping[str, float | None], wanted: Sequence[str], added_at: float | None = None
+) -> dict[str, float]:
+    return {glob: at for glob in wanted if (at := stored.get(glob, added_at)) is not None}
 
+
+class RequiredGlobs:
     def __init__(self, path: Path | None = None):
         self._connection = sqlite3.connect(
             ":memory:" if path is None else str(path), timeout=30, isolation_level=None
@@ -593,12 +595,12 @@ class RequiredGlobs:
 
     def observe(
         self, repo: str, base: str, globs: Sequence[str], now: float
-    ) -> dict[str, float | None]:
+    ) -> dict[str, float]:
         repo = repo.lower()
         wanted = tuple(dict.fromkeys(globs))
         stored = self._stored(repo, base)
         if stored is not None and set(stored) == set(wanted):
-            return {glob: stored[glob] for glob in wanted}
+            return _dated(stored, wanted)
         connection = self._connection
         connection.execute("BEGIN IMMEDIATE")
         try:
@@ -620,7 +622,7 @@ class RequiredGlobs:
         except BaseException:
             connection.execute("ROLLBACK")
             raise
-        return {glob: stored.get(glob, added_at) for glob in wanted}
+        return _dated(stored, wanted, added_at)
 
     def _stored(self, repo: str, base: str) -> dict[str, float | None] | None:
         if (
@@ -2064,7 +2066,7 @@ class LivePollSource:
             factory=factory,
             comments=comments,
             current_head=head,
-            ci={head: self._gated_ci(project.repo, number, factory, pull, ci, hold_inputs)},
+            ci={head: self._gated_ci(project.repo, number, number, factory, pull, ci, hold_inputs)},
             risk=self._intake_risk(project.repo, number, comments) or "high",
             job_timeout_minutes=resolve_job_timeout(self.config, project.repo),
             ticket_url=_optional_string(pull.get("html_url")),
@@ -2120,26 +2122,21 @@ class LivePollSource:
     def _gated_ci(
         self,
         repo: str,
+        ticket_id: str,
         number: str,
         factory: FactoryConfig,
         pull: Mapping[str, Any],
         raw: CIResult,
         hold_inputs: Mapping[str, Any],
     ) -> CIResult:
-        """The PR's CI gate, with a green from before a CI change pending
-        (#1286). The required set is observed on every read, so the time a
-        glob was added does not wait for a green head. A diff or commit read
-        that fails is recorded and leaves the head pending, as a failed hold
-        read leaves it held (#86)."""
         ci = pr_ci(raw, factory, _pr_base(pull))
         added = self.required_globs.observe(
             repo, factory.base_branch, factory.ci_required_checks, self.wall()
         )
-        changes = [
-            CIChange("required-set", at, (glob,)) for glob, at in added.items() if at is not None
-        ]
+        changes = [CIChange("required-set", at, (glob,)) for glob, at in added.items()]
         if ci.status != "success" or not factory.ci_force_rerun_paths:
             return ci_fresh(ci, tuple(changes), factory.ci_required_checks)
+        unread = CIResult("pending", pending=("CI freshness (unread)",), checks=ci.checks)
         try:
             files = (
                 hold_inputs["changed_files"]
@@ -2148,7 +2145,9 @@ class LivePollSource:
                     "files", repo, number, pull, lambda: self.github.pull_files(repo, number)
                 )
             )
-            if files is not None and any(
+            if files is None:
+                return unread
+            if any(
                 glob_matches(pattern, path)
                 for pattern in factory.ci_force_rerun_paths
                 for path in files
@@ -2159,10 +2158,8 @@ class LivePollSource:
                 )
                 changes.append(CIChange("head-workflow", at))
         except Exception as exc:
-            self._record(repo, number, exc)
-            files = None
-        if files is None:
-            return CIResult("pending", pending=("CI freshness (unread)",), checks=ci.checks)
+            self._record(repo, ticket_id, exc)
+            return unread
         return ci_fresh(ci, tuple(changes), factory.ci_required_checks)
 
     def _hold_inputs(
@@ -2372,7 +2369,7 @@ class LivePollSource:
             head = _pr_head(pull, project.repo, pr_number)
             pr_title = _open_title(pull)
             raw = self.github.ci_status(project.repo, head)
-            ci[head] = self._gated_ci(project.repo, pr_number, factory, pull, raw, {})
+            ci[head] = self._gated_ci(project.repo, identifier, pr_number, factory, pull, raw, {})
             github_comments = self.github.list_comments(project.repo, pr_number)
             comments = tuple(
                 sorted(

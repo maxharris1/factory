@@ -220,18 +220,15 @@ def test_the_first_observed_required_set_is_a_baseline_and_holds_nothing(tmp_pat
 
 def test_the_required_set_store_survives_a_restart_and_dates_only_additions(tmp_path: Path) -> None:
     path = tmp_path / "orch.db"
-    assert RequiredGlobs(path).observe("o/r", "main", ("lint",), BEFORE) == {"lint": None}
-    assert RequiredGlobs(path).observe("O/R", "main", ("lint", "ci-ok"), CHANGE) == {
-        "lint": None,
-        "ci-ok": CHANGE,
-    }
+    assert RequiredGlobs(path).observe("o/r", "main", ("lint",), BEFORE) == {}
+    assert RequiredGlobs(path).observe("O/R", "main", ("lint", "ci-ok"), CHANGE) == {"ci-ok": CHANGE}
+    assert RequiredGlobs(path).observe("o/r", "main", ("lint", "ci-ok"), AFTER) == {"ci-ok": CHANGE}
     assert RequiredGlobs(path).observe("o/r", "main", ("ci-ok",), AFTER) == {"ci-ok": CHANGE}
     assert RequiredGlobs(path).observe("o/r", "main", ("ci-ok", "lint"), AFTER) == {
         "ci-ok": CHANGE,
         "lint": AFTER,
     }
-    assert RequiredGlobs(path).observe("o/r", "release", ("lint",), AFTER) == {"lint": None}
-
+    assert RequiredGlobs(path).observe("o/r", "release", ("lint",), AFTER) == {}
 
 STALE = ci_fresh(CIResult("success", checks=(row("test", BEFORE),)), (WORKFLOW,), ())
 

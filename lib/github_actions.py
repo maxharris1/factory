@@ -796,7 +796,6 @@ class GitHubReviewActions:
         return tuple(events)
 
     def committed_at(self, repo: str, sha: str) -> float:
-        """The commit's committer date (#1286)."""
         commit = _object(self._json(f"{_repo_path(repo)}/commits/{_sha(sha, 'commit')}"))
         committer = _object(_object(commit.get("commit")).get("committer"))
         return _created_at(committer.get("date"))

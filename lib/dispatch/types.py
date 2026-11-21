@@ -232,8 +232,6 @@ def _fresh(row: CheckRow, change: CIChange) -> bool:
 
 
 def ci_fresh(result: CIResult, changes: tuple[CIChange, ...], required: tuple[str, ...]) -> CIResult:
-    """A green result is pending while a gate unit has no success that
-    started after a CI change (#1286)."""
     if result.status != "success":
         return result
     stale = dict.fromkeys(

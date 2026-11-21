@@ -161,7 +161,6 @@ PINNED_READS = [
     SEARCHES + [("issue", "AUT-3"), ("issue", "AUT-1"), ("issue", "AUT-2")],
     SEARCHES + [("issue", "AUT-3"), ("issue", "AUT-1"), ("issue", "AUT-2")],
 ]
-# #1286 adds one diff read per green head, on its first cycle.
 PINNED_GH_CALLS = [17, 16, 16]
 
 
