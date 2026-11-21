@@ -652,6 +652,7 @@ def test_split_children_returns_every_issue_split_from_the_parent() -> None:
         {"number": 22, "body": "Context.\n\nSplit from #12\n", "state": "open",
          "state_reason": "reopened"},
     ]}), ""))
+    gh.route(timeline(12), ok([]))
 
     found = GitHubIntakeClient(gh).split_children("owner/app", 12)
 
@@ -659,6 +660,54 @@ def test_split_children_returns_every_issue_split_from_the_parent() -> None:
         IssueRecord(number=21, state="closed", reason="completed", body="Split from #12 (plan url)."),
         IssueRecord(number=22, state="open", reason="reopened", body="Context.\n\nSplit from #12\n"),
     )
+
+
+def timeline(parent: int) -> tuple[str, ...]:
+    return ("--paginate", f"{REPO}/issues/{parent}/timeline?per_page=100")
+
+
+def reference(number: int, body: str, state: str = "open", reason: str | None = None,
+              repo: str = "owner/app", **extra: object) -> dict:
+    return {"event": "cross-referenced", "source": {"type": "issue", "issue": {
+        "number": number, "body": body, "state": state, "state_reason": reason,
+        "repository_url": f"https://api.github.com/repos/{repo}", **extra,
+    }}}
+
+
+def test_split_children_finds_a_follow_up_the_search_index_has_not_caught() -> None:
+    gh = RecordedGh()
+    gh.route(search(12), ok({"total_count": 2, "incomplete_results": False, "items": [
+        {"number": 21, "body": "Split from #12", "state": "closed", "state_reason": "completed"},
+        {"number": 22, "body": "Split from #12", "state": "open", "state_reason": None},
+    ]}))
+    gh.route(timeline(12), ok([
+        {"event": "labeled", "label": {"name": "factory:ready"}},
+        reference(21, "Split from #12", "closed", "completed"),
+        reference(22, "Split from #12", "closed", "completed"),
+        reference(23, "Found later.\n\nSplit from #12\n"),
+        reference(24, "Mentions #12 only."),
+        reference(25, "Split from #12", repo="other/app"),
+        reference(26, "Split from #12", pull_request={}),
+    ]))
+
+    found = GitHubIntakeClient(gh).split_children("owner/app", 12)
+
+    assert found == (
+        IssueRecord(number=21, state="closed", reason="completed", body="Split from #12"),
+        IssueRecord(number=22, state="closed", reason="completed", body="Split from #12"),
+        IssueRecord(number=23, state="open", reason=None, body="Found later.\n\nSplit from #12\n"),
+    )
+
+
+def test_issue_record_reads_one_issue() -> None:
+    gh = RecordedGh()
+    gh.route((f"{REPO}/issues/31",), ok(
+        {"number": 31, "body": "Split from #12", "state": "open", "state_reason": None}
+    ))
+
+    found = GitHubIntakeClient(gh).issue_record("owner/app", 31)
+
+    assert found == IssueRecord(number=31, state="open", reason=None, body="Split from #12")
 
 
 def test_split_children_raises_on_incomplete_search_results() -> None:

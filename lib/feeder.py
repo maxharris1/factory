@@ -210,7 +210,7 @@ from lib.feeder_gates import (
     path_matches,
     paths_collide,
 )
-from lib.followups import has_marker
+from lib.followups import has_marker, split_parent
 from lib.github_actions import TIMEOUT_SECONDS
 from lib.handoff import Handoff, HandoffError, format_comment, parse_comment
 from lib.journeys import (
@@ -255,11 +255,16 @@ from lib.queue import (
     rank,
     set_ticket_priority,
 )
+from lib.split_parent import close_split_parent
 from lib.ticket_type import TICKET_TYPES
 
 FEEDER_TABLE = "feeder_items"
 POLL_TABLE = "feeder_poll"  # one row: when the feeder last read intake
 IDLE_TABLE = "feeder_idle_stalls"  # one row per project in an idle-blocked-ready stall
+SPLIT_CURSOR_TABLE = "feeder_split_cursor"
+SPLIT_UNSETTLED_TABLE = "feeder_split_unsettled"
+SPLIT_CURSOR_OVERLAP_SECONDS = 120  # clock skew between orch and GitHub
+SPLIT_RECHECK_SECONDS = 120  # GitHub search allows 30 reads a minute
 # eligible: seen this poll, not fed yet; waiting-capacity: no room for its
 # harness this poll; feeding: some steps done; error: a step failed (retried
 # next poll); fed: brief and go posted; done: fed and its job is queued;
@@ -294,6 +299,7 @@ _COLUMNS = (
     ("unblocks", "INTEGER NOT NULL DEFAULT 0"),
     ("base_branch", "TEXT"),
     ("own_tier", "INTEGER"),
+    ("split_noted", "INTEGER NOT NULL DEFAULT 0"),
 )
 ORCHESTRATOR = "grok-bot"
 FACTORY_LABEL = "factory"
@@ -672,7 +678,17 @@ class GitHubIntake(Protocol):
 
     def marked_issues(self, repo: str, marker: str, since: float) -> tuple[int, ...]: ...
 
-    def close_issue(self, repo: str, number: int, comment: str | None) -> None: ...
+    def close_issue(
+        self, repo: str, number: int, comment: str | None, *, completed: bool = False
+    ) -> None: ...
+
+    def remove_issue_label(self, repo: str, number: int, label: str) -> None: ...
+
+    def closed_issues_since(self, repo: str, since: float) -> Sequence[IssueRecord]: ...
+
+    def split_children(self, repo: str, parent: int) -> Sequence[IssueRecord]: ...
+
+    def issue_record(self, repo: str, number: int) -> IssueRecord: ...
 
     def post_issue_comment_once(self, repo: str, number: int, body: str, marker: str) -> str: ...
 
@@ -888,10 +904,30 @@ def ensure_tables(connection: sqlite3.Connection) -> None:
     for name, kind in _COLUMNS:
         if name not in present:
             connection.execute(f"ALTER TABLE {FEEDER_TABLE} ADD COLUMN {name} {kind}")
+    if "split_noted" not in present and _has_merge_states(connection):
+        connection.execute(
+            f"""
+            UPDATE {FEEDER_TABLE} SET split_noted = 1
+            WHERE tracker = 'github' AND EXISTS (
+                SELECT 1 FROM ticket_state AS ticket
+                WHERE lower(ticket.repo) = {FEEDER_TABLE}.repo
+                  AND ticket.ticket_id = {FEEDER_TABLE}.ticket_id
+                  AND ticket.workflow_state = 'merged'
+            )
+            """
+        )
     attention.ensure_table(connection)
     connection.execute(
         f"CREATE TABLE IF NOT EXISTS {POLL_TABLE} "
         "(id INTEGER PRIMARY KEY CHECK (id = 1), at REAL NOT NULL)"
+    )
+    connection.execute(
+        f"CREATE TABLE IF NOT EXISTS {SPLIT_CURSOR_TABLE} (repo TEXT PRIMARY KEY, at REAL NOT NULL)"
+    )
+    connection.execute(
+        f"CREATE TABLE IF NOT EXISTS {SPLIT_UNSETTLED_TABLE} "
+        "(repo TEXT NOT NULL, parent INTEGER NOT NULL, checked_at REAL NOT NULL, "
+        "PRIMARY KEY (repo, parent))"
     )
     ensure_priority_table(connection)
     connection.execute(
@@ -941,6 +977,31 @@ def last_feeder_poll(connection: sqlite3.Connection) -> float | None:
         return None
     row = connection.execute(f"SELECT at FROM {POLL_TABLE}").fetchone()
     return None if row is None else float(row[0])
+
+
+def _has_merge_states(connection: sqlite3.Connection) -> bool:
+    if not _has_table(connection, "ticket_state"):
+        return False
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(ticket_state)")}
+    return {"repo", "ticket_id", "workflow_state"} <= columns
+
+
+def _merged_issues(
+    connection: sqlite3.Connection, repo: str, *, unnoted: bool = False
+) -> frozenset[int]:
+    if not _has_merge_states(connection):
+        return frozenset()
+    rows = connection.execute(
+        f"""
+        SELECT feed.issue FROM {FEEDER_TABLE} AS feed
+        JOIN ticket_state AS ticket
+          ON lower(ticket.repo) = feed.repo AND ticket.ticket_id = feed.ticket_id
+        WHERE feed.repo = ? AND feed.tracker = 'github'
+          AND ticket.workflow_state = 'merged'
+        """ + (" AND feed.split_noted = 0" if unnoted else ""),
+        (repo.lower(),),
+    ).fetchall()
+    return frozenset(int(issue) for (issue,) in rows if str(issue).isdigit())
 
 
 def feeder_items(connection: sqlite3.Connection) -> list[dict[str, object]]:
@@ -1008,6 +1069,7 @@ class Feeder:
     def feed_once(self) -> FeedReport:
         now = self.queue.now()
         contexts, context_errors = self._contexts()
+        context_errors += self._close_split_parents(contexts, now)
         mains, main_errors = self._main_reads(contexts)
         main_errors += self._file_main_fixes(mains, now)
         candidates, read_repos, read_errors = self._candidates(contexts)
@@ -1136,6 +1198,100 @@ class Feeder:
                 errors += 1
                 self.log(f"feeder: cannot read intake for {project.repo}: {safe_ship_error(exc)}")
         return found, errors
+
+    def _close_split_parents(
+        self, contexts: Sequence[tuple[Project, FactoryContext]], now: float
+    ) -> int:
+        errors = 0
+        for project, context in contexts:
+            intake = project.intake
+            assert intake is not None
+            if project.linear_project_ids or intake.label is None or context.config.tickets != "github":
+                continue
+            errors += self._close_repo_split_parents(project.repo, intake.label, now)
+        return errors
+
+    def _close_repo_split_parents(self, repo: str, label: str, now: float) -> int:
+        key = repo.lower()
+        with self.queue.connect() as connection:
+            row = connection.execute(
+                f"SELECT at FROM {SPLIT_CURSOR_TABLE} WHERE repo = ?", (key,)
+            ).fetchone()
+            pending = dict(connection.execute(
+                f"SELECT parent, checked_at FROM {SPLIT_UNSETTLED_TABLE} WHERE repo = ?", (key,)
+            ).fetchall())
+            if row is not None:
+                cursor = float(row[0])
+            else:
+                last = last_feeder_poll(connection)
+                cursor = now if last is None else last - SPLIT_CURSOR_OVERLAP_SECONDS
+        try:
+            closed = self.github.closed_issues_since(repo, cursor)
+        except Exception as exc:
+            self.log(f"feeder: cannot read closed issues for {repo}: {safe_ship_error(exc)}")
+            return 1
+        errors = 0
+        triggers: dict[int, list[IssueRecord]] = {}
+        for record in closed:
+            parent = split_parent(record.body)
+            if record.reason == "completed" and parent is not None:
+                triggers.setdefault(parent, []).append(record)
+        noted: list[int] = []
+        merged_parents: set[int] = set()
+        for issue in sorted(self._merged_issues(repo, unnoted=True)):
+            try:
+                record = self.github.issue_record(repo, issue)
+            except Exception as exc:
+                errors += 1
+                self.log(f"feeder: cannot read merged part {repo}#{issue}: {safe_ship_error(exc)}")
+                continue
+            noted.append(issue)
+            parent = split_parent(record.body)
+            if parent is not None:
+                merged_parents.add(parent)
+        due = {parent for parent, at in pending.items() if now - at >= SPLIT_RECHECK_SECONDS}
+        check = merged_parents | due | (triggers.keys() - pending.keys())
+        merged = self._merged_issues(repo) if check else frozenset()
+        unsettled = {parent: at for parent, at in pending.items() if parent not in check}
+        for parent in sorted(check):
+            try:
+                outcome = close_split_parent(
+                    self.github, repo, parent, triggers.get(parent, ()), merged, label
+                )
+            except Exception as exc:
+                errors += 1
+                unsettled[parent] = now
+                self.log(f"feeder: cannot close split parent {repo}#{parent}: {safe_ship_error(exc)}")
+                continue
+            if outcome == "parts-open":
+                unsettled[parent] = now
+            elif outcome == "closed":
+                self.log(f"feeder: closed split parent {repo}#{parent} (all parts merged)")
+        if not closed and not check and not noted:
+            return errors
+
+        def work(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                f"INSERT INTO {SPLIT_CURSOR_TABLE} (repo, at) VALUES (?, ?) "
+                "ON CONFLICT(repo) DO UPDATE SET at = excluded.at",
+                (key, now - SPLIT_CURSOR_OVERLAP_SECONDS),
+            )
+            connection.execute(f"DELETE FROM {SPLIT_UNSETTLED_TABLE} WHERE repo = ?", (key,))
+            connection.executemany(
+                f"INSERT INTO {SPLIT_UNSETTLED_TABLE} (repo, parent, checked_at) VALUES (?, ?, ?)",
+                [(key, parent, at) for parent, at in sorted(unsettled.items())],
+            )
+            connection.executemany(
+                f"UPDATE {FEEDER_TABLE} SET split_noted = 1 WHERE repo = ? AND issue = ?",
+                [(key, str(issue)) for issue in noted],
+            )
+
+        bookkeeping_write(self.queue.connect, work, site="_close_split_parents", ledger=self.ledger)
+        return errors
+
+    def _merged_issues(self, repo: str, *, unnoted: bool = False) -> frozenset[int]:
+        with self.queue.connect() as connection:
+            return _merged_issues(connection, repo, unnoted=unnoted)
 
     def _candidates(
         self, contexts: Sequence[tuple[Project, FactoryContext]]
