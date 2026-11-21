@@ -878,11 +878,68 @@ def test_ci_branches_and_local_checks_are_read_from_factory_md(tmp_path: Path) -
     assert config.ci_local_checks == ("typecheck", "Jest", "pgTAP")
 
 
+def test_ci_required_checks_default_to_none(tmp_path: Path) -> None:
+    data = copy.deepcopy(VALID)
+    data["ci"] = {"branches": ["main"]}
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert findings == []
+    assert config is not None
+    assert config.ci_required_checks == ()
+
+
+def test_ci_required_checks_parse_without_branches(tmp_path: Path) -> None:
+    data = copy.deepcopy(VALID)
+    data["ci"] = {"required_checks": ["ci-ok", "test (*)"]}
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert findings == []
+    assert config is not None
+    assert config.ci_required_checks == ("ci-ok", "test (*)")
+    assert (config.ci_branches, config.ci_local_checks) == (None, ())
+
+
+def test_ci_required_checks_parse_beside_branches(tmp_path: Path) -> None:
+    data = copy.deepcopy(VALID)
+    data["ci"] = {"branches": ["main"], "required_checks": ["ci-ok"]}
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert findings == []
+    assert config is not None
+    assert (config.ci_branches, config.ci_required_checks) == (("main",), ("ci-ok",))
+
+
+def test_feeder_and_ci_required_checks_are_set_independently(tmp_path: Path) -> None:
+    data = copy.deepcopy(VALID)
+    data["feeder"] = {"required_checks": ["test (*)"]}
+    data["ci"] = {"required_checks": ["ci-ok"]}
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert findings == []
+    assert config is not None
+    assert config.required_checks == ("test (*)",)
+    assert config.ci_required_checks == ("ci-ok",)
+
+    data["ci"] = {"branches": ["main"]}
+    feeder_only, _ = load_factory_md(write_factory(tmp_path, data))
+    assert feeder_only is not None
+    assert (feeder_only.required_checks, feeder_only.ci_required_checks) == (("test (*)",), ())
+
+    del data["feeder"]
+    data["ci"] = {"required_checks": ["ci-ok"]}
+    ci_only, _ = load_factory_md(write_factory(tmp_path, data))
+    assert ci_only is not None
+    assert (ci_only.required_checks, ci_only.ci_required_checks) == ((), ("ci-ok",))
+
+
 @pytest.mark.parametrize(
     ("ci", "message"),
     [
         (["dev"], "ci must be a mapping"),
         ({"local_checks": ["Jest"]}, "ci.branches must be a non-empty list"),
+        ({}, "ci.branches must be a non-empty list"),
+        ({"required_checks": ["ci-ok"], "branches": []}, "ci.branches must be a non-empty list"),
+        ({"required_checks": "ci-ok"}, "ci.required_checks must be a list"),
+        ({"required_checks": [""]}, "ci.required_checks[0] must be a non-empty job name glob"),
+        ({"required_checks": ["  "]}, "ci.required_checks[0] must be a non-empty job name glob"),
+        ({"required_checks": [3]}, "ci.required_checks[0] must be a non-empty job name glob"),
+        ({"required_checks": ["ci-ok"], "bogus": 1}, "unknown field 'ci.bogus'"),
         ({"branches": []}, "ci.branches must be a non-empty list"),
         ({"branches": "dev"}, "ci.branches must be a non-empty list"),
         ({"branches": ["dev", "bad branch"]}, "ci.branches[1] must be a branch name"),
@@ -915,6 +972,38 @@ def test_check_config_refuses_an_empty_ci_branch_list(tmp_path: Path) -> None:
     )
     assert result.returncode != 0
     assert "ci.branches must be a non-empty list" in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("ci", "message"),
+    [
+        (None, None),
+        ({"required_checks": ["ci-ok"]}, None),
+        ({"required_checks": "ci-ok"}, "ci.required_checks must be a list"),
+        ({"required_checks": [""]}, "ci.required_checks[0] must be a non-empty job name glob"),
+        ({"required_checks": [3]}, "ci.required_checks[0] must be a non-empty job name glob"),
+    ],
+)
+def test_check_config_reads_ci_required_checks(
+    tmp_path: Path, ci: object, message: str | None
+) -> None:
+    data = copy.deepcopy(VALID)
+    if ci is not None:
+        data["ci"] = ci
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "bin/orch"), "check-config", "--allow-placeholders",
+         "--factory", str(write_factory(tmp_path, data))],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=ROOT,
+    )
+    output = result.stdout + result.stderr
+    if message is None:
+        assert result.returncode == 0, output
+    else:
+        assert result.returncode != 0
+        assert message in output
 
 
 def test_removing_a_ci_branch_is_a_trust_change() -> None:
