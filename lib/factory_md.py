@@ -87,9 +87,11 @@ feeder.required_checks. force_rerun_paths (issue #1285) is a list of
 repo-relative paths or globs, default .github/workflows/**, and [] turns
 it off. A green head whose diff touches one of them stays pending until
 a check run starts after its head commit's committer date (issue #1286).
-So does a green from runs that started before the poller first saw a glob
-newly added to required_checks. With force_rerun_paths given, branches may
-be omitted, and every base is a CI base.
+So does a green from runs that started before the poller first saw a
+glob newly added to required_checks, or saw required_checks switched back
+to none, the all-checks gate. A commit status counts by when it was
+posted. With force_rerun_paths given, branches may be omitted, and every
+base is a CI base.
 
 shared_paths is optional (issue #261): a list of repo-relative paths or
 globs, a trailing / naming a directory. A Touches: path that matches never

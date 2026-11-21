@@ -574,10 +574,17 @@ class GhCacheExpiries:
         )
 
 
+_ALL_CHECKS = ""
+
+
 def _dated(
     stored: Mapping[str, float | None], wanted: Sequence[str], added_at: float | None = None
-) -> dict[str, float]:
-    return {glob: at for glob in wanted if (at := stored.get(glob, added_at)) is not None}
+) -> tuple[CIChange, ...]:
+    return tuple(
+        CIChange("required-set", at, () if glob == _ALL_CHECKS else (glob,))
+        for glob in wanted
+        if (at := stored.get(glob, added_at)) is not None
+    )
 
 
 class RequiredGlobs:
@@ -595,9 +602,9 @@ class RequiredGlobs:
 
     def observe(
         self, repo: str, base: str, globs: Sequence[str], now: float
-    ) -> dict[str, float]:
+    ) -> tuple[CIChange, ...]:
         repo = repo.lower()
-        wanted = tuple(dict.fromkeys(globs))
+        wanted = tuple(dict.fromkeys(globs)) or (_ALL_CHECKS,)
         stored = self._stored(repo, base)
         if stored is not None and set(stored) == set(wanted):
             return _dated(stored, wanted)
@@ -2130,10 +2137,11 @@ class LivePollSource:
         hold_inputs: Mapping[str, Any],
     ) -> CIResult:
         ci = pr_ci(raw, factory, _pr_base(pull))
-        added = self.required_globs.observe(
-            repo, factory.base_branch, factory.ci_required_checks, self.wall()
+        changes = list(
+            self.required_globs.observe(
+                repo, factory.base_branch, factory.ci_required_checks, self.wall()
+            )
         )
-        changes = [CIChange("required-set", at, (glob,)) for glob, at in added.items()]
         if ci.status != "success" or not factory.ci_force_rerun_paths:
             return ci_fresh(ci, tuple(changes), factory.ci_required_checks)
         unread = CIResult("pending", pending=("CI freshness (unread)",), checks=ci.checks)

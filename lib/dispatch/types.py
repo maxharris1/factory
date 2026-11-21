@@ -131,6 +131,7 @@ class CIResult:
     failed: tuple[FailedCheck, ...] = ()
     pending: tuple[str, ...] = ()
     checks: tuple[CheckRow, ...] = field(default=(), compare=False)
+    statuses: tuple[CheckRow, ...] = field(default=(), compare=False)
 
     def __post_init__(self) -> None:
         if self.status not in CI_STATUSES:
@@ -220,11 +221,13 @@ def _gate_units(result: CIResult, change: CIChange, required: tuple[str, ...]) -
     globs = change.globs or required
     if globs:
         return {glob: [row for row in result.checks if fnmatchcase(row.name, glob)] for glob in globs}
-    return {
-        unit.name: [row for row in result.checks if row.name == unit.name]
-        for unit in result.checks
+    rows = result.checks + result.statuses
+    units = {
+        unit.name: [row for row in rows if row.name == unit.name]
+        for unit in rows
         if unit.conclusion == "success"
     }
+    return units or {"CI": []}
 
 
 def _fresh(row: CheckRow, change: CIChange) -> bool:
@@ -242,7 +245,7 @@ def ci_fresh(result: CIResult, changes: tuple[CIChange, ...], required: tuple[st
     )
     if not stale:
         return result
-    return CIResult("pending", pending=tuple(stale), checks=result.checks)
+    return CIResult("pending", pending=tuple(stale), checks=result.checks, statuses=result.statuses)
 
 
 # Where a Linear issue stands relative to the project's ready state (the

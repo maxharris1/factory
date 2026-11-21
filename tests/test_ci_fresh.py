@@ -218,17 +218,92 @@ def test_the_first_observed_required_set_is_a_baseline_and_holds_nothing(tmp_pat
     assert polled(gh, globs=RequiredGlobs(tmp_path / "orch.db"), now=AFTER).clears
 
 
+def added(at: float, *globs: str) -> CIChange:
+    return CIChange("required-set", at, globs)
+
+
 def test_the_required_set_store_survives_a_restart_and_dates_only_additions(tmp_path: Path) -> None:
     path = tmp_path / "orch.db"
-    assert RequiredGlobs(path).observe("o/r", "main", ("lint",), BEFORE) == {}
-    assert RequiredGlobs(path).observe("O/R", "main", ("lint", "ci-ok"), CHANGE) == {"ci-ok": CHANGE}
-    assert RequiredGlobs(path).observe("o/r", "main", ("lint", "ci-ok"), AFTER) == {"ci-ok": CHANGE}
-    assert RequiredGlobs(path).observe("o/r", "main", ("ci-ok",), AFTER) == {"ci-ok": CHANGE}
-    assert RequiredGlobs(path).observe("o/r", "main", ("ci-ok", "lint"), AFTER) == {
-        "ci-ok": CHANGE,
-        "lint": AFTER,
-    }
-    assert RequiredGlobs(path).observe("o/r", "release", ("lint",), AFTER) == {}
+    assert RequiredGlobs(path).observe("o/r", "main", ("lint",), BEFORE) == ()
+    assert RequiredGlobs(path).observe("O/R", "main", ("lint", "ci-ok"), CHANGE) == (added(CHANGE, "ci-ok"),)
+    assert RequiredGlobs(path).observe("o/r", "main", ("lint", "ci-ok"), AFTER) == (added(CHANGE, "ci-ok"),)
+    assert RequiredGlobs(path).observe("o/r", "main", ("ci-ok",), AFTER) == (added(CHANGE, "ci-ok"),)
+    assert RequiredGlobs(path).observe("o/r", "main", ("ci-ok", "lint"), AFTER) == (
+        added(CHANGE, "ci-ok"),
+        added(AFTER, "lint"),
+    )
+    assert RequiredGlobs(path).observe("o/r", "main", (), AFTER + 1) == (added(AFTER + 1),)
+    assert RequiredGlobs(path).observe("o/r", "release", ("lint",), AFTER) == ()
+
+
+def status_row(context: str, created_at: float) -> CheckRow:
+    return CheckRow(name=context, status="completed", conclusion="success", started_at=created_at)
+
+
+def test_a_status_only_green_needs_a_status_posted_after_the_change() -> None:
+    stale = CIResult("success", statuses=(status_row("external-ci", BEFORE),))
+    fresh = CIResult("success", statuses=(status_row("external-ci", AFTER),))
+
+    assert ci_fresh(stale, (WORKFLOW,), ()).pending == ("external-ci (stale after head-workflow)",)
+    assert ci_fresh(fresh, (WORKFLOW,), ()) is fresh
+
+
+def test_a_green_with_no_dated_evidence_is_stale_after_a_change() -> None:
+    result = CIResult("success", checks=(row("lint", AFTER, "skipped"),))
+
+    assert ci_fresh(result, (WORKFLOW,), ()).pending == ("CI (stale after head-workflow)",)
+
+
+class StatusGh(FreshGh):
+    def __init__(self, *args, statuses: list[dict], **kwargs):
+        super().__init__(*args, **kwargs)
+        self.statuses = statuses
+
+    def __call__(self, argv, timeout):
+        if any(part.endswith("/status") for part in argv):
+            combined = {"total_count": len(self.statuses), "state": "success", "statuses": self.statuses}
+            return GhResult(0, json.dumps(combined), "")
+        return super().__call__(argv, timeout)
+
+
+def posted(created_at: float) -> list[dict]:
+    return [{"context": "external-ci", "state": "success", "created_at": iso(created_at)}]
+
+
+@pytest.mark.parametrize(
+    "runs",
+    [[], [{"name": "lint", "status": "completed", "conclusion": "skipped", "started_at": iso(AFTER)}]],
+    ids=["no-check-runs", "skipped-check"],
+)
+def test_the_poller_holds_a_workflow_head_whose_only_green_is_an_old_commit_status(runs: list[dict]) -> None:
+    stale = StatusGh(factory_md(), runs, WORKFLOW_DIFF, CHANGE, statuses=posted(BEFORE))
+    fresh = StatusGh(factory_md(), runs, WORKFLOW_DIFF, CHANGE, statuses=posted(AFTER))
+    ordinary = StatusGh(factory_md(), runs, ["lib/x.py"], CHANGE, statuses=posted(BEFORE))
+
+    assert polled(stale).pending == ("external-ci (stale after head-workflow)",)
+    assert polled(fresh).status == "success"
+    assert polled(ordinary).status == "success"
+
+
+def test_restoring_the_default_gate_holds_checks_it_newly_requires(tmp_path: Path) -> None:
+    globs = RequiredGlobs(tmp_path / "orch.db")
+    off = "  force_rerun_paths: []\n"
+    runs = [run("lint", BEFORE), run("test", BEFORE)]
+    assert polled(FreshGh(required("lint", rerun=off), runs, [], 0), globs=globs, now=BEFORE).clears
+
+    ci = polled(FreshGh(factory_md(off), runs, [], 0), globs=globs, now=CHANGE)
+
+    assert ci.status == "pending"
+    assert "test (stale after required-set)" in ci.pending
+    rerun = [run("lint", AFTER), run("test", AFTER)]
+    assert polled(FreshGh(factory_md(off), rerun, [], 0), globs=globs, now=AFTER).clears
+
+
+def test_the_first_observed_default_gate_is_a_baseline(tmp_path: Path) -> None:
+    gh = FreshGh(factory_md("  force_rerun_paths: []\n"), [run("test", BEFORE)], [], 0)
+
+    assert polled(gh, globs=RequiredGlobs(tmp_path / "orch.db"), now=AFTER).clears
+
 
 STALE = ci_fresh(CIResult("success", checks=(row("test", BEFORE),)), (WORKFLOW,), ())
 
