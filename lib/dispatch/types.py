@@ -206,6 +206,47 @@ def pr_ci(result: CIResult, factory: FactoryConfig, pr_base: str | None) -> CIRe
     return ci_required(result, factory.ci_required_checks)
 
 
+CIChangeKind = Literal["head-workflow", "required-set"]
+
+
+@dataclass(frozen=True)
+class CIChange:
+    kind: CIChangeKind
+    at: float
+    globs: tuple[str, ...] = ()
+
+
+def _gate_units(result: CIResult, change: CIChange, required: tuple[str, ...]) -> dict[str, list[CheckRow]]:
+    globs = change.globs or required
+    if globs:
+        return {glob: [row for row in result.checks if fnmatchcase(row.name, glob)] for glob in globs}
+    return {
+        unit.name: [row for row in result.checks if row.name == unit.name]
+        for unit in result.checks
+        if unit.conclusion == "success"
+    }
+
+
+def _fresh(row: CheckRow, change: CIChange) -> bool:
+    return row.conclusion == "success" and row.started_at is not None and row.started_at > change.at
+
+
+def ci_fresh(result: CIResult, changes: tuple[CIChange, ...], required: tuple[str, ...]) -> CIResult:
+    """A green result is pending while a gate unit has no success that
+    started after a CI change (#1286)."""
+    if result.status != "success":
+        return result
+    stale = dict.fromkeys(
+        f"{unit} (stale after {change.kind})"
+        for change in changes
+        for unit, rows in _gate_units(result, change, required).items()
+        if not any(_fresh(row, change) for row in rows)
+    )
+    if not stale:
+        return result
+    return CIResult("pending", pending=tuple(stale), checks=result.checks)
+
+
 # Where a Linear issue stands relative to the project's ready state (the
 # first linear_handoff_states name), read with the ticket: still before review
 # (backlog, triage, unstarted, or started before the ready state), already in
