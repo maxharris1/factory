@@ -45,8 +45,10 @@ from lib.dispatcher import (
 )
 from lib.dispatch.types import (
     AlreadyDeferred,
+    CIChange,
     LinearState,
     LinearStateRead,
+    ci_fresh,
     pr_ci,
 )
 from lib.brief_comment import before_factory_md
@@ -77,7 +79,7 @@ from lib.github_actions import (
 )
 from lib.github_app_token import BrokerError, owner_from_args, reads_prefix
 from lib.handoff import HandoffError, parse_comment
-from lib.hold import FACTORY_MD
+from lib.hold import FACTORY_MD, glob_matches
 from lib.intake_risk import INTAKE_RISK_SCHEMA, INTAKE_RISK_TABLE, stored_risk
 from lib.linear_webhook import DirtyRow, missed_delivery
 from lib.orch_yml import (
@@ -572,6 +574,79 @@ class GhCacheExpiries:
         )
 
 
+_ALL_CHECKS = ""
+
+
+def _dated(
+    stored: Mapping[str, float | None], wanted: Sequence[str], added_at: float | None = None
+) -> tuple[CIChange, ...]:
+    return tuple(
+        CIChange("required-set", at, () if glob == _ALL_CHECKS else (glob,))
+        for glob in wanted
+        if (at := stored.get(glob, added_at)) is not None
+    )
+
+
+class RequiredGlobs:
+    def __init__(self, path: Path | None = None):
+        self._connection = sqlite3.connect(
+            ":memory:" if path is None else str(path), timeout=30, isolation_level=None
+        )
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS ci_required_bases (repo TEXT, base TEXT, PRIMARY KEY (repo, base))"
+        )
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS ci_required_globs "
+            "(repo TEXT, base TEXT, glob TEXT, added_at REAL, PRIMARY KEY (repo, base, glob))"
+        )
+
+    def observe(
+        self, repo: str, base: str, globs: Sequence[str], now: float
+    ) -> tuple[CIChange, ...]:
+        repo = repo.lower()
+        wanted = tuple(dict.fromkeys(globs)) or (_ALL_CHECKS,)
+        stored = self._stored(repo, base)
+        if stored is not None and set(stored) == set(wanted):
+            return _dated(stored, wanted)
+        connection = self._connection
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            stored = self._stored(repo, base)
+            added_at = None if stored is None else now
+            stored = stored or {}
+            connection.execute(
+                "INSERT OR IGNORE INTO ci_required_bases (repo, base) VALUES (?, ?)", (repo, base)
+            )
+            connection.executemany(
+                "DELETE FROM ci_required_globs WHERE repo = ? AND base = ? AND glob = ?",
+                [(repo, base, glob) for glob in stored if glob not in wanted],
+            )
+            connection.executemany(
+                "INSERT INTO ci_required_globs (repo, base, glob, added_at) VALUES (?, ?, ?, ?)",
+                [(repo, base, glob, added_at) for glob in wanted if glob not in stored],
+            )
+            connection.execute("COMMIT")
+        except BaseException:
+            connection.execute("ROLLBACK")
+            raise
+        return _dated(stored, wanted, added_at)
+
+    def _stored(self, repo: str, base: str) -> dict[str, float | None] | None:
+        if (
+            self._connection.execute(
+                "SELECT 1 FROM ci_required_bases WHERE repo = ? AND base = ?", (repo, base)
+            ).fetchone()
+            is None
+        ):
+            return None
+        return dict(
+            self._connection.execute(
+                "SELECT glob, added_at FROM ci_required_globs WHERE repo = ? AND base = ?",
+                (repo, base),
+            ).fetchall()
+        )
+
+
 class LastRead(NamedTuple):
     probe_before_read: str | None
     read_at: float
@@ -611,11 +686,13 @@ class LivePollSource:
         risks: IntakeRisks | None = None,
         fed_pulls: FedPulls | None = None,
         gh_cache: GhCacheExpiries | None = None,
+        required_globs: RequiredGlobs | None = None,
     ):
         self.config = config
         self.risks = IntakeRisks() if risks is None else risks
         self.fed_pulls = FedPulls() if fed_pulls is None else fed_pulls
         self.gh_cache = GhCacheExpiries() if gh_cache is None else gh_cache
+        self.required_globs = RequiredGlobs() if required_globs is None else required_globs
         self.environ = environ
         self.gh_runner = gh_runner
         self.linear_transport = linear_transport
@@ -1996,7 +2073,7 @@ class LivePollSource:
             factory=factory,
             comments=comments,
             current_head=head,
-            ci={head: pr_ci(ci, factory, _pr_base(pull))},
+            ci={head: self._gated_ci(project.repo, number, number, factory, pull, ci, hold_inputs)},
             risk=self._intake_risk(project.repo, number, comments) or "high",
             job_timeout_minutes=resolve_job_timeout(self.config, project.repo),
             ticket_url=_optional_string(pull.get("html_url")),
@@ -2048,6 +2125,50 @@ class LivePollSource:
             grok_bot=project.grok_bot,
             merged=True,
         )
+
+    def _gated_ci(
+        self,
+        repo: str,
+        ticket_id: str,
+        number: str,
+        factory: FactoryConfig,
+        pull: Mapping[str, Any],
+        raw: CIResult,
+        hold_inputs: Mapping[str, Any],
+    ) -> CIResult:
+        ci = pr_ci(raw, factory, _pr_base(pull))
+        changes = list(
+            self.required_globs.observe(
+                repo, factory.base_branch, factory.ci_required_checks, self.wall()
+            )
+        )
+        if ci.status != "success" or not factory.ci_force_rerun_paths:
+            return ci_fresh(ci, tuple(changes), factory.ci_required_checks)
+        unread = CIResult("pending", pending=("CI freshness (unread)",), checks=ci.checks)
+        try:
+            files = (
+                hold_inputs["changed_files"]
+                if "changed_files" in hold_inputs
+                else self._per_head(
+                    "files", repo, number, pull, lambda: self.github.pull_files(repo, number)
+                )
+            )
+            if files is None:
+                return unread
+            if any(
+                glob_matches(pattern, path)
+                for pattern in factory.ci_force_rerun_paths
+                for path in files
+            ):
+                head = _pr_head(pull, repo, number)
+                at = self._per_head(
+                    "committed", repo, number, pull, lambda: self.github.committed_at(repo, head)
+                )
+                changes.append(CIChange("head-workflow", at))
+        except Exception as exc:
+            self._record(repo, ticket_id, exc)
+            return unread
+        return ci_fresh(ci, tuple(changes), factory.ci_required_checks)
 
     def _hold_inputs(
         self,
@@ -2255,7 +2376,8 @@ class LivePollSource:
                 self._linear_merged(project, identifier, allow_merged)
             head = _pr_head(pull, project.repo, pr_number)
             pr_title = _open_title(pull)
-            ci[head] = pr_ci(self.github.ci_status(project.repo, head), factory, _pr_base(pull))
+            raw = self.github.ci_status(project.repo, head)
+            ci[head] = self._gated_ci(project.repo, identifier, pr_number, factory, pull, raw, {})
             github_comments = self.github.list_comments(project.repo, pr_number)
             comments = tuple(
                 sorted(

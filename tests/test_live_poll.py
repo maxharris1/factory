@@ -942,14 +942,14 @@ def test_github_ticket_is_fetched_once_per_cycle() -> None:
     )
 
     assert len(candidates) == len(tracked) == 3
-    assert len(gh.calls) == 2 + 4 * 3
+    assert len(gh.calls) == 2 + 5 * 3
     cached = [
         call
         for call in gh.calls
         if not any(
             marker in part
             for call_part in call
-            for marker in ("/comments?", "/check-runs?", "/status")
+            for marker in ("/comments?", "/check-runs?", "/status", "/files?")
             for part in (call_part,)
         )
     ]
@@ -960,7 +960,7 @@ def test_github_ticket_is_fetched_once_per_cycle() -> None:
         if any(
             marker in part
             for part in call
-            for marker in ("/comments?", "/check-runs?", "/status")
+            for marker in ("/comments?", "/check-runs?", "/status", "/files?")
         )
     )
 

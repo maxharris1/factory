@@ -159,9 +159,12 @@ def test_intake_risks_are_raised_but_never_lowered(tmp_path) -> None:
     assert IntakeRisks(tmp_path / "orch.db").get("acme/widgets", "12") == "high"
 
 
+LINEAR_FACTORY = FACTORY.format(tickets="linear", ship="handoff")
+
+
 class FilesGh(FakeGh):
-    def __init__(self, files: list | None) -> None:
-        super().__init__(FACTORY.format(tickets="linear", ship="handoff"))
+    def __init__(self, files: list | None, factory: str = LINEAR_FACTORY) -> None:
+        super().__init__(factory)
         self.files = files
         self.blobs = {
             item["sha"]: item["source"]
@@ -201,6 +204,7 @@ def linear_ticket(
     go: str = GO_LOW,
     errors: list | None = None,
     risks: IntakeRisks | None = None,
+    factory: str = LINEAR_FACTORY,
 ):
     issue = linear_issue()
     issue["comments"]["nodes"][0]["body"] = go
@@ -209,7 +213,7 @@ def linear_ticket(
             "nodes": [{"name": name} for name in labels],
             "pageInfo": {"hasNextPage": False},
         }
-    gh = FilesGh(None if files is None else list(files))
+    gh = FilesGh(None if files is None else list(files), factory)
     if not linked:
         gh.branch_pulls = []
 
@@ -265,7 +269,7 @@ def test_a_linear_ticket_whose_changed_files_are_unread_is_high() -> None:
     errors: list = []
     ticket, _ = linear_ticket(labels=[], files=None, errors=errors)
     assert ticket.risk == "high"
-    assert [(repo, ticket_id) for repo, ticket_id, _ in errors] == [("acme/widgets", "AUT-42")]
+    assert {(repo, ticket_id) for repo, ticket_id, _ in errors} == {("acme/widgets", "AUT-42")}
 
 
 def test_a_linear_ticket_with_no_pr_yet_is_judged_on_its_labels() -> None:
@@ -274,7 +278,8 @@ def test_a_linear_ticket_with_no_pr_yet_is_judged_on_its_labels() -> None:
 
 
 def test_a_linear_high_ticket_reads_no_changed_files() -> None:
-    ticket, gh = linear_ticket(labels=[], files=["src/app.ts"], go=GO_HIGH)
+    no_rerun_paths = LINEAR_FACTORY.replace("skills: []\n", "skills: []\nci:\n  force_rerun_paths: []\n")
+    ticket, gh = linear_ticket(labels=[], files=["src/app.ts"], go=GO_HIGH, factory=no_rerun_paths)
     assert ticket.risk == "high"
     assert not any("/files?" in part for call in gh.calls for part in call)
 

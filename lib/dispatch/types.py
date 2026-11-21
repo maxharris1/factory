@@ -131,6 +131,7 @@ class CIResult:
     failed: tuple[FailedCheck, ...] = ()
     pending: tuple[str, ...] = ()
     checks: tuple[CheckRow, ...] = field(default=(), compare=False)
+    statuses: tuple[CheckRow, ...] = field(default=(), compare=False)
 
     def __post_init__(self) -> None:
         if self.status not in CI_STATUSES:
@@ -204,6 +205,49 @@ def pr_ci(result: CIResult, factory: FactoryConfig, pr_base: str | None) -> CIRe
     if base is not None:
         return ci_on_base(result, base)
     return ci_required(result, factory.ci_required_checks)
+
+
+CIChangeKind = Literal["head-workflow", "required-set"]
+
+
+@dataclass(frozen=True)
+class CIChange:
+    kind: CIChangeKind
+    at: float
+    globs: tuple[str, ...] = ()
+
+
+def _named_units(rows: tuple[CheckRow, ...]) -> list[tuple[str, list[CheckRow]]]:
+    names = dict.fromkeys(row.name for row in rows if row.conclusion == "success")
+    return [(name, [row for row in rows if row.name == name]) for name in names]
+
+
+def _gate_units(
+    result: CIResult, change: CIChange, required: tuple[str, ...]
+) -> list[tuple[str, list[CheckRow]]]:
+    globs = change.globs or required
+    if globs:
+        return [(glob, [row for row in result.checks if fnmatchcase(row.name, glob)]) for glob in globs]
+    units = _named_units(result.checks) + _named_units(result.statuses)
+    return units or [("CI", [])]
+
+
+def _fresh(row: CheckRow, change: CIChange) -> bool:
+    return row.conclusion == "success" and row.started_at is not None and row.started_at > change.at
+
+
+def ci_fresh(result: CIResult, changes: tuple[CIChange, ...], required: tuple[str, ...]) -> CIResult:
+    if result.status != "success":
+        return result
+    stale = dict.fromkeys(
+        f"{unit} (stale after {change.kind})"
+        for change in changes
+        for unit, rows in _gate_units(result, change, required)
+        if not any(_fresh(row, change) for row in rows)
+    )
+    if not stale:
+        return result
+    return CIResult("pending", pending=tuple(stale), checks=result.checks, statuses=result.statuses)
 
 
 # Where a Linear issue stands relative to the project's ready state (the
