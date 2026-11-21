@@ -574,7 +574,7 @@ def pid_gone(pid: int, start: str | None) -> bool:
 
 
 def parent_pid(pid: int) -> int | None:
-    """A pid's parent, from /proc/<pid>/stat (field 4); None if unknown."""
+    """A pid's parent; None if unknown."""
     stat = _proc_stat(pid)
     return stat.ppid if stat is not None else None
 
@@ -592,8 +592,6 @@ def descends_from(pid: int, ancestor: int, *, parent=parent_pid, limit: int = 64
 
 
 def _process_start(pid: int) -> str | None:
-    """Field 22 of /proc/<pid>/stat, else `ps`'s lstart (macOS), so a reused pid is
-    not mistaken for the owner. Either is the start lib.process_tree lists."""
     stat = _proc_stat(pid)
     return stat.start if stat is not None else None
 
