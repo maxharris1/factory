@@ -928,6 +928,39 @@ def test_feeder_and_ci_required_checks_are_set_independently(tmp_path: Path) -> 
     assert (ci_only.required_checks, ci_only.ci_required_checks) == ((), ("ci-ok",))
 
 
+def test_ci_force_rerun_paths_default_to_workflows(tmp_path: Path) -> None:
+    config, findings = load_factory_md(write_factory(tmp_path, VALID))
+    assert findings == []
+    assert config is not None
+    assert config.ci_force_rerun_paths == (".github/workflows/**",)
+
+    data = copy.deepcopy(VALID)
+    data["ci"] = {"branches": ["main"]}
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert findings == []
+    assert config is not None
+    assert config.ci_force_rerun_paths == (".github/workflows/**",)
+
+
+def test_ci_force_rerun_paths_override_parses_without_branches(tmp_path: Path) -> None:
+    data = copy.deepcopy(VALID)
+    data["ci"] = {"force_rerun_paths": [".github/workflows/ci.yml", "scripts/ci/**"]}
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert findings == []
+    assert config is not None
+    assert config.ci_force_rerun_paths == (".github/workflows/ci.yml", "scripts/ci/**")
+    assert (config.ci_branches, config.ci_required_checks) == (None, ())
+
+
+def test_ci_force_rerun_paths_empty_list_turns_the_path_trigger_off(tmp_path: Path) -> None:
+    data = copy.deepcopy(VALID)
+    data["ci"] = {"branches": ["main"], "force_rerun_paths": []}
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert findings == []
+    assert config is not None
+    assert (config.ci_branches, config.ci_force_rerun_paths) == (("main",), ())
+
+
 @pytest.mark.parametrize(
     ("ci", "message"),
     [
@@ -940,6 +973,21 @@ def test_feeder_and_ci_required_checks_are_set_independently(tmp_path: Path) -> 
         ({"required_checks": ["  "]}, "ci.required_checks[0] must be a non-empty job name glob"),
         ({"required_checks": [3]}, "ci.required_checks[0] must be a non-empty job name glob"),
         ({"required_checks": ["ci-ok"], "bogus": 1}, "unknown field 'ci.bogus'"),
+        ({"force_rerun_paths": ".github/workflows/**"}, "ci.force_rerun_paths must be a list"),
+        ({"force_rerun_paths": None}, "ci.force_rerun_paths must be a list"),
+        (
+            {"force_rerun_paths": ["/etc/ci.yml"]},
+            "ci.force_rerun_paths[0] must be a repo-relative path or glob",
+        ),
+        (
+            {"force_rerun_paths": ["ok/**", "../x"]},
+            "ci.force_rerun_paths[1] must be a repo-relative path or glob",
+        ),
+        (
+            {"force_rerun_paths": [3]},
+            "ci.force_rerun_paths[0] must be a repo-relative path or glob",
+        ),
+        ({"force_rerun_paths": [], "bogus": 1}, "unknown field 'ci.bogus'"),
         ({"branches": []}, "ci.branches must be a non-empty list"),
         ({"branches": "dev"}, "ci.branches must be a non-empty list"),
         ({"branches": ["dev", "bad branch"]}, "ci.branches[1] must be a branch name"),
@@ -982,6 +1030,14 @@ def test_check_config_refuses_an_empty_ci_branch_list(tmp_path: Path) -> None:
         ({"required_checks": "ci-ok"}, "ci.required_checks must be a list"),
         ({"required_checks": [""]}, "ci.required_checks[0] must be a non-empty job name glob"),
         ({"required_checks": [3]}, "ci.required_checks[0] must be a non-empty job name glob"),
+        ({"force_rerun_paths": [".github/workflows/ci.yml", "scripts/ci/**"]}, None),
+        ({"force_rerun_paths": []}, None),
+        ({"force_rerun_paths": "x"}, "ci.force_rerun_paths must be a list"),
+        (
+            {"force_rerun_paths": ["../ci.yml"]},
+            "ci.force_rerun_paths[0] must be a repo-relative path or glob",
+        ),
+        ({"force_rerun_paths": [], "rerun": True}, "unknown field 'ci.rerun'"),
     ],
 )
 def test_check_config_reads_ci_required_checks(
