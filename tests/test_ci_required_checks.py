@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from lib.dispatch.constants import CI_RERUN_SETTLE_SECONDS
 from lib.dispatch.types import (
     CHECK_FAILED,
     CheckRow,
@@ -18,6 +19,7 @@ from lib.factory_md import FactoryConfig
 from lib.github_actions import GhResult
 from lib.poll_source import LivePollSource
 from tests.merge_queue_support import sha
+from tests.test_ci_rerun import RUN, RUN_URL, RerunBoard
 from tests.test_live_poll import FACTORY, FakeGh, config
 from tests.test_ready_ci_gate import ci_waits
 from tests.test_review_before_ci import board_with, built_with_ci_pending, reviewed_at_pending_ci
@@ -336,3 +338,46 @@ def test_ship_waits_on_a_missing_ci_ok_even_when_every_other_job_is_green(tmp_pa
 
     assert board.outcome(approve) != "merge-queue"
     assert not pr.merged
+
+
+@pytest.mark.parametrize(
+    ("raw", "gate", "running"),
+    [
+        (adapter(row("ci-ok", "failure"), row("lint", "success")), GATE, ()),
+        (adapter(row("ci-ok", "failure"), row("e2e", "skipped")), ("ci-ok", "e2e"), ()),
+        (adapter(row("ci-ok", "failure")), ("ci-ok", "test (*)"), ()),
+        (adapter(row("ci-ok", "failure"), row("docs")), GATE, ("docs",)),
+    ],
+    ids=["completed", "other-glob-skipped", "other-glob-missing", "other-job-running"],
+)
+def test_a_failed_ci_ok_waits_only_on_checks_still_running(
+    raw: CIResult, gate: tuple[str, ...], running: tuple[str, ...]
+) -> None:
+    gated = ci_required(raw, gate)
+
+    assert gated.status == "failure"
+    assert gated.pending == running
+
+
+def test_a_red_ci_ok_gets_todays_rerun_then_its_fix(tmp_path: Path) -> None:
+    board = RerunBoard(tmp_path)
+    board.factory = replace(board.factory, ci_required_checks=GATE)
+    pr = board.open("42", sha(1))
+    board.go(pr, "go")
+    board.poll()
+    board.finish("claude")
+    aggregate = FailedCheck("ci-ok", RUN, "12", RUN_URL)
+    raw = adapter(row("ci-ok", "failure"), row("lint", "success"), failed=(aggregate,))
+    pr.ci[pr.head] = "failure"
+    board.results[pr.head] = pr_ci(raw, board.factory, "main")
+    ready = board.ready(pr, pr.head)
+    board.poll()
+
+    assert board.reruns == [("owner/repo", RUN)]
+    assert board.reruns_table() == [(pr.head, "requested", ["12"], None)]
+
+    board.now[0] += CI_RERUN_SETTLE_SECONDS
+    board.poll()
+
+    assert board.outcome(ready) == "queued-ci-fix"
+    assert [job["source_comment_id"] for job in board.jobs("fix")] == [ready]

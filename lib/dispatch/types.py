@@ -188,12 +188,12 @@ def ci_required(result: CIResult, required: tuple[str, ...]) -> CIResult:
         return result
     verdicts = [_required_verdict(glob, result.checks) for glob in required]
     failed_names = tuple(dict.fromkeys(name for verdict in verdicts for name in verdict.failed))
-    pending = tuple(dict.fromkeys(name for verdict in verdicts for name in verdict.pending))
     if failed_names:
         gate = tuple(check for check in result.failed if check.name in failed_names)
         failed = gate + tuple(check for check in result.failed if check.name not in failed_names)
         log = "failed: " + ", ".join(check.name for check in failed)
-        return CIResult("failure", log, failed=failed, pending=pending, checks=result.checks)
+        return CIResult("failure", log, failed=failed, pending=result.pending, checks=result.checks)
+    pending = tuple(dict.fromkeys(name for verdict in verdicts for name in verdict.pending))
     if pending:
         return CIResult("pending", pending=pending, checks=result.checks)
     return CIResult("success", checks=result.checks)
