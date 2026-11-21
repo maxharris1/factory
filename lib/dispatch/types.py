@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
+from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Literal, Protocol
 
 from lib.factory_md import FactoryConfig
@@ -161,6 +162,48 @@ def ci_on_base(result: CIResult, base_without_ci: str | None) -> CIResult:
     if base_without_ci is None or result.reported or result.status != "pending":
         return result
     return CIResult("not-run", reported=False)
+
+
+@dataclass(frozen=True)
+class _RequiredVerdict:
+    failed: tuple[str, ...]
+    pending: tuple[str, ...]
+
+
+def _required_verdict(glob: str, checks: tuple[CheckRow, ...]) -> _RequiredVerdict:
+    rows = [row for row in checks if fnmatchcase(row.name, glob)]
+    failed = tuple(row.name for row in rows if row.conclusion in CHECK_FAILED)
+    running = tuple(row.name for row in rows if row.conclusion is None)
+    if running:
+        return _RequiredVerdict(failed, running)
+    if not rows:
+        return _RequiredVerdict(failed, (f"{glob} (not reported)",))
+    if not any(row.conclusion == "success" for row in rows):
+        return _RequiredVerdict(failed, (f"{glob} (no success)",))
+    return _RequiredVerdict(failed, ())
+
+
+def ci_required(result: CIResult, required: tuple[str, ...]) -> CIResult:
+    if not required or not result.reported or (result.status == "pending" and not result.checks):
+        return result
+    verdicts = [_required_verdict(glob, result.checks) for glob in required]
+    failed_names = tuple(dict.fromkeys(name for verdict in verdicts for name in verdict.failed))
+    if failed_names:
+        gate = tuple(check for check in result.failed if check.name in failed_names)
+        failed = gate + tuple(check for check in result.failed if check.name not in failed_names)
+        log = "failed: " + ", ".join(check.name for check in failed)
+        return CIResult("failure", log, failed=failed, pending=result.pending, checks=result.checks)
+    pending = tuple(dict.fromkeys(name for verdict in verdicts for name in verdict.pending))
+    if pending:
+        return CIResult("pending", pending=pending, checks=result.checks)
+    return CIResult("success", checks=result.checks)
+
+
+def pr_ci(result: CIResult, factory: FactoryConfig, pr_base: str | None) -> CIResult:
+    base = no_ci_base(factory, pr_base)
+    if base is not None:
+        return ci_on_base(result, base)
+    return ci_required(result, factory.ci_required_checks)
 
 
 # Where a Linear issue stands relative to the project's ready state (the

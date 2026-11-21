@@ -47,8 +47,7 @@ from lib.dispatch.types import (
     AlreadyDeferred,
     LinearState,
     LinearStateRead,
-    ci_on_base,
-    no_ci_base,
+    pr_ci,
 )
 from lib.brief_comment import before_factory_md
 from lib.dispatch.constants import STOPPED_POLL_SECONDS
@@ -1997,7 +1996,7 @@ class LivePollSource:
             factory=factory,
             comments=comments,
             current_head=head,
-            ci={head: ci_on_base(ci, no_ci_base(factory, _pr_base(pull)))},
+            ci={head: pr_ci(ci, factory, _pr_base(pull))},
             risk=self._intake_risk(project.repo, number, comments) or "high",
             job_timeout_minutes=resolve_job_timeout(self.config, project.repo),
             ticket_url=_optional_string(pull.get("html_url")),
@@ -2256,10 +2255,7 @@ class LivePollSource:
                 self._linear_merged(project, identifier, allow_merged)
             head = _pr_head(pull, project.repo, pr_number)
             pr_title = _open_title(pull)
-            ci[head] = ci_on_base(
-                self.github.ci_status(project.repo, head),
-                no_ci_base(factory, _pr_base(pull)),
-            )
+            ci[head] = pr_ci(self.github.ci_status(project.repo, head), factory, _pr_base(pull))
             github_comments = self.github.list_comments(project.repo, pr_number)
             comments = tuple(
                 sorted(
