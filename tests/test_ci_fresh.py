@@ -248,6 +248,14 @@ def test_a_status_only_green_needs_a_status_posted_after_the_change() -> None:
     assert ci_fresh(fresh, (WORKFLOW,), ()) is fresh
 
 
+def test_a_fresh_status_does_not_refresh_a_stale_check_run_of_the_same_name() -> None:
+    result = CIResult("success", checks=(row("external-ci", BEFORE),), statuses=(status_row("external-ci", AFTER),))
+    fresh_check = CIResult("success", checks=(row("external-ci", AFTER),), statuses=(status_row("external-ci", BEFORE),))
+
+    assert ci_fresh(result, (WORKFLOW,), ()).pending == ("external-ci (stale after head-workflow)",)
+    assert ci_fresh(fresh_check, (WORKFLOW,), ()).pending == ("external-ci (stale after head-workflow)",)
+
+
 def test_a_green_with_no_dated_evidence_is_stale_after_a_change() -> None:
     result = CIResult("success", checks=(row("lint", AFTER, "skipped"),))
 
@@ -283,6 +291,15 @@ def test_the_poller_holds_a_workflow_head_whose_only_green_is_an_old_commit_stat
     assert polled(stale).pending == ("external-ci (stale after head-workflow)",)
     assert polled(fresh).status == "success"
     assert polled(ordinary).status == "success"
+
+
+def test_the_poller_holds_an_old_check_run_beside_a_fresh_status_of_the_same_name() -> None:
+    gh = StatusGh(factory_md(), [run("external-ci", BEFORE)], WORKFLOW_DIFF, CHANGE, statuses=posted(AFTER))
+
+    ci = polled(gh)
+
+    assert ci.status == "pending"
+    assert ci.pending == ("external-ci (stale after head-workflow)",)
 
 
 def test_restoring_the_default_gate_holds_checks_it_newly_requires(tmp_path: Path) -> None:

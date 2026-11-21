@@ -217,17 +217,19 @@ class CIChange:
     globs: tuple[str, ...] = ()
 
 
-def _gate_units(result: CIResult, change: CIChange, required: tuple[str, ...]) -> dict[str, list[CheckRow]]:
+def _named_units(rows: tuple[CheckRow, ...]) -> list[tuple[str, list[CheckRow]]]:
+    names = dict.fromkeys(row.name for row in rows if row.conclusion == "success")
+    return [(name, [row for row in rows if row.name == name]) for name in names]
+
+
+def _gate_units(
+    result: CIResult, change: CIChange, required: tuple[str, ...]
+) -> list[tuple[str, list[CheckRow]]]:
     globs = change.globs or required
     if globs:
-        return {glob: [row for row in result.checks if fnmatchcase(row.name, glob)] for glob in globs}
-    rows = result.checks + result.statuses
-    units = {
-        unit.name: [row for row in rows if row.name == unit.name]
-        for unit in rows
-        if unit.conclusion == "success"
-    }
-    return units or {"CI": []}
+        return [(glob, [row for row in result.checks if fnmatchcase(row.name, glob)]) for glob in globs]
+    units = _named_units(result.checks) + _named_units(result.statuses)
+    return units or [("CI", [])]
 
 
 def _fresh(row: CheckRow, change: CIChange) -> bool:
@@ -240,7 +242,7 @@ def ci_fresh(result: CIResult, changes: tuple[CIChange, ...], required: tuple[st
     stale = dict.fromkeys(
         f"{unit} (stale after {change.kind})"
         for change in changes
-        for unit, rows in _gate_units(result, change, required).items()
+        for unit, rows in _gate_units(result, change, required)
         if not any(_fresh(row, change) for row in rows)
     )
     if not stale:
