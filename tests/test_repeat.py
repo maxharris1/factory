@@ -10,6 +10,7 @@ from lib import job_detail
 from lib.brief.common import decided_section
 from lib.dispatch.verdict.repeat import STOP_OPTIONS, _quote
 from lib.intake_risk import INTAKE_RISK_SCHEMA
+from lib.orchestrate import approver_go_post
 from tests.test_approver_credential import MAX, AppFlow, grok_wakes
 from tests.test_dispatcher import ANSWERS, GO, READY, VERDICT, job_count
 from tests.test_rounds_and_caps import HEADS
@@ -485,3 +486,41 @@ def test_an_overrule_from_a_login_that_may_not_lift_the_cap_changes_nothing(tmp_
 
     assert work(flow) == before
     assert decisions(flow) == []
+
+
+STOP_QUESTION = (
+    "f-1 repeats. Which option?\n"
+    "- Another round: an approver's /go adds one round and queues the fix.\n"
+    "- Overrule the finding: no fix is queued.\n"
+    "- Split: close this PR.\n"
+)
+
+
+def max_quoted_overrule() -> str:
+    return approver_go_post(
+        "go",
+        answered(STOP_QUESTION, "Overrule the finding: f-1. Prose in flags is accepted."),
+        {},
+        app_trust=False,
+        gh_config_dir=None,
+    ).body
+
+
+@pytest.mark.parametrize(
+    ("make", "state"),
+    [(repeat_stop, "waiting-max"), (capped_stop, "capped"), (low_risk_extra_round_used, None)],
+    ids=["repeat", "capped", "low-risk-extra-used"],
+)
+def test_an_overrule_answer_quoted_under_maxs_words_queues_no_fix(tmp_path: Path, make, state: str | None) -> None:
+    flow = make(tmp_path)
+    before = work(flow)
+    earlier = decisions(flow)
+    state = state or flow.state()["workflow_state"]
+
+    assert flow.post("go-overrule", max_quoted_overrule(), MAX) == "overruled-finding"
+    flow.dispatcher.process(flow.snapshot())
+
+    assert work(flow) == before
+    assert flow.state()["workflow_state"] == state
+    [decision] = decisions(flow)[len(earlier):]
+    assert decision["choice"] == "Overrule the finding: f-1. Prose in flags is accepted."

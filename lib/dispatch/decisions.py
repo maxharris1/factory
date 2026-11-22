@@ -60,10 +60,11 @@ def record_decisions(
 
 def answer_text(body: str) -> str:
     try:
-        return parse_comment(body).body
+        text = parse_comment(body).body
     except HandoffError:
         slash = parse_slash_go(body)
-        return body.strip() if slash is None else slash.instruction or "/go"
+        text = body if slash is None else slash.instruction or "/go"
+    return unquoted(text)
 
 
 def answer_blocks(body: str) -> list[tuple[str, str]]:
@@ -102,4 +103,4 @@ def unquoted(body: str) -> str:
 def chosen_words(body: str) -> str:
     text = answer_text(body)
     blocks = answer_blocks(text)
-    return "\n\n".join(choice for _, choice in blocks) if blocks else unquoted(text)
+    return "\n\n".join(choice for _, choice in blocks) if blocks else text

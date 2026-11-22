@@ -302,3 +302,14 @@ def test_fenced_example_records_one_decision_and_brief(tmp_path: Path) -> None:
     decided = render(resumed).split("## Decided\n")[1].split("\n## ")[0]
     assert decided.count("Choice:") == 1
     assert "Disable audit logs?" in decided
+
+
+def test_decisions_of_reads_the_answer_blocks_inside_maxs_words() -> None:
+    body = ANSWERS.replace(
+        "Answers.\n",
+        "**Max's words**\n> **Question**\n> Format?\n> - CSV\n> - JSON\n> **Answer**\n> CSV.\n",
+    )
+
+    [decision] = decisions_of(None, answer(body))
+
+    assert (decision.question, decision.choice) == ("Format?\n- CSV\n- JSON", "CSV.")
