@@ -477,6 +477,25 @@ class SchemaMixin:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS engine_decisions (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    site TEXT NOT NULL CHECK (site IN ('cap', 'repeat', 'moved-head')),
+                    subject TEXT NOT NULL,
+                    rule TEXT NOT NULL,
+                    outcome TEXT NOT NULL
+                        CHECK (outcome IN ('granted', 'landed', 'waiting', 'escalated')),
+                    reason TEXT,
+                    checks TEXT NOT NULL,
+                    finding_ids TEXT NOT NULL,
+                    header TEXT,
+                    decided_at REAL NOT NULL,
+                    PRIMARY KEY (repo, ticket_id, site, subject)
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS ticket_retries (
                     repo TEXT NOT NULL,
                     ticket_id TEXT NOT NULL,

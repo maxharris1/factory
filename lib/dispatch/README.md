@@ -75,6 +75,7 @@ blocking findings, with no caller yet (#1035).
 | Driver inbox | `inbox.py` (`InboxMixin`) | `_queue_inbox_post`, `_inbox_body`, `_drain_driver_inbox`: a copy of each Grok wake on a project's `driver_inbox` issue, once per job id, posted after Grok delivery (issue #737) |
 | Tracking | `tracking.py` (`TrackingMixin`) | `_feed`, `_discover`, `_starts_tracking`, `_tracked_*`, `active_job_tickets`, `record_terminal`, `_enter_merged` |
 | Linear states | `linear_states.py` (`LinearStatesMixin`) | `linear_move`, `_read_linear_states`, `_apply_linear_moves`, `_reopen_linear`: store each tracked Linear ticket's state, follow moves made in Linear (#749), and move a reopened ticket's issue back to In Progress (#1191) |
+| Rule engine log | `rule_engine.py` (`RuleEngineMixin`) | `_log_ruling`: one `engine_decisions` row and one poller.log line per ruling; a replay writes nothing, and a changed outcome for the same subject updates the row (#1320) |
 | State DB | `schema.py` (`SchemaMixin`) | `_connect`, `_initialize`, migrations, `_add_missing_columns` |
 | Poll | `poll.py` (`PollMixin`, `PollLoop`) | `poll_once`, handoff verification, poll-error streaks, attention |
 | Eval log | `eval_log.py` (`EvalLogMixin`) | `_export_eval_log`: append `dispatcher.log` beside the database from the rows each poll committed (#545) |

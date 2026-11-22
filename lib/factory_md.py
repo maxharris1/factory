@@ -53,6 +53,10 @@ convergence. convergence lets a REVISE that cuts the open blocking findings
 to a new low, or a first flat round, go on past the cap;
 review.auto_extra_rounds is not read under it.
 
+rule_engine is optional (issue #1320): on or off, default off. on lets the
+rule engine rule at the cap, repeat and moved-head sites once later parts
+read it. It is a trust key, so a PR that flips it is held.
+
 review.verify_unavailable is optional (issue #596): a boolean, default
 false. True says the review.verify skill may not be on the reviewed base
 yet: the review brief tells the reviewer to list it as not run there
@@ -196,6 +200,7 @@ _TOP_KEYS = {
     "plan",
     "ci",
     "qa",
+    "rule_engine",
 }
 _CI_KEYS = {"branches", "local_checks", "required_checks", "force_rerun_paths"}
 DEFAULT_CI_FORCE_RERUN_PATHS = (".github/workflows/**",)
@@ -204,7 +209,7 @@ DEFAULT_PLAN_MAX_LINES = 400
 PLAN_ESTIMATE_FACTOR = Fraction(27, 20)
 DEFAULT_PLAN_MAX_CRITERIA = 5
 _HOLD_KEYS = {"label", "approver", "paths"}
-TRUST_KEYS = ("hold", "ship", "finish_line", "builder", "reviewer", "ci", "qa")
+TRUST_KEYS = ("hold", "ship", "finish_line", "builder", "reviewer", "ci", "qa", "rule_engine")
 _FEEDER_KEYS = {"max_holders_per_path", "exclusive_paths", "required_checks"}
 DEFAULT_MAX_HOLDERS_PER_PATH = 2
 QA_RUNNERS = ("claude-cloud", "cursor-cloud")
@@ -329,6 +334,7 @@ class FactoryConfig:
     ci_required_checks: tuple[str, ...] = ()
     ci_force_rerun_paths: tuple[str, ...] = DEFAULT_CI_FORCE_RERUN_PATHS
     qa: QaConfig | None = None
+    rule_engine: str = "off"
 
     def __post_init__(self) -> None:
         if self.finish_line is None:
@@ -456,6 +462,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
     )
     qa, qa_findings = _qa(data, strict)
     findings.extend(qa_findings)
+    rule_engine = _rule_engine(data, findings, unknown)
 
     if builder_harness is not None and reviewer_harness is not None:
         findings.extend(
@@ -538,6 +545,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
         ci_required_checks=ci_required_checks,
         ci_force_rerun_paths=ci_force_rerun_paths,
         qa=qa,
+        rule_engine=rule_engine,
     )
     return config, findings
 
@@ -716,6 +724,17 @@ def _stop_on(review: dict, findings: list[Finding], unknown: str) -> str:
     if not isinstance(value, str) or value not in STOP_ON:
         findings.append(Finding(unknown, "review.stop_on must be rounds or convergence"))
         return "rounds"
+    return value
+
+
+def _rule_engine(data: dict, findings: list[Finding], unknown: str) -> str:
+    value = data.get("rule_engine", "off")
+    # YAML 1.1 loads bare on/off as booleans, and True == 1, so test the type.
+    if type(value) is bool:
+        return "on" if value else "off"
+    if value not in ("on", "off"):
+        findings.append(Finding(unknown, "rule_engine must be on or off"))
+        return "off"
     return value
 
 
