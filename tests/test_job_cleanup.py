@@ -1138,6 +1138,97 @@ def test_a_plan_from_an_older_host_leaves_the_lock(tmp_path: Path) -> None:
         (job_cleanup.HOLD, True), (job_cleanup.FINISH, True)]
 
 
+def no_process_holds(jobs: Path) -> set[str]:
+    return set()
+
+
+def test_a_finish_that_waited_out_another_finish_leaves_nothing_under_jobs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = work_root(tmp_path)
+    jobs = root / "jobs"
+    job_folder(root, "j")
+    cutoff = NOW - 6 * HOUR
+    hold = Plan(frozenset({"j"}), cutoff, False, unlink_lock=True)
+    finish = Plan(frozenset({"j"}), cutoff, False, job_cleanup.FINISH, unlink_lock=True)
+    assert job_cleanup.device_step(root, hold, scan=no_process_holds).held == ("j",)
+    waiting = threading.Event()
+    reports: dict[str, job_cleanup.Report] = {}
+    real_flock, real_save = fcntl.flock, job_leftovers.save_work
+    second = threading.Thread(target=lambda: reports.__setitem__(
+        "second", job_cleanup.device_step(root, finish, scan=no_process_holds)))
+
+    def flock(fd, operation):
+        if threading.current_thread() is second:
+            waiting.set()
+        return real_flock(fd, operation)
+
+    def save_while_the_second_waits(*args):
+        second.start()
+        assert waiting.wait(30), "the second finish never waited on the lock"
+        return real_save(*args)
+
+    monkeypatch.setattr(job_cleanup.fcntl, "flock", flock)
+    monkeypatch.setattr(job_leftovers, "save_work", save_while_the_second_waits)
+    reports["first"] = job_cleanup.device_step(root, finish, scan=no_process_holds)
+    second.join(30)
+
+    assert not second.is_alive() and set(reports["first"].removed) == {"j"}
+    assert [path.name for path in jobs.iterdir()] == []
+
+
+def test_a_lock_left_by_a_pass_that_stopped_after_retiring_goes_with_the_next_pass(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = work_root(tmp_path)
+    jobs = root / "jobs"
+    finished_with_leftovers(root, "j")
+    real_commit = job_leftovers.commit_record
+
+    def commit_then_stop(*args) -> int:
+        real_commit(*args)
+        raise SystemExit(1)
+
+    with monkeypatch.context() as stopping:
+        stopping.setattr(job_leftovers, "commit_record", commit_then_stop)
+        with pytest.raises(SystemExit):
+            device_pass(root, Plan(frozenset({"j"}), NOW - 6 * HOUR, False, unlink_lock=True),
+                        scan=no_process_holds)
+    assert [path.name for path in jobs.iterdir()] == ["j.lock"]
+    assert (root / "jobs-kept" / "j" / "kept.json").exists()
+
+    [(_, report)] = job_cleanup.run(database(tmp_path, DONE), machines(tmp_path, "pc"),
+                                    InProcessTransport(root, no_process_holds),
+                                    now=NOW, grace_hours=6, dry_run=False)
+
+    assert report.kept == {}
+    assert [path.name for path in jobs.iterdir()] == []
+
+
+@pytest.mark.parametrize("case", ["held", "claimed", "not-named", "older-host", "dry-run"])
+def test_a_lone_lock_stays_while_claimed_or_not_retired_by_the_plan(
+    tmp_path: Path, case: str
+) -> None:
+    root = work_root(tmp_path)
+    jobs = root / "jobs"
+    jobs.mkdir(parents=True)
+    (jobs / "j.lock").touch()
+    if case == "claimed":
+        (jobs / "j.claimed").touch()
+    plan = Plan(frozenset() if case == "not-named" else frozenset({"j"}), NOW - 6 * HOUR,
+                case == "dry-run", unlink_lock=case != "older-host")
+    holder = hold_lock(jobs / "j.lock", 60) if case == "held" else None
+    try:
+        report = job_cleanup.device_step(root, plan, scan=no_process_holds)
+    finally:
+        if holder is not None:
+            holder.kill()
+            holder.wait()
+
+    assert report.removed == {}
+    assert "j.lock" in [path.name for path in jobs.iterdir()]
+
+
 def stale_worktree(tmp_path: Path, root: Path, job_id: str = "j") -> Path:
     origin = tmp_path / "origin"
     origin.mkdir()

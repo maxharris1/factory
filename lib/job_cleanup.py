@@ -534,12 +534,30 @@ def _orphan_records(root: Path, plan: Plan,
     return removed, kept
 
 
+def _unlink_stranded_locks(jobs: Path, plan: Plan) -> dict[str, str]:
+    kept: dict[str, str] = {}
+    if not plan.unlink_lock or plan.dry_run:
+        return kept
+    for lock in sorted(jobs.glob(f"*{LOCK}")):
+        job_id = lock.name.removesuffix(LOCK)
+        if job_id not in plan.finished:
+            continue
+        try:
+            with _claim_lock(jobs, job_id, wait=False, create=False) as locked:
+                if locked:
+                    _unlink_held_lock(jobs, job_id, plan)
+        except OSError as exc:
+            kept[job_id] = f"error: {exc}".splitlines()[0]
+    return kept
+
+
 def _hold(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None]) -> Report:
     jobs = root / "jobs"
     locks = runner_locks()
     removed, kept = _finish_crashed(root, plan, locks)
     orphans_removed, orphans_kept = _orphan_records(root, plan, locks)
-    removed, kept = {**orphans_removed, **removed}, {**orphans_kept, **kept}
+    removed = {**orphans_removed, **removed}
+    kept = {**_unlink_stranded_locks(jobs, plan), **orphans_kept, **kept}
     held = list(_job_folders(jobs, SET_ASIDE))
     folders = _job_folders(jobs)
     away = job_leftovers.cross_device(root) if folders else None
@@ -591,6 +609,7 @@ def _finish(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None]) -> 
             with _claim_lock(jobs, job_id):
                 if not aside.is_dir():
                     kept[job_id] = RECENT
+                    _unlink_held_lock(jobs, job_id, plan)
                     continue
                 reason = (_finish_reason(aside, job_id, plan, locks, scan)
                           or job_leftovers.cross_device(root)
