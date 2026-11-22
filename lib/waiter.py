@@ -35,6 +35,10 @@ runs as the owning bot's own user and login, starts the job itself:
   <command>` with the brief on stdin and its path in ORCH_JOB_BRIEF, in a new
   session (so a waiter restart never kills a job), output to run.log there;
 * it goes straight back to waiting, and reaps each `orch job run` it started;
+* on its first step and every CLEANUP_SWEEP_SECONDS after, it starts
+  `orch cleanup run --bot <bot>` (lib/job_cleanup.py) in a new session,
+  output to `<state>/cleanup.log`, never while its last pass still runs
+  (#1349);
 * before each claim, whatever jobs it runs (#366), it brings its own box
   factory_root to the deployed box checkout's HEAD with lib/device_deploy.py's
   git steps, then its home's installed skills to that pin with the preflight's
@@ -224,6 +228,8 @@ STATUS_FILE = "exit"
 RUN_LOCK = "run.lock"
 HOME_RETRY_SECONDS = 60.0
 CONTAINER_SWEEP_SECONDS = 600.0
+CLEANUP_SWEEP_SECONDS = 900.0
+CLEANUP_LOG = "cleanup.log"
 UNSTARTED_CLAIM = (
     "harness = ? AND autostart_pid = ? AND runner_pid IS NULL "
     "AND worker_pid IS NULL AND COALESCE(remote_started, 0) = 0"
@@ -621,6 +627,7 @@ class Waiter:
         home: Path | None = None,
         clock: Callable[[], float] = time.monotonic,
         transport: WaiterTransport | None = None,
+        cleanup_spawn: Callable[..., Child] | None = None,
     ):
         if bot not in OWNING_BOTS:
             raise WaiterError(f"{bot!r} is not a harness bot")
@@ -666,6 +673,9 @@ class Waiter:
         self.clock = clock
         self._home_key: tuple[object, ...] | None = None
         self._home_retry_at = 0.0
+        self.cleanup_spawn = cleanup_spawn
+        self._cleanup: Child | None = None
+        self._cleanup_started_at: float | None = None
 
     def running(self) -> set[str]:
         return set(self._children)
@@ -675,6 +685,7 @@ class Waiter:
         if not self._recovered:
             self._recover()
         self._reap()
+        self._sweep_job_folders()
         self._reconcile_home()
         if self._draining():
             return None
@@ -690,6 +701,38 @@ class Waiter:
             return None
         job, placement, proof = claimed
         return self._start(job, placement, proof)
+
+    def _sweep_job_folders(self) -> None:
+        if self.cleanup_spawn is None:
+            return
+        log_path = self.state_dir / CLEANUP_LOG
+        if self._cleanup is not None:
+            code = self._cleanup.poll()
+            if code is None:
+                return
+            self._cleanup = None
+            self.log(f"cleanup run exited {code} ({log_path})")
+        now = self.clock()
+        if self._cleanup_started_at is not None and now - self._cleanup_started_at < CLEANUP_SWEEP_SECONDS:
+            return
+        self._cleanup_started_at = now
+        argv = [*self.orch, "cleanup", "run", "--bot", self.bot,
+                "--db", str(self.db), "--machines", str(self.machines)]
+        try:
+            self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with open(log_path, "wb", opener=_private_nofollow) as output:
+                self._cleanup = self.cleanup_spawn(
+                    argv,
+                    stdin=subprocess.DEVNULL,
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                    cwd=str(self.state_dir),
+                    start_new_session=True,
+                    close_fds=True,
+                    shell=False,
+                )
+        except OSError as exc:
+            self.log(f"cleanup run not started: {_one_line(exc)}")
 
     def _reconcile_home(self) -> None:
         if self.home is None:
@@ -1621,6 +1664,10 @@ def _write_private(path: Path, data: bytes) -> None:
     with os.fdopen(fd, "wb") as handle:
         handle.write(data)
     os.chmod(path, 0o600)
+
+
+def _private_nofollow(path: str, flags: int) -> int:
+    return os.open(path, flags | os.O_NOFOLLOW, 0o600)
 
 
 def _one_line(exc: BaseException) -> str:
