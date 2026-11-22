@@ -31,15 +31,19 @@ limits: a window the event leaves out), is `not on plan`: the plan has no
 such limit. Only harnesses in PLAN_INFERRED (Codex) are read this way. A
 Codex event read again is the same observation, and any reading that
 reports the window ends the streak.
-`Session._write` (lib/telemetry.py) stores them in `usage_readings` in the
-same transaction as the job's telemetry row, on the existing heartbeat
-flush. A reading is keyed by harness, bot (the login's OS user) and
-device, and replaces one only when its source time is newer. Its `account`
-is the subscription the placed device's login uses, and readers and
-the not-on-plan streak key on it; a NULL account, written by older code, is
-`<harness>-default`. Cursor is not tracked.
+`Session._write` (lib/telemetry.py) stores them in the same transaction as
+the job's telemetry row, on the existing heartbeat flush. A reading is keyed
+by account, device and window in `usage_account_readings`, so two accounts
+signed in on one device keep their own, and replaces one only when it
+was written later (`updated_at`). `usage_readings`, keyed by harness, bot (the login's
+OS user) and device, is the table older binaries read and write: only the
+device's own login account's readings go there too. `stored` reads both
+tables; a `usage_readings` row wins only when written later. Its
+`account` is the subscription the placed device's login uses, and readers
+and the not-on-plan streak key on it; a NULL account, written by older
+code, is `<harness>-default`. Cursor is not tracked.
 
-`TelemetryUsage` is a `lib.usage.UsageSource` over the table. Its report is
+`TelemetryUsage` is a `lib.usage.UsageSource` over `stored`. Its report is
 verified only when both windows are fresh, so routing keeps the existing
 verified-report rule. `orchestrate.choose_route` does not use it yet.
 
@@ -103,6 +107,24 @@ EXTERNAL = "external"
 EXTERNAL_DEVICE = "external"
 EXTERNAL_JOB = "orch-usage-record"
 
+ACCOUNT_READINGS = "usage_account_readings"
+ACCOUNT_READINGS_DDL = f"""
+CREATE TABLE IF NOT EXISTS {ACCOUNT_READINGS} (
+    account TEXT NOT NULL,
+    device TEXT NOT NULL,
+    window TEXT NOT NULL,
+    harness TEXT NOT NULL,
+    bot TEXT NOT NULL,
+    used REAL,
+    resets_at INTEGER,
+    observed_at REAL NOT NULL,
+    job_id TEXT NOT NULL,
+    absent INTEGER NOT NULL DEFAULT 0,
+    source_at REAL,
+    PRIMARY KEY (account, device, window)
+)
+"""
+
 ADDED_COLUMNS = {"absent": "INTEGER NOT NULL DEFAULT 0", "source_at": "REAL"}
 BACKUP_LABEL = "usage-accounts"
 
@@ -155,6 +177,37 @@ ON CONFLICT (harness, bot, device, window) DO UPDATE SET
     account = excluded.account
 WHERE COALESCE(excluded.source_at, excluded.observed_at) > COALESCE({TABLE}.source_at, {TABLE}.observed_at)
 """
+
+
+def updated_at(row: str = "") -> str:
+    """A historical writer's upsert advances observed_at but leaves source_at as it was."""
+    prefix = f"{row}." if row else ""
+    return f"MAX({prefix}observed_at, COALESCE({prefix}source_at, {prefix}observed_at))"
+
+
+_READINGS_COLUMNS = "account, device, window, harness, bot, used, resets_at, observed_at, job_id, absent, source_at"
+_READINGS_CONFLICT = f"""
+ON CONFLICT (account, device, window) DO UPDATE SET
+    harness = excluded.harness,
+    bot = excluded.bot,
+    used = excluded.used,
+    resets_at = excluded.resets_at,
+    observed_at = excluded.observed_at,
+    job_id = excluded.job_id,
+    absent = excluded.absent,
+    source_at = excluded.source_at
+WHERE {updated_at("excluded")} > {updated_at(ACCOUNT_READINGS)}
+"""
+ACCOUNT_READINGS_UPSERT = f"""
+INSERT INTO {ACCOUNT_READINGS} ({_READINGS_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+{_READINGS_CONFLICT}
+"""
+_SEED_READINGS = f"""
+INSERT INTO {ACCOUNT_READINGS} ({_READINGS_COLUMNS})
+SELECT {_READINGS_COLUMNS} FROM {TABLE} WHERE true
+{_READINGS_CONFLICT}
+"""
+_MARK_READINGS = f"UPDATE {ACCOUNT_READINGS} SET absent = MAX(?, 1) WHERE account = ? AND window = ? AND absent > 0"
 
 
 @dataclass(frozen=True)
@@ -225,21 +278,15 @@ def _columns(connection: sqlite3.Connection) -> set[str]:
     return {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}
 
 
-def account_sql(connection: sqlite3.Connection) -> str:
-    """A row's account in SQL. Before the migration adds the column, every
-    row is its harness's default account."""
-    return ACCOUNT_SQL if "account" in _columns(connection) else DEFAULT_ACCOUNT_SQL
-
-
-def _tables(connection: sqlite3.Connection) -> set[str]:
+def tables(connection: sqlite3.Connection) -> set[str]:
     return {str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
 
 
 def _migrated(connection: sqlite3.Connection) -> bool:
-    successors = {ACCOUNT_OBSERVATIONS, lane_limit.ACCOUNT_EVIDENCE_TABLE, lane_limit.ACCOUNT_TABLE}
+    successors = {ACCOUNT_READINGS, ACCOUNT_OBSERVATIONS, lane_limit.ACCOUNT_EVIDENCE_TABLE, lane_limit.ACCOUNT_TABLE}
     return (
         "account" in _columns(connection)
-        and successors <= _tables(connection)
+        and successors <= tables(connection)
         and connection.execute(f"SELECT 1 FROM {TABLE} WHERE account IS NULL LIMIT 1").fetchone() is None
     )
 
@@ -252,14 +299,15 @@ def migrate(
 ) -> bool:
     """Key db's usage readings on the account; True when it wrote.
 
-    Already migrated (the column, no unnamed row, the three account tables):
+    Already migrated (the column, no unnamed row, the four account tables):
     no backup and no write. Otherwise it first takes the BACKUP_LABEL
     labelled backup into directory (default manual/ beside the rolling
     backup); a failed backup raises before any write. Then one transaction
     creates any missing table, adds the column, names every unnamed row
     `<harness>-default`, creates the account tables and seeds them from the
-    harness-keyed ones. Rows written meanwhile by older code are named by
-    the next run."""
+    harness-keyed ones, keeping the newest reading of each account, device
+    and window. No table is rebuilt. Rows written meanwhile by older code
+    are named by the next run."""
     with closing(connect()) as connection:
         if _migrated(connection):
             return False
@@ -278,16 +326,22 @@ def migrate(
             except sqlite3.OperationalError as exc:
                 if "duplicate column name" not in str(exc):
                     raise
-            for ddl in (ACCOUNT_OBSERVATIONS_DDL, lane_limit.ACCOUNT_EVIDENCE_DDL, lane_limit.ACCOUNT_DDL):
+            for ddl in (
+                ACCOUNT_READINGS_DDL,
+                ACCOUNT_OBSERVATIONS_DDL,
+                lane_limit.ACCOUNT_EVIDENCE_DDL,
+                lane_limit.ACCOUNT_DDL,
+            ):
                 connection.execute(ddl)
             connection.execute(f"UPDATE {TABLE} SET account = {DEFAULT_ACCOUNT_SQL} WHERE account IS NULL")
+            connection.execute(_SEED_READINGS)
             connection.execute(
                 f"""
                 INSERT OR IGNORE INTO {ACCOUNT_OBSERVATIONS} (account, window, source_at, absent)
                 SELECT {DEFAULT_ACCOUNT_SQL}, window, source_at, absent FROM {OBSERVATIONS}
                 """
             )
-            if lane_limit.EVIDENCE_TABLE in _tables(connection):
+            if lane_limit.EVIDENCE_TABLE in tables(connection):
                 connection.execute(
                     f"""
                     INSERT OR IGNORE INTO {lane_limit.ACCOUNT_EVIDENCE_TABLE} (account, window, observed_at, free_at)
@@ -437,15 +491,21 @@ def store(
     job_id: str,
     readings: list[Reading],
     account: str | None = None,
+    own_login: bool = True,
 ) -> None:
-    """Store readings for account (None: `<harness>-default`). Before the
-    migration adds the account column, the row and its streak keep the
-    harness-and-bot shape; this never adds the column."""
+    """Store readings for account (None: `<harness>-default`). Only an
+    own_login account's row goes in TABLE. Before the migration adds the
+    account column, the row and its streak keep the harness-and-bot shape
+    and a side account's readings are not stored. After it, every account's row goes in ACCOUNT_READINGS once
+    `migrate` has created it. This never adds the column or that table."""
     if not readings:
         return
     account = account or default_account(harness)
+    if not (own_login or "account" in _columns(connection)):
+        return
     ensure_table(connection)
     keyed = "account" in _columns(connection)
+    by_account = keyed and ACCOUNT_READINGS in tables(connection)
     if keyed:
         connection.execute(ACCOUNT_OBSERVATIONS_DDL)
     statements, key = (_BY_ACCOUNT, (account,)) if keyed else (_BY_HARNESS, (harness, bot))
@@ -458,12 +518,17 @@ def store(
         connection.execute(statements.observe, (*scope, source, absent))
         newest = connection.execute(statements.newest, scope).fetchall()
         connection.execute(statements.prune, (*scope, newest[-1][0]))
-        row = (harness, bot, device, r.window, r.used, r.resets_at, r.observed_at, job_id, absent, source)
-        if keyed:
-            connection.execute(_ACCOUNT_UPSERT, (*row, account))
-        else:
-            connection.execute(_UPSERT, row)
-        connection.execute(statements.mark, (_omissions(newest), *scope))
+        values = (r.used, r.resets_at, r.observed_at, job_id, absent, source)
+        if not keyed:
+            connection.execute(_UPSERT, (harness, bot, device, r.window, *values))
+        elif own_login:
+            connection.execute(_ACCOUNT_UPSERT, (harness, bot, device, r.window, *values, account))
+        if by_account:
+            connection.execute(ACCOUNT_READINGS_UPSERT, (account, device, r.window, harness, bot, *values))
+        run = _omissions(newest)
+        connection.execute(statements.mark, (run, *scope))
+        if by_account:
+            connection.execute(_MARK_READINGS, (run, account, r.window))
     lane_limit.reevaluate(connection, account, readings)
 
 
@@ -493,6 +558,64 @@ def from_row(
     return Reading(str(window), used_fraction(used), resets_at, observed)
 
 
+@dataclass(frozen=True)
+class StoredRow:
+    """One stored reading row, its values as stored and not yet validated."""
+
+    account: object
+    device: object
+    harness: object
+    bot: object
+    window: object
+    used: object
+    resets_at: object
+    observed_at: object
+    absent: object
+    source_at: object
+
+    def reading(self) -> Reading | None:
+        return from_row(self.window, self.used, self.resets_at, self.observed_at, self.absent)
+
+
+def stored(
+    connection: sqlite3.Connection, account: str | None = None, limit: int | None = None
+) -> list[StoredRow] | None:
+    """The stored rows (account's only, when given), one per account, device
+    and window, ordered by account, device, harness and bot: the
+    ACCOUNT_READINGS row, unless TABLE holds one written later (`updated_at`).
+    None when neither table exists."""
+    present = tables(connection)
+    parts = []
+    if ACCOUNT_READINGS in present:
+        parts.append(
+            "SELECT account, device, harness, bot, window, used, resets_at, observed_at, absent, source_at,"
+            f" 0 AS rank FROM {ACCOUNT_READINGS}"
+        )
+    if TABLE in present:
+        columns = _columns(connection)
+        named = ACCOUNT_SQL if "account" in columns else DEFAULT_ACCOUNT_SQL
+        absent = "absent" if "absent" in columns else "0"
+        source = "source_at" if "source_at" in columns else "NULL"
+        parts.append(
+            f"SELECT {named} AS account, device, harness, bot, window, used, resets_at, observed_at,"
+            f" {absent} AS absent, {source} AS source_at, 1 AS rank FROM {TABLE}"
+        )
+    if not parts:
+        return None
+    rows = connection.execute(
+        f"""
+        SELECT account, device, harness, bot, window, used, resets_at, observed_at, absent, source_at FROM (
+            SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY account, device, window ORDER BY {updated_at()} DESC, rank
+            ) AS n
+            FROM ({" UNION ALL ".join(parts)}) WHERE :account IS NULL OR account = :account
+        ) WHERE n = 1 ORDER BY account, device, harness, bot LIMIT :limit
+        """,
+        {"account": account, "limit": -1 if limit is None else limit},
+    ).fetchall()
+    return [StoredRow(*row) for row in rows]
+
+
 def window_state(reading: Reading, now: float, harness: str | None = None) -> str:
     """`stale` once the window has reset or the reading is old; else `ok`;
     `not on plan` for a PLAN_INFERRED harness once absent from
@@ -515,8 +638,8 @@ def headroom(readings: list[Reading], now: float) -> float | None:
 
 
 class TelemetryUsage:
-    """`UsageSource` over `usage_readings` for the account each harness uses,
-    on any of its devices: each window's newest reading."""
+    """`UsageSource` over the stored readings for the account each harness
+    uses, on any of its devices: each window's newest reading."""
 
     def __init__(
         self,
@@ -535,15 +658,12 @@ class TelemetryUsage:
             return None
         try:
             with closing(self.connect()) as connection:
-                rows = connection.execute(
-                    f"SELECT window, used, resets_at, observed_at FROM {TABLE}"
-                    f" WHERE harness = ? AND {account_sql(connection)} = ? ORDER BY observed_at",
-                    (harness, account),
-                ).fetchall()
+                rows = stored(connection, account) or []
         except sqlite3.Error:
             return None
         now = self.clock()
-        readings = {r.window: r for r in (from_row(*row) for row in rows) if r is not None}
+        found = (row.reading() for row in rows if row.harness == harness)
+        readings = {r.window: r for r in sorted((r for r in found if r is not None), key=lambda r: r.observed_at)}
         remaining = headroom(list(readings.values()), now)
         if remaining is None:
             return None

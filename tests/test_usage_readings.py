@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import codex_rollout, telemetry, usage_probe, usage_readings
+from lib import codex_rollout, lane_limit, telemetry, usage_probe, usage_readings
 from lib.dashboard import collect_snapshot
 from lib.dashboard_usage import read_usage
 from lib.device_pool import DevicePool
@@ -818,7 +818,9 @@ sys.stdout.buffer.write(open({str(FIXTURES / "codex-exec-json.jsonl")!r}, "rb").
 
 
 @pytest.mark.parametrize("harness", ["claude", "codex"])
-def test_a_remote_jobs_usage_reads_run_as_its_slots_account(tmp_path: Path, harness: str) -> None:
+def test_a_remote_jobs_usage_reads_run_as_its_slots_account(
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory, harness: str
+) -> None:
     from tests.test_remote_start import Ssh, config_of, enqueue, machines_file
 
     bot, placed = f"{harness}-bot", f"{harness}-max-2"
@@ -831,6 +833,7 @@ def test_a_remote_jobs_usage_reads_run_as_its_slots_account(tmp_path: Path, harn
         encoding="utf-8",
     )
     queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: CAPTURED)
+    assert _migrate(queue.path, tmp_path_factory.mktemp("manual")) is True
     job_id = enqueue(queue, harness, "1")
     assert DevicePool(queue, config_of(machines)).claim(harness) is not None
     with queue.connect() as connection:
@@ -863,8 +866,11 @@ def test_a_remote_jobs_usage_reads_run_as_its_slots_account(tmp_path: Path, harn
         assert probed["CLAUDE_CONFIG_DIR"] == str(account_home)
         assert not set(ACCOUNT_TOKENS["claude"]) & set(probed)
     with sqlite3.connect(queue.path) as connection:
-        rows = connection.execute("SELECT account, window, used FROM usage_readings ORDER BY window").fetchall()
+        rows = connection.execute(
+            "SELECT account, window, used FROM usage_account_readings ORDER BY window").fetchall()
+        login_rows = connection.execute("SELECT COUNT(*) FROM usage_readings").fetchone()
     assert rows == [(placed, "five_hour", 0.125), (placed, "seven_day", 0.345)]
+    assert login_rows == (0,), "a side account never writes the login's old row"
 
 def _probe_lines(run: subprocess.CompletedProcess) -> list[str]:
     for secret in (PROBE_MARKER, CLAIM_PROOF, TAG_VALUE, ENV_VALUE):
@@ -1633,6 +1639,195 @@ def test_orch_usage_migrate_says_whether_it_migrated(
     first, second = capsys.readouterr().out.splitlines()
     assert (first, second) == (f"migrated {db}", f"{db} already migrated")
     assert [path.name.endswith("-usage-accounts.db") for path in (tmp_path / "backup" / "manual").iterdir()] == [True]
+
+
+ACCOUNT_UPSERT_BEFORE_1248 = """
+INSERT INTO usage_readings (harness, bot, device, window, used, resets_at, observed_at, job_id, absent, source_at, account)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (harness, bot, device, window) DO UPDATE SET
+    used = excluded.used,
+    resets_at = excluded.resets_at,
+    observed_at = excluded.observed_at,
+    job_id = excluded.job_id,
+    absent = excluded.absent,
+    source_at = excluded.source_at,
+    account = excluded.account
+WHERE COALESCE(excluded.source_at, excluded.observed_at) > COALESCE(usage_readings.source_at, usage_readings.observed_at)
+"""
+
+
+def _migrated_db(tmp_path: Path) -> Path:
+    db = tmp_path / "state" / "orch.db"
+    _pre_account_db(db)
+    assert _migrate(db, tmp_path / "manual") is True
+    return db
+
+
+def _store_on(db: Path, account: str, device: str, used: float, at: float, *, own_login: bool) -> None:
+    with sqlite3.connect(db) as connection:
+        usage_readings.store(
+            connection, harness="codex", bot="codex-bot", device=device, job_id=f"job-{account}",
+            readings=[Reading("five_hour", used, FIVE_HOUR_RESET, at), Reading("seven_day", used, SEVEN_DAY_RESET, at)],
+            account=account, own_login=own_login,
+        )
+
+
+def _headroom(db: Path, account: str, now: float) -> float | None:
+    report = _source(db, now, {"codex": account}).read("codex")
+    return None if report is None else report.remaining
+
+
+def _lane_readings(db: Path, account: str) -> dict[str, float | None]:
+    with closing(sqlite3.connect(db)) as connection:
+        return {r.window: r.used for r in lane_limit.readings(connection, account)}
+
+
+def _dashboard(db: Path, now: float) -> dict[str, dict]:
+    with closing(sqlite3.connect(db)) as connection:
+        usage = read_usage(connection, now, BOX)
+    return {entry["account"]: entry for entry in usage["accounts"]}
+
+
+def test_two_accounts_on_one_device_keep_their_own_readings(tmp_path: Path) -> None:
+    db = _migrated_db(tmp_path)
+    _store_on(db, "codex-a", "box", 0.2, CAPTURED + 60, own_login=True)
+    _store_on(db, "codex-b", "box", 0.9, CAPTURED + 120, own_login=False)
+
+    now = CAPTURED + 180
+    assert _headroom(db, "codex-a", now) == pytest.approx(0.8)
+    assert _headroom(db, "codex-b", now) == pytest.approx(0.1)
+    assert _lane_readings(db, "codex-a") == {"five_hour": 0.2, "seven_day": 0.2}
+    assert _lane_readings(db, "codex-b") == {"five_hour": 0.9, "seven_day": 0.9}
+    shown = _dashboard(db, now)
+    assert (shown["codex-a"]["headroom"], shown["codex-a"]["devices"]) == (0.8, ["box"])
+    assert (shown["codex-b"]["headroom"], shown["codex-b"]["devices"]) == (0.1, ["box"])
+    with closing(sqlite3.connect(db)) as connection:
+        legacy = connection.execute(
+            "SELECT account, used FROM usage_readings WHERE device = 'box' AND harness = 'codex' ORDER BY window"
+        ).fetchall()
+        keyed = connection.execute(
+            "SELECT account, device, window, used FROM usage_account_readings"
+            " WHERE harness = 'codex' AND device = 'box' ORDER BY account, window"
+        ).fetchall()
+    assert legacy == [("codex-a", 0.2), ("codex-a", 0.2)], "a side account never writes the login's old row"
+    assert keyed == [
+        ("codex-a", "box", "five_hour", 0.2), ("codex-a", "box", "seven_day", 0.2),
+        ("codex-b", "box", "five_hour", 0.9), ("codex-b", "box", "seven_day", 0.9),
+    ]
+
+
+def test_the_migration_seeds_the_account_table_without_rebuilding_the_old_one(tmp_path: Path) -> None:
+    db, backups = tmp_path / "state" / "orch.db", tmp_path / "manual"
+    _pre_account_db(db)
+    with closing(sqlite3.connect(db)) as connection:
+        old_sql = connection.execute("SELECT sql FROM sqlite_master WHERE name = 'usage_readings'").fetchone()
+    assert _migrate(db, backups) is True
+    with closing(sqlite3.connect(db)) as connection:
+        seeded = connection.execute(
+            "SELECT account, device, window, harness, bot, used, absent FROM usage_account_readings"
+            " ORDER BY account"
+        ).fetchall()
+        new_sql = connection.execute("SELECT sql FROM sqlite_master WHERE name = 'usage_readings'").fetchone()
+    assert seeded == [
+        ("claude-default", "box", "five_hour", "claude", "claude-bot", 0.4, 0),
+        ("codex-default", "pc", "seven_day", "codex", "codex-bot", None, 2),
+    ]
+    assert new_sql[0] == old_sql[0].replace(", PRIMARY KEY", ", account TEXT, PRIMARY KEY"), (
+        "only a column is added, no table is rebuilt"
+    )
+
+
+def test_a_second_migrate_run_writes_nothing(tmp_path: Path) -> None:
+    db = _migrated_db(tmp_path)
+    backups = list((tmp_path / "manual").iterdir())
+    dump, changed = _dump(db), db.stat().st_mtime_ns
+    assert _migrate(db, tmp_path / "manual") is False
+    assert list((tmp_path / "manual").iterdir()) == backups
+    assert (_dump(db), db.stat().st_mtime_ns) == (dump, changed)
+
+
+def test_a_database_migrated_before_the_account_table_is_migrated_again(tmp_path: Path) -> None:
+    db = _migrated_db(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute("DROP TABLE usage_account_readings")
+    assert _migrate(db, tmp_path / "manual") is True
+    with closing(sqlite3.connect(db)) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM usage_account_readings").fetchone() == (2,)
+
+
+def test_an_older_binarys_upsert_still_works_and_its_newer_row_is_read(tmp_path: Path) -> None:
+    db = _migrated_db(tmp_path)
+    _store_on(db, "codex-a", "box", 0.2, CAPTURED + 60, own_login=True)
+
+    def old_binary(used: float, at: float) -> None:
+        with sqlite3.connect(db) as connection:
+            connection.executemany(ACCOUNT_UPSERT_BEFORE_1248, [
+                ("codex", "codex-bot", "box", window, used, reset, at, "old-job", 0, at, "codex-a")
+                for window, reset in (("five_hour", FIVE_HOUR_RESET), ("seven_day", SEVEN_DAY_RESET))
+            ])
+
+    old_binary(0.7, CAPTURED)
+    assert _headroom(db, "codex-a", CAPTURED + 300) == pytest.approx(0.8), "an older row never wins"
+
+    old_binary(0.6, CAPTURED + 120)
+    with closing(sqlite3.connect(db)) as connection:
+        assert connection.execute(
+            "SELECT used FROM usage_readings WHERE device = 'box' AND harness = 'codex'"
+        ).fetchall() == [(0.6,), (0.6,)]
+    assert _headroom(db, "codex-a", CAPTURED + 300) == pytest.approx(0.4)
+    assert _lane_readings(db, "codex-a") == {"five_hour": 0.6, "seven_day": 0.6}
+    assert _dashboard(db, CAPTURED + 300)["codex-a"]["headroom"] == 0.4
+
+
+def test_a_historical_writers_newer_row_is_read_though_its_source_time_is_stale(tmp_path: Path) -> None:
+    db = _migrated_db(tmp_path)
+    _store_on(db, "codex-a", "box", 0.2, CAPTURED + 60, own_login=True)
+    reset = FIVE_HOUR_RESET + 3600
+    with sqlite3.connect(db) as connection:
+        connection.executemany(HISTORICAL_UPSERT, [
+            ("codex", "codex-bot", "box", window, 1.0, reset, CAPTURED + 120, "old-job")
+            for window in usage_readings.WINDOWS
+        ])
+
+    now = CAPTURED + 180
+    assert _headroom(db, "codex-a", now) == 0.0
+    assert _lane_readings(db, "codex-a") == {"five_hour": 1.0, "seven_day": 1.0}
+    assert _dashboard(db, now)["codex-a"]["headroom"] == 0.0
+    with closing(sqlite3.connect(db)) as connection:
+        found = lane_limit.readings(connection, "codex-a")
+    assert lane_limit.until(lane_limit.UsageLimit(None), found, now) == (reset, "reading")
+
+
+def test_before_the_account_table_a_side_accounts_reading_is_not_stored(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    _pre_account_db(db)
+    _store_on(db, "codex-b", "box", 0.9, CAPTURED + 60, own_login=False)
+    assert _headroom(db, "codex-b", CAPTURED + 120) is None
+    with closing(sqlite3.connect(db)) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM usage_readings WHERE device = 'box' AND harness = 'codex'"
+        ).fetchone() == (0,)
+
+
+def test_a_session_for_a_side_account_stores_only_the_account_row(tmp_path: Path) -> None:
+    db = _migrated_db(tmp_path)
+    session = Session(
+        connect=lambda: sqlite3.connect(db), job_id="job-1", bot="claude-bot", repo="acme/widgets",
+        harness="claude", flags=stream_flags(["claude", "-p"]), raw_log=None, scrub=Scrubber({}),
+        log=lambda _m: None, stdout=io.BytesIO(), clock=lambda: CAPTURED + 60, device="box",
+        account="claude-b", own_login=False,
+    )
+    session.add_usage(parse_get_usage(GET_USAGE, CAPTURED + 60))
+    session.finish(0)
+    with closing(sqlite3.connect(db)) as connection:
+        legacy = connection.execute(
+            "SELECT account, used FROM usage_readings WHERE harness = 'claude' ORDER BY window"
+        ).fetchall()
+        keyed = connection.execute(
+            "SELECT account, window, used FROM usage_account_readings WHERE account = 'claude-b' ORDER BY window"
+        ).fetchall()
+    assert legacy == [("claude-default", 0.4)]
+    assert keyed == [("claude-b", "five_hour", 0.125), ("claude-b", "seven_day", 0.345)]
 
 
 # --- no credential file ---------------------------------------------------------------------

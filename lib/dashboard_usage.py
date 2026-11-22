@@ -1,9 +1,9 @@
 """Subscription headroom on the dashboard (issue #151, SPEC 3.5 item 5).
 
-`read_usage` reads `usage_readings` (written by `orch job run` and `orch
-usage record`, lib/usage_readings.py) inside the dashboard's read-only
-transaction. Only allowlisted columns are read and every value is checked
-again. The snapshot is then walked by lib/dashboard.py's `_scrub`.
+`read_usage` reads the stored readings (written by `orch job run` and `orch
+usage record`) inside the dashboard's read-only transaction. Only
+allowlisted columns are read and every value is checked again. The
+snapshot is then walked by lib/dashboard.py's `_scrub`.
 
 There is one entry per account: a subscription, named in machines.yml
 (lib/machines_yml.py). A row with no account belongs to its harness's
@@ -33,14 +33,12 @@ from dataclasses import dataclass, field
 from lib import lane_limit
 from lib.machines_yml import EXTERNAL, MachinesConfig
 from lib.usage_readings import (
-    ACCOUNT_SQL,
     NOT_TRACKED,
     SOURCES,
-    TABLE,
     WINDOWS,
     Reading,
-    from_row,
     headroom,
+    stored,
     window_state,
 )
 
@@ -92,29 +90,25 @@ def _configured(machines: MachinesConfig | None) -> dict[str, _Account]:
 
 def _rows(connection: sqlite3.Connection) -> dict[str, _Account] | None:
     try:
-        columns = {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}
-        account = ACCOUNT_SQL if "account" in columns else "harness || '-default'"
-        absent = "absent" if "absent" in columns else "0"
-        rows = connection.execute(
-            f"SELECT {account}, device, harness, bot, window, used, resets_at, observed_at, {absent}"
-            f" FROM {TABLE} ORDER BY 1, device, harness, bot LIMIT {ROW_LIMIT}"
-        ).fetchall()
+        rows = stored(connection, limit=ROW_LIMIT)
     except sqlite3.OperationalError:
         return None
-    stored: dict[str, _Account] = {}
-    for account_id, device, harness, bot, *values in rows:
-        if harness not in ROW_HARNESSES or not _names(account_id, device, bot):
+    if rows is None:
+        return None
+    found: dict[str, _Account] = {}
+    for row in rows:
+        if row.harness not in ROW_HARNESSES or not _names(row.account, row.device, row.bot):
             continue
-        reading = from_row(*values)
+        reading = row.reading()
         if reading is None:
             continue
-        account = stored.setdefault(account_id, _Account(harness))
-        if harness != EXTERNAL:
-            account.used_by(device, bot)
+        account = found.setdefault(str(row.account), _Account(str(row.harness)))
+        if row.harness != EXTERNAL:
+            account.used_by(str(row.device), str(row.bot))
         kept = account.windows.get(reading.window)
         if kept is None or reading.observed_at > kept.observed_at:
             account.windows[reading.window] = reading
-    return stored
+    return found
 
 
 def _window(reading: Reading | None, now: float, harness: str) -> dict:

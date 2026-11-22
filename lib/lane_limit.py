@@ -231,16 +231,8 @@ def _valid(found: list[usage_readings.Reading]) -> list[usage_readings.Reading]:
 
 
 def readings(connection: sqlite3.Connection, account: str) -> list[usage_readings.Reading]:
-    if not _has_table(connection, usage_readings.TABLE):
-        return []
-    rows = connection.execute(
-        f"""
-        SELECT window, used, resets_at, observed_at FROM {usage_readings.TABLE}
-        WHERE {usage_readings.account_sql(connection)} = ?
-        """,
-        (account,),
-    ).fetchall()
-    return _valid([usage_readings.Reading(*row) for row in rows])
+    found = (row.reading() for row in usage_readings.stored(connection, account) or [])
+    return [r for r in found if r is not None]
 
 
 def record(

@@ -553,7 +553,8 @@ trace <owner/repo>#<n> [--db PATH] [--json]
 usage migrate [--db PATH]
   Key the usage readings on the account (#772). Takes the labelled backup
   usage-accounts (as db-backup does) first, then adds usage_readings.account
-  filled with <harness>-default and the account-keyed tables. `orch poll`
+  filled with <harness>-default and the account-keyed tables, seeding
+  usage_account_readings from usage_readings. `orch poll`
   runs it at start. Says whether it migrated; a second run changes nothing.
   --db defaults to ORCH_DB. Exit 1 when the backup or the migration fails.
 
@@ -2360,6 +2361,7 @@ def _job_run_command(argv: list[str]) -> int:
         worker_env=placed.remote,
         device=placed.device.name,
         account=placed.account,
+        own_login=placed.account_home is None,
         guard=lambda connection: require_latest_claim(connection, args.job_id, claim_proof),
         skills_root=None if factory_root is None else f"{factory_root}/skills",
     )
