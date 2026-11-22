@@ -381,7 +381,7 @@ class SchemaMixin:
                 )
                 """
             )
-            _add_missing_columns(connection, "review_events", {"stop": "TEXT"})
+            _add_missing_columns(connection, "review_events", {"stop": "TEXT", "finding_ids": "TEXT"})
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS followup_filings (

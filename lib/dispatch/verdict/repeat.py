@@ -390,7 +390,7 @@ class RepeatBlockMixin:
         with self._connect() as connection:
             for row in connection.execute(
                 """
-                SELECT comment_id, outcome, stop, qa_failed FROM review_events
+                SELECT comment_id, outcome, stop, qa_failed, finding_ids FROM review_events
                 WHERE repo = ? AND ticket_id = ? AND outcome IN ('capped-review', 'waiting-max-repeat')
                 ORDER BY rowid
                 """,
@@ -408,12 +408,15 @@ class RepeatBlockMixin:
                     )
                     continue
                 body = bodies.get(verdict_id)
+                if row["finding_ids"] is not None:
+                    blocking = frozenset(json.loads(row["finding_ids"]))
+                else:
+                    blocking = frozenset() if body is None else blocking_ids(_handoff(body)[1])
                 history.append(
                     StopRecord(
                         verdict_id,
                         "stalled" if row["stop"] == "stalled" else "capped",
-                        (frozenset() if body is None else blocking_ids(_handoff(body)[1]))
-                        | frozenset(json.loads(row["qa_failed"] or "[]")),
+                        blocking | frozenset(json.loads(row["qa_failed"] or "[]")),
                         _released_by(connection, ticket, verdict_id, "cap"),
                     )
                 )

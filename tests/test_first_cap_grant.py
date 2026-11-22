@@ -233,3 +233,76 @@ def test_a_grant_interrupted_after_it_applied_finishes_once_at_the_next_poll(
     flow.dispatcher.process(flow.snapshot())
 
     assert_granted(flow, fixes)
+
+
+def rewrite(flow: AppFlow, comment_id: str, change: str) -> None:
+    [stop] = [item for item in flow.comments if item.id == comment_id]
+    flow.comments.remove(stop)
+    if change == "edited":
+        flow.comments.append(replace(stop, body=stop.body.replace(F3, "- [blocking] f-9: rewritten.\n")))
+
+
+@pytest.mark.parametrize("change", ["deleted", "edited"])
+def test_an_engine_grant_keeps_its_findings_when_its_verdict_changes(tmp_path: Path, change: str) -> None:
+    flow = engine_flow(tmp_path)
+    assert to_cap(flow) == "capped-review"
+    respond(flow, 3, "Fixed f-3.\n")
+    assert revise(flow, "4/4", "revise-4", body=F4) == "capped-review"
+    respond(flow, 4, "Fixed f-4.\n")
+    rewrite(flow, "revise-3", change)
+
+    assert revise(flow, "5/5", "revise-5", body=F3) == "capped-review"
+
+    assert flow.state()["cap_extra"] == 2
+    assert_woke_grok(flow, "earlier-round", "revise-5")
+
+
+@pytest.mark.parametrize("change", ["deleted", "edited"])
+def test_an_approver_cap_go_keeps_its_findings_when_its_verdict_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    flow = engine_flow(tmp_path)
+    to_last_round(flow)
+    with monkeypatch.context() as patch:
+        stuck_after_the_verdict(flow, patch)
+        assert revise(flow, "3/3", "revise-3", body=F3) == "capped-review"
+    assert_woke_grok(flow, "stuck")
+    with flow.queue.connect() as connection:
+        connection.execute("UPDATE ticket_state SET stuck = 0")
+    assert flow.post("go-max", "/go", MAX) == "queued-fix"
+    respond(flow, 3, "Fixed f-3.\n")
+    rewrite(flow, "revise-3", change)
+
+    assert revise(flow, "4/4", "revise-4", body=F3) == "capped-review"
+
+    assert flow.state()["cap_extra"] == 1
+    assert_woke_grok(flow, "earlier-round", "revise-4")
+
+
+def test_a_notice_retried_after_the_ticket_moved_on_keeps_the_newer_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flow = engine_flow(tmp_path)
+    to_last_round(flow)
+    actions = flow.dispatcher.review_actions
+
+    def unavailable(*args, **kwargs) -> None:
+        raise RuntimeError("comments unavailable")
+
+    with monkeypatch.context() as outage:
+        outage.setattr(actions, "comment_once", unavailable)
+        try:
+            revise(flow, "3/3", "revise-3", body=F3)
+        except RuntimeError:
+            pass
+        assert (flow.state()["workflow_state"], actions.states[-1]) == ("fixing", "fixing")
+        respond(flow, 3, "Fixed f-3.\n")
+    assert (flow.state()["workflow_state"], actions.states[-1]) == ("review", "review")
+
+    flow.dispatcher.process(flow.snapshot())
+    flow.dispatcher.process(flow.snapshot())
+
+    assert (flow.state()["workflow_state"], actions.states[-1]) == ("review", "review")
+    assert len(notices(flow)) == 1
+    assert rows(flow)[0]["notice_status"] == "posted"
+
