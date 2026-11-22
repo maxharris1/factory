@@ -10,7 +10,10 @@ schedulable, not draining, and list that harness (issue #85). Of the
 accounts signed in for the harness on a free device that are neither
 usage-limited, at max_jobs across every device nor under FLOOR fresh
 headroom, the one with the highest score wins (then fewer running jobs, its
-best device, its id) and takes its best-ranked device. The score is fresh
+best device, its id) and takes its best-ranked device. Once
+`account_signins` exists (lib/account_doctor.py), an account other than the
+device's own login places there only with an `ok` row for the device
+(#1317). The score is fresh
 headroom (UNREAD_HEADROOM with none) less PENDING_CHARGE per job placed
 since the account's newest reading (#1316). A job of a project pinned
 to devices (orch.yml projects[].devices, #1172) takes only a listed device;
@@ -87,7 +90,7 @@ from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
 
-from lib import device_sync, lane_limit, live_settings, usage_readings
+from lib import account_doctor, device_sync, lane_limit, live_settings, usage_readings
 from lib.device_sync import NOTHING_BLOCKED, Blocked
 from lib.machines_yml import (
     Device,
@@ -219,9 +222,16 @@ class AccountLoads:
     held: frozenset[str]
     closed: frozenset[str]
     score: Mapping[str, float]
+    signed_in: frozenset[tuple[str, str]] | None
 
-    def takes_work(self, account: str) -> bool:
-        return account not in self.closed
+    def taking_work(self, config: MachinesConfig, device: str, harness: str) -> list[str]:
+        accounts = config.accounts_on(device, harness)
+        return [
+            account
+            for index, account in enumerate(accounts)
+            if account not in self.closed
+            and (index == 0 or self.signed_in is None or (account, device) in self.signed_in)
+        ]
 
     def score_of(self, account: str) -> float:
         return self.score.get(account, UNREAD_HEADROOM)
@@ -259,7 +269,15 @@ def account_loads(
     for item in config.accounts if config is not None else ():
         if item.max_jobs is not None and running.get(item.id, 0) >= item.max_jobs:
             closed.add(item.id)
-    return AccountLoads(running, frozenset(held), frozenset(closed), score)
+    signed_in = None
+    if _has_table(connection, account_doctor.TABLE):
+        signed_in = frozenset(
+            (str(account), str(device))
+            for account, device in connection.execute(
+                f"SELECT account, device FROM {account_doctor.TABLE} WHERE status = 'ok'"
+            )
+        )
+    return AccountLoads(running, frozenset(held), frozenset(closed), score, signed_in)
 
 
 def _ranked_free(
@@ -298,9 +316,8 @@ def choose_pair(
     """
     best: dict[str, tuple[tuple[bool, Fraction, bool, int], Device]] = {}
     for rank, device in _ranked_free(config, harness, used, blocked, avoid, allowed):
-        for account in config.accounts_on(device.name, harness):
-            if loads.takes_work(account):
-                best.setdefault(account, (rank, device))
+        for account in loads.taking_work(config, device.name, harness):
+            best.setdefault(account, (rank, device))
     if not best:
         return None
 
@@ -1195,7 +1212,7 @@ def placement_blocked(
         (device.name, harness)
         for device in (config.devices if config is not None else ())
         for harness in device.harnesses
-        if not any(map(loads.takes_work, config.accounts_on(device.name, harness)))
+        if not loads.taking_work(config, device.name, harness)
     }
     return replace(blocked, pairs=blocked.pairs | pairs)
 
