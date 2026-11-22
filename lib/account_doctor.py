@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
-from lib import attention
+from lib import attention, lane_limit
 from lib.machines_yml import Device, MachinesConfig
 from lib.remote import (
     _UNTRACE,
@@ -78,9 +78,14 @@ PLACEHOLDER_DEVICE = "device has install placeholders"
 NO_SSH_ALIAS = "no ssh_alias for {} on {}"
 SSH_DOWN = "device unreachable over ssh"
 NO_REPLY = "no status reply"
+AUTHENTICATION_FAILED = "authentication_failed"
 
 _BEGIN = b"ORCH-ACCOUNTS-BEGIN"
 _FRAME = re.compile(rb"ORCH-ACCOUNT (\d+) (\d+)")
+_SIGNED_OUT = {
+    "claude": re.compile(r"OAuth session expired|not logged in|run /login", re.IGNORECASE),
+    "codex": re.compile(r"not logged in|401 Unauthorized|Please (?:log out and )?sign in again", re.IGNORECASE),
+}
 
 _SUBSCRIPTION = re.compile(r"[a-z][a-z0-9_]{0,23}")
 _CODEX_LINES = (
@@ -402,6 +407,14 @@ def ensure_table(connection: sqlite3.Connection) -> None:
 def hold(connection: sqlite3.Connection, account: str, device: str, source: Source, reason: str, now: float) -> None:
     connection.execute(_HOLDS_SCHEMA)
     connection.execute(_HOLD, (account, device, now, source, reason))
+
+
+def detect_signout(harness: str, event: dict) -> bool:
+    if harness == "claude" and event.get("error") == AUTHENTICATION_FAILED:
+        return True
+    pattern = _SIGNED_OUT.get(harness)
+    text = lane_limit.error_text(harness, event)
+    return pattern is not None and text is not None and pattern.search(text) is not None
 
 
 def _holds(connection: sqlite3.Connection) -> dict[tuple[str, str], Hold]:

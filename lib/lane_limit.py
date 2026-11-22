@@ -133,13 +133,13 @@ class LaneLimit:
 
 def detect(harness: str, event: dict, now: float) -> UsageLimit | None:
     """The usage limit one parsed stream event reports, or None."""
-    text = _limit_text(harness, event)
+    text = error_text(harness, event)
     if text is None or not _PHRASE.search(text):
         return None
     return UsageLimit(_parse_reset(text, now))
 
 
-def _limit_text(harness: str, event: dict) -> str | None:
+def error_text(harness: str, event: dict) -> str | None:
     kind = event.get("type")
     if harness == "codex":
         if kind == "error":
