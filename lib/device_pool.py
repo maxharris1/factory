@@ -428,7 +428,8 @@ class DevicePool:
         Runs inside the caller's open BEGIN IMMEDIATE transaction, the one
         that moves the job to running. True for an unpinned project, which
         holds no slot; False when no listed device has a free slot, and for
-        every project while the pins are unknown (None).
+        every project while the pins are unknown (None). QA runs under no
+        harness account, so a limited or capped account never closes its slot.
         """
         pins = self.pins()
         if pins is None:
@@ -438,7 +439,7 @@ class DevicePool:
             return True
         now = self.queue.now()
         config, _ = self._placement(connection)
-        blocked = placement_blocked(connection, now, config, self.head())
+        blocked = device_blocked(connection, now, config, self.head())
         used = _used(connection, config)
         for harness in sorted(HARNESSES):
             device = choose_device(config, harness, used, blocked, allowed=allowed)
@@ -1139,13 +1140,29 @@ def orphan_slot(connection: sqlite3.Connection, job_id: str, now: float) -> None
     connection.execute(f"DELETE FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,))
 
 
-def placement_blocked(
+def device_blocked(
     connection: sqlite3.Connection,
     now: float,
     config: MachinesConfig | None,
     head: str | None,
 ) -> Blocked:
     blocked = device_sync.checkout_blocks(device_sync.read(connection), head, orch_host(config))
+    backed_off = {
+        str(row[0])
+        for table in (BACKOFF_TABLE, MEMORY_HOLDS_TABLE)
+        if _has_table(connection, table)
+        for row in connection.execute(f"SELECT device FROM {table} WHERE until > ?", (now,))
+    }
+    return replace(blocked, devices=blocked.devices | backed_off)
+
+
+def placement_blocked(
+    connection: sqlite3.Connection,
+    now: float,
+    config: MachinesConfig | None,
+    head: str | None,
+) -> Blocked:
+    blocked = device_blocked(connection, now, config, head)
     loads = account_loads(connection, config, now)
     pairs = {
         (device.name, harness)
@@ -1153,13 +1170,7 @@ def placement_blocked(
         for harness in device.harnesses
         if not any(map(loads.takes_work, config.accounts_on(device.name, harness)))
     }
-    backed_off = {
-        str(row[0])
-        for table in (BACKOFF_TABLE, MEMORY_HOLDS_TABLE)
-        if _has_table(connection, table)
-        for row in connection.execute(f"SELECT device FROM {table} WHERE until > ?", (now,))
-    }
-    return replace(blocked, pairs=blocked.pairs | pairs, devices=blocked.devices | backed_off)
+    return replace(blocked, pairs=blocked.pairs | pairs)
 
 
 def placement_blocks(
