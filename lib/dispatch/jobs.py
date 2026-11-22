@@ -80,8 +80,10 @@ from lib.job_state import (
     release_link_dropped,
     requeue_lagging,
     requeue_link_drop,
+    requeue_signed_out_run,
     requeue_unstarted,
     requeue_usage_limited,
+    signout_end,
     unstarted_too_long,
     usage_limit_end,
 )
@@ -974,6 +976,8 @@ class JobsMixin:
             return
         if not queue_owned and self._usage_limit_handled(job):
             return
+        if not queue_owned and self._signout_handled(job):
+            return
         link_drop = self._link_drop(job)
         if link_drop is not None:
             with self._connect() as connection:
@@ -1131,6 +1135,24 @@ class JobsMixin:
             connection.execute("BEGIN IMMEDIATE")
             release_link_dropped(connection, job.id)
             result = requeue_usage_limited(
+                connection, job.id, now=self.queue.now(), reason=detail
+            )
+            connection.commit()
+        if result is not None:
+            self._log_job_event(job, *result)
+        return True
+
+    def _signout_handled(self, job: Job) -> bool:
+        with self._connect() as connection:
+            detail = signout_end(connection, job.id)
+        if detail is None:
+            return False
+        if job.request.action == "review" and self._review_retry_waits(job):
+            return True
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            release_link_dropped(connection, job.id)
+            result = requeue_signed_out_run(
                 connection, job.id, now=self.queue.now(), reason=detail
             )
             connection.commit()
