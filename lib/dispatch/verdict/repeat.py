@@ -13,7 +13,7 @@ from lib.dispatch.decisions import Decision, chosen_words
 from lib.dispatch.qa import QaFix, failed_column
 from lib.dispatch.helpers import _comment_link, _comment_order, _matching_head, _round_number, _scope
 from lib.dispatch.transitions import write_workflow_state
-from lib.dispatch.types import Comment, TrackedTicket
+from lib.dispatch.types import Comment, PausedStep, RoundGrant, TrackedTicket
 from lib.dispatch.verdict.convergence import Continue, Convergence, Repeated, RoundFindings, converge
 from lib.handoff import HandoffError, parse_comment, repeat_id
 from lib.markdown_items import MARKDOWN
@@ -430,7 +430,7 @@ class RepeatBlockMixin:
         )
 
     def _repeat_detail(
-        self, ticket: TrackedTicket, comment: Comment, repeated: Repeated, reported_round: int | None
+        self, ticket: TrackedTicket, comment: Comment, repeated: Repeated, reported_round: int | None, stops: int
     ) -> str:
         same_round = [
             item
@@ -442,7 +442,6 @@ class RepeatBlockMixin:
             same_round[0] if same_round else None,
         )
         earlier = "no earlier verdict" if holding is None else _comment_link(holding.comment)
-        stops = self._repeat_stops(ticket, comment, repeated.rule_id)
         fields = [
             f"repeat-block: {repeated.rule_id}",
             earlier,
@@ -464,9 +463,16 @@ class RepeatBlockMixin:
         qa: QaFix | None,
         states: tuple[str, ...] = REVISE_ROUND_STATES,
     ) -> tuple[bool, str]:
+        from lib.dispatch.rule_engine import prior_grants
+
         key = (ticket.repo.lower(), ticket.ticket_id)
-        detail = self._repeat_detail(ticket, comment, repeated, reported_round)
+        stops = self._repeat_stops(ticket, comment, repeated.rule_id)
+        detail = self._repeat_detail(ticket, comment, repeated, reported_round, stops)
         question = self._stop_question(ticket, comment, "repeat", frozenset({repeated.rule_id}))
+        engine = ticket.factory.rule_engine == "on"
+        prior_grant = prior_grants(self._stop_history(ticket), comment.id) if engine else frozenset()
+        if engine:
+            ticket = self._fresh_issue(ticket)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             prior = connection.execute(
@@ -477,8 +483,12 @@ class RepeatBlockMixin:
                 (*key, comment.id),
             ).fetchone()
             if prior is not None:
+                granted = _released_by(connection, ticket, comment.id, "repeat") == "engine"
                 connection.commit()
-                self._write_state_label(ticket, "waiting-max")
+                if granted:
+                    self._apply_engine_grants(ticket)
+                else:
+                    self._write_state_label(ticket, "waiting-max")
                 return True, str(prior["outcome"])
             state = connection.execute(
                 """
@@ -519,6 +529,29 @@ class RepeatBlockMixin:
                 """,
                 (*key, comment.id, failed_column(qa)),
             )
+            granted = engine and self._rule_on_repeat(
+                connection, ticket, comment, repeated.rule_id, stops, prior_grant, reported_round
+            )
+            if granted:
+                self._resume_step(
+                    connection,
+                    ticket,
+                    comment,
+                    PausedStep(
+                        question_id=comment.id,
+                        action="fix",
+                        recipient=ticket.factory.builder_harness,
+                        generation=generation,
+                        head=ticket.current_head,
+                        round_number=reported_round + 1,
+                        prior=self._resumed_step_detail(connection, ticket, comment, "fix", comment.id),
+                    ),
+                    [],
+                    RoundGrant.engine(comment),
+                )
+                connection.commit()
+                self._apply_engine_grants(ticket)
+                return True, "waiting-max-repeat"
             self.queue.enqueue_in_transaction(
                 connection,
                 self._grok_request(
