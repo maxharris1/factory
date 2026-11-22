@@ -444,7 +444,7 @@ def test_ref_statuses_marks_an_open_pr_labelled_abandoned() -> None:
 
 
 def test_ref_statuses_keeps_the_abandoned_label_on_a_closed_or_merged_pr() -> None:
-    from lib.feeder_gates import github_ref
+    from lib.feeder_gates import Progress, github_ref
 
     labelled = {"nodes": [{"name": "orch:state/abandoned"}]}
     gh = GraphQLGh({"owner/app": {

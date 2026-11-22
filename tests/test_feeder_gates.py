@@ -565,10 +565,10 @@ def test_a_holder_releases_when_its_pr_merges_or_closes(tmp_path: Path, ended) -
     github.statuses[ref(501)] = ended
     assert fed_heads(github, feeder.feed_once()) == ["factory/issue-2"]
     assert rows(tmp_path / "orch.db")["1"]["released"] == 1
-    reads = len(github.status_reads)
     github.statuses[ref(501)] = OPEN_PULL  # reopened: released stays released
     feeder.feed_once()
-    assert all(ref(501) not in read for read in github.status_reads[reads:])
+    assert rows(tmp_path / "orch.db")["1"]["released"] == 1
+    assert states(tmp_path)["2"][0] == "fed"
 
 
 def test_conflicts_with_is_symmetric_and_matches_issue_or_pr_number(tmp_path: Path) -> None:

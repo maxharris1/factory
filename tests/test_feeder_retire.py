@@ -240,16 +240,17 @@ def test_a_labelled_retirement_lost_to_a_lock_lands_on_the_next_poll(
 ) -> None:
     feeder, github, pull = _done_row(tmp_path)
     github.statuses = {pull: LABELLED}
-    armed = []
+    armed: list[bool] = []
     read = github.ref_statuses
 
     def reading(refs):
-        armed.append(True)
+        if not armed:
+            armed.append(True)
         return read(refs)
 
     def locked(connect, work, **kwargs):
-        if armed:
-            armed.clear()
+        if armed == [True]:
+            armed.append(False)
             return False
         return bookkeeping_write(connect, work, **kwargs)
 
