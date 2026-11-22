@@ -277,7 +277,12 @@ def _unreached(account: str, device: str, harness: Harness, detail: str) -> Prob
 
 
 def probe(transport: ByteTransport, config: MachinesConfig, device: Device, harness: Harness) -> list[Probe]:
-    accounts = config.accounts_on(device.name, harness)
+    return _probe_accounts(transport, config, device, harness, config.accounts_on(device.name, harness))
+
+
+def _probe_accounts(
+    transport: ByteTransport, config: MachinesConfig, device: Device, harness: Harness, accounts: Sequence[str]
+) -> list[Probe]:
     if not accounts:
         return []
     alias = device.ssh_alias_for(harness)
@@ -297,6 +302,27 @@ def probe(transport: ByteTransport, config: MachinesConfig, device: Device, harn
         else _unreached(account, device.name, harness, NO_REPLY)
         for index, account in enumerate(accounts)
     ]
+
+
+class SignedOut(Exception):
+    def __init__(self, account: str, device: str, harness: Harness, detail: str) -> None:
+        super().__init__(f"preflight-signed-out: {account}@{device} ({harness}): {detail}")
+        self.account = account
+        self.device = device
+        self.harness = harness
+        self.detail = detail
+
+
+def check_login(transport: ByteTransport, config: MachinesConfig, device: Device, harness: str, account: str) -> None:
+    """Raise SignedOut when the account's login on device reads not logged in.
+
+    Only the reading the doctor would hold on counts. An unreached device or
+    an inconclusive reply passes: skill_preflight owns an unreachable device."""
+    if harness not in _STATUS:
+        return
+    [reading] = _probe_accounts(transport, config, device, harness, (account,))
+    if reading.reached and not reading.logged_in and reading.detail == NOT_LOGGED_IN:
+        raise SignedOut(account, device.name, harness, reading.detail)
 
 
 def _rule(probe: Probe) -> _Rule:

@@ -56,6 +56,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from lib import account_doctor
 from lib.device_pool import LINK_DROP_TAG, UNREACHABLE_BACKOFF_SECONDS, Placement, back_off
 from lib.device_sync import SYNC_GRACE_SECONDS
 from lib.queue import SLOTS_TABLE, retire_requeued
@@ -481,6 +482,38 @@ def requeue_unreachable(
     detail = f"{reason}; requeued, no round or attempt charged"
     record_job_event(connection, job_id, REQUEUED_UNREACHABLE, detail, now)
     return REQUEUED_UNREACHABLE, detail
+
+
+REQUEUED_SIGNED_OUT = "requeued-signed-out"
+
+
+def requeue_signed_out(
+    connection: sqlite3.Connection,
+    job_id: str,
+    *,
+    account: str,
+    device: str,
+    now: float,
+    reason: str,
+    slot_guard: str,
+    slot_params: tuple[object, ...],
+) -> tuple[str, str] | None:
+    """Hold account@device for the doctor and requeue a running job whose
+    login preflight read not logged in (#1334), in the caller's write
+    transaction. Guarded as requeue_unstarted, but charges no free requeue,
+    round or attempt."""
+    account_doctor.hold(connection, account, device, "preflight", account_doctor.NOT_LOGGED_IN, now)
+    if not _free_unstarted_slot(connection, job_id, slot_guard, slot_params):
+        return None
+    connection.execute(
+        "UPDATE jobs SET state = 'queued', last_activity_at = ? WHERE id = ?", (now, job_id)
+    )
+    retired = retire_requeued(connection, job_id, reason, now=now)
+    if retired is not None:
+        return "cancelled", retired
+    detail = f"{reason}; requeued, no round or attempt charged"
+    record_job_event(connection, job_id, REQUEUED_SIGNED_OUT, detail, now)
+    return REQUEUED_SIGNED_OUT, detail
 
 
 LINK_DROP = "link-drop"
