@@ -314,14 +314,11 @@ class SignedOut(Exception):
 
 
 def check_login(transport: ByteTransport, config: MachinesConfig, device: Device, harness: str, account: str) -> None:
-    """Raise SignedOut when the account's login on device reads not logged in.
-
-    Only the reading the doctor would hold on counts. An unreached device or
-    an inconclusive reply passes: skill_preflight owns an unreachable device."""
+    """Raise SignedOut when the account's login on device reads not logged in."""
     if harness not in _STATUS:
         return
     [reading] = _probe_accounts(transport, config, device, harness, (account,))
-    if reading.reached and not reading.logged_in and reading.detail == NOT_LOGGED_IN:
+    if reading.detail == NOT_LOGGED_IN:
         raise SignedOut(account, device.name, harness, reading.detail)
 
 
