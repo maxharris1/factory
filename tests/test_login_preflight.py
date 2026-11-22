@@ -157,7 +157,7 @@ def test_repeated_signed_out_preflights_never_burn_a_retry(tmp_path: Path) -> No
     assert spawn.calls == []
     assert state(db, job_id) == "queued", "a bad login never fails the job, so T6 never retries it"
     assert counters(db, job_id) == before
-    assert [event for event, _ in events_of(db, job_id)] == ["requeued-signed-out"] * (MAX_FREE_REQUEUES + 3)
+    assert [event for event, _ in events_of(db, job_id)] == ["requeued-signed-out"], "the hold keeps placement off the pair"
     assert holds(db) == {("claude-default", "pc", "preflight")}, "one hold however many launches fail"
 
 
