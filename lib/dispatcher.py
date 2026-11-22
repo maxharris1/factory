@@ -157,6 +157,7 @@ from lib.dispatch.ready import (
 from lib.dispatch.retry import (
     RetryMixin,
 )
+from lib.dispatch.rule_engine import RuleEngineMixin
 from lib.dispatch.schema import (
     SchemaMixin,
     _add_missing_columns,
@@ -251,6 +252,7 @@ class Dispatcher(
     LinearStatesMixin,
     PollMixin,
     EvalLogMixin,
+    RuleEngineMixin,
     SchemaMixin,
     DispatcherBase,
 ):

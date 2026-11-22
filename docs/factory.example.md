@@ -21,6 +21,7 @@ review:
   # verify_unavailable: true  # optional; the verify skill may not be on the base yet, so the reviewer lists it as not run
 ship: merge
 # finish_line: merge  # optional; omitted, it follows ship
+# rule_engine: off  # optional; on lets the rule engine rule at the cap, repeat and moved-head sites
 # ci:  # optional; the bases CI runs on. A PR into another base gets no CI wait, and briefs ask for local results
 #   branches: [main]
 #   local_checks: [pytest]
