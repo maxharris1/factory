@@ -294,7 +294,9 @@ HANDOFF_SAVINGS_DEFINITION = (
     "ticket and hand off by hand (stops, clarify, refusals, ship failures). "
     "scripted_share = scripted / (scripted + bot_to_bot). The database does not "
     "record bot messages sent outside the factory, so grok wakes are the "
-    "measurable stand-in for bot-to-bot handoffs."
+    "measurable stand-in for bot-to-bot handoffs. "
+    "engine_handled = granted plus landed rulings in the engine_decisions log, "
+    "and engine_escalated = escalated rulings in that log."
 )
 SCRIPTED_SHARE_DEFINITION = (
     "Scripted share is the part of handoffs a script routed straight to the "
@@ -2210,6 +2212,18 @@ def _read_db(
         in_flight = int(row["in_flight"])
         bot_to_bot = int(row["bot_to_bot"])
     denominator = scripted + bot_to_bot
+    engine_handled = engine_escalated = 0
+    if "engine_decisions" in tables:
+        row = connection.execute(
+            """
+            SELECT
+              COALESCE(SUM(outcome IN ('granted', 'landed')), 0) AS handled,
+              COALESCE(SUM(outcome = 'escalated'), 0) AS escalated
+            FROM engine_decisions
+            """
+        ).fetchone()
+        engine_handled = int(row["handled"])
+        engine_escalated = int(row["escalated"])
 
     return {
         "queue": {
@@ -2253,6 +2267,8 @@ def _read_db(
             "scripted": scripted,
             "scripted_in_flight": in_flight,
             "bot_to_bot": bot_to_bot,
+            "engine_handled": engine_handled,
+            "engine_escalated": engine_escalated,
             "scripted_share": (
                 round(scripted / denominator, 3) if denominator else None
             ),

@@ -134,6 +134,55 @@ def test_definition_texts_are_unchanged(tmp_path: Path) -> None:
     ) in savings
 
 
+ENGINE_OUTCOMES = ("granted", "granted", "landed", "waiting", "escalated", "escalated", "escalated")
+
+
+def _engine_snapshot(tmp_path: Path, outcomes: tuple[str, ...] = ENGINE_OUTCOMES, *, table: bool = True) -> dict:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        if not table:
+            connection.execute("DROP TABLE engine_decisions")
+        for n, outcome in enumerate(outcomes):
+            connection.execute(
+                "INSERT INTO engine_decisions (repo, ticket_id, site, subject, rule, outcome, checks,"
+                " finding_ids, decided_at) VALUES ('maxharris1/factory', ?, 'cap', 'head', 'cap', ?, '[]', '[]', ?)",
+                (str(n), outcome, NOW - n),
+            )
+    return collect_snapshot(db, log, now=NOW, machines_path=_machines(tmp_path))
+
+
+def test_engine_counts_take_granted_and_landed_as_handled(tmp_path: Path) -> None:
+    savings = _engine_snapshot(tmp_path)["handoff_savings"]
+    assert (savings["engine_handled"], savings["engine_escalated"]) == (3, 3)
+
+
+def test_engine_counts_are_zero_with_no_rows(tmp_path: Path) -> None:
+    savings = _engine_snapshot(tmp_path, ())["handoff_savings"]
+    assert (savings["engine_handled"], savings["engine_escalated"]) == (0, 0)
+
+
+def test_engine_counts_are_zero_without_the_table(tmp_path: Path) -> None:
+    savings = _engine_snapshot(tmp_path, (), table=False)["handoff_savings"]
+    assert (savings["engine_handled"], savings["engine_escalated"]) == (0, 0)
+
+
+def _counts(savings: str) -> dict[str, str]:
+    counts = savings[savings.index('<div class="ef-counts">') :]
+    return {_text(label): _text(value)
+            for value, label in re.findall(r"<div>(<b[^>]*>.*?</b>)(<span>.*?</span>)</div>", counts)}
+
+
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+@pytest.mark.parametrize(("table", "handled", "escalated"), [(True, "3", "3"), (False, "0", "0")])
+def test_savings_renders_engine_handled_and_escalated(
+    tmp_path: Path, render: str, table: bool, handled: str, escalated: str
+) -> None:
+    snapshot = _engine_snapshot(tmp_path, ENGINE_OUTCOMES if table else (), table=table)
+    counts = _counts(_render(tmp_path, snapshot, render, "savings"))
+    assert counts["engine handled"] == handled
+    assert counts["engine escalated"] == escalated
+
+
 def _render(tmp_path: Path, snapshot: dict, render: str, ident: str) -> str:
     if render == "server":
         return _inner(_page(snapshot), ident)
