@@ -54,7 +54,7 @@ class StopFacts:
     verdict_id: CommentId
     finding_ids: tuple[FindingId, ...]
     repeat_stops: int
-    prior_grants: frozenset[FindingId]
+    prior_grants: frozenset[FindingId] | None
     round: int
     cap: int
     stuck: bool
@@ -130,21 +130,22 @@ class FirstCapGrant:
     name = "first-cap-grant"
 
     def applies(self, facts: Facts) -> bool:
-        return isinstance(facts, StopFacts) and facts.site == "cap"
+        return isinstance(facts, StopFacts)
 
     def rule(self, facts: Facts) -> Ruling:
         assert isinstance(facts, StopFacts)
-        repeated = sorted(set(facts.finding_ids) & facts.prior_grants)
+        repeated = ["unknown"] if facts.prior_grants is None else sorted(set(facts.finding_ids) & facts.prior_grants)
         checks = (
             Check("stop", facts.stop != "stalled", facts.stop),
             Check("finding-ids", bool(facts.finding_ids), len(facts.finding_ids)),
+            *((Check("repeat-stops", facts.repeat_stops == 1, facts.repeat_stops),) if facts.site == "repeat" else ()),
             Check("stuck", not facts.stuck, int(facts.stuck)),
             Check("earlier-round", not repeated, repeated[0] if repeated else None),
         )
         failed = next((check for check in checks if not check.passed), None)
         if failed is not None:
             return Ruling(self.name, Escalate(failed.name), checks)
-        header = go_header(facts.round + 1, facts.cap + 1)
+        header = go_header(facts.round + 1, facts.cap + int(facts.round >= facts.cap))
         if isinstance(header, Escalate):
             return Ruling(self.name, header, (*checks, Check("header", False, None)))
         return Ruling(self.name, Grant(header), (*checks, Check("header", True, header)))

@@ -52,6 +52,20 @@ class RoundGrant:
 
 
 @dataclass(frozen=True)
+class PausedStep:
+    question_id: str
+    action: str
+    recipient: str
+    generation: int
+    head: str | None
+    round_number: int | None
+    plan_text: str | None = None
+    plan_round: int | None = None
+    unmapped: str | None = None
+    prior: dict[str, object] | None = None
+
+
+@dataclass(frozen=True)
 class PullReview:
     id: str
     author: str

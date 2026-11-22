@@ -13,7 +13,7 @@ from lib.dispatch.decisions import Decision, chosen_words
 from lib.dispatch.qa import QaFix, failed_column
 from lib.dispatch.helpers import _comment_link, _comment_order, _matching_head, _round_number, _scope
 from lib.dispatch.transitions import write_workflow_state
-from lib.dispatch.types import Comment, TrackedTicket
+from lib.dispatch.types import Comment, PausedStep, RoundGrant, TrackedTicket
 from lib.dispatch.verdict.convergence import Continue, Convergence, Repeated, RoundFindings, converge
 from lib.handoff import HandoffError, parse_comment, repeat_id
 from lib.markdown_items import MARKDOWN
@@ -94,6 +94,7 @@ class StopRecord:
     stop: Literal["capped", "stalled", "repeat"]
     finding_ids: frozenset[str]
     released_by: Literal["approver", "engine"] | None
+    complete: bool = True
 
 
 @dataclass(frozen=True)
@@ -397,27 +398,32 @@ class RepeatBlockMixin:
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchall():
                 verdict_id = str(row["comment_id"])
+                body = bodies.get(verdict_id)
+                qa_failed = frozenset(json.loads(row["qa_failed"] or "[]"))
+                if row["finding_ids"] is not None:
+                    blocking = frozenset(json.loads(row["finding_ids"]))
+                else:
+                    blocking = frozenset() if body is None else blocking_ids(_handoff(body)[1])
                 if row["outcome"] == "waiting-max-repeat":
                     history.append(
                         StopRecord(
                             verdict_id,
                             "repeat",
-                            _repeat_finding(connection, ticket, verdict_id),
+                            blocking
+                            if row["finding_ids"] is not None
+                            else blocking | qa_failed | _repeat_finding(connection, ticket, verdict_id),
                             _released_by(connection, ticket, verdict_id, "repeat"),
+                            row["finding_ids"] is not None or body is not None,
                         )
                     )
                     continue
-                body = bodies.get(verdict_id)
-                if row["finding_ids"] is not None:
-                    blocking = frozenset(json.loads(row["finding_ids"]))
-                else:
-                    blocking = frozenset() if body is None else blocking_ids(_handoff(body)[1])
                 history.append(
                     StopRecord(
                         verdict_id,
                         "stalled" if row["stop"] == "stalled" else "capped",
-                        blocking | frozenset(json.loads(row["qa_failed"] or "[]")),
+                        blocking | qa_failed,
                         _released_by(connection, ticket, verdict_id, "cap"),
+                        row["finding_ids"] is not None or body is not None,
                     )
                 )
         return tuple(history)
@@ -430,7 +436,7 @@ class RepeatBlockMixin:
         )
 
     def _repeat_detail(
-        self, ticket: TrackedTicket, comment: Comment, repeated: Repeated, reported_round: int | None
+        self, ticket: TrackedTicket, comment: Comment, repeated: Repeated, reported_round: int | None, stops: int
     ) -> str:
         same_round = [
             item
@@ -442,7 +448,6 @@ class RepeatBlockMixin:
             same_round[0] if same_round else None,
         )
         earlier = "no earlier verdict" if holding is None else _comment_link(holding.comment)
-        stops = self._repeat_stops(ticket, comment, repeated.rule_id)
         fields = [
             f"repeat-block: {repeated.rule_id}",
             earlier,
@@ -464,9 +469,20 @@ class RepeatBlockMixin:
         qa: QaFix | None,
         states: tuple[str, ...] = REVISE_ROUND_STATES,
     ) -> tuple[bool, str]:
+        from lib.dispatch.rule_engine import prior_grants
+        from lib.evidence.findings import blocking_ids
+
         key = (ticket.repo.lower(), ticket.ticket_id)
-        detail = self._repeat_detail(ticket, comment, repeated, reported_round)
+        stops = self._repeat_stops(ticket, comment, repeated.rule_id)
+        detail = self._repeat_detail(ticket, comment, repeated, reported_round, stops)
         question = self._stop_question(ticket, comment, "repeat", frozenset({repeated.rule_id}))
+        engine = ticket.factory.rule_engine == "on"
+        prior_grant = prior_grants(self._stop_history(ticket), comment.id) if engine else frozenset()
+        repeated_ids = frozenset(
+            {repeated.rule_id, *blocking_ids(_handoff(comment.body)[1]), *(qa.failed if qa is not None else ())}
+        )
+        if engine:
+            ticket = self._fresh_issue(ticket)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             prior = connection.execute(
@@ -477,8 +493,12 @@ class RepeatBlockMixin:
                 (*key, comment.id),
             ).fetchone()
             if prior is not None:
+                granted = _released_by(connection, ticket, comment.id, "repeat") == "engine"
                 connection.commit()
-                self._write_state_label(ticket, "waiting-max")
+                if granted:
+                    self._apply_engine_grants(ticket)
+                else:
+                    self._write_state_label(ticket, "waiting-max")
                 return True, str(prior["outcome"])
             state = connection.execute(
                 """
@@ -514,11 +534,34 @@ class RepeatBlockMixin:
             )
             connection.execute(
                 """
-                INSERT INTO review_events (repo, ticket_id, comment_id, outcome, qa_failed)
-                VALUES (?, ?, ?, 'waiting-max-repeat', ?)
+                INSERT INTO review_events (repo, ticket_id, comment_id, outcome, qa_failed, finding_ids)
+                VALUES (?, ?, ?, 'waiting-max-repeat', ?, ?)
                 """,
-                (*key, comment.id, failed_column(qa)),
+                (*key, comment.id, failed_column(qa), json.dumps(sorted(repeated_ids))),
             )
+            granted = engine and self._rule_on_repeat(
+                connection, ticket, comment, repeated_ids, stops, prior_grant, reported_round
+            )
+            if granted:
+                self._resume_step(
+                    connection,
+                    ticket,
+                    comment,
+                    PausedStep(
+                        question_id=comment.id,
+                        action="fix",
+                        recipient=ticket.factory.builder_harness,
+                        generation=generation,
+                        head=ticket.current_head,
+                        round_number=reported_round + 1,
+                        prior=self._resumed_step_detail(connection, ticket, comment, "fix", comment.id),
+                    ),
+                    [],
+                    RoundGrant.engine(comment),
+                )
+                connection.commit()
+                self._apply_engine_grants(ticket)
+                return True, "waiting-max-repeat"
             self.queue.enqueue_in_transaction(
                 connection,
                 self._grok_request(

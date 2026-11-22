@@ -28,7 +28,7 @@ from lib.dispatch.helpers import (
 )
 from lib.dispatch.plan import gap_of
 from lib.dispatch.transitions import write_workflow_state
-from lib.dispatch.types import Comment, Registration, RoundGrant, TrackedTicket
+from lib.dispatch.types import Comment, PausedStep, Registration, RoundGrant, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import Job, JobRequest, _job
 from lib.queue import plan_round as _plan_round
@@ -312,9 +312,6 @@ class QuestionsMixin:
         ):
             return None
         action = str(paused["paused_action"])
-        recipient = str(paused["paused_recipient"])
-        generation = int(paused["paused_generation"])
-        head = str(paused["paused_head"]) if paused["paused_head"] is not None else None
         with self._connect() as connection:
             prior = self._resumed_step_detail(
                 connection, ticket, comment, action, paused["paused_question_id"]
@@ -340,9 +337,19 @@ class QuestionsMixin:
         else:
             plan_text = None
         unmapped = (prior or {}).get("unmapped") if action == "plan" else None
-        round_number = None if action == "plan" else self._review_context(ticket)[1] + 1
+        step = PausedStep(
+            question_id=str(paused["paused_question_id"]),
+            action=action,
+            recipient=str(paused["paused_recipient"]),
+            generation=int(paused["paused_generation"]),
+            head=str(paused["paused_head"]) if paused["paused_head"] is not None else None,
+            round_number=None if action == "plan" else self._review_context(ticket)[1] + 1,
+            plan_text=plan_text if isinstance(plan_text, str) and plan_text else None,
+            plan_round=int(paused["plan_gap_count"]) + 1 if action == "plan" else None,
+            unmapped=unmapped if isinstance(unmapped, str) and unmapped else None,
+            prior=prior,
+        )
         fresh = self._fresh_issue(ticket)
-        resumed_state = _state_for_action(action)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             current = connection.execute(
@@ -360,78 +367,89 @@ class QuestionsMixin:
             ):
                 connection.commit()
                 return None
-            record_decisions(connection, ticket, paused["paused_question_id"], decisions)
-            if grant is not None:
-                connection.execute(
-                    """
-                    UPDATE ticket_state SET cap_extra = cap_extra + 1
-                    WHERE repo = ? AND ticket_id = ? AND review_round >= ?
-                    """,
-                    (ticket.repo.lower(), ticket.ticket_id, self._effective_cap(ticket, connection)),
-                )
-            self._enqueue_step(
-                connection,
-                fresh,
-                comment,
-                JobRequest(
-                    repo=ticket.repo,
-                    ticket_id=ticket.ticket_id,
-                    action=action,
-                    recipient=recipient,
-                    source_comment_id=comment.id,
-                    timeout_seconds=ticket.job_timeout_minutes * 60,
-                    generation=generation,
-                    head=head,
-                    detail=self._job_detail(
-                        ticket,
-                        action=action,
-                        head=head,
-                        round_number=round_number,
-                        instruction=_comment_link(comment),
-                        plan_text=plan_text if isinstance(plan_text, str) and plan_text else None,
-                        resume=True,
-                        cap=self._effective_cap(ticket, connection),
-                        update=UpdateScope.from_detail(prior or {}, head),
-                        plan_round=(
-                            int(paused["plan_gap_count"]) + 1 if action == "plan" else None
-                        ),
-                        ci_failure=red_checks(ticket, head) if action == "fix" else (),
-                        unmapped=unmapped if isinstance(unmapped, str) and unmapped else None,
-                        connection=connection,
-                    ),
-                ),
-                dedupe_key=(
-                    f"t5:{_scope(ticket.repo, ticket.ticket_id)}:{paused['paused_question_id']}:"
-                    f"{comment.id if grant is None else grant.key}"
-                ),
-            )
-            if grant is not None:
-                connection.execute(
-                    """
-                    INSERT INTO review_events (repo, ticket_id, comment_id, outcome)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (ticket.repo.lower(), ticket.ticket_id, grant.key, f"resumed-{action}"),
-                )
-            write_workflow_state(
-                connection,
-                ticket.repo,
-                ticket.ticket_id,
-                resumed_state,
-                source="t5-answers",
-                at=self.queue.now(),
-                also={
-                    "paused_action": None,
-                    "paused_recipient": None,
-                    "paused_head": None,
-                    "paused_generation": None,
-                    "paused_question_id": None,
-                    "paused_plan_text": None,
-                },
-            )
+            resumed_state = self._resume_step(connection, fresh, comment, step, decisions, grant)
             connection.commit()
         self._write_state_label(fresh, resumed_state)
         return True, f"resumed-{action}"
+
+    def _resume_step(
+        self,
+        connection: sqlite3.Connection,
+        ticket: TrackedTicket,
+        comment: Comment,
+        step: PausedStep,
+        decisions: list[Decision],
+        grant: RoundGrant | None,
+    ) -> str:
+        record_decisions(connection, ticket, step.question_id, decisions)
+        if grant is not None:
+            connection.execute(
+                """
+                UPDATE ticket_state SET cap_extra = cap_extra + 1
+                WHERE repo = ? AND ticket_id = ? AND review_round >= ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, self._effective_cap(ticket, connection)),
+            )
+        self._enqueue_step(
+            connection,
+            ticket,
+            comment,
+            JobRequest(
+                repo=ticket.repo,
+                ticket_id=ticket.ticket_id,
+                action=step.action,
+                recipient=step.recipient,
+                source_comment_id=comment.id,
+                timeout_seconds=ticket.job_timeout_minutes * 60,
+                generation=step.generation,
+                head=step.head,
+                detail=self._job_detail(
+                    ticket,
+                    action=step.action,
+                    head=step.head,
+                    round_number=step.round_number,
+                    instruction=_comment_link(comment),
+                    plan_text=step.plan_text,
+                    resume=True,
+                    cap=self._effective_cap(ticket, connection),
+                    update=UpdateScope.from_detail(step.prior or {}, step.head),
+                    plan_round=step.plan_round,
+                    ci_failure=red_checks(ticket, step.head) if step.action == "fix" else (),
+                    unmapped=step.unmapped,
+                    connection=connection,
+                ),
+            ),
+            dedupe_key=(
+                f"t5:{_scope(ticket.repo, ticket.ticket_id)}:{step.question_id}:"
+                f"{comment.id if grant is None else grant.key}"
+            ),
+        )
+        if grant is not None:
+            connection.execute(
+                """
+                INSERT INTO review_events (repo, ticket_id, comment_id, outcome)
+                VALUES (?, ?, ?, ?)
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, grant.key, f"resumed-{step.action}"),
+            )
+        resumed_state = _state_for_action(step.action)
+        write_workflow_state(
+            connection,
+            ticket.repo,
+            ticket.ticket_id,
+            resumed_state,
+            source="t5-answers",
+            at=self.queue.now(),
+            also={
+                "paused_action": None,
+                "paused_recipient": None,
+                "paused_head": None,
+                "paused_generation": None,
+                "paused_question_id": None,
+                "paused_plan_text": None,
+            },
+        )
+        return resumed_state
 
     def _decisions(
         self, ticket: TrackedTicket, connection: sqlite3.Connection | None = None

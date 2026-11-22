@@ -198,6 +198,7 @@ def test_a_first_cap_on_fresh_findings_grants_one_round_with_the_go_header() -> 
         ({"finding_ids": ()}, Check("finding-ids", False, 0)),
         ({"stuck": True}, Check("stuck", False, 1)),
         ({"prior_grants": frozenset({finding_id("ac-2"), finding_id("f-9")})}, Check("earlier-round", False, "ac-2")),
+        ({"prior_grants": None}, Check("earlier-round", False, "unknown")),
     ],
 )
 def test_a_cap_that_fails_one_check_escalates_on_that_check(change: dict, failed: Check) -> None:
@@ -222,7 +223,43 @@ def test_a_cap_whose_header_does_not_round_trip_escalates_header_invalid(monkeyp
     assert ruling.checks[-1] == Check("header", False, None)
 
 
-@pytest.mark.parametrize("facts", [dataclasses.replace(STOP, site="repeat", stop="repeat", repeat_stops=1), MOVED])
-def test_first_cap_grant_rules_only_on_a_cap_stop(facts: Facts) -> None:
-    assert not FirstCapGrant().applies(facts)
-    assert decide(facts) == Ruling("no-rule", Escalate("no-rule"), ())
+def test_first_cap_grant_does_not_rule_on_a_moved_head() -> None:
+    assert not FirstCapGrant().applies(MOVED)
+    assert decide(MOVED) == Ruling("no-rule", Escalate("no-rule"), ())
+
+
+REPEAT = dataclasses.replace(STOP, site="repeat", stop="repeat", finding_ids=(finding_id("f-1"),), repeat_stops=1, round=2)
+
+
+@pytest.mark.parametrize("round, header", [(2, "round=3/3"), (3, "round=4/4")])
+def test_a_first_repeat_stop_grants_the_round_and_the_cap_round_only_at_the_cap(round: int, header: str) -> None:
+    ruling = decide(dataclasses.replace(REPEAT, round=round))
+    line = f"<!-- orch:v1 kind=go from=orch {header} state=fixing -->"
+    assert ruling == Ruling(
+        "first-cap-grant",
+        Grant(line),
+        (
+            Check("stop", True, "repeat"),
+            Check("finding-ids", True, 1),
+            Check("repeat-stops", True, 1),
+            Check("stuck", True, 0),
+            Check("earlier-round", True, None),
+            Check("header", True, line),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "change, failed",
+    [
+        ({"repeat_stops": 2}, Check("repeat-stops", False, 2)),
+        ({"finding_ids": ()}, Check("finding-ids", False, 0)),
+        ({"stuck": True}, Check("stuck", False, 1)),
+        ({"prior_grants": frozenset({finding_id("f-1")})}, Check("earlier-round", False, "f-1")),
+        ({"prior_grants": None}, Check("earlier-round", False, "unknown")),
+    ],
+)
+def test_a_repeat_stop_that_fails_one_check_escalates_on_that_check(change: dict, failed: Check) -> None:
+    ruling = decide(dataclasses.replace(REPEAT, **change))
+    assert ruling.outcome == Escalate(failed.name)
+    assert [check for check in ruling.checks if check.passed is False] == [failed]

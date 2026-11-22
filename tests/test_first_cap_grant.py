@@ -147,8 +147,10 @@ def test_a_finding_an_approver_go_released_wakes_grok_at_the_cap(tmp_path: Path)
     flow = engine_flow(tmp_path, cap=4)
     assert revise(flow, "1/4", "revise-1", body=F1 + F2) == "queued-review-fix"
     respond(flow, 1)
+    flow.factory = replace(flow.factory, rule_engine="off")
     assert revise(flow, "2/4", "revise-2", body=F1_AGAIN) == "waiting-max-repeat"
     assert flow.post("go-max", "/go", MAX) == "resumed-fix"
+    flow.factory = replace(flow.factory, rule_engine="on")
     respond(flow, 2)
     assert revise(flow, "3/4", "revise-3", body=F2) == "queued-review-fix"
     respond(flow, 3)

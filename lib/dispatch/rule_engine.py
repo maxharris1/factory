@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from typing import Literal
 
 from lib.dispatch.types import Comment, RoundGrant, TrackedTicket
+from lib.dispatch.verdict.repeat import StopRecord
 from lib.rule_engine import (
     Escalate,
     FindingId,
@@ -37,13 +38,25 @@ def _valid_ids(texts: Iterable[str]) -> tuple[FindingId, ...]:
     return tuple(sorted(valid))
 
 
-def _cap_notice(ids: list[str], header: str, subject: str) -> str:
+_NOTICE_OPENINGS: dict[Site, str] = {
+    "cap": "Factory granted one more review round at the cap in code, because blocking findings {ids}",
+    "repeat": "Factory resumed the paused fix in code at a first repeat stop, because finding {ids}",
+}
+
+
+def _notice(site: Site, ids: list[str], header: str, subject: str) -> str:
     return (
-        f"Factory granted one more review round at the cap in code, because blocking findings"
-        f" {', '.join(ids)} had no earlier extra round. It needs no action.\n\n"
+        f"{_NOTICE_OPENINGS[site].format(ids=', '.join(ids))} had no earlier extra round. It needs no action.\n\n"
         f"Validated header: `{header}`\n\n"
-        f"{engine_marker('cap', subject)}\n"
+        f"{engine_marker(site, subject)}\n"
     )
+
+
+def prior_grants(history: Iterable[StopRecord], verdict_id: str) -> frozenset[FindingId] | None:
+    released = [record for record in history if record.released_by is not None and record.verdict_id != verdict_id]
+    if not all(record.complete for record in released):
+        return None
+    return frozenset(_valid_ids(found for record in released for found in record.finding_ids))
 
 
 class RuleEngineMixin:
@@ -57,14 +70,7 @@ class RuleEngineMixin:
         ids = _valid_ids(named)
         if len(ids) != len(named):
             ids = ()
-        prior = frozenset(
-            _valid_ids(
-                found
-                for record in history
-                if record.released_by is not None and record.verdict_id != verdict.id
-                for found in record.finding_ids
-            )
-        )
+        prior = prior_grants(history, verdict.id)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             logged = connection.execute(
@@ -102,42 +108,83 @@ class RuleEngineMixin:
         self._apply_engine_grants(ticket)
         return True
 
+    def _rule_on_repeat(
+        self,
+        connection: sqlite3.Connection,
+        ticket: TrackedTicket,
+        verdict: Comment,
+        named: frozenset[str],
+        stops: int,
+        prior: frozenset[FindingId] | None,
+        round_number: int,
+    ) -> bool:
+        try:
+            subject = comment_id(verdict.id)
+        except ValueError:
+            return False
+        ids = _valid_ids(named)
+        if len(ids) != len(named):
+            ids = ()
+        state = connection.execute(
+            "SELECT stuck FROM ticket_state WHERE repo = ? AND ticket_id = ?",
+            (ticket.repo.lower(), ticket.ticket_id),
+        ).fetchone()
+        ruling = decide(
+            StopFacts(
+                site="repeat",
+                stop="repeat",
+                verdict_id=subject,
+                finding_ids=ids,
+                repeat_stops=stops,
+                prior_grants=prior,
+                round=round_number,
+                cap=self._effective_cap(ticket, connection),
+                stuck=bool(state["stuck"]),
+            )
+        )
+        self._log_ruling(connection, ticket, "repeat", subject, ruling, ids)
+        return isinstance(ruling.outcome, Grant)
+
     def _apply_engine_grants(self, ticket: TrackedTicket) -> None:
         with self._connect() as connection:
             pending = connection.execute(
                 """
-                SELECT subject, finding_ids, header FROM engine_decisions
-                WHERE lower(repo) = ? AND ticket_id = ? AND site = 'cap'
+                SELECT site, subject, finding_ids, header FROM engine_decisions
+                WHERE lower(repo) = ? AND ticket_id = ? AND site IN ('cap', 'repeat')
                   AND outcome = 'granted' AND notice_status = 'pending'
                 ORDER BY decided_at, subject
                 """,
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchall()
         for row in pending:
+            site: Literal["cap", "repeat"] = row["site"]
             subject = str(row["subject"])
-            stop = next((item for item in ticket.comments if item.id == subject), None)
-            if stop is None:
-                continue
-            result = self._apply_round_grant(ticket, RoundGrant.engine(stop))
-            if result is None or result[0] != "queued-fix":
-                self._mark_notice(ticket, subject, "void")
-                continue
+            if site == "cap":
+                stop = next((item for item in ticket.comments if item.id == subject), None)
+                if stop is None:
+                    continue
+                result = self._apply_round_grant(ticket, RoundGrant.engine(stop))
+                if result is None or result[0] != "queued-fix":
+                    self._mark_notice(ticket, site, subject, "void")
+                    continue
             self._after_lift(ticket, queued=True, reopened=False)
             self._review_actions(ticket).comment_once(
                 ticket,
-                _cap_notice(json.loads(row["finding_ids"]), str(row["header"]), subject),
-                engine_marker("cap", subject),
+                _notice(site, json.loads(row["finding_ids"]), str(row["header"]), subject),
+                engine_marker(site, subject),
             )
-            self._mark_notice(ticket, subject, "posted")
+            self._mark_notice(ticket, site, subject, "posted")
 
-    def _mark_notice(self, ticket: TrackedTicket, subject: str, status: Literal["void", "posted"]) -> None:
+    def _mark_notice(
+        self, ticket: TrackedTicket, site: Literal["cap", "repeat"], subject: str, status: Literal["void", "posted"]
+    ) -> None:
         with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE engine_decisions SET notice_status = ?
-                WHERE lower(repo) = ? AND ticket_id = ? AND site = 'cap' AND subject = ?
+                WHERE lower(repo) = ? AND ticket_id = ? AND site = ? AND subject = ?
                 """,
-                (status, ticket.repo.lower(), ticket.ticket_id, subject),
+                (status, ticket.repo.lower(), ticket.ticket_id, site, subject),
             )
             connection.commit()
 
