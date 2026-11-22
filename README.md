@@ -2086,7 +2086,9 @@ by script. `scripted_in_flight` counts such jobs still running.
 `bot_to_bot` counts jobs routed to `grok`: each wakes Grok Bot to hand off
 by hand. `scripted_share` is `scripted / (scripted + bot_to_bot)`. Bot
 messages outside the factory are not in the database, so Grok wakes stand
-in for bot-to-bot handoffs.
+in for bot-to-bot handoffs. `engine_handled` counts granted plus landed
+rulings in the `engine_decisions` log, and `engine_escalated` counts its
+escalated rulings.
 
 **Redaction.** Only allowlisted columns are read: never heads, comment
 bodies or other free-form job data. `jobs.detail` is read only for its

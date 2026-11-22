@@ -100,7 +100,8 @@ SCRIPT = r"""
     add(share, el('span', null, 'scripted share'));
     var counts = add(box, el('div', 'ef-counts'));
     [[s.scripted, 'scripted handoffs', null], [s.scripted_in_flight, 'scripted in flight', null],
-     [s.bot_to_bot, 'bot-to-bot (grok wakes)', 'grok']].forEach(function (x) {
+     [s.bot_to_bot, 'bot-to-bot (grok wakes)', 'grok'],
+     [s.engine_handled, 'engine handled', null], [s.engine_escalated, 'engine escalated', null]].forEach(function (x) {
       var line = add(counts, el('div'));
       add(line, el('b', x[2], num(x[0])));
       add(line, el('span', null, x[1]));
@@ -298,6 +299,8 @@ def _savings(snapshot: dict) -> str:
             (savings["scripted"], "scripted handoffs", ""),
             (savings["scripted_in_flight"], "scripted in flight", ""),
             (savings["bot_to_bot"], "bot-to-bot (grok wakes)", "grok"),
+            (savings["engine_handled"], "engine handled", ""),
+            (savings["engine_escalated"], "engine escalated", ""),
         )
     )
     inner = (
