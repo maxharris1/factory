@@ -10,10 +10,7 @@ schedulable, not draining, and list that harness (issue #85). Of the
 accounts signed in for the harness on a free device that are neither
 usage-limited, at max_jobs across every device nor under FLOOR fresh
 headroom, the one with the highest score wins (then fewer running jobs, its
-best device, its id) and takes its best-ranked device. Once
-`account_signins` exists (lib/account_doctor.py), an account other than the
-device's own login places there only with an `ok` row for the device
-(#1317). The score is fresh
+best device, its id) and takes its best-ranked device. The score is fresh
 headroom (UNREAD_HEADROOM with none) less PENDING_CHARGE per job placed
 since the account's newest reading (#1316). A job of a project pinned
 to devices (orch.yml projects[].devices, #1172) takes only a listed device;
@@ -225,12 +222,13 @@ class AccountLoads:
     signed_in: frozenset[tuple[str, str]] | None
 
     def taking_work(self, config: MachinesConfig, device: str, harness: str) -> list[str]:
-        accounts = config.accounts_on(device, harness)
+        own = config.device(device)
+        login = None if own is None else own.account_for(harness)
         return [
             account
-            for index, account in enumerate(accounts)
+            for account in config.accounts_on(device, harness)
             if account not in self.closed
-            and (index == 0 or self.signed_in is None or (account, device) in self.signed_in)
+            and (account == login or self.signed_in is None or (account, device) in self.signed_in)
         ]
 
     def score_of(self, account: str) -> float:
