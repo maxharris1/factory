@@ -55,17 +55,19 @@ CREATE TABLE IF NOT EXISTS {HOLDS} (
     account TEXT NOT NULL,
     device TEXT NOT NULL,
     since REAL NOT NULL,
+    seen REAL NOT NULL,
     source TEXT NOT NULL CHECK (source IN ('preflight','runtime','doctor')),
     reason TEXT NOT NULL,
     PRIMARY KEY (account, device)
 )
 """
-_HOLD = (f"INSERT INTO {HOLDS} (account, device, since, source, reason) VALUES (?, ?, ?, ?, ?) "
-         "ON CONFLICT(account, device) DO NOTHING")
+_HOLD = (f"INSERT INTO {HOLDS} (account, device, since, seen, source, reason) VALUES (?1, ?2, ?3, ?3, ?4, ?5) "
+         "ON CONFLICT(account, device) DO UPDATE SET seen = MAX(seen, excluded.seen)")
 
 NOT_LOGGED_IN = "not logged in"
 NOT_UNDERSTOOD = "status reply not understood"
 EXIT_NONZERO = "status command exited nonzero"
+_INCONCLUSIVE = frozenset({NOT_UNDERSTOOD, EXIT_NONZERO})
 NO_IDENTITY = "sign-in names no org and email"
 TOKEN_AUTH = "auth from a token variable, not the account folder"
 CODEX_API_KEY = "api key, not a ChatGPT sign-in"
@@ -118,6 +120,7 @@ class Hold:
     account: str
     device: str
     since: float
+    seen: float
     source: Source
     reason: str
 
@@ -372,12 +375,16 @@ def _step(row: SignIn, config: MachinesConfig) -> str:
     )
 
 
+def _definite(row: SignIn) -> bool:
+    return row.status == "mismatch" or (row.status == "signed-out" and row.detail not in _INCONCLUSIVE)
+
+
 def flags(
     rows: Sequence[SignIn], holds: Mapping[tuple[str, str], Hold], config: MachinesConfig, repo: str
 ) -> dict[tuple[str, str, str], str]:
     shown = [
         replace(row, status="signed-out", detail=holds[row.account, row.device].reason)
-        if (row.account, row.device) in holds else row
+        if (row.account, row.device) in holds and not _definite(row) else row
         for row in rows
     ]
     return {
@@ -400,9 +407,9 @@ def hold(connection: sqlite3.Connection, account: str, device: str, source: Sour
 def _holds(connection: sqlite3.Connection) -> dict[tuple[str, str], Hold]:
     connection.execute(_HOLDS_SCHEMA)
     return {
-        (account, device): Hold(account, device, since, source, reason)
-        for account, device, since, source, reason in connection.execute(
-            f"SELECT account, device, since, source, reason FROM {HOLDS}")
+        (account, device): Hold(account, device, since, seen, source, reason)
+        for account, device, since, seen, source, reason in connection.execute(
+            f"SELECT account, device, since, seen, source, reason FROM {HOLDS}")
     }
 
 
@@ -454,7 +461,7 @@ def write(
             for row in rows if row.status == "signed-out" and row.detail == NOT_LOGGED_IN
         ])
         connection.executemany(
-            f"DELETE FROM {HOLDS} WHERE account = ? AND device = ? AND since < ?",
+            f"DELETE FROM {HOLDS} WHERE account = ? AND device = ? AND seen < ?",
             [(row.account, row.device, probed_at) for row in rows if row.status == "ok"],
         )
         _drop_unlisted_holds(connection, rows)

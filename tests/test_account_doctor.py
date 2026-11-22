@@ -1100,6 +1100,42 @@ def test_a_hold_written_during_the_probe_survives_an_ok_reading(tmp_path: Path, 
     assert attention_rows(connection) == []
 
 
+@pytest.mark.parametrize("at", [NOW + 120, NOW + 125])
+def test_a_hold_written_during_the_probe_on_a_held_pair_survives_an_ok_reading(tmp_path: Path, at: float) -> None:
+    db = tmp_path / "orch.db"
+    connection = connect(db)
+    config = poller_config(tmp_path)
+    transport = DoctorTransport()
+    sign_out_claude_b(transport)
+    account_doctor.run(connection, config, transport, NOW, "Owner/Factory")
+    rows = account_doctor.run(connection, config, HoldDuringProbe(db, at), NOW + 120, "Owner/Factory")
+    assert {row.status for row in rows} == {"ok"}
+    assert holds(connection) == [("claude-b", "pc", NOW, "doctor", account_doctor.NOT_LOGGED_IN)]
+    assert [(row[:3], row[4]) for row in attention_rows(connection)] == [(KEY, NOW)]
+    account_doctor.run(connection, config, DoctorTransport(), NOW + 240, "Owner/Factory")
+    assert holds(connection) == []
+    assert attention_rows(connection) == []
+
+
+@pytest.mark.parametrize("reply, step", [
+    (claude_reply(method="oauth_token"), "remove the token export from claude-bot's login profile on pc"),
+    (claude_reply(), "sign claude-b in to its own account as claude-bot on pc"),
+], ids=["token-auth", "mismatch"])
+def test_a_newer_failed_diagnosis_on_a_held_pair_names_its_own_step(tmp_path: Path, reply: bytes, step: str) -> None:
+    connection = connect(tmp_path / "orch.db")
+    config = poller_config(tmp_path)
+    transport = DoctorTransport()
+    sign_out_claude_b(transport)
+    account_doctor.run(connection, config, transport, NOW, "Owner/Factory")
+    transport.replies["pc-claude-bot"] = framed((0, 0, claude_reply()), (1, 0, reply))
+    rows = account_doctor.run(connection, config, transport, NOW + 120, "Owner/Factory")
+    (current,) = [row for row in rows if row.account == "claude-b"]
+    ((detail, raised_at),) = [(row[3], row[4]) for row in attention_rows(connection) if row[:3] == KEY]
+    assert raised_at == NOW
+    assert step in str(detail)
+    assert str(detail).endswith(current.detail)
+
+
 def test_an_ok_reading_clears_a_hold_written_before_the_probe(tmp_path: Path) -> None:
     connection = connect(tmp_path / "orch.db")
     account_doctor.hold(connection, "claude-b", "pc", "runtime", "authentication_failed", NOW - 1)
