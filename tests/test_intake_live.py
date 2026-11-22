@@ -429,6 +429,20 @@ def test_ref_statuses_reads_issue_and_pr_kinds() -> None:
     assert found[github_ref("owner/app", 5)].detail == "closed as not planned"
 
 
+def test_ref_statuses_marks_an_open_pr_labelled_abandoned() -> None:
+    from lib.feeder_gates import github_ref
+
+    labelled = {"nodes": [{"name": "factory"}, {"name": "orch:state/abandoned"}]}
+    gh = GraphQLGh({"owner/app": {
+        1: {**pull_node("OPEN"), "labels": labelled},
+        2: {**pull_node("OPEN"), "labels": {"nodes": [{"name": "orch:state/building"}]}},
+        3: pull_node("OPEN"),
+    }})
+    found = GitHubIntakeClient(gh).ref_statuses([github_ref("owner/app", n) for n in (1, 2, 3)])
+    assert {int(ref.key): status.abandoned for ref, status in found.items()} == {1: True, 2: False, 3: False}
+    assert "labels(first: 30) { nodes { name } }" in " ".join(gh.calls[0])
+
+
 def test_ref_statuses_is_one_cached_graphql_read_per_repo() -> None:
     from lib.feeder_gates import github_ref
 

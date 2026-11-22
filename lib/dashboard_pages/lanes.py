@@ -458,7 +458,7 @@ SCRIPT = r"""
   var FEEDER_STATE = {'eligible': 'eligible', 'waiting-capacity': 'waiting for capacity',
     'waiting-blocked': 'waiting on a blocker', 'refused-intake': 'refused at intake', 'feeding': 'feeding',
     'error': 'feed error, retrying', 'fed': 'fed', 'done': 'fed, job queued', 'closed': 'PR closed, not fed',
-    'split-parent': 'split into parts, not fed'};
+    'split-parent': 'split into parts, not fed', 'abandoned': 'abandoned, not fed'};
 
   function tierChip(parent, tier, own) {
     if (tier === null || tier === undefined) return;
@@ -854,6 +854,7 @@ _FEEDER_STATE = {
     "done": "fed, job queued",
     "closed": "PR closed, not fed",
     "split-parent": "split into parts, not fed",
+    "abandoned": "abandoned, not fed",
 }
 
 

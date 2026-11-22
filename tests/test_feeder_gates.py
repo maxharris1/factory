@@ -458,12 +458,13 @@ def test_feeder_reads_statuses_once_per_poll_for_a_long_chain(tmp_path: Path) ->
     assert sum(1 for state, _ in states(tmp_path).values() if state == "waiting-blocked") == 14
 
 
-def test_no_gate_lines_means_no_status_read(tmp_path: Path) -> None:
+def test_no_gate_lines_reads_only_the_fed_pr(tmp_path: Path) -> None:
     feeder, _, github, _ = make_feeder(tmp_path, box=1)
     github.issues[HOME] = [issue(1, created_at=1.0), issue(2, created_at=2.0)]
     feeder.feed_once()
-    feeder.feed_once()
     assert github.status_reads == []
+    feeder.feed_once()
+    assert github.status_reads == [frozenset({ref(501)})]
     assert states(tmp_path)["2"] == ("waiting-capacity", None)
 
 
