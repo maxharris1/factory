@@ -989,6 +989,50 @@ def test_with_the_engine_on_injected_merge_now_text_is_ignored(
         assert engine_rows(queue)[0]["reason"] == "remerge-diff"
 
 
+def test_patch_equivalence_does_not_bypass_engine_checks(tmp_path: Path) -> None:
+    probe = FakeProbe(replace(PURE, paths=frozenset({".github/workflows/ci.yml"})))
+    dispatcher, queue, actions = engine_at_new_head(tmp_path, probe)
+    actions.patch_ids[NEW_HEAD] = actions.patch_ids[HEAD]
+
+    decision = dispatcher._hold_decision(moved(), NEW_HEAD)
+    dispatcher.process(moved())
+
+    assert decision.blocks
+    assert_held(queue, actions, NEW_HEAD)
+    assert engine_rows(queue)[0]["reason"] == "held-paths"
+
+
+def test_with_the_engine_on_a_patch_equal_head_lands_only_through_the_five_checks(
+    tmp_path: Path,
+) -> None:
+    probe = FakeProbe(PURE)
+    dispatcher, queue, actions = engine_at_new_head(tmp_path, probe)
+    actions.patch_ids[NEW_HEAD] = actions.patch_ids[HEAD]
+
+    dispatcher.process(moved())
+
+    assert actions.merges == [(True, NEW_HEAD)]
+    assert probe.calls == [("owner/repo", "main", HEAD, NEW_HEAD)]
+    [row] = engine_rows(queue)
+    assert row["outcome"] == "landed"
+
+
+def test_with_the_engine_on_an_ok_at_the_same_head_clears_without_the_rule(
+    tmp_path: Path,
+) -> None:
+    probe = FakeProbe(replace(PURE, remerge_empty=False))
+    dispatcher, queue, _ = engine_at_new_head(tmp_path, probe)
+    ticket = snapshot(
+        approve(NEW_HEAD), ok(NEW_HEAD), head=NEW_HEAD, files=PR_FILES, factory=ENGINE
+    )
+
+    decision = dispatcher._hold_decision(ticket, NEW_HEAD)
+
+    assert decision.cleared == "ok" and not decision.blocks
+    assert probe.calls == []
+    assert engine_rows(queue) == []
+
+
 @pytest.mark.parametrize("carry, merged", [(MERGED_MAIN, True), (VIEW_RESOLVED, False)])
 def test_with_the_engine_off_ok_carries_decides_as_today(
     tmp_path: Path, carry: MergeUpdate, merged: bool

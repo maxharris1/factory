@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 
 from lib.dispatch.constants import _NOT_FINISHED
-from lib.dispatch.helpers import _base_update_key, _is_full_sha, ship_mode
+from lib.dispatch.helpers import _base_update_key, _is_full_sha, _matching_head, ship_mode
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, ShipError, TrackedTicket
 from lib.hold import HoldDecision, decide, ok_carries
@@ -199,10 +199,14 @@ class HoldsMixin:
         assert hold is not None
         waited = False
 
-        def carries(ok_head: str) -> bool:
+        def covers(ok_head: str) -> bool:
             nonlocal waited
             if ticket.factory.rule_engine != "on":
-                return self._ok_carries(ticket, ok_head, head)
+                return self._approval_covers(ticket, ok_head, head) or self._ok_carries(
+                    ticket, ok_head, head
+                )
+            if _matching_head(ok_head, head) is not None:
+                return True
             outcome = self._rule_on_moved_head(ticket, ok_head, head)
             waited = waited or isinstance(outcome, Wait)
             return isinstance(outcome, Land)
@@ -215,7 +219,7 @@ class HoldsMixin:
             factory_md_trust_changed=ticket.factory_md_trust_changed,
             comments=ticket.comments,
             approver_allowed=self._may_approve(hold.approver),
-            covers=lambda ok_head: self._approval_covers(ticket, ok_head, head) or carries(ok_head),
+            covers=covers,
         )
         if waited and decision.blocks and decision.unread is None:
             return replace(decision, unread="moved-head ci")

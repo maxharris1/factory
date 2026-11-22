@@ -20,8 +20,9 @@ equal git patch-id --stable), or, for a label-only hold, by the
 approver removing the label. An ok also covers a head whose every later
 commit merges base in, when the PR owns no new file and no merge changes a
 hold-path file from git's own merge (ok_carries, issue #574); with
-factory.md rule_engine: on, the five-check moved-head-lands rule in
-lib/rule_engine.py replaces ok_carries (issue #1311). An ok does not
+factory.md rule_engine: on, an ok covers only its own commit, and the
+five-check moved-head-lands rule in lib/rule_engine.py replaces both the
+patch-id rule and ok_carries for any other head (issue #1311). An ok does not
 clear a label hold whose label was labeled at or after the latest
 covering ok: a label put back after the ok holds the PR again, and
 still holds it once someone other than the approver removes it. Neither
