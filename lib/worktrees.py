@@ -22,6 +22,7 @@ the clone's config.
 from __future__ import annotations
 
 import fcntl
+import itertools
 import json
 import os
 import re
@@ -42,6 +43,8 @@ DEFAULT_URL_TEMPLATE = "https://github.com/{repo}.git"
 DEFAULT_GC_HOURS = 24.0
 NETWORK_TIMEOUT_SECONDS = 900.0
 LOCAL_TIMEOUT_SECONDS = 120.0
+KEPT_REF = "refs/orch-kept/{job_id}"
+PATCH = "worktree.patch"
 
 _NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
 _JOB_ID = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -373,6 +376,110 @@ def gc(
     return problems
 
 
+def owns(root: Path, record: Path, folder: Path) -> bool:
+    """Whether record is a readable job record and folder a worktree of its clone.
+
+    folder may be the job's worktree renamed aside: git still works there.
+    """
+    loaded = _named_record(root, record)
+    if loaded is None:
+        return False
+    try:
+        _require_worktree_of(folder, loaded[0].clone)
+    except WorktreeError:
+        return False
+    return True
+
+
+def keep_work(root: Path, record: Path, folder: Path, dest: Path) -> None:
+    """Save a dead job's work before its worktree folder is deleted (#1297).
+
+    Uncommitted changes and untracked files go to `dest/worktree.patch` (the
+    first free `.1`, `.2` name; one already holding the same patch is kept),
+    applicable with `git apply` on HEAD. Unpushed commits are pinned by `_pin_if_unpushed`.
+    """
+    loaded = _named_record(root, record)
+    if loaded is None:
+        raise WorktreeError(f"unreadable job record {record}")
+    checkout = loaded[0]
+    with _clone_lock(checkout.clone):
+        _require_worktree_of(folder, checkout.clone)
+        with tempfile.TemporaryDirectory(prefix="orch-patch-") as scratch:
+            index = {"GIT_INDEX_FILE": str(Path(scratch) / "index")}
+            _git(folder, "read-tree", "HEAD", env=index)
+            _git(folder, "add", "-A", env=index)
+            patch = _git_bytes(folder, "diff", "--cached", "--binary", "HEAD", env=index)
+        if patch:
+            _save_patch(dest, patch)
+        head = _git(folder, "rev-parse", "--verify", "HEAD").strip()
+        _pin_if_unpushed(checkout.clone, checkout.job_id, head, checkout.start)
+
+
+def retire_record(root: Path, record: Path) -> None:
+    """Unlink a dead owner's record whose worktree folder is gone (#1297).
+
+    Pins the worktree admin entry's HEAD when it is unpushed, then prunes the
+    entry. A no-op when the record is unreadable, changed, live, or its
+    folder exists again.
+    """
+    loaded = _named_record(root, record)
+    if loaded is None:
+        return
+    checkout, data, _created = loaded
+    with _clone_lock(checkout.clone):
+        if (_load_record(root, record) != loaded or _live_owner(data) is not None
+                or os.path.lexists(checkout.path)):
+            return
+        if checkout.clone.is_dir():
+            head = _admin_head(checkout)
+            if head is not None:
+                _pin_if_unpushed(checkout.clone, checkout.job_id, head, checkout.start)
+            _git(checkout.clone, "worktree", "prune")
+        record.unlink(missing_ok=True)
+
+
+def _named_record(root: Path, record: Path) -> tuple[JobCheckout, dict, float] | None:
+    loaded = _load_record(root, record)
+    return loaded if loaded is not None and loaded[0].job_id == record.stem else None
+
+
+def _admin_head(checkout: JobCheckout) -> str | None:
+    path = os.path.realpath(checkout.path)
+    for entry in _git(checkout.clone, "worktree", "list", "--porcelain").split("\n\n"):
+        fields = dict(line.partition(" ")[::2] for line in entry.splitlines())
+        if "worktree" in fields and os.path.realpath(fields["worktree"]) == path:
+            return fields.get("HEAD")
+    return None
+
+
+def _pin_if_unpushed(clone: Path, job_id: str, head: str, start: str | None) -> None:
+    excluded = ["--remotes"] + ([start] if start else [])
+    if _git(clone, "rev-list", "--count", head, "--not", *excluded).strip() == "0":
+        return
+    base = KEPT_REF.format(job_id=job_id)
+    listed = _git(clone, "for-each-ref", "--format=%(refname) %(objectname)", "refs/orch-kept/")
+    pinned = dict(line.split(" ", 1) for line in listed.splitlines())
+    for ref in itertools.chain([base], (f"{base}.{n}" for n in itertools.count(1))):
+        if pinned.get(ref) == head:
+            return
+        if ref not in pinned:
+            _git(clone, "update-ref", ref, head, "")
+            return
+
+
+def _save_patch(dest: Path, patch: bytes) -> None:
+    dest.mkdir(parents=True, exist_ok=True)
+    target, n = dest / PATCH, 0
+    while os.path.lexists(target):
+        if target.is_file() and target.read_bytes() == patch:
+            return
+        n += 1
+        target = dest / f"{PATCH}.{n}"
+    pending = dest / f".{PATCH}.tmp"
+    pending.write_bytes(patch)
+    os.replace(pending, target)
+
+
 def _gc_keep_reason(checkout: JobCheckout, data: dict) -> str | None:
     owner = _live_owner(data)
     if owner is not None:
@@ -641,15 +748,23 @@ def _clone_lock(clone: Path) -> Iterator[None]:
         yield
 
 
-def _git(cwd: Path, *args: str, network: bool = False) -> str:
-    environment = dict(os.environ)
-    environment["GIT_TERMINAL_PROMPT"] = "0"
+def _git(cwd: Path, *args: str, network: bool = False, env: dict[str, str] | None = None) -> str:
+    return _run_git(cwd, args, network=network, env=env, text=True).stdout
+
+
+def _git_bytes(cwd: Path, *args: str, env: dict[str, str] | None = None) -> bytes:
+    return _run_git(cwd, args, network=False, env=env, text=False).stdout
+
+
+def _run_git(cwd: Path, args: tuple[str, ...], *, network: bool, env: dict[str, str] | None,
+             text: bool) -> subprocess.CompletedProcess:
+    environment = {**os.environ, "GIT_TERMINAL_PROMPT": "0", **(env or {})}
     try:
         result = subprocess.run(
             ["git", *args],
             cwd=cwd,
             env=environment,
-            text=True,
+            text=text,
             capture_output=True,
             check=False,
             timeout=NETWORK_TIMEOUT_SECONDS if network else LOCAL_TIMEOUT_SECONDS,
@@ -657,9 +772,10 @@ def _git(cwd: Path, *args: str, network: bool = False) -> str:
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise WorktreeError(f"git {args[0]} failed: {type(exc).__name__}") from exc
     if result.returncode != 0:
-        detail = " ".join(result.stderr.split())[:200] or f"exit {result.returncode}"
+        stderr = result.stderr if text else os.fsdecode(result.stderr)
+        detail = " ".join(stderr.split())[:200] or f"exit {result.returncode}"
         raise WorktreeError(f"git {args[0]} failed: {detail}")
-    return result.stdout
+    return result
 
 
 def _one_line(exc: BaseException) -> str:
@@ -669,13 +785,18 @@ def _one_line(exc: BaseException) -> str:
 __all__ = [
     "DEFAULT_GC_HOURS",
     "JobCheckout",
+    "KEPT_REF",
+    "PATCH",
     "WorktreeError",
     "check_remote_url",
     "detached_checkout",
     "finish",
     "gc",
     "keep_reason",
+    "keep_work",
+    "owns",
     "prepare",
+    "retire_record",
     "url_template",
     "work_root",
 ]

@@ -22,7 +22,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from lib import scratch
+from lib import scratch, worktrees
 
 KEPT_ROOT = "jobs-kept"
 GONE = ".gone"
@@ -84,6 +84,12 @@ def _free(path: Path) -> Path:
     return candidate
 
 
+def save_work(root: Path, job_id: str, folder: Path) -> None:
+    record = root / "jobs" / f"{job_id}.json"
+    if os.path.lexists(record):
+        worktrees.keep_work(root, record, folder, root / KEPT_ROOT / job_id)
+
+
 def archive(root: Path, job_id: str, gone: Path, *, siblings: bool) -> None:
     jobs = root / "jobs"
     dest = root / KEPT_ROOT / job_id
@@ -117,6 +123,9 @@ def retire(root: Path, job_id: str, gone: Path, *, siblings: bool, finished_at: 
     failed = scratch.remove(gone)
     if failed is not None:
         raise OSError(failed)
+    record = root / "jobs" / f"{job_id}.json"
+    if os.path.lexists(record):
+        worktrees.retire_record(root, record)
     commit_record(root, job_id)
 
 
