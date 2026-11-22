@@ -89,7 +89,7 @@ def test_the_adapter_raises_a_refused_full_rerun_of_a_completed_run() -> None:
         (("**/*.yml",), ""),
     ],
 )
-def test_the_adapter_reads_each_glob_by_its_literal_directory_or_the_whole_branch(
+def test_the_adapter_returns_the_latest_commit_of_each_glob_not_only_the_newest(
     paths: tuple[str, ...], query: str
 ) -> None:
     reads: list[str] = []
@@ -99,10 +99,10 @@ def test_the_adapter_reads_each_glob_by_its_literal_directory_or_the_whole_branc
         commit = {"sha": sha(len(reads)), "commit": {"committer": {"date": iso(CHANGE + len(reads))}}}
         return GhResult(0, json.dumps([commit]), "")
 
-    changed = GitHubReviewActions(gh).base_workflow_commit("owner/repo", "main", paths)
+    changed = GitHubReviewActions(gh).base_workflow_commits("owner/repo", "main", paths)
 
     assert "".join(read.split("?sha=main")[1].removesuffix("&per_page=1") for read in reads) == query
-    assert changed == (sha(len(reads)), CHANGE + len(reads))
+    assert changed == tuple((sha(n), CHANGE + n) for n in range(1, len(reads) + 1))
 
 
 @pytest.mark.parametrize(
@@ -131,7 +131,7 @@ class BaseGh(FreshGh):
         changed: float | None,
         ci: str = "",
         *,
-        compare: str = "behind",
+        compare: str | None = "behind",
     ):
         super().__init__(factory_md(ci), runs, ["lib/x.py"], 0)
         self.changed = changed
@@ -147,6 +147,8 @@ class BaseGh(FreshGh):
             return GhResult(0, json.dumps(commits), "")
         if "/compare/" in endpoint:
             self.calls.append(list(argv))
+            if self.compare is None:
+                return GhResult(1, "", "gh: Server Error (HTTP 502)")
             return GhResult(0, json.dumps({"status": self.compare}), "")
         return super().__call__(argv, timeout)
 
@@ -178,6 +180,12 @@ def test_a_merge_read_holds_a_head_lacking_the_base_commit_whatever_its_runs_sta
 def test_a_merge_read_clears_a_head_containing_the_base_commit() -> None:
     assert read(BaseGh([run("test", BEFORE)], CHANGE, compare="ahead"), fresh=True).clears
     assert read(BaseGh([run("test", BEFORE)], None), fresh=True).clears
+
+
+def test_a_merge_read_never_clears_a_head_when_the_compare_fails() -> None:
+    ci = read(BaseGh([run("test", AFTER)], CHANGE, compare=None), fresh=True)
+
+    assert ci.status == "pending" and not ci.clears
 
 
 def test_an_ordinary_poll_and_an_empty_force_rerun_paths_read_no_base_commits() -> None:

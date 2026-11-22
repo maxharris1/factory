@@ -795,12 +795,12 @@ class GitHubReviewActions:
                 )
         return tuple(events)
 
-    def base_workflow_commit(
+    def base_workflow_commits(
         self, repo: str, branch: str, paths: Sequence[str]
-    ) -> tuple[str, float] | None:
+    ) -> tuple[tuple[str, float], ...]:
         # The commits API path filter takes no glob, so each glob is read by
         # its literal directory, and one with none by the whole branch.
-        commits: list[tuple[str, float]] = []
+        commits: dict[str, float] = {}
         for prefix in dict.fromkeys(map(_literal_prefix, paths)):
             path = f"&path={quote(prefix, safe='/')}" if prefix else ""
             page = self._json(
@@ -811,10 +811,8 @@ class GitHubReviewActions:
                 raise GitHubAdapterError("commits page is not a list")
             for commit in map(_object, page):
                 committer = _object(_object(commit.get("commit")).get("committer"))
-                commits.append(
-                    (_sha(commit.get("sha"), "commit"), _created_at(committer.get("date")))
-                )
-        return max(commits, key=lambda commit: commit[1], default=None)
+                commits[_sha(commit.get("sha"), "commit")] = _created_at(committer.get("date"))
+        return tuple(commits.items())
 
     def contains_commit(self, repo: str, head: str, commit: str) -> bool:
         compare = _object(

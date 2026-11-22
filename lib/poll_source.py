@@ -2172,11 +2172,15 @@ class LivePollSource:
                 )
                 changes.append(CIChange("head-workflow", at))
             if fresh:
-                based = self.github.base_workflow_commit(
-                    repo, _pr_base(pull) or factory.base_branch, factory.ci_force_rerun_paths
-                )
-                if based is not None and not self.github.contains_commit(repo, head, based[0]):
-                    changes.append(CIChange("base-workflow", based[1]))
+                missing = [
+                    at
+                    for commit, at in self.github.base_workflow_commits(
+                        repo, _pr_base(pull) or factory.base_branch, factory.ci_force_rerun_paths
+                    )
+                    if not self.github.contains_commit(repo, head, commit)
+                ]
+                if missing:
+                    changes.append(CIChange("base-workflow", max(missing)))
         except Exception as exc:
             self._record(repo, ticket_id, exc)
             return unread
