@@ -63,6 +63,17 @@ def flock_on_path(tmp_path_factory, monkeypatch) -> None:
     monkeypatch.setenv("PATH", f"{shim}:{os.environ['PATH']}")
 
 
+@pytest.fixture(autouse=True)
+def no_ambient_git_identity(tmp_path_factory, monkeypatch) -> None:
+    config = tmp_path_factory.mktemp("gitconfig") / "config"
+    config.write_text("[user]\n\tuseConfigOnly = true\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for name in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME",
+                 "GIT_COMMITTER_EMAIL", "EMAIL"):
+        monkeypatch.delenv(name, raising=False)
+
+
 def _this_test_and_its_descendants() -> set[str]:
     parent_of = {}
     for stat in Path("/proc").glob("[0-9]*/stat"):
@@ -1396,21 +1407,27 @@ def detour(folder: Path, text: str) -> str:
     return commit
 
 
-def conflicted_merge(folder: Path) -> str:
+def stop_on_merge_conflict(folder: Path) -> str:
     incoming = detour(folder, "unique incoming merge work\n")
     commit_in(folder, "ours\n")
-    subprocess.run(["git", "-C", str(folder), "merge", "--no-edit", incoming],
-                   capture_output=True)
+    merge = subprocess.run(["git", "-C", str(folder), "-c", "user.name=t", "-c",
+                            "user.email=t@example.invalid", "merge", "--no-edit", incoming],
+                           capture_output=True, text=True)
+    assert merge.returncode == 1 and "CONFLICT" in merge.stdout, merge.stderr
+    assert git_out(folder, "rev-parse", "MERGE_HEAD") == incoming
+    return incoming
+
+
+def conflicted_merge(folder: Path) -> str:
+    stop_on_merge_conflict(folder)
     (folder / "tracked.txt").write_text("ours\n")
     return git_out(folder, "rev-parse", ":3:tracked.txt")
 
 
 def resolved_merge(folder: Path) -> str:
-    incoming = detour(folder, "unique incoming merge work\n")
-    commit_in(folder, "ours\n")
-    subprocess.run(["git", "-C", str(folder), "merge", "--no-edit", incoming],
-                   capture_output=True)
+    incoming = stop_on_merge_conflict(folder)
     git_out(folder, "add", "tracked.txt")
+    assert git_out(folder, "ls-files", "--unmerged") == ""
     return incoming
 
 
