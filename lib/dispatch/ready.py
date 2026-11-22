@@ -697,16 +697,14 @@ class ReadyMixin:
         )
 
     def _request_fresh_ci(self, ticket: TrackedTicket) -> None:
-        """#1287: one full rerun of the runs behind a stale green head, per
-        head and set of changes. The merge queue updates a head behind a
-        base workflow change instead, since a rerun keeps the old workflow.
-        A refusal is flagged, and the head stays pending."""
         key = (ticket.repo.lower(), ticket.ticket_id)
         ticket = self._polled.get(key, ticket)
         head = ticket.current_head
         result = ticket.ci.get(head) if head is not None else None
         if head is None or result is None or self.ci_full_rerun is None:
             return
+        # A rerun reuses the run's original merge ref, so it can never pick up
+        # a base workflow change: the merge queue's update-from-main does.
         changes = [change for change in result.stale if change.kind != "base-workflow"]
         if not changes:
             return

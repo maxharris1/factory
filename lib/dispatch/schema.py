@@ -635,7 +635,6 @@ class SchemaMixin:
                 )
                 """
             )
-            # #1287: the one fresh CI run asked for a stale green head.
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ci_fresh_runs (

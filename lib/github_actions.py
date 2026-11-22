@@ -798,14 +798,14 @@ class GitHubReviewActions:
     def workflow_changed_at(
         self, repo: str, branch: str, paths: Sequence[str]
     ) -> float | None:
-        """When branch's newest commit touching a path in paths was
-        committed. A glob is read by its literal directory, so a narrower
-        glob can only report a change early, never miss one."""
+        # The commits API path filter takes no glob, so each glob is read by
+        # its literal directory, and one with none by the whole branch.
         dates: list[float] = []
-        for prefix in dict.fromkeys(filter(None, map(_literal_prefix, paths))):
+        for prefix in dict.fromkeys(map(_literal_prefix, paths)):
+            path = f"&path={quote(prefix, safe='/')}" if prefix else ""
             commits = self._json(
                 f"{_repo_path(repo)}/commits?sha={quote(_branch(branch), safe='/')}"
-                f"&path={quote(prefix, safe='/')}&per_page=1"
+                f"{path}&per_page=1"
             )
             if not isinstance(commits, list):
                 raise GitHubAdapterError("commits page is not a list")

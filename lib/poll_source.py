@@ -2142,8 +2142,6 @@ class LivePollSource:
         *,
         fresh: bool = False,
     ) -> CIResult:
-        """fresh is a ship or merge read: only it reads the base branch for
-        a workflow change, so an ordinary poll costs no extra call."""
         ci = pr_ci(raw, factory, _pr_base(pull))
         changes = list(
             self.required_globs.observe(

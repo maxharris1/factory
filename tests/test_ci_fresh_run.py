@@ -83,6 +83,28 @@ def test_the_adapter_raises_a_refused_full_rerun_of_a_completed_run() -> None:
         adapter([], post=forbidden).rerun_workflow_runs("owner/repo", [RUN])
 
 
+@pytest.mark.parametrize(
+    ("paths", "query"),
+    [
+        ((".github/workflows/**", ".github/workflows/ci.yml"), "&path=.github/workflows&path=.github/workflows/ci.yml"),
+        (("**/*.yml",), ""),
+    ],
+)
+def test_the_adapter_reads_each_glob_by_its_literal_directory_or_the_whole_branch(
+    paths: tuple[str, ...], query: str
+) -> None:
+    reads: list[str] = []
+
+    def gh(argv, timeout: float) -> GhResult:
+        reads.append(argv[-1])
+        return GhResult(0, json.dumps([{"commit": {"committer": {"date": iso(CHANGE + len(reads))}}}]), "")
+
+    changed = GitHubReviewActions(gh).workflow_changed_at("owner/repo", "main", paths)
+
+    assert "".join(read.split("?sha=main")[1].removesuffix("&per_page=1") for read in reads) == query
+    assert changed == CHANGE + len(reads)
+
+
 def test_ci_status_keeps_when_a_rerun_check_first_started() -> None:
     url = f"https://github.com/owner/repo/actions/runs/{RUN}/job/"
     first = {"id": 1, "name": "test", "status": "completed", "conclusion": "failure",

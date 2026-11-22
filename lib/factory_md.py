@@ -93,8 +93,8 @@ to none, the all-checks gate. A commit status counts by when it was
 posted. A ship or merge read also holds a green whose checks first
 started before the PR base's newest commit touching these paths (issue
 #1287). The factory asks for one fresh run: a full rerun, or for a base
-change, the merge queue's update from base. With force_rerun_paths given, branches may be omitted, and every
-base is a CI base.
+change, the merge queue's update from base. With force_rerun_paths given,
+branches may be omitted, and every base is a CI base.
 
 shared_paths is optional (issue #261): a list of repo-relative paths or
 globs, a trailing / naming a directory. A Touches: path that matches never

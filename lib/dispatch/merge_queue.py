@@ -868,8 +868,6 @@ class MergeQueueMixin:
     def _queue_update(
         self, ticket: TrackedTicket, row: sqlite3.Row, why: str | None = None
     ) -> None:
-        """An update-from-main job for the conflicting queue head (#130), or
-        one whose green predates a base workflow change (#1287)."""
         head = ticket.current_head
         if head is None:
             return
