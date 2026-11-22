@@ -32,6 +32,15 @@ _LINE = re.compile(rb"[^\n]*\n|[^\n]+")
 TIMEOUT_SECONDS = 120.0
 _REGULAR_MODES = ("100644", "100755")
 _TREE_ID = re.compile(rb"[0-9a-f]{40}|[0-9a-f]{64}")
+_PLAIN_DIFF = (
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--ignore-submodules=none",
+    "--submodule=short",
+    "--no-relative",
+    "--no-renames",
+)
 
 
 @dataclass(frozen=True)
@@ -133,12 +142,10 @@ def moved_head_probe(clone: Path, base_ref: str, ok: str, head: str) -> MovedHea
     new = _resolve(clone, head)
     _resolve(clone, base_ref)
     _commit, *parents = _output(clone, "rev-list", "--parents", "-n1", new).decode("ascii").split()
-    remerge = _output(
-        clone, "show", "--remerge-diff", "--format=", "--no-ext-diff", "--no-color", new
-    )
-    listed = _output(clone, "diff", "--name-only", "-z", "--no-renames", old, new)
+    remerge = _output(clone, "show", "--remerge-diff", "--format=", *_PLAIN_DIFF, new)
+    listed = _output(clone, "diff", "--name-only", "-z", *_PLAIN_DIFF, old, new)
     added = _output(
-        clone, "diff", "--no-ext-diff", "--no-textconv", "--text", "--unified=0",
+        clone, "diff", *_PLAIN_DIFF, "--text", "--unified=0",
         "--src-prefix=a/", "--dst-prefix=b/", old, new,
     )
     return MovedHead(
@@ -156,7 +163,7 @@ def head_diff(clone: Path, since: str | None, head: str, base_ref: str) -> HeadD
     (head's fork from base_ref when None) with its added plus deleted lines.
     Raises ValueError when the clone cannot list the paths."""
     fork = _merge_base(clone, head, base_ref)
-    listed = _output(clone, "diff", "--numstat", "--no-renames", "-z", since or fork, head)
+    listed = _output(clone, "diff", "--numstat", "-z", *_PLAIN_DIFF, since or fork, head)
     files = []
     for record in listed.split(b"\0"):
         if record:

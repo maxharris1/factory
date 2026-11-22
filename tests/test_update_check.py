@@ -661,3 +661,83 @@ def test_1310_a_missing_base_ref_raises(repo: Repo) -> None:
 
     with pytest.raises(ValueError):
         moved(repo, ok, head, "refs/remotes/origin/main")
+
+
+def _merge_bringing_in_a_token(repo: Repo) -> tuple[str, str]:
+    token = "gh" + "p_" + "A" * 36
+    ok, _ = repo.branches([], [("other.py", "x = 1\n", token + "\n")])
+    return ok, repo.merge_main()
+
+
+def _merge_amended_with_an_edit(repo: Repo) -> tuple[str, str]:
+    ok, _ = repo.branches([("app.py", "line 2\n", "line 2 pr\n")], [("other.py", "1", "2")])
+    repo.merge_main()
+    repo.edit("app.py", "line 9\n", "line 9 manual edit\n")
+    repo.git("commit", "-q", "-a", "--amend", "--no-edit")
+    return ok, repo.git("rev-parse", "HEAD")
+
+
+def _merge_amended_with_a_gitlink(repo: Repo) -> tuple[str, str]:
+    ok, _ = repo.branches([("app.py", "line 2\n", "line 2 pr\n")], [("other.py", "1", "2")])
+    repo.merge_main()
+    repo.git("update-index", "--add", "--cacheinfo", f"160000,{repo.base},dep")
+    repo.git("commit", "-q", "--amend", "--no-edit")
+    return ok, repo.git("rev-parse", "HEAD")
+
+
+def _mask_python_diffs(repo: Repo) -> None:
+    (repo.gitdir / "info" / "attributes").write_text("*.py diff=mask\n")
+    repo.git("config", "diff.mask.textconv", "true")
+
+
+CLONE_SETTINGS = {
+    "color.ui=always": lambda r: r.git("config", "color.ui", "always"),
+    "color.diff=always": lambda r: r.git("config", "color.diff", "always"),
+    "textconv": _mask_python_diffs,
+    "diff.ignoreSubmodules=all": lambda r: r.git("config", "diff.ignoreSubmodules", "all"),
+    "diff.noprefix": lambda r: r.git("config", "diff.noprefix", "true"),
+    "diff.mnemonicPrefix": lambda r: r.git("config", "diff.mnemonicPrefix", "true"),
+    "diff.relative": lambda r: r.git("config", "diff.relative", "true"),
+    "diff.external": lambda r: r.git("config", "diff.external", "true"),
+    "diff.submodule=log": lambda r: r.git("config", "diff.submodule", "log"),
+}
+
+
+@pytest.mark.parametrize("setting", CLONE_SETTINGS)
+@pytest.mark.parametrize(
+    "history",
+    [_merge_bringing_in_a_token, _merge_amended_with_an_edit, _merge_amended_with_a_gitlink],
+)
+def test_1310_a_clone_setting_never_changes_what_the_probe_reads(
+    repo: Repo, setting: str, history
+) -> None:
+    ok, head = history(repo)
+    expected = moved(repo, ok, head)
+
+    CLONE_SETTINGS[setting](repo)
+
+    assert moved(repo, ok, head) == expected
+
+
+def test_1310_each_clone_setting_history_moves_the_probe_by_default(repo: Repo, tmp_path: Path) -> None:
+    ok, head = _merge_bringing_in_a_token(repo)
+    assert moved(repo, ok, head).scan.status == "found"
+    other = Repo(tmp_path / "amended")
+    ok, head = _merge_amended_with_an_edit(other)
+    assert not moved(other, ok, head).remerge_empty
+    linked = Repo(tmp_path / "linked")
+    ok, head = _merge_amended_with_a_gitlink(linked)
+    probe = moved(linked, ok, head)
+    assert not probe.remerge_empty
+    assert probe.paths == {"dep", "other.py"}
+
+
+@pytest.mark.parametrize("setting", CLONE_SETTINGS)
+def test_763_a_clone_setting_never_changes_the_qa_paths(repo: Repo, setting: str) -> None:
+    ok, head = _merge_amended_with_a_gitlink(repo)
+    expected = diff(repo, ok, head).files
+    assert "dep" in dict(expected)
+
+    CLONE_SETTINGS[setting](repo)
+
+    assert diff(repo, ok, head).files == expected
