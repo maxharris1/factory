@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Literal, get_args
+from typing import Literal, NamedTuple, get_args
 
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
@@ -34,6 +34,7 @@ _PREFIX = re.compile(r"^(ac-\d+)\s*:\s*", re.IGNORECASE)
 _ENTRY_ID = re.compile(r"^\s*(ac-\d+)\b", re.IGNORECASE)
 _UNVERIFIED = re.compile(r"\bunverified\b", re.IGNORECASE)
 _CUT = re.compile(r"\n\[cut at \d+ characters\]\Z")
+_FENCE_CLOSE = re.compile(r"^ *(`{3,}|~{3,})\s*$")
 _HEADING = "proof"
 _MARKDOWN = MarkdownIt("commonmark")
 
@@ -43,6 +44,12 @@ class Required:
     id: str
     kind: Kind
     journeys: tuple[str, ...] | None = ()
+
+
+class _CutFence(NamedTuple):
+    indent: str
+    first_cut_line: int
+    closing_line: int
 
 
 @dataclass
@@ -158,7 +165,7 @@ def _problems(item: Required, entry: _Entry) -> list[str]:
 
 
 def _entries(body: str) -> dict[str, _Entry]:
-    tokens = _MARKDOWN.parse(body or "")
+    tokens = _parse_with_raw_output(body or "")
     entries: dict[str, _Entry] = {}
     for start, end in _top_level_items(tokens, _section(tokens)):
         first = tokens[start + 2] if tokens[start + 1].type == "paragraph_open" else None
@@ -179,6 +186,53 @@ def _entries(body: str) -> dict[str, _Entry]:
                 entry.text.append(token.content)
         entries[match.group(1).lower()] = entry
     return entries
+
+
+def _parse_with_raw_output(body: str) -> list[Token]:
+    """CommonMark ends a list item at a fence line indented less than the item, dropping raw pasted output."""
+    lines = body.splitlines(keepends=True)
+    while True:
+        tokens = _MARKDOWN.parse("".join(lines))
+        cut = _cut_fence(tokens, _section(tokens), lines)
+        if cut is None:
+            return tokens
+        short = [
+            index for index in range(cut.first_cut_line, cut.closing_line + 1)
+            if lines[index].strip() and len(lines[index]) - len(lines[index].lstrip(" ")) < len(cut.indent)
+        ]
+        if not short:
+            return tokens
+        for index in short:
+            lines[index] = cut.indent + lines[index]
+
+
+def _cut_fence(tokens: list[Token], section: range, lines: list[str]) -> _CutFence | None:
+    for index in section:
+        token = tokens[index]
+        if token.type != "fence" or not _in_list_item(tokens, index):
+            continue
+        opener, last = token.map[0], token.map[1] - 1
+        if last > opener and _closes(lines[last], token.markup):
+            continue
+        close = next((line for line in range(token.map[1], len(lines)) if _closes(lines[line], token.markup)), None)
+        if close is None:
+            continue
+        return _CutFence(" " * lines[opener].index(token.markup), token.map[1], close)
+    return None
+
+
+def _in_list_item(tokens: list[Token], index: int) -> bool:
+    depth = 0
+    for token in reversed(tokens[:index]):
+        depth += token.nesting
+        if depth > 0:
+            return token.type == "list_item_open"
+    return False
+
+
+def _closes(line: str, markup: str) -> bool:
+    closer = _FENCE_CLOSE.match(line)
+    return closer is not None and closer.group(1)[0] == markup[0] and len(closer.group(1)) >= len(markup)
 
 
 def _section(tokens: list[Token]) -> range:
