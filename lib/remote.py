@@ -1281,11 +1281,19 @@ _PREFLIGHT = (
 # which cleanup reads under the lock, and moves `<job-dir>.cleanup` back to
 # `<job-dir>` when cleanup set the folder aside first. With no `flock` ($lk
 # empty) the claim runs unlocked; cleanup then leaves every folder alone.
+# #1298: cleanup unlinks `<job-dir>.lock` last while it holds it, so a claim
+# that wakes on the unlinked file relocks the new one (exit 75 loops). It
+# compares inode numbers: `-ef` against /dev/fd/9 never matches on macOS,
+# whose devfs gives /dev/fd/9 another st_dev.
 _CLAIM = (
     '{ claim() { touch -- "$d.claimed" && { [ -e "$d" ] || [ -L "$d" ] '
     '|| [ ! -d "$d.cleanup" ] || [ -L "$d.cleanup" ] || mv -- "$d.cleanup" "$d"; }; }; '
-    'mkdir -p -- "${d%/*}" && if [ -n "$lk" ]; then { "$lk" -w 600 9 && claim; } 9>>"$d.lock"; '
-    "else claim; fi; }"
+    'ino() { ls -iL -- "$1" 2>/dev/null | { read -r i _ && echo "$i"; }; }; '
+    'held() { "$lk" -w 600 9 || return 1; '
+    '[ "$(ino "$d.lock")" = "$(ino /dev/fd/9)" ] || return 75; claim; }; '
+    'locked() { while { held; } 9>>"$d.lock"; lr=$?; [ "$lr" -eq 75 ]; do :; done; '
+    'return "$lr"; }; '
+    'mkdir -p -- "${d%/*}" && if [ -n "$lk" ]; then locked; else claim; fi; }'
 )
 _FLOCK_ON_START_OR_LOGIN_PATH = (
     f"command -v flock 2>/dev/null || {LOGIN_SHELL} -lc 'command -v flock | sed s/^/orch-flock:/' "

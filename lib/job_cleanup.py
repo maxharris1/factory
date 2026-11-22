@@ -22,7 +22,10 @@ that is a dead owner's worktree has its uncommitted work saved as
 `jobs-kept/<job-id>/worktree.patch` and its unpushed commits pinned as
 `refs/orch-kept/<job-id>` just before that rename, and its `<job-id>.json`
 record is retired with the folder. A record with no folder whose owner is
-gone is retired the same way. The `.lock` stays. A `<job-id>.gone` already
+gone is retired the same way. Once nothing else of a job is left under
+`jobs/`, its `.lock` is unlinked last, while still held, when the host's
+plan says `unlink_lock`; a holder that waited on it relocks the new file. A
+plan from an older host leaves the `.lock`. A `<job-id>.gone` already
 there puts the folder back with an error. `_CLAIM` only ever restores
 `.cleanup`, never `.gone`, so the next HOLD first finishes every
 `<job-id>.gone` and pending `kept.json.tmp` under the root it was sent
@@ -151,6 +154,7 @@ class Plan:
     dry_run: bool
     step: str = HOLD
     finished_at: Mapping[str, float] = field(default_factory=dict)
+    unlink_lock: bool = False
 
     def own_finish(self, job_id: str) -> float:
         return self.finished_at.get(job_id, self.cutoff)
@@ -158,7 +162,8 @@ class Plan:
     def to_json(self) -> str:
         return json.dumps(
             {"finished": sorted(self.finished), "cutoff": self.cutoff, "dry_run": self.dry_run,
-             "step": self.step, "finished_at": dict(sorted(self.finished_at.items()))}
+             "step": self.step, "finished_at": dict(sorted(self.finished_at.items())),
+             "unlink_lock": self.unlink_lock}
         )
 
     @classmethod
@@ -178,7 +183,8 @@ class Plan:
         ):
             raise ValueError("finished_at must map plain job ids to times")
         return cls(frozenset(finished), float(data["cutoff"]), bool(data["dry_run"]), step,
-                   {key: float(value) for key, value in finished_at.items()})
+                   {key: float(value) for key, value in finished_at.items()},
+                   bool(data.get("unlink_lock", False)))
 
 
 @dataclass(frozen=True)
@@ -340,23 +346,43 @@ def runner_locks() -> bool:
     return shutil.which("flock") is not None
 
 
+def _same_inode(lock, path: Path) -> bool:
+    try:
+        return os.fstat(lock.fileno()).st_ino == os.stat(path).st_ino
+    except FileNotFoundError:
+        return False
+
+
 @contextmanager
 def _claim_lock(jobs: Path, job_id: str, *, wait: bool = True,
                 create: bool = True) -> Iterator[bool]:
-    try:
-        opened = open(jobs / f"{job_id}{LOCK}", "a" if create else "r")
-    except FileNotFoundError:
-        if create:
-            raise
-        yield True
-        return
-    with opened as lock:
+    """A holder that waited on a lock file another holder unlinked relocks the new one."""
+    path = jobs / f"{job_id}{LOCK}"
+    while True:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
-        except BlockingIOError:
-            yield False
+            opened = open(path, "a" if create else "r")
+        except FileNotFoundError:
+            if create:
+                raise
+            yield True
             return
-        yield True
+        with opened as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+            except BlockingIOError:
+                yield False
+                return
+            if _same_inode(lock, path):
+                yield True
+                return
+
+
+def _unlink_held_lock(jobs: Path, job_id: str, plan: Plan) -> None:
+    lock = f"{job_id}{LOCK}"
+    if plan.unlink_lock and not plan.dry_run and not any(
+            entry.name.split(".", 1)[0] == job_id and entry.name != lock
+            for entry in jobs.iterdir()):
+        (jobs / lock).unlink(missing_ok=True)
 
 
 def _worker_tags(folder: Path, job_id: str) -> list[str]:
@@ -467,10 +493,13 @@ def _finish_crashed(root: Path, plan: Plan, locks: bool) -> tuple[dict[str, int]
                         job_leftovers.retire(root, job_id, gone, siblings=siblings,
                                              finished_at=plan.own_finish(job_id),
                                              removed_bytes=size)
+                        if siblings:
+                            _unlink_held_lock(jobs, job_id, plan)
                     removed[job_id] = size
                 else:
                     removed[job_id] = (0 if plan.dry_run
                                        else job_leftovers.commit_record(root, job_id))
+                    _unlink_held_lock(jobs, job_id, plan)
         except (OSError, worktrees.WorktreeError) as exc:
             kept[job_id] = f"error: {exc}".splitlines()[0]
     return removed, kept
@@ -499,6 +528,7 @@ def _orphan_records(root: Path, plan: Plan,
                     continue
                 if not plan.dry_run:
                     worktrees.retire_record(root, record)
+                    _unlink_held_lock(jobs, job_id, plan)
                 removed[job_id] = 0
         except (OSError, worktrees.WorktreeError) as exc:
             kept[job_id] = f"error: {exc}".splitlines()[0]
@@ -581,6 +611,7 @@ def _finish(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None]) -> 
                 job_leftovers.retire(root, job_id, gone, siblings=True,
                                      finished_at=plan.own_finish(job_id), removed_bytes=size)
                 removed[job_id] = size
+                _unlink_held_lock(jobs, job_id, plan)
         except (OSError, worktrees.WorktreeError) as exc:
             kept[job_id] = f"error: {exc}".splitlines()[0]
     return Report(removed, kept, False)
@@ -654,7 +685,7 @@ def clean_target(transport: CaptureTransport, target: Target, db: Path, plan: Pl
     confirmed = frozenset(i for i in hold.held if i in reread and reread[i] is None)
     finish = _device_call(transport, target, Plan(
         confirmed, plan.cutoff, False, FINISH,
-        {i: at for i, at in plan.finished_at.items() if i in confirmed}))
+        {i: at for i, at in plan.finished_at.items() if i in confirmed}, plan.unlink_lock))
     if isinstance(finish, str):
         return f"set aside {len(hold.held)} checkouts, then {finish}"
     taken_back = {i: reread.get(i) or RECENT for i in hold.held if i not in finish.removed}
@@ -671,7 +702,7 @@ def run(db: Path, machines, transport: CaptureTransport, *, now: float, grace_ho
     reasons = keep_reasons(rows, cutoff)
     finished_at = {row.id: row.finished_at for row in rows
                    if reasons[row.id] is None and row.finished_at is not None}
-    plan = Plan(frozenset(finished_at), cutoff, dry_run, HOLD, finished_at)
+    plan = Plan(frozenset(finished_at), cutoff, dry_run, HOLD, finished_at, unlink_lock=True)
     found = {(t.device, t.remote.workdir_root): t for t in targets(machines)}
     work = list(found.values())
     if not work:
