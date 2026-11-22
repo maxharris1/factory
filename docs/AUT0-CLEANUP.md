@@ -105,6 +105,7 @@ skills:
   - nsa-process
   - aut0-review
   - verify-aut0
+human_reviewers: [olivermillard, KonstantineBiganashvili]
 ---
 
 ## Review

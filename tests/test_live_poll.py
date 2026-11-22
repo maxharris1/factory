@@ -147,6 +147,8 @@ class FakeGh:
             value = self.label_events
         elif endpoint.endswith("/pulls"):
             value = self.branch_pulls
+        elif endpoint.endswith("/reviews?per_page=100"):
+            value = []
         elif "/pulls/" in endpoint:
             value = {**self.pull, "head": {"sha": self.head, **self.pull.get("head", {})}}
         elif endpoint.endswith("/comments?per_page=100"):

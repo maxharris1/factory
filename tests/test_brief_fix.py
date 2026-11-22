@@ -96,3 +96,22 @@ def test_a_reopen_fix_merges_the_base_before_the_change_unless_it_is_already_in(
 
 def test_a_reopen_brief_states_no_contradicting_pair():
     assert contradictions_in(_reopen_brief()) == []
+
+
+REVIEW_URL = "https://github.com/owner/repo/pull/42#pullrequestreview-901"
+
+
+def test_a_review_reopen_asks_for_the_changes_the_review_requests():
+    action, attempt, head, extra = REOPEN
+    brief = _render(action, attempt, head, {**extra, "instruction": REVIEW_URL, "source": "review"})
+    task = _task(brief)
+
+    steps = [
+        f"Make the changes the CHANGES_REQUESTED review at {REVIEW_URL} asks for",
+        "`git merge origin/dev`: a merge commit only, no rebase, no force-push.",
+        "3. Make the changes the review asks for, including its inline comments.",
+    ]
+    positions = [task.index(step) for step in steps]
+    assert positions == sorted(positions)
+    assert "approver's go" not in task
+    assert contradictions_in(brief) == []
