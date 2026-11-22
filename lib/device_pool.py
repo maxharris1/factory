@@ -312,9 +312,8 @@ def account_loads(
                 f"SELECT account, device FROM {account_doctor.TABLE} WHERE status = 'ok'"
             )
         )
-    return AccountLoads(
-        running, frozenset(held), frozenset(closed), score, signed_in, account_doctor.held(connection), running_on
-    )
+    signed_out = account_doctor.held(connection) if _has_table(connection, account_doctor.HOLDS) else frozenset()
+    return AccountLoads(running, frozenset(held), frozenset(closed), score, signed_in, signed_out, running_on)
 
 
 def _ranked_free(
