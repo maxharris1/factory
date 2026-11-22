@@ -125,8 +125,8 @@ _VISIBLE_LINE = re.compile(r"^`orch:v1\b\s*(.*?)\s*`$")
 _ATTR = re.compile(r"^[a-z][a-z0-9_]*=[A-Za-z0-9_.:/-]+$")
 _TOKEN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _ROUND = re.compile(r"^([1-9][0-9]{0,8})(?:/([1-9][0-9]{0,8}))?$")
-_HEAD = re.compile(r"^[0-9a-f]{7,40}$")
-_REPEAT = re.compile(r"^(?:ac|f)-[1-9][0-9]*$")
+HEAD_SHA = re.compile(r"^[0-9a-f]{7,40}$")
+FINDING_ID = re.compile(r"^(?:ac|f)-[1-9][0-9]*$")
 _UNSAT = re.compile(r"^ac-[1-9][0-9]*$")
 _ESTIMATE_LINE = re.compile(r"^Estimate:\s*([-+]?[0-9]\S*(?:\s+[0-9]\S*)*)")
 _ESTIMATE = re.compile(r"0|[1-9][0-9]{0,8}")
@@ -254,7 +254,7 @@ def repeat_id(handoff: Handoff) -> str | None:
         return fields["repeat"]
     first = next((line.strip() for line in handoff.body.splitlines() if line.strip()), "")
     key, _, value = first.partition("=")
-    return value if key == "repeat" and _REPEAT.fullmatch(value) else None
+    return value if key == "repeat" and FINDING_ID.fullmatch(value) else None
 
 
 def plan_estimate_text(body: str) -> str | None:
@@ -332,7 +332,7 @@ def _check_value(key: str, value: str) -> None:
             raise HandoffError(f"bad round {value!r}")
         return
     if key == "head":
-        if _HEAD.fullmatch(value) is None:
+        if HEAD_SHA.fullmatch(value) is None:
             raise HandoffError(f"bad head {value!r}")
         return
     if key == "ac":
@@ -356,7 +356,7 @@ def _check_value(key: str, value: str) -> None:
             raise HandoffError(f"bad {key} {value!r}")
         return
     if key == "repeat":
-        if _REPEAT.fullmatch(value) is None:
+        if FINDING_ID.fullmatch(value) is None:
             raise HandoffError(f"bad repeat {value!r}")
         return
     if key == "unsat":
