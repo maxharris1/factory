@@ -56,7 +56,7 @@ def remote_machines(tmp_path: Path, *, box_slots: int = 1, box_enabled: bool = T
 
 
 def make_waiter(tmp_path: Path, machines: Path, spawn, *, environ=None, log=None,
-                orch=("python3", "/factory/bin/orch"), alive=None, gone=None):
+                orch=("python3", "/factory/bin/orch"), alive=None, gone=None, transport=None):
     db = tmp_path / "orch.db"
     queue = SQLiteJobQueue(db, clock=time.time)
     config, findings = load_machines_yml(machines)
@@ -76,6 +76,7 @@ def make_waiter(tmp_path: Path, machines: Path, spawn, *, environ=None, log=None
         environ=environ or {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
         **({"alive": alive} if alive is not None else {}),
         **({"gone": gone} if gone is not None else {}),
+        **({"transport": transport} if transport is not None else {}),
     )
     return waiter, queue, db
 

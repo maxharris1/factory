@@ -9,7 +9,9 @@ The waiter's skill preflight (lib/skill_preflight.py) is a no-op in this
 process unless a test overrides `_skill_preflight`, as
 tests/test_skill_preflight.py does. A waiter a test starts as its own
 process runs the real preflight, so HOME is a session home holding the
-pinned skills, installed as install-skills does.
+pinned skills, installed as install-skills does. The waiter's login check
+(account_doctor.check_login) is a no-op the same way unless a test overrides
+`_login_preflight`, as tests/test_login_preflight.py does.
 """
 
 from __future__ import annotations
@@ -113,6 +115,27 @@ def _no_real_ssh(tmp_path_factory: pytest.TempPathFactory):
     previous = os.environ.get("PATH", "")
     os.environ["PATH"] = f"{guard}{os.pathsep}{previous}"
     yield Path(guard)
+    os.environ["PATH"] = previous
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _signed_in_harnesses(_no_real_ssh: Path, tmp_path_factory: pytest.TempPathFactory):
+    guard = tmp_path_factory.mktemp("signed-in-harnesses")
+    replies = {
+        "claude": ("auth status", "printf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}'"),
+        "codex": ("login status", "echo 'Logged in using ChatGPT' >&2"),
+    }
+    for name, (status, reply) in replies.items():
+        script = guard / name
+        script.write_text(
+            f'#!/bin/sh\nif [ "$*" = "{status}" ]; then {reply}; exit 0; fi\n'
+            f"echo 'tests: real {name} is disabled' >&2\nexit 127\n",
+            encoding="utf-8",
+        )
+        script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    previous = os.environ.get("PATH", "")
+    os.environ["PATH"] = f"{guard}{os.pathsep}{previous}"
+    yield guard
     os.environ["PATH"] = previous
 
 
@@ -404,6 +427,13 @@ def _skill_preflight(monkeypatch: pytest.MonkeyPatch):
     from lib import skill_preflight
 
     monkeypatch.setattr(skill_preflight, "preflight", lambda *args, **kwargs: None)
+
+
+@pytest.fixture(autouse=True)
+def _login_preflight(monkeypatch: pytest.MonkeyPatch):
+    from lib import account_doctor
+
+    monkeypatch.setattr(account_doctor, "check_login", lambda *args, **kwargs: None)
 
 
 @pytest.fixture(autouse=True, scope="session")

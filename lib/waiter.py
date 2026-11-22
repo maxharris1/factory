@@ -22,7 +22,10 @@ runs as the owning bot's own user and login, starts the job itself:
   the preflight's ssh cannot reach (`preflight-unreachable`, #460) requeues
   the job at once with no round, attempt or free requeue charged, and backs
   that device off for UNREACHABLE_BACKOFF_SECONDS so the next claim goes to
-  a reachable device;
+  a reachable device. A harness login on the placed device that reads not
+  logged in (#1334) never starts the harness: it holds that account@device
+  for the doctor (lib/account_doctor.py) and requeues the job with no round,
+  attempt or free requeue charged;
 * it renders the standard brief for the job (lib/brief/), with the target
   repo's factory.md prose as additional context, read from the repo's
   trusted `factory_ref` in orch.yml (never a PR head) with `gh api` and every
@@ -140,7 +143,7 @@ from lib.device_pool import UNREACHABLE_BACKOFF_SECONDS, DevicePool, Placement, 
 from lib.factory_md import FactoryContext, parse_factory_context
 from lib.load import load_yaml
 from lib.machines_yml import Device, MachinesConfig, orch_host
-from lib import containers, device_deploy, job_token, leftovers, stacks
+from lib import account_doctor, containers, device_deploy, job_token, leftovers, stacks
 from lib.device_monitor import remote_target
 from lib.harness_env import ApproverProfileExposed, harness_environ
 from lib.handoff_check import (
@@ -171,13 +174,13 @@ from lib.queue import (
     job_from_row,
     require_proof,
 )
-from lib.remote import CaptureTransport, SshTransport
+from lib.remote import ByteTransport, CaptureTransport, SshTransport
 from lib.scratch import remove as remove_scratch
 from lib.self_deploy import git_env, own_repo
 from lib import skill_preflight
 from lib.skill_preflight import CheckoutLagging, DeviceUnreachable, PreflightError
 from lib import device_sync
-from lib.job_state import fail_lagging, requeue_unreachable
+from lib.job_state import fail_lagging, requeue_signed_out, requeue_unreachable
 from lib.telemetry import STATE_DIR_ENV
 from lib.wait import (
     OWNING_BOTS,
@@ -487,6 +490,10 @@ class GhContextSource:
         return ContextResult(context, ref, None)
 
 
+class WaiterTransport(CaptureTransport, ByteTransport, Protocol):
+    pass
+
+
 class Child(Protocol):
     pid: int
 
@@ -613,7 +620,7 @@ class Waiter:
         orch_yml: Path = FACTORY_CHECKOUT / "orch.yml",
         home: Path | None = None,
         clock: Callable[[], float] = time.monotonic,
-        transport: CaptureTransport | None = None,
+        transport: WaiterTransport | None = None,
     ):
         if bot not in OWNING_BOTS:
             raise WaiterError(f"{bot!r} is not a harness bot")
@@ -841,13 +848,18 @@ class Waiter:
         factory_root = self._factory_root(device)
         if not remote:
             self._sync_checkout_to_box_head(factory_root, label)
+        placed = placement is not None and device is not None
         try:
+            account, account_home = run_account(self.pool.config, placement) if placed else (None, None)
             skill_preflight.preflight(
                 self.queue, job, bot=self.bot, placement=placement, device=device,
                 checkout=factory_root, held=self._box_held(), host=orch_host(self.pool.config),
-                account_home=run_account(self.pool.config, placement)[1]
-                if placement is not None and device is not None else None,
+                account_home=account_home,
             )
+            if placed:
+                account_doctor.check_login(
+                    self.transport, self.pool.config, device, placement.harness, account, self.environ
+                )
             job_dir = self._job_dir(job.id)
             argv = job_run_argv(
                 self.orch,
@@ -885,6 +897,9 @@ class Waiter:
             return None
         except DeviceUnreachable as exc:
             self._requeue_unreachable(job, exc, label, claim)
+            return None
+        except account_doctor.SignedOut as exc:
+            self._requeue_signed_out(job, exc, label, claim)
             return None
         except (WaiterError, BriefError, PreflightError, OSError, ValueError) as exc:
             self.log(f"{label}: not started: {_one_line(exc)}; failed it for T6")
@@ -1007,6 +1022,37 @@ class Waiter:
             return
         self.log(f"{label}: not started: {reason}; requeued, {exc.device} backed off "
                  f"for {UNREACHABLE_BACKOFF_SECONDS}s")
+
+    def _requeue_signed_out(
+        self, job: Job, exc: account_doctor.SignedOut, label: str, proof: Proof
+    ) -> None:
+        reason = str(exc)
+        claimer, _ = self._claimer
+
+        def write() -> tuple[str, str] | None:
+            with self.queue.connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                require_proof(connection, job.id, proof)
+                result = requeue_signed_out(
+                    connection, job.id, account=exc.account, device=exc.device, now=self.queue.now(),
+                    reason=reason, slot_guard=UNSTARTED_CLAIM, slot_params=(self.recipient, claimer),
+                )
+                connection.commit()
+                return result
+
+        try:
+            result = retry_locked(write)
+        except ClaimProofError:
+            result = None
+        except (QueueError, sqlite3.Error, OSError) as error:
+            self.log(f"{label}: not started: {reason}; could not record it ({_one_line(error)})")
+            self._fail(job, proof)
+            return
+        if result is None:
+            self.log(f"{label}: not started: {reason}; its claim changed, left alone")
+            return
+        self.log(f"{label}: not started: {reason}; requeued, {exc.account}@{exc.device} signed out, "
+                 "held until its login reads signed in")
 
     def _factory_root(self, device: Device | None) -> str | None:
         """The placed device's deployed factory checkout, never the job's worktree.
