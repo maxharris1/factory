@@ -2161,26 +2161,37 @@ class LivePollSource:
             )
             if files is None:
                 return unread
+            head = _pr_head(pull, repo, number)
             if any(
                 glob_matches(pattern, path)
                 for pattern in factory.ci_force_rerun_paths
                 for path in files
             ):
-                head = _pr_head(pull, repo, number)
                 at = self._per_head(
                     "committed", repo, number, pull, lambda: self.github.committed_at(repo, head)
                 )
                 changes.append(CIChange("head-workflow", at))
             if fresh:
-                based = self.github.workflow_changed_at(
+                based = self.github.base_workflow_commit(
                     repo, _pr_base(pull) or factory.base_branch, factory.ci_force_rerun_paths
                 )
-                if based is not None:
-                    changes.append(CIChange("base-workflow", based))
+                if based is not None and not self.github.contains_commit(repo, head, based[0]):
+                    ci = self._with_base_refs(repo, ci)
+                    changes.append(CIChange("base-workflow", based[1]))
         except Exception as exc:
             self._record(repo, ticket_id, exc)
             return unread
         return ci_fresh(ci, tuple(changes), factory.ci_required_checks)
+
+    def _with_base_refs(self, repo: str, ci: CIResult) -> CIResult:
+        runs = {row.run_id for row in ci.checks if row.run_id and row.conclusion == "success"}
+        at = {run_id: self.github.base_ref_at(repo, run_id) for run_id in sorted(runs)}
+        return replace(
+            ci,
+            checks=tuple(
+                replace(row, base_ref_at=at.get(row.run_id or "")) for row in ci.checks
+            ),
+        )
 
     def _hold_inputs(
         self,

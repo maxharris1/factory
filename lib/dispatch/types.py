@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Literal, Protocol
@@ -97,7 +97,7 @@ class CheckRow:
     run_id: str | None = None
     job_id: str | None = None
     workflow: str = ""
-    first_started_at: float | None = None
+    base_ref_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -239,11 +239,7 @@ def _gate_units(
 
 
 def _fresh(row: CheckRow, change: CIChange) -> bool:
-    # A same-SHA rerun of a pull_request run keeps its original merge ref,
-    # so only the first attempt can show a base workflow change was in it.
-    started = row.started_at
-    if change.kind == "base-workflow" and row.first_started_at is not None:
-        started = row.first_started_at
+    started = row.base_ref_at if change.kind == "base-workflow" else row.started_at
     return row.conclusion == "success" and started is not None and started > change.at
 
 
@@ -257,7 +253,25 @@ def stale_units(
     ]
 
 
+def _unreported(result: CIResult, changes: tuple[CIChange, ...]) -> tuple[CIChange, ...]:
+    added = [change for change in changes if change.kind == "required-set" and change.globs]
+    missing = tuple(
+        change
+        for change in added
+        if f"{change.globs[0]} (not reported)" in result.pending
+        and all(
+            row.conclusion is not None and (row.started_at or 0) <= change.at
+            for row in result.checks
+        )
+    )
+    names = {f"{change.globs[0]} (not reported)" for change in missing}
+    return missing if result.checks and set(result.pending) <= names else ()
+
+
 def ci_fresh(result: CIResult, changes: tuple[CIChange, ...], required: tuple[str, ...]) -> CIResult:
+    if result.status == "pending":
+        missing = _unreported(result, changes)
+        return replace(result, stale=missing) if missing else result
     if result.status != "success":
         return result
     stale = {

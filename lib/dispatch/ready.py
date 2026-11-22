@@ -706,9 +706,12 @@ class ReadyMixin:
         # A rerun reuses the run's original merge ref, so it can never pick up
         # a base workflow change: the merge queue's update-from-main does.
         changes = [change for change in result.stale if change.kind != "base-workflow"]
-        if not changes:
+        if not changes or self._is_stuck(ticket):
             return
-        if self._review_context(ticket)[0] not in _AFTER_BUILD_STATES or self._is_stuck(ticket):
+        state = self._review_context(ticket)[0]
+        if state not in _AFTER_BUILD_STATES and not (
+            state == "building" and self._names_head(ticket, head, ("ready",))
+        ):
             return
         trigger = " ".join(sorted(change.trigger for change in changes))
         with self._connect() as connection:

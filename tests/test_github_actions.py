@@ -1596,7 +1596,6 @@ def test_ci_status_lists_every_latest_attempt_check_without_another_read() -> No
             run_id="123456",
             job_id="31000000004",
             workflow="actions-run:123456",
-            first_started_at=epoch("2026-11-10T19:50:00"),
         ),
         CheckRow(
             "lint",
@@ -1605,7 +1604,6 @@ def test_ci_status_lists_every_latest_attempt_check_without_another_read() -> No
             started_at=epoch("2026-11-10T19:50:00"),
             completed_at=epoch("2026-11-10T19:56:00"),
             workflow="suite:77",
-            first_started_at=epoch("2026-11-10T19:50:00"),
         ),
     )
     assert gh.keys() == [CHECKS, STATUS]

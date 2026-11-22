@@ -795,24 +795,45 @@ class GitHubReviewActions:
                 )
         return tuple(events)
 
-    def workflow_changed_at(
+    def base_workflow_commit(
         self, repo: str, branch: str, paths: Sequence[str]
-    ) -> float | None:
+    ) -> tuple[str, float] | None:
         # The commits API path filter takes no glob, so each glob is read by
         # its literal directory, and one with none by the whole branch.
-        dates: list[float] = []
+        commits: list[tuple[str, float]] = []
         for prefix in dict.fromkeys(map(_literal_prefix, paths)):
             path = f"&path={quote(prefix, safe='/')}" if prefix else ""
-            commits = self._json(
+            page = self._json(
                 f"{_repo_path(repo)}/commits?sha={quote(_branch(branch), safe='/')}"
                 f"{path}&per_page=1"
             )
-            if not isinstance(commits, list):
+            if not isinstance(page, list):
                 raise GitHubAdapterError("commits page is not a list")
-            for commit in map(_object, commits):
+            for commit in map(_object, page):
                 committer = _object(_object(commit.get("commit")).get("committer"))
-                dates.append(_created_at(committer.get("date")))
-        return max(dates, default=None)
+                commits.append(
+                    (_sha(commit.get("sha"), "commit"), _created_at(committer.get("date")))
+                )
+        return max(commits, key=lambda commit: commit[1], default=None)
+
+    def contains_commit(self, repo: str, head: str, commit: str) -> bool:
+        compare = _object(
+            self._json(
+                f"{_repo_path(repo)}/compare/{_sha(commit, 'commit')}...{_sha(head, 'head')}"
+            )
+        )
+        return compare.get("status") in ("ahead", "identical")
+
+    def base_ref_at(self, repo: str, run_id: str) -> float | None:
+        # A pull_request run takes its workflow from the merge with the base
+        # at the event, and every rerun keeps that merge: only attempt 1's
+        # start dates which base revision it ran.
+        if not run_id.isdigit():
+            raise GitHubAdapterError("Actions run id is not a number")
+        attempt = _object(self._json(f"{_repo_path(repo)}/actions/runs/{run_id}/attempts/1"))
+        if attempt.get("event") not in ("pull_request", "pull_request_target"):
+            return None
+        return _display_time(attempt.get("run_started_at") or attempt.get("created_at"))
 
     def committed_at(self, repo: str, sha: str) -> float:
         commit = _object(self._json(f"{_repo_path(repo)}/commits/{_sha(sha, 'commit')}"))
@@ -853,9 +874,8 @@ class GitHubReviewActions:
             return CIResult("pending")
         if not runs and not total:
             return CIResult("pending", reported=False)
-        first = _first_starts(runs)
         runs = _latest_attempts(runs)
-        checks = tuple(_check_row(run, first.get(_attempt_key(run))) for run in runs)
+        checks = tuple(map(_check_row, runs))
         statuses = _status_rows(combined)
         failed: list[FailedCheck] = []
         pending: list[str] = []
@@ -1295,26 +1315,16 @@ def _latest_attempts(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     latest: dict[tuple[str, str, str], dict[str, Any]] = {}
     for run in runs:
-        key = _attempt_key(run)
+        app = _object(run.get("app")) if isinstance(run.get("app"), dict) else {}
+        key = (
+            str(app.get("id", app.get("slug", ""))),
+            _workflow_identity(run),
+            str(run.get("name")),
+        )
         current = latest.get(key)
         if current is None or _attempt_order(run) > _attempt_order(current):
             latest[key] = run
     return list(latest.values())
-
-
-def _attempt_key(run: dict[str, Any]) -> tuple[str, str, str]:
-    app = _object(run.get("app")) if isinstance(run.get("app"), dict) else {}
-    return (str(app.get("id", app.get("slug", ""))), _workflow_identity(run), str(run.get("name")))
-
-
-def _first_starts(runs: list[dict[str, Any]]) -> dict[tuple[str, str, str], float]:
-    first: dict[tuple[str, str, str], float] = {}
-    for run in runs:
-        started = _display_time(run.get("started_at"))
-        if started is not None:
-            key = _attempt_key(run)
-            first[key] = min(first.get(key, started), started)
-    return first
 
 
 def _literal_prefix(pattern: str) -> str:
@@ -1370,7 +1380,7 @@ def _failed_check(name: str, details: object, cause: Cause, signal: str | None) 
     )
 
 
-def _check_row(run: dict[str, Any], first_started_at: float | None = None) -> CheckRow:
+def _check_row(run: dict[str, Any]) -> CheckRow:
     conclusion = run.get("conclusion")
     status = _board_status(run.get("status"), conclusion)
     details = run.get("details_url")
@@ -1385,7 +1395,6 @@ def _check_row(run: dict[str, Any], first_started_at: float | None = None) -> Ch
         run_id=None if job is None else job.group(2),
         job_id=None if job is None else job.group(3),
         workflow=_workflow_identity(run),
-        first_started_at=first_started_at,
     )
 
 
