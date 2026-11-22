@@ -10,8 +10,10 @@ ticket job-failed-2.
 from __future__ import annotations
 
 import contextlib
+import shlex
 import sqlite3
-from collections.abc import Sequence
+import subprocess
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -56,7 +58,7 @@ def pc_config(tmp_path: Path):
 def check(tmp_path: Path, harness: str, transport: LoginTransport) -> None:
     config = pc_config(tmp_path)
     account = config.device("pc").account_for(harness)
-    account_doctor.check_login(transport, config, config.device("pc"), harness, account)
+    account_doctor.check_login(transport, config, config.device("pc"), harness, account, {})
 
 
 @pytest.mark.parametrize("harness, reply", [
@@ -168,4 +170,158 @@ def test_a_signed_in_preflight_launches(tmp_path: Path) -> None:
 
     assert len(spawn.calls) == 1
     assert transport.aliases == ["fakepc-claude-bot"]
+    assert holds(db) == set()
+
+
+class ShellTransport:
+    def __init__(self, env: Mapping[str, str]) -> None:
+        self.env = dict(env)
+
+    def run(self, argv: Sequence[str], *, timeout: float) -> int:
+        return 0
+
+    def exchange(self, argv: Sequence[str], *, timeout: float, input: bytes = b"") -> Exchanged:
+        done = subprocess.run(["/bin/sh", "-c", argv[-1]], env=self.env, input=input, capture_output=True,
+                              timeout=timeout, check=False)
+        return Exchanged(done.returncode, done.stdout, done.stderr.decode())
+
+
+def fake_harnesses(folder: Path, signed_in: str | None) -> Path:
+    folder.mkdir(parents=True, exist_ok=True)
+    for name, home, tokens, yes, no in (
+        ("claude", "CLAUDE_CONFIG_DIR", "$CLAUDE_CODE_OAUTH_TOKEN$ANTHROPIC_API_KEY$ANTHROPIC_AUTH_TOKEN",
+         "printf '%s\\n' " + shlex.quote(claude_reply().decode()),
+         "printf '%s\\n' " + shlex.quote(SIGNED_OUT_CLAUDE.decode()) + "; exit 1"),
+        ("codex", "CODEX_HOME", "$OPENAI_API_KEY$CODEX_API_KEY",
+         "echo 'Logged in using ChatGPT' >&2", "echo 'Not logged in' >&2; exit 1"),
+    ):
+        fake = folder / name
+        fake.write_text(
+            "#!/bin/sh\n"
+            f'if [ "${{{home}:-}}" = {shlex.quote(signed_in or "")} ] && [ -z "{tokens}" ]; then {yes}; else {no}; fi\n',
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+    return folder
+
+
+ACCOUNT_MACHINES = """\
+accounts:
+  - {{id: claude-b, harness: claude, signed_in_on: [box, pc]}}
+  - {{id: codex-b, harness: codex, signed_in_on: [box, pc]}}
+devices:
+  - name: box
+    local: true
+    slot_max: 1
+    harnesses: {{claude: claude-bot, codex: codex-bot}}
+    home: {home}
+  - name: pc
+    tailscale_name: pc.example.ts.net
+    slot_max: 1
+    harnesses: {{claude: claude-bot, codex: codex-bot}}
+    workdir_root: {home}/work
+    ssh_alias: pc-{{bot}}
+    factory_root: /srv/factory
+    home: {home}
+"""
+PROFILE_HOMES = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}
+PROFILE_TOKENS = {"claude": "CLAUDE_CODE_OAUTH_TOKEN", "codex": "OPENAI_API_KEY"}
+
+
+def account_config(tmp_path: Path):
+    path = tmp_path / "machines.yml"
+    path.write_text(ACCOUNT_MACHINES.format(home=tmp_path / "home"), encoding="utf-8")
+    config, findings = load_machines_yml(path)
+    assert config is not None, findings
+    return config
+
+
+def login_environment(tmp_path: Path, harness: str, signed_in: str | None) -> dict[str, str]:
+    bin_dir = fake_harnesses(tmp_path / "bin", signed_in)
+    return {
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "HOME": str(tmp_path / "home"),
+        PROFILE_HOMES[harness]: str(tmp_path / "profile-login"),
+        PROFILE_TOKENS[harness]: "sk-planted",
+    }
+
+
+def remote_transport(tmp_path: Path, environment: Mapping[str, str]) -> ShellTransport:
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    (home / ".bash_profile").write_text(
+        "".join(f"export {name}={shlex.quote(value)}\n" for name, value in environment.items() if name != "HOME"),
+        encoding="utf-8",
+    )
+    return ShellTransport({"HOME": str(home), "PATH": "/usr/bin:/bin"})
+
+
+@pytest.mark.parametrize("where", ["local", "remote"])
+@pytest.mark.parametrize("harness", ["claude", "codex"])
+def test_the_own_login_is_read_through_the_profile_config_folder(tmp_path: Path, where: str, harness: str) -> None:
+    config = account_config(tmp_path)
+    environment = login_environment(tmp_path, harness, signed_in=None)
+    device = config.device("box" if where == "local" else "pc")
+    transport = remote_transport(tmp_path, environment) if where == "remote" else LoginTransport(b"")
+
+    with pytest.raises(account_doctor.SignedOut) as raised:
+        account_doctor.check_login(transport, config, device, harness, f"{harness}-default", environment)
+
+    assert (raised.value.account, raised.value.device) == (f"{harness}-default", device.name)
+
+
+@pytest.mark.parametrize("where", ["local", "remote"])
+@pytest.mark.parametrize("harness", ["claude", "codex"])
+def test_an_account_folder_is_read_without_the_profile_folder_or_tokens(
+    tmp_path: Path, where: str, harness: str
+) -> None:
+    config = account_config(tmp_path)
+    device = config.device("box" if where == "local" else "pc")
+    account = f"{harness}-b"
+    folder = config.account_home(device.name, harness, account)
+    environment = login_environment(tmp_path, harness, signed_in=folder)
+    transport = remote_transport(tmp_path, environment) if where == "remote" else LoginTransport(b"")
+
+    account_doctor.check_login(transport, config, device, harness, account, environment)
+
+    signed_out = login_environment(tmp_path, harness, signed_in=str(tmp_path / "elsewhere"))
+    transport = remote_transport(tmp_path, signed_out) if where == "remote" else transport
+    with pytest.raises(account_doctor.SignedOut):
+        account_doctor.check_login(transport, config, device, harness, account, signed_out)
+
+
+def box_waiter(tmp_path: Path, signed_in: str | None):
+    spawn = FakeSpawn()
+    bin_dir = fake_harnesses(tmp_path / "bin", signed_in)
+    waiter, queue, db = make_waiter(
+        tmp_path, remote_machines(tmp_path, pc=False), spawn,
+        environ={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)}, transport=LoginTransport(b""),
+    )
+    with_job_events(db)
+    return waiter, queue, db, spawn
+
+
+def test_a_signed_out_local_login_does_not_launch_or_charge_a_retry(tmp_path: Path) -> None:
+    waiter, queue, db, spawn = box_waiter(tmp_path, signed_in=str(tmp_path / "elsewhere"))
+    job_id = enqueue(queue, "a")
+    before = counters(db, job_id)
+
+    for _ in range(MAX_FREE_REQUEUES + 1):
+        assert waiter.step() is None
+
+    assert spawn.calls == [], "the harness never starts on a signed-out local login"
+    assert state(db, job_id) == "queued"
+    assert counters(db, job_id) == before
+    assert holds(db) == {("claude-default", "box", "preflight")}
+    with sqlite3.connect(db) as connection:
+        assert free_requeues(connection, job_id) == 0
+
+
+def test_a_signed_in_local_login_launches(tmp_path: Path) -> None:
+    waiter, queue, db, spawn = box_waiter(tmp_path, signed_in=None)
+    job_id = enqueue(queue, "a")
+
+    assert waiter.step() == job_id
+
+    assert len(spawn.calls) == 1
     assert holds(db) == set()
