@@ -94,6 +94,7 @@ class StopRecord:
     stop: Literal["capped", "stalled", "repeat"]
     finding_ids: frozenset[str]
     released_by: Literal["approver", "engine"] | None
+    complete: bool = True
 
 
 @dataclass(frozen=True)
@@ -397,29 +398,32 @@ class RepeatBlockMixin:
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchall():
                 verdict_id = str(row["comment_id"])
+                body = bodies.get(verdict_id)
+                qa_failed = frozenset(json.loads(row["qa_failed"] or "[]"))
+                if row["finding_ids"] is not None:
+                    blocking = frozenset(json.loads(row["finding_ids"]))
+                else:
+                    blocking = frozenset() if body is None else blocking_ids(_handoff(body)[1])
                 if row["outcome"] == "waiting-max-repeat":
                     history.append(
                         StopRecord(
                             verdict_id,
                             "repeat",
-                            frozenset(json.loads(row["finding_ids"]))
+                            blocking
                             if row["finding_ids"] is not None
-                            else _repeat_finding(connection, ticket, verdict_id),
+                            else blocking | qa_failed | _repeat_finding(connection, ticket, verdict_id),
                             _released_by(connection, ticket, verdict_id, "repeat"),
+                            row["finding_ids"] is not None or body is not None,
                         )
                     )
                     continue
-                body = bodies.get(verdict_id)
-                if row["finding_ids"] is not None:
-                    blocking = frozenset(json.loads(row["finding_ids"]))
-                else:
-                    blocking = frozenset() if body is None else blocking_ids(_handoff(body)[1])
                 history.append(
                     StopRecord(
                         verdict_id,
                         "stalled" if row["stop"] == "stalled" else "capped",
-                        blocking | frozenset(json.loads(row["qa_failed"] or "[]")),
+                        blocking | qa_failed,
                         _released_by(connection, ticket, verdict_id, "cap"),
+                        row["finding_ids"] is not None or body is not None,
                     )
                 )
         return tuple(history)

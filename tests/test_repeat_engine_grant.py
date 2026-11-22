@@ -279,3 +279,33 @@ def test_a_stop_that_repeats_a_granted_finding_beside_another_wakes_grok(tmp_pat
     granted, escalated = rows(flow)
     assert sorted(json.loads(granted["finding_ids"])) == sorted([other_id, "f-2"])
     assert (escalated["subject"], escalated["outcome"]) == ("revise-3", "escalated")
+
+
+def forget_finding_ids(flow: AppFlow, subject: str) -> None:
+    with flow.queue.connect() as connection:
+        connection.execute("UPDATE review_events SET finding_ids = NULL WHERE comment_id = ?", (subject,))
+
+
+def test_a_repeat_on_a_finding_released_at_a_repeat_stop_written_without_ids_wakes_grok(tmp_path: Path) -> None:
+    flow = approver_released_repeat_stop(tmp_path)
+    forget_finding_ids(flow, "revise-4")
+
+    assert revise(flow, "5/5", "revise-5", body=F2 + F3) == "waiting-max-repeat"
+
+    assert_parked_for_grok(flow, "revise-5", "stops=2, for=max")
+    assert flow.state()["cap_extra"] == 2
+    row = next(row for row in rows(flow) if row["subject"] == "revise-5")
+    assert (row["outcome"], row["reason"]) == ("escalated", "repeat-stops")
+
+
+def test_a_released_stop_whose_findings_cannot_be_recovered_blocks_an_engine_grant(tmp_path: Path) -> None:
+    flow = approver_released_repeat_stop(tmp_path)
+    forget_finding_ids(flow, "revise-4")
+    flow.comments = [item for item in flow.comments if item.id != "revise-4"]
+
+    assert revise(flow, "5/5", "revise-5", " repeat=f-2", body=F2 + F3) == "waiting-max-repeat"
+
+    assert_parked_for_grok(flow, "revise-5", "stops=1, for=factory")
+    assert flow.state()["cap_extra"] == 2
+    row = next(row for row in rows(flow) if row["subject"] == "revise-5")
+    assert (row["outcome"], row["reason"]) == ("escalated", "earlier-round")

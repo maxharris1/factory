@@ -54,7 +54,7 @@ class StopFacts:
     verdict_id: CommentId
     finding_ids: tuple[FindingId, ...]
     repeat_stops: int
-    prior_grants: frozenset[FindingId]
+    prior_grants: frozenset[FindingId] | None
     round: int
     cap: int
     stuck: bool
@@ -134,7 +134,7 @@ class FirstCapGrant:
 
     def rule(self, facts: Facts) -> Ruling:
         assert isinstance(facts, StopFacts)
-        repeated = sorted(set(facts.finding_ids) & facts.prior_grants)
+        repeated = ["unknown"] if facts.prior_grants is None else sorted(set(facts.finding_ids) & facts.prior_grants)
         checks = (
             Check("stop", facts.stop != "stalled", facts.stop),
             Check("finding-ids", bool(facts.finding_ids), len(facts.finding_ids)),

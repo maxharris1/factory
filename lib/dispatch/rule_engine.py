@@ -52,15 +52,11 @@ def _notice(site: Site, ids: list[str], header: str, subject: str) -> str:
     )
 
 
-def prior_grants(history: Iterable[StopRecord], verdict_id: str) -> frozenset[FindingId]:
-    return frozenset(
-        _valid_ids(
-            found
-            for record in history
-            if record.released_by is not None and record.verdict_id != verdict_id
-            for found in record.finding_ids
-        )
-    )
+def prior_grants(history: Iterable[StopRecord], verdict_id: str) -> frozenset[FindingId] | None:
+    released = [record for record in history if record.released_by is not None and record.verdict_id != verdict_id]
+    if not all(record.complete for record in released):
+        return None
+    return frozenset(_valid_ids(found for record in released for found in record.finding_ids))
 
 
 class RuleEngineMixin:
@@ -119,7 +115,7 @@ class RuleEngineMixin:
         verdict: Comment,
         named: frozenset[str],
         stops: int,
-        prior: frozenset[FindingId],
+        prior: frozenset[FindingId] | None,
         round_number: int,
     ) -> bool:
         try:

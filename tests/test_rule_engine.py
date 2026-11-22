@@ -198,6 +198,7 @@ def test_a_first_cap_on_fresh_findings_grants_one_round_with_the_go_header() -> 
         ({"finding_ids": ()}, Check("finding-ids", False, 0)),
         ({"stuck": True}, Check("stuck", False, 1)),
         ({"prior_grants": frozenset({finding_id("ac-2"), finding_id("f-9")})}, Check("earlier-round", False, "ac-2")),
+        ({"prior_grants": None}, Check("earlier-round", False, "unknown")),
     ],
 )
 def test_a_cap_that_fails_one_check_escalates_on_that_check(change: dict, failed: Check) -> None:
@@ -255,6 +256,7 @@ def test_a_first_repeat_stop_grants_the_round_and_the_cap_round_only_at_the_cap(
         ({"finding_ids": ()}, Check("finding-ids", False, 0)),
         ({"stuck": True}, Check("stuck", False, 1)),
         ({"prior_grants": frozenset({finding_id("f-1")})}, Check("earlier-round", False, "f-1")),
+        ({"prior_grants": None}, Check("earlier-round", False, "unknown")),
     ],
 )
 def test_a_repeat_stop_that_fails_one_check_escalates_on_that_check(change: dict, failed: Check) -> None:
