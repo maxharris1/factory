@@ -494,6 +494,7 @@ class SchemaMixin:
                 )
                 """
             )
+            _add_missing_columns(connection, "engine_decisions", {"notice_status": "TEXT"})
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ticket_retries (

@@ -346,7 +346,7 @@ class RepeatBlockMixin:
             0,
         )
 
-    def _capped_stop(self, ticket: TrackedTicket, verdict: Comment) -> Stop:
+    def _capped_stop(self, ticket: TrackedTicket, verdict: Comment) -> Literal["capped", "stalled"]:
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT stop FROM review_events WHERE repo = ? AND ticket_id = ? AND comment_id = ?",

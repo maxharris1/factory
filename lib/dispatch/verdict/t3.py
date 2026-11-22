@@ -84,8 +84,8 @@ class T3Mixin:
         if state is None:
             self._wake_comment_problem(ticket, comment, "stale", outcome)
             return True, outcome
-        if state == "capped":
-            self._wake_capped(ticket, comment)
+        if state == "capped" and self._wake_capped(ticket, comment):
+            return True, outcome
         self._write_state_label(ticket, state)
         return True, outcome
 

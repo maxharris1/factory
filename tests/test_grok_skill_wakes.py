@@ -114,3 +114,13 @@ def test_no_ok_as_max():
         if "kind=ok" in sentence:
             assert re.match(r"\W*Never\b", sentence), sentence
     assert "round=" not in text
+
+
+def test_the_engine_notice_marker_the_code_posts_is_named_in_commands():
+    from lib.dispatch.rule_engine import engine_marker
+
+    commands = SKILL.read_text(encoding="utf-8").split("\n## Commands\n", 1)[1].split("\n## ", 1)[0]
+    marker = engine_marker("cap", "1").split()[1]
+    assert marker == "orch-engine"
+    [line] = [line for line in commands.splitlines() if f"`{marker}`" in line]
+    assert "needs no action" in line
