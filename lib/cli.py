@@ -951,6 +951,7 @@ def _wait_autostart(
             drain=waiter.drain_marker(args.bot),
             orch_yml=orch_path,
             home=Path.home(),
+            sweep_cleanup=True,
         )
     except (WaitError, waiter.WaiterError) as exc:
         print(f"orch wait: {exc}", file=sys.stderr)

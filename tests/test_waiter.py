@@ -413,16 +413,88 @@ def test_a_failed_scratch_removal_is_retried_until_it_succeeds(tmp_path: Path) -
 
 
 def sweeping_waiter(tmp_path: Path, queue: SQLiteJobQueue, db: Path, log: list[str],
-                    pool: DevicePool | None = None) -> tuple[Waiter, list[float]]:
+                    pool: DevicePool | None = None, *, spawn: FakeSpawn | None = None,
+                    cleanup: CleanupSpawn | None = None) -> tuple[Waiter, list[float]]:
     now = [0.0]
     waiter = Waiter(
         bot="claude-bot", queue=queue, pool=pool or local_pool(queue),
         harness=HarnessCommand(bot="claude-bot", command=("fake-harness", "-p")),
         context=FakeContext(), state_dir=tmp_path / "state", db=db, machines=MACHINES,
-        orch=("python3", "/factory/bin/orch"), spawn=FakeSpawn(), log=log.append,
+        orch=("python3", "/factory/bin/orch"), spawn=spawn or FakeSpawn(), log=log.append,
         environ={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}, clock=lambda: now[0],
+        sweep_cleanup=cleanup is not None, cleanup_spawn=cleanup or CleanupSpawn(),
     )
     return waiter, now
+
+
+class CleanupSpawn:
+    def __init__(self, error: OSError | None = None):
+        self.calls: list[tuple[list[str], dict]] = []
+        self.children: list[FakeChild] = []
+        self.error = error
+
+    def __call__(self, argv, **kwargs):
+        if self.error is not None:
+            raise self.error
+        self.calls.append((list(argv), kwargs))
+        self.children.append(FakeChild(20_000 + len(self.children)))
+        return self.children[-1]
+
+
+def test_the_waiter_starts_its_bots_cleanup_on_a_cadence_one_at_a_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", Docker(tmp_path).path())
+    db, queue = make_queue(tmp_path)
+    cleanup = CleanupSpawn()
+    log: list[str] = []
+    waiter, now = sweeping_waiter(tmp_path, queue, db, log, cleanup=cleanup)
+    every = waiter_module.CLEANUP_SWEEP_SECONDS
+    assert every == 900
+
+    def passes_after(at: float) -> int:
+        now[0] = at
+        assert waiter.step() is None
+        return len(cleanup.calls)
+
+    assert passes_after(0) == 1
+    argv, kwargs = cleanup.calls[0]
+    assert argv == ["python3", "/factory/bin/orch", "cleanup", "run", "--bot", "claude-bot",
+                    "--db", str(db), "--machines", str(MACHINES)]
+    assert kwargs["start_new_session"] is True
+    assert Path(kwargs["stdout"].name) == tmp_path / "state" / "cleanup.log"
+
+    cleanup.children[0].returncode = 0
+    assert passes_after(every - 1) == 1
+    assert passes_after(every) == 2
+    assert passes_after(2 * every) == 2, "a running pass is never joined by another"
+    assert passes_after(2 * every + 5) == 2
+    cleanup.children[1].returncode = 1
+    assert passes_after(2 * every + 6) == 3
+    assert [line for line in log if line.startswith("cleanup run exited")] == [
+        f"cleanup run exited 0 ({tmp_path / 'state' / 'cleanup.log'})",
+        f"cleanup run exited 1 ({tmp_path / 'state' / 'cleanup.log'})",
+    ]
+
+
+@pytest.mark.parametrize("error", [None, OSError("cannot exec orch")])
+def test_the_cleanup_pass_does_not_block_the_claim_in_the_same_step(
+    tmp_path: Path, error: OSError | None
+) -> None:
+    db, queue = make_queue(tmp_path)
+    job_id = enqueue(queue, "a")
+    spawn, cleanup = FakeSpawn(), CleanupSpawn(error)
+    log: list[str] = []
+    waiter, _ = sweeping_waiter(tmp_path, queue, db, log, spawn=spawn, cleanup=cleanup)
+
+    assert waiter.step() == job_id
+
+    assert state(db, job_id) == "running"
+    assert spawn.calls[0][0][2:4] == ["job", "run"]
+    assert len(cleanup.calls) == (0 if error else 1)
+    failed = [line for line in log if line.startswith("cleanup run not started")]
+    assert failed == ([] if error is None else ["cleanup run not started: cannot exec orch"])
+    spawn.end_runners()
 
 
 def set_state(db: Path, job_id: str, job_state: str) -> None:
@@ -1370,8 +1442,8 @@ def test_plain_wait_still_prints_and_exits_without_starting_anything(tmp_path: P
 
 
 def test_waiter_module_spawns_only_orch_job_run(tmp_path: Path) -> None:
-    # Every process the waiter module starts is `orch job run` (and the gh
-    # read of factory.md): the waiter never execs a harness directly.
+    # Every process the waiter module starts is `orch job run` or `orch
+    # cleanup run` (and the gh read of factory.md): the waiter never execs a harness directly.
     tree = ast.parse((ROOT / "lib" / "waiter.py").read_text(encoding="utf-8"))
     calls = [
         node for node in ast.walk(tree)
