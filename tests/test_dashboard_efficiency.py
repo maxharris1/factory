@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import lib.dashboard as dashboard
-from lib import lane_limit, usage_readings
+from lib import account_doctor, lane_limit, usage_readings
 from lib.dashboard import collect_snapshot, render_pages
 from lib.dashboard_pages import efficiency
 from lib.machines_yml import load_machines_yml
@@ -890,3 +890,68 @@ def test_an_empty_factory_renders_every_panel(tmp_path: Path) -> None:
     for ident in PANELS:
         assert f'id="{ident}"' in page, ident
     assert "no shipped tickets yet" in page and "no finished jobs yet" in page
+
+
+SHARED = (
+    "orch_host: box\n"
+    "accounts:\n"
+    "  - {id: claude-a, harness: claude}\n"
+    "  - {id: claude-b, harness: claude, plan: max, signed_in_on: [box, pc], max_jobs: 2}\n"
+    "devices:\n"
+    "  - name: box\n    local: true\n    slot_max: 3\n    home: /home/{bot}\n    harnesses:\n"
+    "      claude: {bot: claude-bot, account: claude-a}\n"
+    "  - name: pc\n    slot_max: 2\n    tailscale_name: pc\n    workdir_root: /w\n    factory_root: /f\n"
+    "    ssh_alias: pc-{bot}\n    home: /home/{bot}\n    harnesses:\n      claude: {bot: claude-bot, account: claude-a}\n"
+)
+SHARED_A = "claude claude-a via get_usage · read 1m 00s ago"
+SHARED_B = "claude claude-b max · via get_usage · read 1m 00s ago"
+
+
+def _shared_snapshot(tmp_path: Path) -> dict:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        for account, five_hour, seven_day in (("claude-a", 0.4, 0.2), ("claude-b", 0.7, 0.1)):
+            usage_readings.store(
+                connection, harness="claude", bot="claude-bot", device="box", job_id="j", account=account,
+                own_login=account == "claude-a",
+                readings=[Reading("five_hour", five_hour, int(NOW + 7500), NOW - 60),
+                          Reading("seven_day", seven_day, int(NOW + 86400), NOW - 60)])
+        connection.execute(
+            "CREATE TABLE device_slots (job_id TEXT PRIMARY KEY, device TEXT NOT NULL, harness TEXT NOT NULL, "
+            "os_user TEXT NOT NULL, placed_at REAL NOT NULL, account TEXT)")
+        connection.executemany(
+            "INSERT INTO device_slots VALUES (?, ?, 'claude', 'claude-bot', ?, ?)",
+            [("on-box-b", "box", NOW - 30, "claude-b"), ("on-pc-legacy", "pc", NOW - 30, None),
+             ("on-box-a", "box", NOW - 30, "claude-a")])
+        account_doctor.ensure_table(connection)
+        connection.executemany(
+            f"INSERT INTO {account_doctor.TABLE} (account, device, status, checked_at) VALUES (?, ?, ?, ?)",
+            [("claude-b", "box", "ok", NOW - 60), ("claude-b", "pc", "signed-out", NOW - 60)])
+    return collect_snapshot(db, log, now=NOW, machines_path=_machines(tmp_path, SHARED))
+
+
+def test_each_account_carries_its_running_jobs_cap_and_devices_from_the_placement_read(tmp_path: Path) -> None:
+    entries = {e["account"]: e for e in _shared_snapshot(tmp_path)["usage"]["accounts"]}
+    assert list(entries) == ["claude-a", "claude-b"]
+    assert {k: entries["claude-a"][k] for k in ("running", "max_jobs", "signed_in", "running_on")} == {
+        "running": 2, "max_jobs": None, "signed_in": ["box", "pc"], "running_on": ["box", "pc"]}
+    assert {k: entries["claude-b"][k] for k in ("running", "max_jobs", "signed_in", "running_on")} == {
+        "running": 1, "max_jobs": 2, "signed_in": ["box"], "running_on": ["box"]}
+
+
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+def test_two_claude_accounts_on_shared_devices_render_one_row_each(tmp_path: Path, render: str) -> None:
+    headroom = _render(tmp_path, _shared_snapshot(tmp_path), render, "headroom")
+    assert re.findall(r"<th>(.*?)</th>", headroom) == [
+        "account", "5-hour window", "7-day window", "resets", "headroom", "jobs", "devices"]
+    assert _rows(headroom) == {
+        SHARED_A: ["40% used", "20% used", "in 2h 05m", "60%", "2 running · no max",
+                   "signed in on box, pc · running on box, pc"],
+        SHARED_B: ["70% used", "10% used", "in 2h 05m", "30%", "1 running · max 2",
+                   "signed in on box · running on box"],
+    }
+    blocks = [_text(block) for block in _blocks(headroom)]
+    assert blocks[0].startswith(SHARED_A) and blocks[0].endswith(
+        "2 running · no max · signed in on box, pc · running on box, pc")
+    assert blocks[1].startswith(SHARED_B) and blocks[1].endswith(
+        "1 running · max 2 · signed in on box · running on box")
