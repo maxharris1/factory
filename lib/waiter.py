@@ -626,6 +626,7 @@ class Waiter:
         home: Path | None = None,
         clock: Callable[[], float] = time.monotonic,
         transport: WaiterTransport | None = None,
+        sweep_cleanup: bool = False,
         cleanup_spawn: Callable[..., Child] | None = None,
     ):
         if bot not in OWNING_BOTS:
@@ -672,7 +673,8 @@ class Waiter:
         self.clock = clock
         self._home_key: tuple[object, ...] | None = None
         self._home_retry_at = 0.0
-        self.cleanup_spawn = cleanup_spawn
+        self.sweep_cleanup = sweep_cleanup
+        self.cleanup_spawn = cleanup_spawn if cleanup_spawn is not None else spawn
         self._cleanup: Child | None = None
         self._cleanup_started_at: float | None = None
 
@@ -702,7 +704,7 @@ class Waiter:
         return self._start(job, placement, proof)
 
     def _sweep_job_folders(self) -> None:
-        if self.cleanup_spawn is None:
+        if not self.sweep_cleanup:
             return
         log_path = self.state_dir / CLEANUP_LOG
         if self._cleanup is not None:

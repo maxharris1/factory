@@ -34,7 +34,7 @@ from tests.test_ship_hold import (
     snapshot,
     workflow_state,
 )
-from tests.test_waiter import MACHINES, FakeContext, FakeSpawn, enqueue, local_pool, make_queue, make_waiter
+from tests.test_waiter import MACHINES, CleanupSpawn, FakeContext, FakeSpawn, enqueue, local_pool, make_queue, make_waiter
 
 ROOT = Path(__file__).resolve().parent.parent
 APP_BOT = "fake-factory-bots[bot]"
@@ -747,23 +747,36 @@ def autostart_once(tmp_path: Path, monkeypatch, text: str | None, environ: dict[
         orch.write_text(text, encoding="utf-8")
     db, queue = make_queue(tmp_path)
     enqueue(queue, "already-queued")
-    spawn = FakeSpawn()
+    spawn, cleanup = FakeSpawn(), CleanupSpawn()
     monkeypatch.setattr(cli.waiter, "GhContextSource", lambda *args, **kwargs: FakeContext())
-    monkeypatch.setattr(cli.waiter, "Waiter", functools.partial(Waiter, spawn=spawn, environ=environ))
+    monkeypatch.setattr(
+        cli.waiter, "Waiter",
+        functools.partial(Waiter, spawn=spawn, environ=environ, cleanup_spawn=cleanup),
+    )
     monkeypatch.setattr(Waiter, "serve", lambda self, stop: (self.step(), 0)[1])
     monkeypatch.setattr(cli.signal, "signal", lambda *args: None)
     args = argparse.Namespace(
         orch=orch, bot="claude-bot", state_dir=tmp_path / "state", db=db, machines=MACHINES
     )
     harness = HarnessCommand(bot="claude-bot", command=("fake-harness",))
-    return cli._wait_autostart(args, queue, local_pool(queue), harness), spawn
+    return cli._wait_autostart(args, queue, local_pool(queue), harness), spawn, cleanup
+
+
+def test_autostart_starts_the_bots_cleanup_through_the_waiters_spawn(
+    tmp_path: Path, monkeypatch
+) -> None:
+    environ = {"PATH": "/usr/bin", "HOME": str(tmp_path / "bot")}
+    code, spawn, cleanup = autostart_once(tmp_path, monkeypatch, orch_text(enabled=False), environ)
+    assert code == 0
+    assert len(spawn.calls) == 1
+    assert [argv[2:6] for argv, _ in cleanup.calls] == [["cleanup", "run", "--bot", "claude-bot"]]
 
 
 def test_autostart_keeps_the_guard_when_orch_yml_has_another_error(tmp_path: Path, monkeypatch) -> None:
     profile = tmp_path / "grok" / "gh-approver"
     text = orch_text(enabled=True, profile=str(profile)).replace("poll_seconds: 30", "poll_seconds: 45")
     environ = {"PATH": "/usr/bin", "HOME": str(tmp_path / "bot"), "GH_CONFIG_DIR": str(profile)}
-    code, spawn = autostart_once(tmp_path, monkeypatch, text, environ)
+    code, spawn, _ = autostart_once(tmp_path, monkeypatch, text, environ)
     assert code == 0
     assert len(spawn.calls) == 1
     assert "GH_CONFIG_DIR" not in spawn.calls[0][1]["env"]
@@ -775,7 +788,7 @@ def test_autostart_refuses_a_profile_in_home_when_orch_yml_has_another_error(
     home = tmp_path / "bot"
     profile = home / ".config" / "gh"
     text = orch_text(enabled=True, profile=str(profile)).replace("poll_seconds: 30", "poll_seconds: 45")
-    code, spawn = autostart_once(tmp_path, monkeypatch, text, {"HOME": str(home), "GH_CONFIG_DIR": str(profile)})
+    code, spawn, _ = autostart_once(tmp_path, monkeypatch, text, {"HOME": str(home), "GH_CONFIG_DIR": str(profile)})
     assert code == 2
     assert spawn.calls == []
 
@@ -795,6 +808,6 @@ def test_autostart_refuses_when_the_approval_settings_cannot_load(
     tmp_path: Path, monkeypatch, text: str | None
 ) -> None:
     home = tmp_path / "bot"
-    code, spawn = autostart_once(tmp_path, monkeypatch, text, {"HOME": str(home), "GH_CONFIG_DIR": str(home / "gh")})
+    code, spawn, _ = autostart_once(tmp_path, monkeypatch, text, {"HOME": str(home), "GH_CONFIG_DIR": str(home / "gh")})
     assert code == 2
     assert spawn.calls == []

@@ -422,7 +422,7 @@ def sweeping_waiter(tmp_path: Path, queue: SQLiteJobQueue, db: Path, log: list[s
         context=FakeContext(), state_dir=tmp_path / "state", db=db, machines=MACHINES,
         orch=("python3", "/factory/bin/orch"), spawn=spawn or FakeSpawn(), log=log.append,
         environ={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}, clock=lambda: now[0],
-        cleanup_spawn=cleanup,
+        sweep_cleanup=cleanup is not None, cleanup_spawn=cleanup or CleanupSpawn(),
     )
     return waiter, now
 
@@ -1442,8 +1442,8 @@ def test_plain_wait_still_prints_and_exits_without_starting_anything(tmp_path: P
 
 
 def test_waiter_module_spawns_only_orch_job_run(tmp_path: Path) -> None:
-    # Every process the waiter module starts is `orch job run` (and the gh
-    # read of factory.md): the waiter never execs a harness directly.
+    # Every process the waiter module starts is `orch job run` or `orch
+    # cleanup run` (and the gh read of factory.md): the waiter never execs a harness directly.
     tree = ast.parse((ROOT / "lib" / "waiter.py").read_text(encoding="utf-8"))
     calls = [
         node for node in ast.walk(tree)

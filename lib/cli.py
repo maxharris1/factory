@@ -14,7 +14,6 @@ import shutil
 import signal
 import sqlite3
 import stat
-import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -952,7 +951,7 @@ def _wait_autostart(
             drain=waiter.drain_marker(args.bot),
             orch_yml=orch_path,
             home=Path.home(),
-            cleanup_spawn=subprocess.Popen,
+            sweep_cleanup=True,
         )
     except (WaitError, waiter.WaiterError) as exc:
         print(f"orch wait: {exc}", file=sys.stderr)
