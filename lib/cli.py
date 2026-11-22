@@ -16,7 +16,7 @@ import sqlite3
 import stat
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -2576,15 +2576,7 @@ def _job_run_command(argv: list[str]) -> int:
                     home=placed.account_home,
                 ))
             if session.harness == "codex":
-                for account, home in usage_probe.account_probes(
-                    machines, placed.device.name, "codex", (placed.account, placed.account_home), log
-                )[1:]:
-                    found = (
-                        usage_probe.idle_codex_remote(placed.transport, placed.target, home=home)
-                        if placed.target is not None
-                        else codex_rollout.newest(home or codex_rollout.default_home(inherited))
-                    )
-                    session.add_rollout(found, account, own_login=home is None)
+                _read_idle_codex(session, machines, placed, inherited, log)
             session.finish(code)
         placed.ended(code)  # #91: the exit reason, while the job still runs
         # A remote run's job is finished by its waiter on the box, from the
@@ -2606,6 +2598,29 @@ def _job_run_command(argv: list[str]) -> int:
             log(f"could not release the device slot: {' '.join(str(exc).split())}")
             if settle is not None:
                 settle()  # a settled or requeued job is no longer running: left alone
+
+
+def _read_idle_codex(
+    session: telemetry.Session,
+    machines: MachinesConfig,
+    placed: placed_run.PlacedRun,
+    inherited: Mapping[str, str],
+    log: Callable[[str], None],
+) -> None:
+    """Each other Codex account's newest rollout, read as the job ends; never raises."""
+    try:
+        probes = usage_probe.account_probes(
+            machines, placed.device.name, "codex", (placed.account, placed.account_home), log
+        )
+        for account, home in probes[1:]:
+            found = (
+                usage_probe.idle_codex_remote(placed.transport, placed.target, home=home)
+                if placed.target is not None
+                else codex_rollout.newest(home or codex_rollout.default_home(dict(inherited)))
+            )
+            session.add_rollout(found, account, own_login=home is None)
+    except Exception as exc:  # a usage read never touches the job's end
+        log(f"usage probe: idle codex accounts not read ({type(exc).__name__})")
 
 
 def _settle_box(
