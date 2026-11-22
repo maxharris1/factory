@@ -34,6 +34,8 @@ _PREFIX = re.compile(r"^(ac-\d+)\s*:\s*", re.IGNORECASE)
 _ENTRY_ID = re.compile(r"^\s*(ac-\d+)\b", re.IGNORECASE)
 _UNVERIFIED = re.compile(r"\bunverified\b", re.IGNORECASE)
 _CUT = re.compile(r"\n\[cut at \d+ characters\]\Z")
+_FENCE_OPEN = re.compile(r"^( *)(`{3,}(?=[^`]*$)|~{3,})")
+_FENCE_CLOSE = re.compile(r"^ *(`{3,}|~{3,})\s*$")
 _HEADING = "proof"
 _MARKDOWN = MarkdownIt("commonmark")
 
@@ -158,7 +160,7 @@ def _problems(item: Required, entry: _Entry) -> list[str]:
 
 
 def _entries(body: str) -> dict[str, _Entry]:
-    tokens = _MARKDOWN.parse(body or "")
+    tokens = _MARKDOWN.parse(_indent_fence_content(body or ""))
     entries: dict[str, _Entry] = {}
     for start, end in _top_level_items(tokens, _section(tokens)):
         first = tokens[start + 2] if tokens[start + 1].type == "paragraph_open" else None
@@ -179,6 +181,25 @@ def _entries(body: str) -> dict[str, _Entry]:
                 entry.text.append(token.content)
         entries[match.group(1).lower()] = entry
     return entries
+
+
+def _indent_fence_content(body: str) -> str:
+    """CommonMark ends a list item at a fence line indented less than the item, dropping raw pasted output."""
+    lines = body.splitlines(keepends=True)
+    fence: tuple[str, str] | None = None
+    for index, line in enumerate(lines):
+        if fence is None:
+            opener = _FENCE_OPEN.match(line)
+            if opener:
+                fence = (opener.group(1), opener.group(2))
+            continue
+        indent, marker = fence
+        closer = _FENCE_CLOSE.match(line)
+        if closer and closer.group(1)[0] == marker[0] and len(closer.group(1)) >= len(marker):
+            fence = None
+        if line.strip() and len(line) - len(line.lstrip(" ")) < len(indent):
+            lines[index] = indent + line
+    return "".join(lines)
 
 
 def _section(tokens: list[Token]) -> range:

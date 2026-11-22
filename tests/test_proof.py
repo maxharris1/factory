@@ -238,3 +238,67 @@ def test_a_bare_qa_tag_binds_the_features_the_source_issue_shows_below_the_cut()
     assert items == (Required("ac-1", "qa", ("upload-file", "search")),)
     ran_one = "- ac-1 (qa): `verify run upload-file`\n  ```\n  upload-file PASS\n  ```"
     assert missing(items, _ready(ran_one)) == ["Proof entry ac-1 (qa) does not name journey search"]
+
+
+REVIEW_ITEMS = (Required("ac-1", "review"), Required("ac-2", "review"), Required("ac-3", "review"))
+
+
+def test_output_pasted_at_column_zero_inside_a_list_item_fence_counts() -> None:
+    ready = _ready(
+        "- ac-1 (review): `pytest -q tests/test_a.py`\n  ```\n....\n4 passed in 0.12s\n  ```",
+        "- ac-2 (review): `pytest -q tests/test_b.py`\n  ```\nFAILED before the fix\n1 passed in 0.03s\n  ```",
+        "- ac-3 (review): `python3 scripts/recheck.py`\n  ```\n[]\n  ```",
+    )
+    assert missing(REVIEW_ITEMS, ready) == []
+
+
+def test_output_with_one_space_lines_and_a_blank_line_inside_the_fence_counts() -> None:
+    ready = _ready(
+        "- ac-1 (review): `npx vitest run src/a.test.ts --maxWorkers=2`\n  ```\n"
+        " ✓ src/a.test.ts (3 tests) 4ms\n\n Test Files  1 passed (1)\n      Tests  3 passed (3)\n  ```",
+        "- ac-2 (review): `npx vitest run src/b.test.ts --maxWorkers=2`\n  ```\n ✓ src/b.test.ts (1 test) 2ms\n  ```",
+        "- ac-3 (review): `npx tsc --noEmit`\n  ```\nexit 0\n  ```",
+    )
+    assert missing(REVIEW_ITEMS, ready) == []
+
+
+def test_a_shorter_fence_inside_a_longer_one_does_not_close_it() -> None:
+    ready = _ready(
+        "- ac-1 (review): `cat handoff.md`\n  ~~~~\n## Proof\n```\nnested\n```\n- ac-9 (review): `x`\n  ~~~~",
+        "- ac-2 (review): `pytest -q`\n  ```\n1 passed\n  ```",
+    )
+    assert missing(REVIEW_ITEMS[:2], ready) == []
+
+
+@pytest.mark.parametrize("raw", [False, True])
+def test_the_build_brief_example_passes_as_written_and_with_raw_pasted_output(raw: bool) -> None:
+    from lib.brief.build import PROOF_EXAMPLE
+
+    output = "\n".join(["....", "", "4 passed in 0.12s"]) if raw else "  3 passed"
+    example = (
+        PROOF_EXAMPLE.replace("  <its output>", output)
+        .replace("  <doctor output>", output)
+        .replace("<command>", "pytest -q")
+        .replace("<verify-skill command for journey upload-file>", "verify run upload-file")
+        .replace("<doctor command>", "verify doctor")
+    )
+    items = (Required("ac-1", "review"), Required("ac-2", "qa", ("upload-file",)), Required("ac-3", "qa", None))
+    assert missing(items, f"What changed.\n\n{example}\n") == []
+
+
+def test_a_dropped_entry_is_still_named_when_the_others_paste_raw_output() -> None:
+    ready = _ready(
+        "- ac-1 (review): `pytest -q tests/test_a.py`\n  ```\n4 passed\n  ```",
+        "- ac-3 (review): `pytest -q tests/test_c.py`\n  ```\n2 passed\n  ```",
+    )
+    assert missing(REVIEW_ITEMS, ready) == ["ready has no Proof entry for ac-2"]
+
+
+def test_a_command_with_no_output_block_is_still_refused_beside_raw_output() -> None:
+    ready = _ready(
+        "- ac-1 (review): `pytest -q tests/test_a.py`\n  ```\n4 passed\n  ```",
+        "- ac-2 (review): `pytest -q tests/test_b.py`, it passed",
+    )
+    assert missing(REVIEW_ITEMS[:2], ready) == [
+        "Proof entry ac-2 (review) needs the command in backticks and its output in a fenced block"
+    ]
