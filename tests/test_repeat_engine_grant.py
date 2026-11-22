@@ -124,6 +124,45 @@ def test_a_first_repeat_on_a_finding_an_approver_released_at_the_cap_wakes_grok(
     assert (row["subject"], row["outcome"], row["reason"]) == ("revise-4", "escalated", "earlier-round")
 
 
+def approver_released_repeat_stop(tmp_path: Path) -> AppFlow:
+    flow = AppFlow(tmp_path, enabled=True)
+    flow.factory = replace(flow.factory, rule_engine="on", auto_extra_rounds=0, rounds_high=3)
+    to_first_review(flow)
+    for number, body in enumerate((F1.replace("f-1", "f-4"), F1.replace("f-1", "f-5"), F1), start=1):
+        revise(flow, f"{number}/3", f"revise-{number}", body=body)
+        respond(flow, number)
+    assert revise(flow, "4/4", "revise-4", body=F1 + F2) == "waiting-max-repeat"
+    assert_parked_for_grok(flow, "revise-4", "stops=1, for=factory")
+    assert flow.post("go-max", "/go", MAX) == "resumed-fix"
+    respond(flow, 4)
+    return flow
+
+
+def test_a_repeat_on_a_finding_an_approver_released_at_a_repeat_stop_wakes_grok(tmp_path: Path) -> None:
+    flow = approver_released_repeat_stop(tmp_path)
+
+    assert revise(flow, "5/5", "revise-5", body=F2 + F3) == "waiting-max-repeat"
+
+    assert_parked_for_grok(flow, "revise-5", "stops=2, for=max")
+    assert flow.state()["cap_extra"] == 2
+    assert any(row["source_comment_id"] == "revise-5" for row in grok_wakes(flow, "clarify"))
+    row = next(row for row in rows(flow) if row["subject"] == "revise-5")
+    assert row["outcome"] == "escalated"
+
+
+def test_a_cap_stop_on_a_finding_an_approver_released_at_a_repeat_stop_wakes_grok(tmp_path: Path) -> None:
+    flow = approver_released_repeat_stop(tmp_path)
+    assert revise(flow, "5/5", "revise-5", body=F3) == "capped-review"
+    assert flow.state()["cap_extra"] == 3
+    respond(flow, 5)
+
+    assert revise(flow, "6/6", "revise-6", body=F2) == "capped-review"
+
+    assert (flow.state()["workflow_state"], flow.state()["cap_extra"]) == ("capped", 3)
+    row = next(row for row in rows(flow) if row["subject"] == "revise-6")
+    assert (row["site"], row["outcome"], row["reason"]) == ("cap", "escalated", "earlier-round")
+
+
 def test_a_ticket_that_goes_stuck_at_a_first_repeat_stop_wakes_grok(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

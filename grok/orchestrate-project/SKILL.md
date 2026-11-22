@@ -166,7 +166,7 @@ That intake label is the one other label this skill applies. With `tickets: line
 - `/ok <sha>` from the hold approver is a hold `ok` for that 40-hex head.
 - `orch retry <owner/repo>#<n> --reason "..."` posts `kind=retry`; the dispatcher acts on it only for a stuck ticket.
 - "Auto extra round k of n" is the poller granting its own `review.auto_extra_rounds`. It needs no action.
-- An `orch-engine` notice is the engine granting a finding's first extra round at the cap or at a first repeat stop. It needs no action.
+- An `orch-engine` notice is the engine granting a first extra round at a cap or repeat stop. It needs no action.
 
 ## Stops
 

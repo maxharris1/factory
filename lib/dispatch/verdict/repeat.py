@@ -402,7 +402,9 @@ class RepeatBlockMixin:
                         StopRecord(
                             verdict_id,
                             "repeat",
-                            _repeat_finding(connection, ticket, verdict_id),
+                            frozenset(json.loads(row["finding_ids"]))
+                            if row["finding_ids"] is not None
+                            else _repeat_finding(connection, ticket, verdict_id),
                             _released_by(connection, ticket, verdict_id, "repeat"),
                         )
                     )
@@ -528,10 +530,10 @@ class RepeatBlockMixin:
             )
             connection.execute(
                 """
-                INSERT INTO review_events (repo, ticket_id, comment_id, outcome, qa_failed)
-                VALUES (?, ?, ?, 'waiting-max-repeat', ?)
+                INSERT INTO review_events (repo, ticket_id, comment_id, outcome, qa_failed, finding_ids)
+                VALUES (?, ?, ?, 'waiting-max-repeat', ?, ?)
                 """,
-                (*key, comment.id, failed_column(qa)),
+                (*key, comment.id, failed_column(qa), json.dumps(sorted(repeated_ids))),
             )
             granted = engine and self._rule_on_repeat(
                 connection, ticket, comment, repeated_ids, stops, prior_grant, reported_round
