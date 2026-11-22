@@ -9,7 +9,15 @@ import pytest
 
 from lib import update_check
 from lib.hold import ok_carries
-from lib.update_check import HeadDiff, classify, head_diff, merge_update
+from lib.secret_scan import ScanResult, SecretHit
+from lib.update_check import (
+    HeadDiff,
+    MovedHead,
+    classify,
+    head_diff,
+    merge_update,
+    moved_head_probe,
+)
 
 BASE = "".join(f"line {n}\n" for n in range(1, 21))
 
@@ -542,3 +550,194 @@ def test_763_a_head_with_no_change_from_base_has_no_patch_id(repo: Repo) -> None
 def test_763_an_unknown_head_raises(repo: Repo) -> None:
     with pytest.raises(ValueError):
         diff(repo, None, "f" * 40)
+
+
+def moved(repo: Repo, ok: str, head: str, base_ref: str = "refs/heads/main"):
+    return moved_head_probe(repo.gitdir, base_ref, ok, head)
+
+
+def test_1310_a_pure_merge_of_main_reads_as_one(repo: Repo) -> None:
+    ok, main = repo.branches([("app.py", "line 2\n", "line 2 pr\n")], [("other.py", "1", "2")])
+    head = repo.merge_main()
+
+    probe = moved(repo, ok, head)
+
+    assert probe == MovedHead(
+        parents=(ok, main),
+        second_parent_on_base=True,
+        remerge_empty=True,
+        paths=frozenset({"other.py"}),
+        scan=ScanResult("clean", ()),
+    )
+
+
+def test_1310_a_hand_resolved_merge_has_a_remerge_diff(repo: Repo) -> None:
+    ok, main = repo.branches(
+        [("app.py", "line 5\n", "line 5 pr\n")], [("app.py", "line 5\n", "line 5 main\n")]
+    )
+    head = repo.merge_main(lambda r: r.write("app.py", BASE.replace("line 5\n", "line 5 both\n")))
+
+    probe = moved(repo, ok, head)
+
+    assert probe.parents == (ok, main)
+    assert probe.second_parent_on_base
+    assert not probe.remerge_empty
+
+
+def test_1310_a_clean_merge_amended_with_an_edit_has_a_remerge_diff(repo: Repo) -> None:
+    ok, _ = repo.branches([("app.py", "line 2\n", "line 2 pr\n")], [("other.py", "1", "2")])
+    repo.merge_main()
+    repo.edit("app.py", "line 9\n", "line 9 sneaked\n")
+    repo.git("commit", "-q", "-a", "--amend", "--no-edit")
+    head = repo.git("rev-parse", "HEAD")
+
+    probe = moved(repo, ok, head)
+
+    assert not probe.remerge_empty
+    assert probe.paths == {"app.py", "other.py"}
+
+
+def test_1310_a_second_commit_is_one_parent_and_not_empty(repo: Repo) -> None:
+    ok, _ = repo.branches([("app.py", "line 2\n", "line 2 pr\n")], [])
+    repo.git("checkout", "-q", "pr")
+    repo.write("new.py", "y = 1\n")
+    head = repo.commit("second")
+
+    probe = moved(repo, ok, head)
+
+    assert probe.parents == (ok,)
+    assert not probe.second_parent_on_base
+    assert not probe.remerge_empty
+    assert probe.paths == {"new.py"}
+
+
+def test_1310_a_merge_of_a_branch_off_main_is_off_base(repo: Repo) -> None:
+    ok, _ = repo.branches([("app.py", "line 5\n", "line 5 pr\n")], [("other.py", "1", "2")])
+    repo.git("checkout", "-q", "-b", "side", repo.base)
+    repo.write("side.py", "s = 1\n")
+    side = repo.commit("side work")
+    repo.git("checkout", "-q", "pr")
+    repo.git("merge", "-q", "--no-ff", "-m", "merge side", "side")
+    head = repo.git("rev-parse", "HEAD")
+
+    probe = moved(repo, ok, head)
+
+    assert probe.parents == (ok, side)
+    assert not probe.second_parent_on_base
+    assert probe.remerge_empty
+    assert probe.paths == {"side.py"}
+
+
+def test_1310_a_rename_lists_both_sides(repo: Repo) -> None:
+    ok, _ = repo.branches([], [])
+    repo.git("checkout", "-q", "pr")
+    repo.git("mv", "other.py", "moved.py")
+    head = repo.commit("rename")
+
+    assert moved(repo, ok, head).paths == {"other.py", "moved.py"}
+
+
+def test_1310_a_merge_that_brings_in_a_token_is_found(repo: Repo) -> None:
+    token = "gh" + "p_" + "A1b2C3d4E5" * 4
+    ok, _ = repo.branches([("app.py", "line 2\n", "line 2 pr\n")], [("other.py", "x = 1\n", f"x = '{token}'\n")])
+    head = repo.merge_main()
+
+    scan = moved(repo, ok, head).scan
+
+    assert scan == ScanResult("found", (SecretHit("other.py", "github-token"),))
+
+
+def test_1310_an_unknown_ok_raises(repo: Repo) -> None:
+    repo.branches([("app.py", "line 2\n", "line 2 pr\n")], [("other.py", "1", "2")])
+    head = repo.merge_main()
+
+    with pytest.raises(ValueError):
+        moved(repo, "f" * 40, head)
+
+
+def test_1310_a_missing_base_ref_raises(repo: Repo) -> None:
+    ok, _ = repo.branches([("app.py", "line 2\n", "line 2 pr\n")], [("other.py", "1", "2")])
+    head = repo.merge_main()
+
+    with pytest.raises(ValueError):
+        moved(repo, ok, head, "refs/remotes/origin/main")
+
+
+def _merge_bringing_in_a_token(repo: Repo) -> tuple[str, str]:
+    token = "gh" + "p_" + "A" * 36
+    ok, _ = repo.branches([], [("other.py", "x = 1\n", token + "\n")])
+    return ok, repo.merge_main()
+
+
+def _merge_amended_with_an_edit(repo: Repo) -> tuple[str, str]:
+    ok, _ = repo.branches([("app.py", "line 2\n", "line 2 pr\n")], [("other.py", "1", "2")])
+    repo.merge_main()
+    repo.edit("app.py", "line 9\n", "line 9 manual edit\n")
+    repo.git("commit", "-q", "-a", "--amend", "--no-edit")
+    return ok, repo.git("rev-parse", "HEAD")
+
+
+def _merge_amended_with_a_gitlink(repo: Repo) -> tuple[str, str]:
+    ok, _ = repo.branches([("app.py", "line 2\n", "line 2 pr\n")], [("other.py", "1", "2")])
+    repo.merge_main()
+    repo.git("update-index", "--add", "--cacheinfo", f"160000,{repo.base},dep")
+    repo.git("commit", "-q", "--amend", "--no-edit")
+    return ok, repo.git("rev-parse", "HEAD")
+
+
+def _mask_python_diffs(repo: Repo) -> None:
+    (repo.gitdir / "info" / "attributes").write_text("*.py diff=mask\n")
+    repo.git("config", "diff.mask.textconv", "true")
+
+
+CLONE_SETTINGS = {
+    "color.ui=always": lambda r: r.git("config", "color.ui", "always"),
+    "color.diff=always": lambda r: r.git("config", "color.diff", "always"),
+    "textconv": _mask_python_diffs,
+    "diff.ignoreSubmodules=all": lambda r: r.git("config", "diff.ignoreSubmodules", "all"),
+    "diff.noprefix": lambda r: r.git("config", "diff.noprefix", "true"),
+    "diff.mnemonicPrefix": lambda r: r.git("config", "diff.mnemonicPrefix", "true"),
+    "diff.relative": lambda r: r.git("config", "diff.relative", "true"),
+    "diff.external": lambda r: r.git("config", "diff.external", "true"),
+    "diff.submodule=log": lambda r: r.git("config", "diff.submodule", "log"),
+}
+
+
+@pytest.mark.parametrize("setting", CLONE_SETTINGS)
+@pytest.mark.parametrize(
+    "history",
+    [_merge_bringing_in_a_token, _merge_amended_with_an_edit, _merge_amended_with_a_gitlink],
+)
+def test_1310_a_clone_setting_never_changes_what_the_probe_reads(
+    repo: Repo, setting: str, history
+) -> None:
+    ok, head = history(repo)
+    expected = moved(repo, ok, head)
+
+    CLONE_SETTINGS[setting](repo)
+
+    assert moved(repo, ok, head) == expected
+
+
+def test_1310_each_clone_setting_history_moves_the_probe_by_default(repo: Repo, tmp_path: Path) -> None:
+    ok, head = _merge_bringing_in_a_token(repo)
+    assert moved(repo, ok, head).scan.status == "found"
+    other = Repo(tmp_path / "amended")
+    ok, head = _merge_amended_with_an_edit(other)
+    assert not moved(other, ok, head).remerge_empty
+    linked = Repo(tmp_path / "linked")
+    ok, head = _merge_amended_with_a_gitlink(linked)
+    probe = moved(linked, ok, head)
+    assert not probe.remerge_empty
+    assert probe.paths == {"dep", "other.py"}
+
+
+@pytest.mark.parametrize("setting", CLONE_SETTINGS)
+def test_763_a_clone_setting_never_changes_the_qa_paths(repo: Repo, setting: str) -> None:
+    ok, head = _merge_amended_with_a_gitlink(repo)
+    expected = diff(repo, ok, head).files
+    assert "dep" in dict(expected)
+
+    CLONE_SETTINGS[setting](repo)
+
+    assert diff(repo, ok, head).files == expected
