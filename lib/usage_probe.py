@@ -271,8 +271,33 @@ def remote_codex(
         return None
 
 
-def idle_codex_remote(transport: Transport, target: RemoteTarget, *, home: str | None) -> object:
+def read_idle_codex(
+    config: MachinesConfig,
+    device: str,
+    harness: str,
+    placed: tuple[str, str | None],
+    add: Callable[[object, str, str | None], None],
+    read: Callable[[str | None], object],
+    log: Callable[[str], None],
+) -> None:
+    if harness != "codex":
+        return
     try:
-        return codex_remote(transport, target, None, home=home)
-    except Exception:
-        return None
+        probes = account_probes(config, device, harness, placed, log)
+    except Exception as exc:
+        log(f"usage probe: idle codex accounts not read ({type(exc).__name__})")
+        return
+    for account, home in probes[1:]:
+        label = f"usage probe ({account})"
+        try:
+            found = read(home)
+        except ProbeFailed as failed:
+            log(f"{label}: failed ({failed})")
+            continue
+        except Exception as exc:
+            log(f"{label}: failed ({type(exc).__name__})")
+            continue
+        if found is None:
+            log(f"{label}: no rollout")
+        else:
+            add(found, account, home)

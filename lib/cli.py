@@ -16,7 +16,7 @@ import sqlite3
 import stat
 import sys
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -2381,7 +2381,7 @@ def _job_run_command(argv: list[str]) -> int:
                 session.clock,
                 (lambda home: usage_probe.claude_remote(placed.transport, target, home=home))
                 if target is not None
-                else (lambda home: usage_probe.claude_local(binary, account_environ(inherited, "claude", home))),
+                else (lambda home: usage_probe.claude_local(binary, account_environ(inherited, session.harness, home))),
                 log,
             )
     checkout: list[worktrees.JobCheckout] = []
@@ -2575,8 +2575,14 @@ def _job_run_command(argv: list[str]) -> int:
                     placed.transport, placed.target, session.harness, session.summary.thread_id,
                     home=placed.account_home,
                 ))
-            if session.harness == "codex":
-                _read_idle_codex(session, machines, placed, inherited, log)
+            usage_probe.read_idle_codex(
+                machines, placed.device.name, session.harness, (placed.account, placed.account_home),
+                lambda found, account, home: session.add_rollout(found, account, own_login=home is None),
+                (lambda home: usage_probe.codex_remote(placed.transport, placed.target, None, home=home))
+                if placed.target is not None
+                else (lambda home: codex_rollout.newest(home or codex_rollout.default_home(dict(inherited)))),
+                log,
+            )
             session.finish(code)
         placed.ended(code)  # #91: the exit reason, while the job still runs
         # A remote run's job is finished by its waiter on the box, from the
@@ -2598,28 +2604,6 @@ def _job_run_command(argv: list[str]) -> int:
             log(f"could not release the device slot: {' '.join(str(exc).split())}")
             if settle is not None:
                 settle()  # a settled or requeued job is no longer running: left alone
-
-
-def _read_idle_codex(
-    session: telemetry.Session,
-    machines: MachinesConfig,
-    placed: placed_run.PlacedRun,
-    inherited: Mapping[str, str],
-    log: Callable[[str], None],
-) -> None:
-    try:
-        probes = usage_probe.account_probes(
-            machines, placed.device.name, "codex", (placed.account, placed.account_home), log
-        )
-        for account, home in probes[1:]:
-            found = (
-                usage_probe.idle_codex_remote(placed.transport, placed.target, home=home)
-                if placed.target is not None
-                else codex_rollout.newest(home or codex_rollout.default_home(dict(inherited)))
-            )
-            session.add_rollout(found, account, own_login=home is None)
-    except Exception as exc:
-        log(f"usage probe: idle codex accounts not read ({type(exc).__name__})")
 
 
 def _settle_box(

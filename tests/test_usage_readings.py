@@ -803,7 +803,7 @@ def test_the_remote_probes_send_the_account_homes_scripts() -> None:
     transport = FakeTransport(Exchanged(0, GET_USAGE, ""))
     usage_probe.claude_remote(transport, TARGET, home=home)
     usage_probe.remote_codex(transport, TARGET, "codex", THREAD, home=home)
-    usage_probe.idle_codex_remote(transport, TARGET, home=home)
+    usage_probe.codex_remote(transport, TARGET, None, home=home)
     assert [argv for argv, _data in transport.calls] == [
         ssh_argv(TARGET, usage_probe.claude_remote_script(home)),
         ssh_argv(TARGET, usage_probe.codex_remote_script(THREAD, home)),
@@ -811,12 +811,56 @@ def test_the_remote_probes_send_the_account_homes_scripts() -> None:
     ]
 
 
-def test_an_idle_codex_read_returns_its_line_and_none_on_any_failure() -> None:
+CODEX_ACCOUNTS = MachinesConfig(
+    (Device("pc", 2, {"codex": "codex-bot"}, home="/home/{bot}"),),
+    accounts=(Account("codex-b", "codex", signed_in_on=frozenset({"pc"})),),
+)
+CODEX_B_HOME = "/home/codex-bot/.factory-accounts/codex-b"
+
+
+def _idle_pass(harness: str, transport: FakeTransport) -> tuple[list, list[str]]:
+    added: list = []
+    lines: list[str] = []
+    usage_probe.read_idle_codex(
+        CODEX_ACCOUNTS, "pc", harness, ("codex-default", None),
+        lambda found, account, home: added.append((found, account, home)),
+        lambda home: usage_probe.codex_remote(transport, TARGET, None, home=home),
+        lines.append,
+    )
+    return added, lines
+
+
+def test_an_idle_codex_account_is_read_under_its_own_home_and_kept_under_its_name() -> None:
     line = {"rate_limits": {"primary": {"used_percent": 5.0}}, "timestamp": "2026-11-14T16:22:00.000Z"}
-    found = FakeTransport(Exchanged(0, json.dumps(line).encode() + b"\n", ""))
-    assert usage_probe.idle_codex_remote(found, TARGET, home=None) == line
-    assert usage_probe.idle_codex_remote(FakeTransport(Exchanged(255, b"", "")), TARGET, home=None) is None
-    assert usage_probe.idle_codex_remote(FakeTransport(Exchanged(0, b"not json\n", "")), TARGET, home=None) is None
+    transport = FakeTransport(Exchanged(0, json.dumps(line).encode() + b"\n", ""))
+    added, lines = _idle_pass("codex", transport)
+    assert added == [(line, "codex-b", CODEX_B_HOME)]
+    assert [argv for argv, _data in transport.calls] == [
+        ssh_argv(TARGET, usage_probe.codex_remote_script(None, CODEX_B_HOME))]
+    assert lines == []
+
+
+@pytest.mark.parametrize(
+    ("reply", "line"),
+    [
+        (Exchanged(255, b"", ""), "usage probe (codex-b): failed (ssh exit 255)"),
+        (Exchanged(0, b"", ""), "usage probe (codex-b): no rollout"),
+        (Exchanged(0, b"not json\n", ""), "usage probe (codex-b): no rollout"),
+    ],
+)
+def test_an_idle_codex_read_that_finds_nothing_logs_one_line_naming_the_account(
+    reply: Exchanged, line: str
+) -> None:
+    added, lines = _idle_pass("codex", FakeTransport(reply))
+    assert added == []
+    assert lines == [line]
+
+
+def test_only_a_codex_run_reads_idle_codex_accounts() -> None:
+    transport = FakeTransport(Exchanged(0, b"", ""))
+    assert _idle_pass("claude", transport) == ([], [])
+    assert transport.calls == []
+
 
 @pytest.mark.parametrize(
     ("out", "line"),
