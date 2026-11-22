@@ -1142,6 +1142,10 @@ def test_snapshot_usage_has_one_entry_per_account(tmp_path: Path) -> None:
         "headroom": 0.655,
         "observed_at": CAPTURED,
         "age_seconds": 120,
+        "running": 0,
+        "max_jobs": None,
+        "signed_in": ["box"],
+        "running_on": [],
         "limited_until": None,
         "limit_label": None,
     }
@@ -1262,8 +1266,8 @@ def test_a_window_left_out_of_three_fresh_readings_is_not_on_the_plan(tmp_path: 
                                   "state": "ok"}
     assert codex["headroom"] == 0.32 and codex["state"] == "ok"
     assert set(codex) == {"account", "plan", "label", "source", "bot", "bots", "harness", "devices", "state",
-                          "five_hour", "seven_day", "headroom", "observed_at", "age_seconds", "limited_until",
-                          "limit_label"}
+                          "five_hour", "seven_day", "headroom", "observed_at", "age_seconds", "running",
+                          "max_jobs", "signed_in", "running_on", "limited_until", "limit_label"}
     assert set(codex["five_hour"]) == set(codex["seven_day"]) == {"used", "resets_at", "observed_at", "state"}
 
 

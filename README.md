@@ -1513,8 +1513,9 @@ section shows the last delivery (or `never` and the listener's age, or
 else a `note:` after more than an hour with no delivery while any tracked
 Linear ticket is not merged, handed off, done or abandoned (see "Linear
 webhook"). A running job's age counts from its claim (its device slot's
-`placed_at`, else when it was queued), followed by its last heartbeat:
-`aut0-code/aut0#12 build -> claude running 42m (beat 12s ago)`.
+`placed_at`, else when it was queued), followed by its last heartbeat and,
+for a job that holds a slot, the account it runs on (issue #1251):
+`aut0-code/aut0#12 build -> claude running 42m (beat 12s ago) account claude-max-1`.
 The last section is `Health` (next section), and a queued job that no live
 waiter can take ends with `[no waiter for <harness>]`.
 
@@ -1861,6 +1862,10 @@ and the other window alone is then the account's headroom.
 A newer `no reading` replaces older numbers. A window that has reset, or a
 reading older than 24 hours, is `stale` and its `used` is null. Cursor shows `not tracked` while no Cursor account is declared, and a database without the
 table shows `no telemetry`.
+
+Each row also shows the account's jobs (`2 running · max 3`, or `no max`)
+and its devices (`signed in on pc, box · running on pc`), from the same read
+placement uses (`account_loads` in `lib/device_pool.py`, issue #1251).
 
 ### Usage accounts
 

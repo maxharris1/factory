@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import lib.dashboard as dashboard
-from lib import lane_limit, usage_readings
+from lib import account_doctor, lane_limit, usage_readings
 from lib.dashboard import collect_snapshot, render_pages
 from lib.dashboard_pages import efficiency
 from lib.machines_yml import load_machines_yml
@@ -222,18 +222,20 @@ def _usage_snapshot(tmp_path: Path, machines: str = MACHINES, **used: float | No
     return collect_snapshot(db, log, now=NOW, machines_path=_machines(tmp_path, machines))
 
 
-CLAUDE = "claude claude-default via get_usage · read 1m 00s ago · used on box, pc"
-CODEX = "codex codex-default via rollout · read 1m 00s ago · used on box"
-CLAUDE_UNREAD = "claude claude-default via get_usage · never read · used on box, pc"
-CODEX_UNREAD = "codex codex-default via rollout · never read · used on box"
+CLAUDE = "claude claude-default via get_usage · read 1m 00s ago"
+CODEX = "codex codex-default via rollout · read 1m 00s ago"
+CLAUDE_UNREAD = "claude claude-default via get_usage · never read"
+CODEX_UNREAD = "codex codex-default via rollout · never read"
+CLAUDE_LOAD = ["0 running · no max", "signed in on box, pc"]
+CODEX_LOAD = ["0 running · no max", "signed in on box"]
 
 
 @pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
 def test_headroom_has_one_row_per_account(tmp_path: Path, render: str) -> None:
     rows = _rows(_render(tmp_path, _snapshot(tmp_path), render, "headroom"))
     assert list(rows) == [CLAUDE, CODEX, "cursor"]
-    assert rows[CLAUDE] == ["41% used", "26% used", "in 2h 05m", "59%"]
-    assert rows[CODEX] == ["10% used", "stale", "in 1h 00m", "90% (5-hour only)"]
+    assert rows[CLAUDE] == ["41% used", "26% used", "in 2h 05m", "59%", *CLAUDE_LOAD]
+    assert rows[CODEX] == ["10% used", "stale", "in 1h 00m", "90% (5-hour only)", *CODEX_LOAD]
 
 
 @pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
@@ -294,7 +296,7 @@ def test_headroom_on_one_window_is_neutral_and_names_it(
 ) -> None:
     headroom = _render(tmp_path, _usage_snapshot(tmp_path, **used), render, "headroom")
     table = headroom.split("</table>")[0]
-    assert _rows(headroom)[CLAUDE] == cells
+    assert _rows(headroom)[CLAUDE] == [*cells, *CLAUDE_LOAD]
     only = cells[3].split(" ", 1)[1]
     assert (f'<span class="ef-hn neutral">{number}</span>' in table
             and f'<span class="ef-tag">{only}</span>' in table)
@@ -316,7 +318,7 @@ def test_a_claude_window_null_in_three_replies_shows_no_reading(tmp_path: Path, 
             _store(connection, "claude", "claude-bot", "box", *parsed)
     snapshot = collect_snapshot(db, log, now=NOW, machines_path=_machines(tmp_path))
     assert _rows(_render(tmp_path, snapshot, render, "headroom"))[CLAUDE] == [
-        "no reading", "26% used", "in 1d 0h", "74% (7-day only)"]
+        "no reading", "26% used", "in 1d 0h", "74% (7-day only)", *CLAUDE_LOAD]
 
 
 @pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
@@ -330,7 +332,7 @@ def test_a_window_not_on_the_plan_leaves_the_other_as_the_whole_plan(tmp_path: P
     )
     headroom = _render(tmp_path, snapshot, render, "headroom")
     table = headroom.split("</table>")[0]
-    assert _rows(headroom)[CODEX] == ["not on this plan", "68% used", "in 1d 0h", "32%"]
+    assert _rows(headroom)[CODEX] == ["not on this plan", "68% used", "in 1d 0h", "32%", *CODEX_LOAD]
     assert '<td class="ef-v muted">not on this plan</td>' in table
     assert '<span class="ef-hn warn">32%</span>' in table
     assert _meters(table)[1] == ("codex-default headroom 32 percent: 6 of 20 cells lit", ["warn"] * 6 + [None] * 14)
@@ -341,7 +343,7 @@ def test_a_window_not_on_the_plan_leaves_the_other_as_the_whole_plan(tmp_path: P
 def test_headroom_with_no_window_shows_no_number(tmp_path: Path, render: str) -> None:
     headroom = _render(tmp_path, _usage_snapshot(tmp_path), render, "headroom")
     table = headroom.split("</table>")[0]
-    assert _rows(headroom)[CLAUDE_UNREAD] == ["no reading"] * 3 + [""]
+    assert _rows(headroom)[CLAUDE_UNREAD] == ["no reading"] * 3 + ["", *CLAUDE_LOAD]
     assert _meters(table)[0] == ("claude-default headroom: no reading", [None] * 20)
     room = re.findall(r'<td><div class="ef-room">(.*?)</div></td>', table)
     assert room and not any("%" in cell for cell in room)
@@ -365,7 +367,7 @@ def test_untracked_harness_is_one_muted_line(tmp_path: Path, render: str) -> Non
     headroom = _render(tmp_path, _snapshot(tmp_path), render, "headroom")
     table = headroom.split("</table>")[0]
     assert re.findall(r'<tr class="ef-un">(.*?)</tr>', table) == [
-        f'<td><span class="bot {h}">{h}</span></td><td class="ef-v muted" colspan="4">not tracked</td>'
+        f'<td><span class="bot {h}">{h}</span></td><td class="ef-v muted" colspan="6">not tracked</td>'
         for h in ("cursor",)
     ]
     assert table.count("bot cursor") == 1 and "cursor-bot" not in headroom
@@ -375,7 +377,7 @@ def test_untracked_harness_is_one_muted_line(tmp_path: Path, render: str) -> Non
 def test_harness_without_account_is_not_listed(tmp_path: Path, render: str) -> None:
     headroom = _render(tmp_path, _usage_snapshot(tmp_path, CLAUDE_ONLY, five_hour=0.4, seven_day=0.2),
                        render, "headroom")
-    assert list(_rows(headroom)) == ["claude claude-default via get_usage · read 1m 00s ago · used on box"]
+    assert list(_rows(headroom)) == ["claude claude-default via get_usage · read 1m 00s ago"]
     assert [_text(block).split()[0] for block in _blocks(headroom)] == ["claude"]
     assert "codex" not in headroom and "cursor" not in headroom
 
@@ -384,8 +386,10 @@ def test_harness_without_account_is_not_listed(tmp_path: Path, render: str) -> N
 def test_headroom_phone_block_per_account(tmp_path: Path, render: str) -> None:
     blocks = _blocks(_render(tmp_path, _snapshot(tmp_path), render, "headroom"))
     assert [_text(block) for block in blocks] == [
-        f"{CLAUDE} 59% headroom 5-hour 41% used 7-day 26% used resets in 2h 05m",
-        f"{CODEX} 90% headroom (5-hour only) 5-hour 10% used 7-day stale resets in 1h 00m",
+        f"{CLAUDE} 59% headroom 5-hour 41% used 7-day 26% used resets in 2h 05m"
+        " 0 running · no max · signed in on box, pc",
+        f"{CODEX} 90% headroom (5-hour only) 5-hour 10% used 7-day stale resets in 1h 00m"
+        " 0 running · no max · signed in on box",
         "cursor not tracked",
     ]
     assert [block[: block.index(">") + 1] for block in blocks] == ['<div class="ef-acct">'] * 2 + [
@@ -400,7 +404,8 @@ def test_headroom_phone_block_per_account(tmp_path: Path, render: str) -> None:
 def test_headroom_without_the_table_says_no_telemetry(tmp_path: Path, render: str) -> None:
     headroom = _render(tmp_path, _snapshot(tmp_path, readings=False), render, "headroom")
     rows = _rows(headroom)
-    assert rows[CLAUDE_UNREAD] == rows[CODEX_UNREAD] == ["no telemetry"] * 3 + [""]
+    assert rows[CLAUDE_UNREAD] == ["no telemetry"] * 3 + ["", *CLAUDE_LOAD]
+    assert rows[CODEX_UNREAD] == ["no telemetry"] * 3 + ["", *CODEX_LOAD]
     assert rows["cursor"] == ["not tracked"]
     assert _meters(headroom.split("</table>")[0]) == [
         (f"{h}-default headroom: no telemetry", [None] * 20) for h in ("claude", "codex")
@@ -422,8 +427,8 @@ ACCOUNTS = (
 )
 CODEX_A_RESET = int(NOW + 1800)
 CODEX_B_RESET = int(NOW + 9000)
-CODEX_A = "codex codex-a pro · via rollout · read 2m 00s ago · used on box"
-CODEX_B = "codex codex-b via rollout · read 5m 00s ago · used on pc"
+CODEX_A = "codex codex-a pro · via rollout · read 2m 00s ago"
+CODEX_B = "codex codex-b via rollout · read 5m 00s ago"
 GROK = "external Cursor Grok Ultra ultra · via external · never read"
 
 
@@ -480,8 +485,8 @@ def test_two_accounts_on_one_bot_never_mix_readings(tmp_path: Path) -> None:
 def test_two_accounts_on_one_bot_render_their_own_rows(tmp_path: Path, render: str) -> None:
     headroom = _render(tmp_path, _accounts_snapshot(tmp_path), render, "headroom")
     rows = _rows(headroom)
-    assert rows[CODEX_A] == ["90% used", "30% used", "in 30m 00s", "10%"]
-    assert rows[CODEX_B] == ["20% used", "15% used", "in 2h 30m", "80%"]
+    assert rows[CODEX_A] == ["90% used", "30% used", "in 30m 00s", "10%", "0 running · no max", "signed in on box"]
+    assert rows[CODEX_B] == ["20% used", "15% used", "in 2h 30m", "80%", "0 running · no max", "signed in on pc"]
     a, b = " ".join([CODEX_A, *rows[CODEX_A]]), " ".join([CODEX_B, *rows[CODEX_B]])
     assert not [text for text in ("90%", "30m 00s", "10%") if text in b]
     assert not [text for text in ("20%", "2h 30m", "80%") if text in a]
@@ -491,9 +496,9 @@ def test_two_accounts_on_one_bot_render_their_own_rows(tmp_path: Path, render: s
 def test_headroom_has_one_row_per_account_with_plan_source_age_and_devices(tmp_path: Path, render: str) -> None:
     headroom = _render(tmp_path, _accounts_snapshot(tmp_path), render, "headroom")
     rows = _rows(headroom)
-    assert list(rows) == ["claude claude-default via get_usage · never read · used on box",
+    assert list(rows) == ["claude claude-default via get_usage · never read",
                           CODEX_A, CODEX_B, GROK, "cursor"]
-    assert rows[GROK] == ["no reading"] * 3 + [""]
+    assert rows[GROK] == ["no reading"] * 3 + ["", "0 running · no max", "none"]
     assert rows["cursor"] == ["not tracked"]
     assert "One account is shared" not in headroom and "bot grok" not in headroom
     blocks = _blocks(headroom)
@@ -505,7 +510,7 @@ def test_a_declared_cursor_account_is_tracked(tmp_path: Path, render: str) -> No
     machines = ACCOUNTS.replace("accounts:\n", "accounts:\n  - {id: cursor-pro, harness: cursor}\n").replace(
         "cursor: cursor-bot", "cursor: {bot: cursor-bot, account: cursor-pro}")
     rows = _rows(_render(tmp_path, _accounts_snapshot(tmp_path, machines), render, "headroom"))
-    assert rows["cursor cursor-pro never read · used on box"] == ["no reading"] * 3 + [""]
+    assert rows["cursor cursor-pro never read"] == ["no reading"] * 3 + ["", "0 running · no max", "signed in on box"]
     assert "cursor" not in rows
 
 
@@ -890,3 +895,69 @@ def test_an_empty_factory_renders_every_panel(tmp_path: Path) -> None:
     for ident in PANELS:
         assert f'id="{ident}"' in page, ident
     assert "no shipped tickets yet" in page and "no finished jobs yet" in page
+
+
+SHARED = (
+    "orch_host: box\n"
+    "accounts:\n"
+    "  - {id: claude-a, harness: claude}\n"
+    "  - {id: claude-b, harness: claude, plan: max, signed_in_on: [box, pc], max_jobs: 2}\n"
+    "devices:\n"
+    "  - name: box\n    local: true\n    slot_max: 3\n    home: /home/{bot}\n    harnesses:\n"
+    "      claude: {bot: claude-bot, account: claude-a}\n"
+    "  - name: pc\n    slot_max: 2\n    tailscale_name: pc\n    workdir_root: /w\n    factory_root: /f\n"
+    "    ssh_alias: pc-{bot}\n    home: /home/{bot}\n    harnesses:\n      claude: {bot: claude-bot, account: claude-a}\n"
+)
+SHARED_A = "claude claude-a via get_usage · read 1m 00s ago"
+SHARED_B = "claude claude-b max · via get_usage · read 1m 00s ago"
+
+
+def _shared_snapshot(tmp_path: Path) -> dict:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute(usage_readings.ACCOUNT_READINGS_DDL)
+        for account, five_hour, seven_day in (("claude-a", 0.4, 0.2), ("claude-b", 0.7, 0.1)):
+            usage_readings.store(
+                connection, harness="claude", bot="claude-bot", device="box", job_id="j", account=account,
+                own_login=account == "claude-a",
+                readings=[Reading("five_hour", five_hour, int(NOW + 7500), NOW - 60),
+                          Reading("seven_day", seven_day, int(NOW + 86400), NOW - 60)])
+        connection.execute(
+            "CREATE TABLE device_slots (job_id TEXT PRIMARY KEY, device TEXT NOT NULL, harness TEXT NOT NULL, "
+            "os_user TEXT NOT NULL, placed_at REAL NOT NULL, account TEXT)")
+        connection.executemany(
+            "INSERT INTO device_slots VALUES (?, ?, 'claude', 'claude-bot', ?, ?)",
+            [("on-box-b", "box", NOW - 30, "claude-b"), ("on-pc-legacy", "pc", NOW - 30, None),
+             ("on-box-a", "box", NOW - 30, "claude-a")])
+        account_doctor.ensure_table(connection)
+        connection.executemany(
+            f"INSERT INTO {account_doctor.TABLE} (account, device, status, checked_at) VALUES (?, ?, ?, ?)",
+            [("claude-b", "box", "ok", NOW - 60), ("claude-b", "pc", "signed-out", NOW - 60)])
+    return collect_snapshot(db, log, now=NOW, machines_path=_machines(tmp_path, SHARED))
+
+
+def test_each_account_carries_its_running_jobs_cap_and_devices_from_the_placement_read(tmp_path: Path) -> None:
+    entries = {e["account"]: e for e in _shared_snapshot(tmp_path)["usage"]["accounts"]}
+    assert list(entries) == ["claude-a", "claude-b"]
+    assert {k: entries["claude-a"][k] for k in ("running", "max_jobs", "signed_in", "running_on")} == {
+        "running": 2, "max_jobs": None, "signed_in": ["box", "pc"], "running_on": ["box", "pc"]}
+    assert {k: entries["claude-b"][k] for k in ("running", "max_jobs", "signed_in", "running_on")} == {
+        "running": 1, "max_jobs": 2, "signed_in": ["box"], "running_on": ["box"]}
+
+
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+def test_two_claude_accounts_on_shared_devices_render_one_row_each(tmp_path: Path, render: str) -> None:
+    headroom = _render(tmp_path, _shared_snapshot(tmp_path), render, "headroom")
+    assert re.findall(r"<th>(.*?)</th>", headroom) == [
+        "account", "5-hour window", "7-day window", "resets", "headroom", "jobs", "devices"]
+    assert _rows(headroom) == {
+        SHARED_A: ["40% used", "20% used", "in 2h 05m", "60%", "2 running · no max",
+                   "signed in on box, pc · running on box, pc"],
+        SHARED_B: ["70% used", "10% used", "in 2h 05m", "30%", "1 running · max 2",
+                   "signed in on box · running on box"],
+    }
+    blocks = [_text(block) for block in _blocks(headroom)]
+    assert blocks[0].startswith(SHARED_A) and blocks[0].endswith(
+        "2 running · no max · signed in on box, pc · running on box, pc")
+    assert blocks[1].startswith(SHARED_B) and blocks[1].endswith(
+        "1 running · max 2 · signed in on box · running on box")

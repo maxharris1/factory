@@ -38,7 +38,7 @@ CSS = """\
 .ef-dot{font:13px/1.5 var(--mono);color:var(--muted)}
 .ef-pct{margin-left:auto;font-size:12px;color:var(--muted)}
 .ef-scroll{overflow-x:auto}
-.ef-usage{min-width:660px;margin:0}
+.ef-usage{min-width:860px;margin:0}
 .ef-usage td{padding:10px 12px 10px 0}
 .ef-usage th:last-child,.ef-usage td:last-child{padding-right:0}
 .ef-usage .ef-un td{padding-top:6px;padding-bottom:6px}
@@ -160,9 +160,17 @@ SCRIPT = r"""
   function accountName(e) { return e.label || e.account; }
   function accountAbout(e) {
     return [e.plan, e.source ? 'via ' + e.source : null,
-      e.age_seconds === null ? 'never read' : 'read ' + dur(e.age_seconds) + ' ago',
-      e.devices.length ? 'used on ' + e.devices.join(', ') : null]
+      e.age_seconds === null ? 'never read' : 'read ' + dur(e.age_seconds) + ' ago']
       .filter(function (x) { return x; }).join(' · ');
+  }
+  function accountJobs(e) {
+    return e.running + ' running · ' + (e.max_jobs === null ? 'no max' : 'max ' + e.max_jobs);
+  }
+  function accountDevices(e) {
+    var parts = [e.signed_in.length ? 'signed in on ' + e.signed_in.join(', ') : null,
+      e.running_on.length ? 'running on ' + e.running_on.join(', ') : null]
+      .filter(function (x) { return x; });
+    return parts.length ? parts.join(' · ') : 'none';
   }
   function accountView(e, now) {
     var fresh = WINDOWS.filter(function (w) { return e[w].state === 'ok'; });
@@ -216,7 +224,7 @@ SCRIPT = r"""
     if (row) {
       var tr = add(parent, el('tr', 'ef-un'));
       add(add(tr, el('td')), el('span', 'bot ' + h, h));
-      add(tr, el('td', 'ef-v muted', 'not tracked')).setAttribute('colspan', '4');
+      add(tr, el('td', 'ef-v muted', 'not tracked')).setAttribute('colspan', '6');
       return;
     }
     var line = add(parent, el('div', 'ef-un'));
@@ -234,7 +242,7 @@ SCRIPT = r"""
       .forEach(function (e) { if (untracked.indexOf(e.harness) < 0) untracked.push(e.harness); });
     var table = add(add(root, el('div', 'ef-scroll')), el('table', 'ef-usage'));
     var head = add(add(table, el('thead')), el('tr'));
-    ['account', '5-hour window', '7-day window', 'resets', 'headroom']
+    ['account', '5-hour window', '7-day window', 'resets', 'headroom', 'jobs', 'devices']
       .forEach(function (h) { add(head, el('th', null, h)); });
     var body = add(table, el('tbody'));
     views.forEach(function (v) {
@@ -242,6 +250,8 @@ SCRIPT = r"""
       accountWho(add(tr, el('td')), v.entry);
       v.windows.concat([v.resets]).forEach(function (c) { usageCell(tr, c, 'td'); });
       headroomRoom(add(tr, el('td')), v, false);
+      usageCell(tr, [accountJobs(v.entry), null], 'td');
+      usageCell(tr, [accountDevices(v.entry), null], 'td');
     });
     untracked.forEach(function (h) { untrackedLine(body, h, true); });
     add(root, el('p', 'ef-hnote', HEADROOM_NOTE));
@@ -257,6 +267,7 @@ SCRIPT = r"""
         add(col, el('div', 'ef-wk', name));
         usageCell(col, v.windows.concat([v.resets])[i], 'div');
       });
+      add(block, el('div', 'ef-dev', accountJobs(v.entry) + ' · ' + accountDevices(v.entry)));
     });
     untracked.forEach(function (h) { untrackedLine(list, h, false); });
     add(root, el('p', 'ef-hnote-ph', HEADROOM_NOTE));
@@ -409,8 +420,21 @@ def _about(entry: dict) -> str:
         entry["plan"],
         entry["source"] and f"via {entry['source']}",
         "never read" if age is None else f"read {duration(age)} ago",
-        entry["devices"] and "used on " + ", ".join(entry["devices"]),
     ) if part)
+
+
+def _jobs(entry: dict) -> str:
+    cap = "no max" if entry["max_jobs"] is None else f"max {entry['max_jobs']}"
+    return f"{entry['running']} running · {cap}"
+
+
+def _devices(entry: dict) -> str:
+    parts = [
+        f"{verb} {', '.join(entry[key])}"
+        for verb, key in (("signed in on", "signed_in"), ("running on", "running_on"))
+        if entry[key]
+    ]
+    return " · ".join(parts) or "none"
 
 
 def _who(entry: dict) -> str:
@@ -440,7 +464,10 @@ def _account_row(view: dict) -> str:
     return (
         f"<tr><td>{_who(view['entry'])}</td>"
         + "".join(_cell(text, cls) for text, cls in (*view["windows"], view["resets"]))
-        + f'<td><div class="ef-room">{_number(view, phone=False)}{_meter(view)}{tag}</div></td></tr>'
+        + f'<td><div class="ef-room">{_number(view, phone=False)}{_meter(view)}{tag}</div></td>'
+        + _cell(_jobs(view["entry"]), None)
+        + _cell(_devices(view["entry"]), None)
+        + "</tr>"
     )
 
 
@@ -453,7 +480,8 @@ def _account_block(view: dict) -> str:
     return (
         f'<div class="ef-acct">{_who(view["entry"])}'
         f'<div class="ef-room">{_number(view, phone=True)}{_meter(view)}</div>'
-        f'<div class="ef-hl">{_e(label)}</div><div class="ef-wins">{columns}</div></div>'
+        f'<div class="ef-hl">{_e(label)}</div><div class="ef-wins">{columns}</div>'
+        f'<div class="ef-dev">{_e(_jobs(view["entry"]) + " · " + _devices(view["entry"]))}</div></div>'
     )
 
 
@@ -462,10 +490,10 @@ def _headroom(snapshot: dict) -> str:
     views = [_view(e, snapshot["generated_at_epoch"]) for e in accounts if e["state"] != "not tracked"]
     untracked = list(dict.fromkeys(e["harness"] for e in accounts if e["state"] == "not tracked"))
     head = "".join(f"<th>{name}</th>" for name in
-                   ("account", "5-hour window", "7-day window", "resets", "headroom"))
+                   ("account", "5-hour window", "7-day window", "resets", "headroom", "jobs", "devices"))
     rows = "".join(_account_row(view) for view in views) + "".join(
         f'<tr class="ef-un"><td>{_span("bot " + h, h)}</td>'
-        '<td class="ef-v muted" colspan="4">not tracked</td></tr>'
+        '<td class="ef-v muted" colspan="6">not tracked</td></tr>'
         for h in untracked
     )
     blocks = "".join(_account_block(view) for view in views) + "".join(
