@@ -233,6 +233,9 @@ class AccountLoads:
             and (account == login or self.signed_in is None or (account, device) in self.signed_in)
         ]
 
+    def holds(self, account: str, device: str) -> bool:
+        return account in self.held or (account, device) in self.signed_out
+
     def score_of(self, account: str) -> float:
         return self.score.get(account, UNREAD_HEADROOM)
 
