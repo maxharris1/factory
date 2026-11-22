@@ -3,10 +3,14 @@
 A slot is one row in `device_slots`, in the dispatcher database next to
 `jobs`. `claim` moves the first queued job for a harness, in the queue's
 claim order (lib/queue.py claim_order), to running
-and holds a slot for it on the least-loaded device (lowest utilization,
-slots held over slot_max; a tie goes to a remote before the local box,
-remotes in machines.yml order; issue #223) that is schedulable, not
-draining, and lists that harness (issue #85). A job of a project pinned
+and holds a slot for it on an (account, device) pair (#1315). Devices rank
+by utilization (slots held over slot_max; a tie goes to a remote before the
+local box, remotes in machines.yml order; issue #223) among those that are
+schedulable, not draining, and list that harness (issue #85). Of the
+accounts signed in for the harness on a free device that are neither
+usage-limited nor at max_jobs across every device, the one running the
+fewest jobs wins (then its best device, then its id) and takes its
+best-ranked device. A job of a project pinned
 to devices (orch.yml projects[].devices, #1172) takes only a listed device;
 with none free it stays queued and the next job in claim order is tried.
 Both writes happen
@@ -200,6 +204,88 @@ def run_account(config: MachinesConfig, placement: Placement) -> tuple[str, str 
     return account, config.account_home(placement.device, placement.harness, account)
 
 
+@dataclass(frozen=True)
+class AccountLoads:
+    running: Mapping[str, int]
+    closed: frozenset[str]
+
+    def takes_work(self, account: str) -> bool:
+        return account not in self.closed
+
+
+def account_loads(
+    connection: sqlite3.Connection, config: MachinesConfig | None, now: float
+) -> AccountLoads:
+    """Held slots per account on every device; closed are those limited or at max_jobs."""
+    running: dict[str, int] = {}
+    if _has_table(connection, SLOTS_TABLE):
+        for device_name, harness, account in connection.execute(
+            f"SELECT device, harness, account FROM {SLOTS_TABLE}"
+        ):
+            if account is None:
+                device = None if config is None else config.device(str(device_name))
+                account = None if device is None else device.account_for(str(harness))
+            if account is not None:
+                running[str(account)] = running.get(str(account), 0) + 1
+    closed = set(lane_limit.account_limits(connection, now))
+    for item in config.accounts if config is not None else ():
+        if item.max_jobs is not None and running.get(item.id, 0) >= item.max_jobs:
+            closed.add(item.id)
+    return AccountLoads(running, frozenset(closed))
+
+
+def _ranked_free(
+    config: MachinesConfig,
+    harness: str,
+    used: Mapping[str, int],
+    blocked: Blocked,
+    avoid: Collection[str],
+    allowed: Collection[str] | None,
+) -> list[tuple[tuple[bool, Fraction, bool, int], Device]]:
+    candidates = []
+    for index, device in enumerate(config.devices):
+        if not _places(device, harness, blocked, allowed):
+            continue
+        assert device.slot_max is not None
+        held = used.get(device.name, 0)
+        if held < device.slot_max:
+            rank = (device.name in avoid, Fraction(held, device.slot_max), device.local, index)
+            candidates.append((rank, device))
+    return sorted(candidates, key=lambda candidate: candidate[0])
+
+
+def choose_pair(
+    config: MachinesConfig,
+    harness: str,
+    used: Mapping[str, int],
+    blocked: Blocked,
+    loads: AccountLoads,
+    avoid: Collection[str] = frozenset(),
+    allowed: Collection[str] | None = None,
+) -> tuple[str, Device] | None:
+    """The account to run the next job and its best free device, or None (#1315).
+
+    The account running the fewest jobs wins, then the one whose best device
+    ranks first (choose_device's order), then the lower id. The avoid flag
+    leads, so a device in `avoid` is used only when no other pair exists (#218).
+    """
+    best: dict[str, tuple[tuple[bool, Fraction, bool, int], Device]] = {}
+    for rank, device in _ranked_free(config, harness, used, blocked, avoid, allowed):
+        for account in config.accounts_on(device.name, harness):
+            if loads.takes_work(account):
+                best.setdefault(account, (rank, device))
+    if not best:
+        return None
+
+    def order(account: str) -> tuple:
+        rank, _ = best[account]
+        avoided = rank[0]
+        return avoided, loads.running.get(account, 0), rank, account
+
+    account = min(best, key=order)
+    return account, best[account][1]
+
+
 def choose_device(
     config: MachinesConfig,
     harness: str,
@@ -217,18 +303,8 @@ def choose_device(
     in `avoid` is chosen only when no other has a free slot (#218). With
     `allowed`, no device outside it is chosen.
     """
-    candidates = []
-    for index, device in enumerate(config.devices):
-        if not _places(device, harness, blocked, allowed):
-            continue
-        assert device.slot_max is not None
-        held = used.get(device.name, 0)
-        if held < device.slot_max:
-            rank = (device.name in avoid, Fraction(held, device.slot_max), device.local, index)
-            candidates.append((rank, device))
-    if not candidates:
-        return None
-    return min(candidates, key=lambda candidate: candidate[0])[1]
+    ranked = _ranked_free(config, harness, used, blocked, avoid, allowed)
+    return ranked[0][1] if ranked else None
 
 
 def free_slots(
@@ -424,7 +500,8 @@ class DevicePool:
             )
             blocked = placement_blocked(connection, now, config, self.head())
             used = _used(connection, config)
-            if choose_device(config, harness, used, blocked) is None:
+            loads = account_loads(connection, config, now)
+            if choose_pair(config, harness, used, blocked, loads) is None:
                 connection.commit()
                 return None
             for row in claim_order(
@@ -433,18 +510,19 @@ class DevicePool:
                 if str(row["id"]) in excluded:
                     continue
                 allowed = pins.get(str(row["repo"]).lower())
-                device = choose_device(config, harness, used, blocked, allowed=allowed)
-                if device is not None:
+                pair = choose_pair(config, harness, used, blocked, loads, allowed=allowed)
+                if pair is not None:
                     break
             else:
                 connection.commit()
                 return None
             dropped = _lost_on(connection, str(row["id"]))
-            if dropped == device.name:
-                device = choose_device(
-                    config, harness, used, blocked, avoid={dropped}, allowed=allowed
+            if dropped == pair[1].name:
+                pair = choose_pair(
+                    config, harness, used, blocked, loads, avoid={dropped}, allowed=allowed
                 )
-                assert device is not None
+                assert pair is not None
+            account, device = pair
             changed = connection.execute(
                 """
                 UPDATE jobs
@@ -456,7 +534,6 @@ class DevicePool:
             if changed != 1:
                 raise QueueError(f"job {row['id']} changed during claim")
             os_user = device.harnesses[harness]
-            account = device.account_for(harness)
             claimer_pid, claimer_start = autostart if autostart is not None else (None, None)
             connection.execute(
                 f"""
@@ -1069,12 +1146,12 @@ def placement_blocked(
     head: str | None,
 ) -> Blocked:
     blocked = device_sync.checkout_blocks(device_sync.read(connection), head, orch_host(config))
-    limited = lane_limit.account_limits(connection, now)
+    loads = account_loads(connection, config, now)
     pairs = {
         (device.name, harness)
         for device in (config.devices if config is not None else ())
         for harness in device.harnesses
-        if device.account_for(harness) in limited
+        if not any(map(loads.takes_work, config.accounts_on(device.name, harness)))
     }
     backed_off = {
         str(row[0])
