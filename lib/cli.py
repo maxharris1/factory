@@ -99,6 +99,7 @@ from lib.poll_source import (
     IntakeRisks,
     LivePollSource,
     PollSourceError,
+    RequiredGlobs,
 )
 from lib.linear_upload import HttpLinear
 from lib.qa_cloud import QaWorker
@@ -1374,6 +1375,7 @@ def _runtime(
         risks=None if create else IntakeRisks(path),
         fed_pulls=None if create else FedPulls(path),
         gh_cache=None if create else GhCacheExpiries(path),
+        required_globs=None if create else RequiredGlobs(path),
     )
     devices = None
     machines = None

@@ -25,7 +25,7 @@ ship: merge
 #   branches: [main]
 #   local_checks: [pytest]
 #   required_checks: [ci-ok]  # optional; when set, only these checks decide PR CI
-#   force_rerun_paths: [.github/workflows/**]  # optional; the default. Parsed only until a later part of #1276 reads it; [] turns it off
+#   force_rerun_paths: [.github/workflows/**]  # optional; the default. A green head touching these waits for runs started after its commit; [] turns it off
 # qa:  # optional; what the QA lane must run. The dispatcher queues qa jobs from it (section 4.2.1)
 #   enabled: true
 #   gate: report  # report posts the result; block gates the ship

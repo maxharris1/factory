@@ -1389,7 +1389,7 @@ def test_the_poll_source_reads_labels_files_and_events_uncached(ship: str) -> No
 def test_the_poll_source_skips_hold_reads_unless_the_hold_applies(
     ship: str, hold: str
 ) -> None:
-    gh = HoldGh(HOLD_FACTORY.format(ship=ship, hold=hold))
+    gh = HoldGh(HOLD_FACTORY.format(ship=ship, hold=hold + "ci:\n  force_rerun_paths: []\n"))
 
     found, errors = live_ticket(gh)
 

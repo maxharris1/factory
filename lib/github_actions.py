@@ -795,6 +795,11 @@ class GitHubReviewActions:
                 )
         return tuple(events)
 
+    def committed_at(self, repo: str, sha: str) -> float:
+        commit = _object(self._json(f"{_repo_path(repo)}/commits/{_sha(sha, 'commit')}"))
+        committer = _object(_object(commit.get("commit")).get("committer"))
+        return _created_at(committer.get("date"))
+
     def ci_status(self, repo: str, head: str) -> CIResult:
         """Check runs and commit statuses on head.
 
@@ -831,6 +836,7 @@ class GitHubReviewActions:
             return CIResult("pending", reported=False)
         runs = _latest_attempts(runs)
         checks = tuple(map(_check_row, runs))
+        statuses = _status_rows(combined)
         failed: list[FailedCheck] = []
         pending: list[str] = []
         passed = False
@@ -868,11 +874,13 @@ class GitHubReviewActions:
                 failed=tuple(failed),
                 pending=tuple(pending),
                 checks=checks,
+                statuses=statuses,
             )
         return CIResult(
             "success" if passed and not pending else "pending",
             pending=tuple(pending),
             checks=checks,
+            statuses=statuses,
         )
 
     def _failure_texts(self, repo: str, run: dict[str, Any]) -> list[str]:
@@ -1290,6 +1298,21 @@ def _pending_contexts(combined: dict[str, Any]) -> list[str]:
         for status in map(_object, statuses)
         if status.get("state") == "pending"
     ]
+
+
+def _status_rows(combined: dict[str, Any]) -> tuple[CheckRow, ...]:
+    statuses = combined.get("statuses")
+    if not isinstance(statuses, list):
+        return ()
+    return tuple(
+        CheckRow(
+            name=str(status.get("context")),
+            status="completed",
+            conclusion=str(status.get("state")),
+            started_at=_display_time(status.get("created_at")),
+        )
+        for status in map(_object, statuses)
+    )
 
 
 def _failed_check(name: str, details: object, cause: Cause, signal: str | None) -> FailedCheck:
