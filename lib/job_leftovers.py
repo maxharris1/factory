@@ -88,6 +88,8 @@ def save_work(root: Path, job_id: str, folder: Path) -> None:
     record = root / "jobs" / f"{job_id}.json"
     if os.path.lexists(record):
         worktrees.keep_work(root, record, folder, root / KEPT_ROOT / job_id)
+    elif (folder / ".git").is_file():
+        raise worktrees.WorktreeError(f"{folder} is a worktree with no job record")
 
 
 def archive(root: Path, job_id: str, gone: Path, *, siblings: bool) -> None:

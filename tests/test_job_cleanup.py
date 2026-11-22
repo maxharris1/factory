@@ -1266,6 +1266,129 @@ def test_an_orphan_record_the_plan_does_not_name_is_untouched(tmp_path: Path) ->
     assert len(registered(root)) == 1
 
 
+def commit_in(folder: Path, text: str) -> str:
+    (folder / "tracked.txt").write_text(text)
+    subprocess.run(["git", "-C", str(folder), "-c", "user.name=t", "-c",
+                    "user.email=t@example.invalid", "commit", "-qam", text], check=True)
+    return git_out(folder, "rev-parse", "HEAD")
+
+
+def survives_gc(root: Path, commit: str) -> bool:
+    clone = root / CLONE
+    git_out(clone, "reflog", "expire", "--expire=now", "--all")
+    git_out(clone, "gc", "-q", "--prune=now")
+    return subprocess.run(["git", "-C", str(clone), "cat-file", "-e", commit]).returncode == 0
+
+
+def test_every_orphan_in_one_clone_keeps_its_commit_when_one_is_retired(
+    tmp_path: Path
+) -> None:
+    root = work_root(tmp_path)
+    commits = {"j": commit_in(stale_worktree(tmp_path, root), "j never pushed\n")}
+    k = worktrees.prepare(root, "k", "acme/widgets", None,
+                          url_template=str(tmp_path / "origin"), pid=dead_pid())
+    commits["k"] = commit_in(k.path, "k never pushed\n")
+    for job_id in commits:
+        shutil.rmtree(root / "jobs" / job_id)
+        age_job(root, job_id)
+    database(tmp_path, [*DONE, ("k", "t2", "done", OLD)])
+
+    report = collect_stale(tmp_path, root)
+
+    assert set(report.removed) == {"j", "k"} and report.kept == {}
+    assert {job_id: pinned(root, f"refs/orch-kept/{job_id}") for job_id in commits} == commits
+    assert all(survives_gc(root, commit) for commit in commits.values())
+
+
+def test_finishing_another_job_pins_a_missing_worktrees_unpushed_commit(
+    tmp_path: Path
+) -> None:
+    root = work_root(tmp_path)
+    commit = commit_in(stale_worktree(tmp_path, root), "never pushed\n")
+    shutil.rmtree(root / "jobs" / "j")
+    other = worktrees.prepare(root, "k", "acme/widgets", None,
+                              url_template=str(tmp_path / "origin"), pid=dead_pid())
+
+    assert worktrees.finish(other, lambda _: None)
+
+    assert pinned(root) == commit and survives_gc(root, commit)
+
+
+def test_staged_work_that_differs_from_the_working_file_is_saved(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    folder = stale_worktree(tmp_path, root)
+    start = json.loads((root / "jobs" / "j.json").read_text())["start"]
+    (folder / "tracked.txt").write_text("unique staged work\n")
+    git_out(folder, "add", "tracked.txt")
+    (folder / "tracked.txt").write_text("different working edit\n")
+
+    assert_retired(root, collect_stale(tmp_path, root))
+
+    kept = root / "jobs-kept" / "j"
+    staged = apply_to_a_fresh_worktree(tmp_path, root, start, kept / "index.patch")
+    assert (staged / "tracked.txt").read_text() == "unique staged work\n"
+    shutil.rmtree(staged)
+    git_out(root / CLONE, "worktree", "prune")
+    working = apply_to_a_fresh_worktree(tmp_path, root, start, kept / "worktree.patch")
+    assert (working / "tracked.txt").read_text() == "different working edit\n"
+
+
+def hold_then_finish(root: Path, between: Callable[[], None]) -> job_cleanup.Report:
+    age_job(root, "j")
+    plan = Plan(frozenset({"j"}), NOW - 6 * HOUR, False, finished_at={"j": OLD})
+    assert job_cleanup.device_step(root, plan, scan=lambda _: set()).held == ("j",)
+    between()
+    return job_cleanup.device_step(
+        root, Plan(frozenset({"j"}), plan.cutoff, False, job_cleanup.FINISH, {"j": OLD}),
+        scan=lambda _: set())
+
+
+def test_gc_between_hold_and_finish_leaves_the_work_to_be_saved(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    folder = stale_worktree(tmp_path, root)
+    start = json.loads((root / "jobs" / "j.json").read_text())["start"]
+    commit = commit_in(folder, "never pushed\n")
+    (folder / "notes.md").write_text("valuable uncommitted note\n")
+
+    done = hold_then_finish(root, lambda: worktrees.gc(root, older_than_hours=0,
+                                                         log=lambda _: None, now=NOW))
+
+    assert set(done.removed) == {"j"} and done.kept == {}
+    assert pinned(root) == commit
+    fresh = apply_to_a_fresh_worktree(tmp_path, root, start,
+                                      root / "jobs-kept" / "j" / "worktree.patch")
+    assert (fresh / "notes.md").read_text() == "valuable uncommitted note\n"
+
+
+def test_a_set_aside_worktree_whose_record_vanished_is_kept(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    folder = stale_worktree(tmp_path, root)
+    (folder / "notes.md").write_text("valuable uncommitted note\n")
+
+    done = hold_then_finish(root, (root / "jobs" / "j.json").unlink)
+
+    assert done.removed == {} and done.kept["j"].startswith("error:")
+    assert (root / "jobs" / "j" / "notes.md").read_text() == "valuable uncommitted note\n"
+
+
+def test_a_nested_repository_with_its_own_work_keeps_the_folder(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    nested = stale_worktree(tmp_path, root) / "nested"
+    nested.mkdir()
+    git_out(nested, "init", "-q")
+    (nested / "work.txt").write_text("unique nested work\n")
+    git_out(nested, "add", ".")
+    git_out(nested, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+            "commit", "-qm", "nested")
+
+    report = collect_stale(tmp_path, root)
+
+    assert report.removed == {} and report.kept["j"].startswith("error:")
+    assert (root / "jobs" / "j" / "nested" / "work.txt").read_text() == "unique nested work\n"
+    assert git_out(root / "jobs" / "j" / "nested", "log", "--format=%s") == "nested"
+    assert (root / "jobs" / "j.json").exists()
+
+
 def test_a_held_lock_keeps_the_folder_without_waiting(tmp_path: Path) -> None:
     root = work_root(tmp_path)
     finished_with_leftovers(root, "j")

@@ -45,6 +45,8 @@ NETWORK_TIMEOUT_SECONDS = 900.0
 LOCAL_TIMEOUT_SECONDS = 120.0
 KEPT_REF = "refs/orch-kept/{job_id}"
 PATCH = "worktree.patch"
+INDEX_PATCH = "index.patch"
+_SET_ASIDE = (".cleanup", ".gone")
 
 _NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
 _JOB_ID = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -201,7 +203,7 @@ def detached_checkout(root: Path, repo: str, head: str, template: str) -> Iterat
             shutil.rmtree(path, ignore_errors=True)
             with _clone_lock(clone):
                 try:
-                    _git(clone, "worktree", "prune")
+                    _pin_then_prune_locked(clone)
                 except WorktreeError:
                     pass  # the next prepare or finish prunes it
 
@@ -280,6 +282,8 @@ def keep_reason(path: Path, start: str | None = None) -> str | None:
     fetched by SHA is on no remote-tracking ref).
     """
     if not path.exists():
+        if any(os.path.lexists(f"{path}{suffix}") for suffix in _SET_ASIDE):
+            return "set aside by cleanup"
         return None
     try:
         status = _git(path, "status", "--porcelain", "--untracked-files=all")
@@ -370,7 +374,7 @@ def gc(
             if clone.is_dir():
                 try:
                     with _clone_lock(clone):
-                        _git(clone, "worktree", "prune")
+                        _pin_then_prune_locked(clone)
                 except WorktreeError:
                     problems += 1
     return problems
@@ -396,7 +400,10 @@ def keep_work(root: Path, record: Path, folder: Path, dest: Path) -> None:
 
     Uncommitted changes and untracked files go to `dest/worktree.patch` (the
     first free `.1`, `.2` name; one already holding the same patch is kept),
-    applicable with `git apply` on HEAD. Unpushed commits are pinned by `_pin_if_unpushed`.
+    applicable with `git apply` on HEAD. Staged content that differs from it
+    goes to `dest/index.patch` the same way. Unpushed commits are pinned by
+    `_pin_if_unpushed`. A nested git repository raises before anything is
+    saved: the patch cannot hold its work.
     """
     loaded = _named_record(root, record)
     if loaded is None:
@@ -408,9 +415,16 @@ def keep_work(root: Path, record: Path, folder: Path, dest: Path) -> None:
             index = {"GIT_INDEX_FILE": str(Path(scratch) / "index")}
             _git(folder, "read-tree", "HEAD", env=index)
             _git(folder, "add", "-A", env=index)
+            raw = _git(folder, "diff", "--cached", "--raw", "HEAD", env=index)
+            if any(line.split()[1] == "160000" for line in raw.splitlines()):
+                raise WorktreeError(
+                    f"{folder} holds a nested git repository whose work no patch can save")
             patch = _git_bytes(folder, "diff", "--cached", "--binary", "HEAD", env=index)
+        staged = _git_bytes(folder, "diff", "--cached", "--binary", "HEAD")
         if patch:
-            _save_patch(dest, patch)
+            _save_patch(dest, PATCH, patch)
+        if staged and staged != patch:
+            _save_patch(dest, INDEX_PATCH, staged)
         head = _git(folder, "rev-parse", "--verify", "HEAD").strip()
         _pin_if_unpushed(checkout.clone, checkout.job_id, head, checkout.start)
 
@@ -418,9 +432,9 @@ def keep_work(root: Path, record: Path, folder: Path, dest: Path) -> None:
 def retire_record(root: Path, record: Path) -> None:
     """Unlink a dead owner's record whose worktree folder is gone (#1297).
 
-    Pins the worktree admin entry's HEAD when it is unpushed, then prunes the
-    entry. A no-op when the record is unreadable, changed, live, or its
-    folder exists again.
+    Prunes the clone's worktree admin entries, first pinning the unpushed
+    HEAD of each missing job worktree that cleanup has not set aside. A no-op when the record is unreadable,
+    changed, live, or its folder exists again.
     """
     loaded = _named_record(root, record)
     if loaded is None:
@@ -431,10 +445,7 @@ def retire_record(root: Path, record: Path) -> None:
                 or os.path.lexists(checkout.path)):
             return
         if checkout.clone.is_dir():
-            head = _admin_head(checkout)
-            if head is not None:
-                _pin_if_unpushed(checkout.clone, checkout.job_id, head, checkout.start)
-            _git(checkout.clone, "worktree", "prune")
+            _pin_then_prune_locked(checkout.clone)
         record.unlink(missing_ok=True)
 
 
@@ -443,13 +454,34 @@ def _named_record(root: Path, record: Path) -> tuple[JobCheckout, dict, float] |
     return loaded if loaded is not None and loaded[0].job_id == record.stem else None
 
 
-def _admin_head(checkout: JobCheckout) -> str | None:
-    path = os.path.realpath(checkout.path)
-    for entry in _git(checkout.clone, "worktree", "list", "--porcelain").split("\n\n"):
-        fields = dict(line.partition(" ")[::2] for line in entry.splitlines())
-        if "worktree" in fields and os.path.realpath(fields["worktree"]) == path:
-            return fields.get("HEAD")
-    return None
+def _pin_then_prune_locked(clone: Path) -> None:
+    """Prune is clone-wide, so it would drop every missing worktree's admin
+    entry, and with it the only ref to unpushed commits. One that cleanup
+    renamed aside and has not saved yet is locked through the prune, so git
+    keeps working in the renamed folder.
+    """
+    jobs = os.path.realpath(clone.parents[2] / "jobs")
+    locked: list[str] = []
+    try:
+        for entry in _git(clone, "worktree", "list", "--porcelain").split("\n\n"):
+            fields = dict(line.partition(" ")[::2] for line in entry.splitlines())
+            path = fields.get("worktree")
+            if (path is None or "locked" in fields or os.path.lexists(path)
+                    or os.path.realpath(os.path.dirname(path)) != jobs):
+                continue
+            job_id = os.path.basename(path)
+            if not _JOB_ID.match(job_id):
+                continue
+            if any(os.path.lexists(f"{path}{suffix}") for suffix in _SET_ASIDE):
+                _git(clone, "worktree", "lock", "--reason", "orch-cleanup", path)
+                locked.append(path)
+            elif "HEAD" in fields:
+                start = recorded_start(Path(jobs, f"{job_id}.json"))
+                _pin_if_unpushed(clone, job_id, fields["HEAD"], start)
+        _git(clone, "worktree", "prune")
+    finally:
+        for path in locked:
+            _git(clone, "worktree", "unlock", path)
 
 
 def _pin_if_unpushed(clone: Path, job_id: str, head: str, start: str | None) -> None:
@@ -467,15 +499,15 @@ def _pin_if_unpushed(clone: Path, job_id: str, head: str, start: str | None) -> 
             return
 
 
-def _save_patch(dest: Path, patch: bytes) -> None:
+def _save_patch(dest: Path, name: str, patch: bytes) -> None:
     dest.mkdir(parents=True, exist_ok=True)
-    target, n = dest / PATCH, 0
+    target, n = dest / name, 0
     while os.path.lexists(target):
         if target.is_file() and target.read_bytes() == patch:
             return
         n += 1
-        target = dest / f"{PATCH}.{n}"
-    pending = dest / f".{PATCH}.tmp"
+        target = dest / f"{name}.{n}"
+    pending = dest / f".{name}.tmp"
     pending.write_bytes(patch)
     os.replace(pending, target)
 
@@ -526,7 +558,7 @@ def _remove_locked(checkout: JobCheckout) -> None:
         # drop ignored build output, which `worktree remove` refuses.
         _git(checkout.clone, "worktree", "remove", "--force", str(checkout.path))
     if checkout.clone.is_dir():
-        _git(checkout.clone, "worktree", "prune")
+        _pin_then_prune_locked(checkout.clone)
     checkout.record.unlink(missing_ok=True)
 
 
@@ -784,6 +816,7 @@ def _one_line(exc: BaseException) -> str:
 
 __all__ = [
     "DEFAULT_GC_HOURS",
+    "INDEX_PATCH",
     "JobCheckout",
     "KEPT_REF",
     "PATCH",
