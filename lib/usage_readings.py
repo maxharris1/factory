@@ -58,7 +58,7 @@ import json
 import math
 import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -637,6 +637,17 @@ def headroom(readings: list[Reading], now: float) -> float | None:
     return round(min(fresh), 6) if fresh else None
 
 
+def newest_by_account(rows: Iterable[StoredRow]) -> dict[str, dict[str, Reading]]:
+    """Each account's newest valid reading per window, across its devices."""
+    found = [(str(row.account), row.reading()) for row in rows]
+    newest: dict[str, dict[str, Reading]] = {}
+    for account, reading in sorted(
+        ((a, r) for a, r in found if r is not None), key=lambda pair: pair[1].observed_at
+    ):
+        newest.setdefault(account, {})[reading.window] = reading
+    return newest
+
+
 class TelemetryUsage:
     """`UsageSource` over the stored readings for the account each harness
     uses, on any of its devices: each window's newest reading."""
@@ -662,8 +673,7 @@ class TelemetryUsage:
         except sqlite3.Error:
             return None
         now = self.clock()
-        found = (row.reading() for row in rows if row.harness == harness)
-        readings = {r.window: r for r in sorted((r for r in found if r is not None), key=lambda r: r.observed_at)}
+        readings = newest_by_account(row for row in rows if row.harness == harness).get(account, {})
         remaining = headroom(list(readings.values()), now)
         if remaining is None:
             return None

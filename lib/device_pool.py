@@ -8,9 +8,11 @@ by utilization (slots held over slot_max; a tie goes to a remote before the
 local box, remotes in machines.yml order; issue #223) among those that are
 schedulable, not draining, and list that harness (issue #85). Of the
 accounts signed in for the harness on a free device that are neither
-usage-limited nor at max_jobs across every device, the one running the
-fewest jobs wins (then its best device, then its id) and takes its
-best-ranked device. A job of a project pinned
+usage-limited, at max_jobs across every device nor under FLOOR fresh
+headroom, the one with the highest score wins (then fewer running jobs, its
+best device, its id) and takes its best-ranked device. The score is fresh
+headroom (UNREAD_HEADROOM with none) less PENDING_CHARGE per job placed
+since the account's newest reading (#1316). A job of a project pinned
 to devices (orch.yml projects[].devices, #1172) takes only a listed device;
 with none free it stays queued and the next job in claim order is tried.
 Both writes happen
@@ -76,14 +78,16 @@ This module starts nothing and contacts no device.
 
 from __future__ import annotations
 
+import math
 import sqlite3
+from collections import Counter
 from collections.abc import Callable, Collection, Mapping
 import json
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
 
-from lib import device_sync, lane_limit, live_settings
+from lib import device_sync, lane_limit, live_settings, usage_readings
 from lib.device_sync import NOTHING_BLOCKED, Blocked
 from lib.machines_yml import (
     Device,
@@ -204,34 +208,53 @@ def run_account(config: MachinesConfig, placement: Placement) -> tuple[str, str 
     return account, config.account_home(placement.device, placement.harness, account)
 
 
+FLOOR = 0.05
+PENDING_CHARGE = 0.02
+UNREAD_HEADROOM = 0.5
+
+
 @dataclass(frozen=True)
 class AccountLoads:
     running: Mapping[str, int]
     closed: frozenset[str]
+    score: Mapping[str, float]
 
     def takes_work(self, account: str) -> bool:
         return account not in self.closed
+
+    def score_of(self, account: str) -> float:
+        return self.score.get(account, UNREAD_HEADROOM)
 
 
 def account_loads(
     connection: sqlite3.Connection, config: MachinesConfig | None, now: float
 ) -> AccountLoads:
-    """Held slots per account on every device; closed are those limited or at max_jobs."""
-    running: dict[str, int] = {}
+    placed: list[tuple[str, float]] = []
     if _has_table(connection, SLOTS_TABLE):
-        for device_name, harness, account in connection.execute(
-            f"SELECT device, harness, account FROM {SLOTS_TABLE}"
+        for device_name, harness, account, placed_at in connection.execute(
+            f"SELECT device, harness, account, placed_at FROM {SLOTS_TABLE}"
         ):
             if account is None:
                 device = None if config is None else config.device(str(device_name))
                 account = None if device is None else device.account_for(str(harness))
             if account is not None:
-                running[str(account)] = running.get(str(account), 0) + 1
+                placed.append((str(account), float(placed_at)))
+    running = Counter(account for account, _ in placed)
+    newest = usage_readings.newest_by_account(usage_readings.stored(connection) or [])
+    read_at = {account: max(r.observed_at for r in windows.values()) for account, windows in newest.items()}
+    pending = Counter(account for account, at in placed if at > read_at.get(account, -math.inf))
+    fresh = {account: usage_readings.headroom(list(windows.values()), now) for account, windows in newest.items()}
+    score = {
+        account: (UNREAD_HEADROOM if fresh.get(account) is None else fresh[account])
+        - PENDING_CHARGE * pending[account]
+        for account in running.keys() | fresh.keys()
+    }
     closed = set(lane_limit.account_limits(connection, now))
+    closed.update(account for account, left in fresh.items() if left is not None and left < FLOOR)
     for item in config.accounts if config is not None else ():
         if item.max_jobs is not None and running.get(item.id, 0) >= item.max_jobs:
             closed.add(item.id)
-    return AccountLoads(running, frozenset(closed))
+    return AccountLoads(running, frozenset(closed), score)
 
 
 def _ranked_free(
@@ -265,9 +288,8 @@ def choose_pair(
 ) -> tuple[str, Device] | None:
     """The account to run the next job and its best free device, or None (#1315).
 
-    The account running the fewest jobs wins, then the one whose best device
-    ranks first (choose_device's order), then the lower id. The avoid flag
-    leads, so a device in `avoid` is used only when no other pair exists (#218).
+    The avoid flag leads, so a device in `avoid` is used only when no other
+    pair exists (#218).
     """
     best: dict[str, tuple[tuple[bool, Fraction, bool, int], Device]] = {}
     for rank, device in _ranked_free(config, harness, used, blocked, avoid, allowed):
@@ -280,7 +302,7 @@ def choose_pair(
     def order(account: str) -> tuple:
         rank, _ = best[account]
         avoided = rank[0]
-        return avoided, loads.running.get(account, 0), rank, account
+        return avoided, -loads.score_of(account), loads.running.get(account, 0), rank, account
 
     account = min(best, key=order)
     return account, best[account][1]
