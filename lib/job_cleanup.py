@@ -46,6 +46,11 @@ archive here holds the same lock. A device whose login PATH has no `flock`
 claims unlocked, so it removes nothing. A folder the host did not name is
 never touched; the host labels each one live, recent, retry-held or
 unknown.
+
+`orch cleanup run --bot <bot>` sweeps only the jobs that bot received, on
+that bot's targets, after a default 10 minute grace. Its plan names every id
+the bot owns, so on a work root several bots share the device leaves the rest
+alone.
 """
 
 from __future__ import annotations
@@ -72,8 +77,10 @@ from lib import health, job_leftovers, remote, worktrees
 from lib.device_deploy import PICK_PYTHON, Target, targets
 from lib.job_leftovers import GONE, WORKER_RECORD
 from lib.remote import SSH_UNREACHABLE, CaptureTransport, SshTransport, _login, _marked, ssh_argv
+from lib.wait import OWNING_BOTS
 
 DEFAULT_GRACE_HOURS = 6.0
+BOT_GRACE_MINUTES = 10
 TIMEOUT_SECONDS = 3600.0
 MARK = "orch-cleanup:"
 FINISHED = ("done", "failed", "cancelled")
@@ -113,6 +120,7 @@ class JobRow:
     ticket_id: str
     state: str
     finished_at: float | None
+    recipient: str
     failure_handled: bool = True
 
 
@@ -139,13 +147,22 @@ def read_jobs(db: Path) -> list[JobRow]:
     connection = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
         return [
-            JobRow(id, repo, ticket, state, finished_at, bool(handled))
-            for id, repo, ticket, state, finished_at, handled in connection.execute(
-                "SELECT id, repo, ticket_id, state, finished_at, failure_handled FROM jobs"
+            JobRow(id, repo, ticket, state, finished_at, recipient, bool(handled))
+            for id, repo, ticket, state, finished_at, recipient, handled in connection.execute(
+                "SELECT id, repo, ticket_id, state, finished_at, recipient, failure_handled"
+                " FROM jobs"
             )
         ]
     finally:
         connection.close()
+
+
+def _job_ids(value: object, name: str) -> frozenset[str]:
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) and _JOB_ID.fullmatch(item) for item in value
+    ):
+        raise ValueError(f"{name} must be a list of plain job ids")
+    return frozenset(value)
 
 
 @dataclass(frozen=True)
@@ -156,25 +173,28 @@ class Plan:
     step: str = HOLD
     finished_at: Mapping[str, float] = field(default_factory=dict)
     unlink_lock: bool = False
+    owned: frozenset[str] | None = None
 
     def own_finish(self, job_id: str) -> float:
         return self.finished_at.get(job_id, self.cutoff)
 
+    def owns(self, job_id: str) -> bool:
+        return self.owned is None or job_id in self.owned
+
     def to_json(self) -> str:
-        return json.dumps(
-            {"finished": sorted(self.finished), "cutoff": self.cutoff, "dry_run": self.dry_run,
-             "step": self.step, "finished_at": dict(sorted(self.finished_at.items())),
-             "unlink_lock": self.unlink_lock}
-        )
+        data = {"finished": sorted(self.finished), "cutoff": self.cutoff,
+                "dry_run": self.dry_run, "step": self.step,
+                "finished_at": dict(sorted(self.finished_at.items())),
+                "unlink_lock": self.unlink_lock}
+        if self.owned is not None:
+            data["owned"] = sorted(self.owned)
+        return json.dumps(data)
 
     @classmethod
     def parse(cls, text: str) -> Plan:
         data = json.loads(text)
-        finished = data["finished"]
-        if not isinstance(finished, list) or not all(
-            isinstance(item, str) and _JOB_ID.fullmatch(item) for item in finished
-        ):
-            raise ValueError("finished must be a list of plain job ids")
+        finished = _job_ids(data["finished"], "finished")
+        owned = data.get("owned")
         step = data.get("step", HOLD)
         if step not in (HOLD, FINISH):
             raise ValueError(f"unknown step {step!r}")
@@ -183,9 +203,10 @@ class Plan:
             isinstance(key, str) and _JOB_ID.fullmatch(key) for key in finished_at
         ):
             raise ValueError("finished_at must map plain job ids to times")
-        return cls(frozenset(finished), float(data["cutoff"]), bool(data["dry_run"]), step,
+        return cls(finished, float(data["cutoff"]), bool(data["dry_run"]), step,
                    {key: float(value) for key, value in finished_at.items()},
-                   bool(data.get("unlink_lock", False)))
+                   bool(data.get("unlink_lock", False)),
+                   None if owned is None else _job_ids(owned, "owned"))
 
 
 @dataclass(frozen=True)
@@ -479,7 +500,7 @@ def _finish_crashed(root: Path, plan: Plan, locks: bool) -> tuple[dict[str, int]
     removed: dict[str, int] = {}
     kept: dict[str, str] = {}
     pending = filter(_JOB_ID.fullmatch, job_leftovers.pending(root))
-    for job_id in sorted(set(_job_folders(jobs, GONE)).union(pending)):
+    for job_id in sorted(filter(plan.owns, set(_job_folders(jobs, GONE)).union(pending))):
         gone = jobs / f"{job_id}{GONE}"
         try:
             with _claim_lock(jobs, job_id, wait=False, create=not plan.dry_run) as locked:
@@ -559,8 +580,9 @@ def _hold(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None]) -> Re
     orphans_removed, orphans_kept = _orphan_records(root, plan, locks)
     removed = {**orphans_removed, **removed}
     kept = {**_unlink_stranded_locks(jobs, plan), **orphans_kept, **kept}
-    held = list(_job_folders(jobs, SET_ASIDE))
-    folders = _job_folders(jobs)
+    held = list(filter(plan.owns, _job_folders(jobs, SET_ASIDE)))
+    folders = {job_id: folder for job_id, folder in _job_folders(jobs).items()
+               if plan.owns(job_id)}
     away = job_leftovers.cross_device(root) if folders else None
     for job_id, folder in folders.items():
         if job_id not in plan.finished:
@@ -605,6 +627,8 @@ def _finish(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None]) -> 
     jobs = root / "jobs"
     locks = runner_locks()
     for job_id, aside in _job_folders(jobs, SET_ASIDE).items():
+        if not plan.owns(job_id):
+            continue
         gone = jobs / f"{job_id}{GONE}"
         try:
             with _claim_lock(jobs, job_id) as locked:
@@ -652,8 +676,12 @@ def _gib(size: int) -> str:
     return f"{size / 2**30:.2f} GiB"
 
 
+def _label(target: Target) -> str:
+    return f"{target.label} {target.remote.workdir_root}"
+
+
 def summary(target: Target, outcome: Report | str) -> str:
-    label = f"{target.label} {target.remote.workdir_root}"
+    label = _label(target)
     if isinstance(outcome, str):
         return f"{label}: failed: {outcome}"
     report = outcome
@@ -664,6 +692,18 @@ def summary(target: Target, outcome: Report | str) -> str:
         f"{label}: {verb} {len(report.removed)} checkouts ({_gib(report.bytes_freed)}), "
         f"kept {len(report.kept)}" + (f" ({kept})" if kept else "")
     )
+
+
+def report_lines(target: Target, outcome: Report | str) -> list[str]:
+    if isinstance(outcome, str):
+        return [summary(target, outcome)]
+    label = _label(target)
+    verb = "would remove" if outcome.dry_run else "removed"
+    return [summary(target, outcome),
+            *(f"{label}: {verb} {job_id} {size} bytes"
+              for job_id, size in sorted(outcome.removed.items())),
+            *(f"{label}: kept {job_id} {reason}"
+              for job_id, reason in sorted(outcome.kept.items()))]
 
 
 def device_script(checkout: str, workdir_root: str) -> str:
@@ -704,7 +744,8 @@ def clean_target(transport: CaptureTransport, target: Target, db: Path, plan: Pl
     confirmed = frozenset(i for i in hold.held if i in reread and reread[i] is None)
     finish = _device_call(transport, target, Plan(
         confirmed, plan.cutoff, False, FINISH,
-        {i: at for i, at in plan.finished_at.items() if i in confirmed}, plan.unlink_lock))
+        {i: at for i, at in plan.finished_at.items() if i in confirmed}, plan.unlink_lock,
+        plan.owned))
     if isinstance(finish, str):
         return f"set aside {len(hold.held)} checkouts, then {finish}"
     taken_back = {i: reread.get(i) or RECENT for i in hold.held if i not in finish.removed}
@@ -715,14 +756,18 @@ def clean_target(transport: CaptureTransport, target: Target, db: Path, plan: Pl
 
 
 def run(db: Path, machines, transport: CaptureTransport, *, now: float, grace_hours: float,
-        dry_run: bool) -> list[tuple[Target, Report | str]]:
+        dry_run: bool, bot: str | None = None) -> list[tuple[Target, Report | str]]:
     cutoff = now - grace_hours * 3600
     rows = read_jobs(db)
     reasons = keep_reasons(rows, cutoff)
-    finished_at = {row.id: row.finished_at for row in rows
+    mine = [row for row in rows if bot is None or row.recipient == OWNING_BOTS[bot]]
+    owned = None if bot is None else frozenset(row.id for row in mine)
+    finished_at = {row.id: row.finished_at for row in mine
                    if reasons[row.id] is None and row.finished_at is not None}
-    plan = Plan(frozenset(finished_at), cutoff, dry_run, HOLD, finished_at, unlink_lock=True)
-    found = {(t.device, t.remote.workdir_root): t for t in targets(machines)}
+    plan = Plan(frozenset(finished_at), cutoff, dry_run, HOLD, finished_at, unlink_lock=True,
+                owned=owned)
+    found = {(t.device, t.remote.workdir_root): t for t in targets(machines)
+             if bot is None or t.bot == bot}
     work = list(found.values())
     if not work:
         return []
@@ -732,7 +777,8 @@ def run(db: Path, machines, transport: CaptureTransport, *, now: float, grace_ho
 
 
 USAGE = """\
-orch cleanup run --backlog [--dry-run] [--grace-hours H] [--db PATH] [--machines PATH]
+orch cleanup run (--backlog | --bot BOT) [--dry-run] [--grace-hours H] [--db PATH]
+                  [--machines PATH]
 orch cleanup device --root DIR      (reads the host's plan as JSON on stdin)
 """
 
@@ -741,10 +787,12 @@ def main(argv: list[str], *, clock: Callable[[], float] = time.time,
          transport: CaptureTransport | None = None) -> int:
     parser = argparse.ArgumentParser(prog="orch cleanup", usage=USAGE)
     commands = parser.add_subparsers(dest="command", required=True)
-    host = commands.add_parser("run")
-    host.add_argument("--backlog", action="store_true")
+    host = commands.add_parser("run", prog="orch cleanup run")
+    sweep = host.add_mutually_exclusive_group(required=True)
+    sweep.add_argument("--backlog", action="store_true")
+    sweep.add_argument("--bot", choices=tuple(OWNING_BOTS))
     host.add_argument("--dry-run", action="store_true")
-    host.add_argument("--grace-hours", type=float, default=DEFAULT_GRACE_HOURS)
+    host.add_argument("--grace-hours", type=float)
     host.add_argument("--db", type=Path)
     host.add_argument("--machines", type=Path)
     device = commands.add_parser("device")
@@ -761,9 +809,8 @@ def main(argv: list[str], *, clock: Callable[[], float] = time.time,
             return 2
         print(MARK, device_step(args.root, plan).to_json(), flush=True)
         return 0
-    if not args.backlog:
-        print("orch cleanup run: only the hand-run --backlog pass exists so far", file=sys.stderr)
-        return 2
+    if args.grace_hours is None:
+        args.grace_hours = BOT_GRACE_MINUTES / 60 if args.bot else DEFAULT_GRACE_HOURS
     if args.grace_hours < 0:
         print("orch cleanup run: --grace-hours must not be negative", file=sys.stderr)
         return 2
@@ -774,7 +821,9 @@ def main(argv: list[str], *, clock: Callable[[], float] = time.time,
         return 1
     outcomes = run(db, health.load_machines(args.machines),
                    transport if transport is not None else SshTransport(),
-                   now=clock(), grace_hours=args.grace_hours, dry_run=args.dry_run)
+                   now=clock(), grace_hours=args.grace_hours, dry_run=args.dry_run,
+                   bot=args.bot)
     for target, outcome in outcomes:
-        print(summary(target, outcome), flush=True)
+        for line in report_lines(target, outcome):
+            print(line, flush=True)
     return 1 if any(isinstance(outcome, str) for _, outcome in outcomes) else 0
