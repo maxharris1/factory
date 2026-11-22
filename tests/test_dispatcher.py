@@ -6584,6 +6584,43 @@ def test_a_device_backoff_never_counts_toward_the_queue_wait(
     assert claimed.request.attempt == 1
 
 
+def test_a_signed_out_login_holds_a_queued_job_past_its_wait_until_the_doctor_reads_ok(
+    tmp_path: Path,
+) -> None:
+    from lib import account_doctor
+
+    now = [0.0]
+    dispatcher, queue = _busy_dispatcher(tmp_path, now, slot_max=1)
+    waiting = queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="1",
+            action="build",
+            recipient="claude",
+            source_comment_id="go-1",
+            timeout_seconds=60,
+        ),
+        dedupe_key="build:1",
+    )
+    with queue.connect() as connection:
+        account_doctor.hold(connection, "claude-default", "box", "runtime", account_doctor.NOT_LOGGED_IN, 0.0)
+
+    for second in (30, 60, 90):
+        now[0] = second
+        dispatcher.reconcile_jobs()
+        assert [job.state for job in queue.outstanding()] == ["queued"], f"timed out at {second}s"
+
+    now[0] = 120
+    ok = account_doctor.SignIn("claude-default", "box", "ok", None, None, None, now[0], "")
+    with queue.connect() as connection:
+        account_doctor.write(connection, [ok], dispatcher.devices.config, None, now[0])
+    dispatcher.reconcile_jobs()
+
+    claimed = queue.claim("claude")
+    assert claimed is not None and claimed.id == waiting.id
+    assert claimed.request.attempt == 1
+
+
 def test_a_queued_job_times_out_a_full_wait_after_its_device_backoff_ends(
     tmp_path: Path,
 ) -> None:

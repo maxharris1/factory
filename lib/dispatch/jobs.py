@@ -268,13 +268,16 @@ class JobsMixin:
         def held(job: Job) -> bool:
             harness = job.request.recipient
             allowed = pins.get(job.request.repo.lower())
-            accounts = {
-                account
+            pairs = {
+                (account, device.name)
                 for device in config.devices
                 if device.takes_new(harness) and (allowed is None or device.name in allowed)
                 for account in config.accounts_on(device.name, harness)
             }
-            return bool(accounts & loads.held) and free_slots(config, harness, used, blocked, allowed=allowed) == 0
+            return (
+                any(loads.holds(account, device) for account, device in pairs)
+                and free_slots(config, harness, used, blocked, allowed=allowed) == 0
+            )
 
         return held
 
