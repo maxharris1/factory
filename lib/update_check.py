@@ -138,7 +138,8 @@ def moved_head_probe(clone: Path, base_ref: str, ok: str, head: str) -> MovedHea
     )
     listed = _output(clone, "diff", "--name-only", "-z", "--no-renames", old, new)
     added = _output(
-        clone, "diff", "--no-ext-diff", "--no-textconv", "--text", "--unified=0", old, new
+        clone, "diff", "--no-ext-diff", "--no-textconv", "--text", "--unified=0",
+        "--src-prefix=a/", "--dst-prefix=b/", old, new,
     )
     return MovedHead(
         tuple(parents),
