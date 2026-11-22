@@ -216,6 +216,7 @@ UNREAD_HEADROOM = 0.5
 @dataclass(frozen=True)
 class AccountLoads:
     running: Mapping[str, int]
+    held: frozenset[str]
     closed: frozenset[str]
     score: Mapping[str, float]
 
@@ -245,16 +246,20 @@ def account_loads(
     pending = Counter(account for account, at in placed if at > read_at.get(account, -math.inf))
     fresh = {account: usage_readings.headroom(list(windows.values()), now) for account, windows in newest.items()}
     score = {
-        account: (UNREAD_HEADROOM if fresh.get(account) is None else fresh[account])
-        - PENDING_CHARGE * pending[account]
+        account: round(
+            (UNREAD_HEADROOM if fresh.get(account) is None else fresh[account])
+            - PENDING_CHARGE * pending[account],
+            6,
+        )
         for account in running.keys() | fresh.keys()
     }
-    closed = set(lane_limit.account_limits(connection, now))
-    closed.update(account for account, left in fresh.items() if left is not None and left < FLOOR)
+    held = set(lane_limit.account_limits(connection, now))
+    held.update(account for account, left in fresh.items() if left is not None and left < FLOOR)
+    closed = set(held)
     for item in config.accounts if config is not None else ():
         if item.max_jobs is not None and running.get(item.id, 0) >= item.max_jobs:
             closed.add(item.id)
-    return AccountLoads(running, frozenset(closed), score)
+    return AccountLoads(running, frozenset(held), frozenset(closed), score)
 
 
 def _ranked_free(

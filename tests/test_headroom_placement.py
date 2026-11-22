@@ -115,3 +115,42 @@ def test_a_queued_job_behind_floored_accounts_waits_and_does_not_time_out(tmp_pa
     (job,) = [job for job in queue.outstanding() if job.id == job_id]
     assert job.state == "queued", "not timed out while no account can take it"
     assert job.last_activity_at == NOW + 601, "its queue wait restarted"
+
+
+def test_equal_adjusted_scores_go_to_the_account_running_fewer_jobs(tmp_path: Path) -> None:
+    pool, queue, _ = build(tmp_path, [NOW])
+    read(queue, "claude-a", 0.80, NOW - 60)
+    read(queue, "claude-b", 0.82, NOW - 60)
+
+    assert claims(pool, queue, 2) == [("box", "claude-a"), ("box", "claude-b")], "0.20 less one charge ties 0.18"
+
+
+def test_a_queued_job_keeps_its_timeout_through_a_floor_that_clears(tmp_path: Path) -> None:
+    now = [NOW]
+    pool, queue, config = build(tmp_path, now)
+    read(queue, "claude-a", 0.96, NOW - 60)
+    read(queue, "claude-b", 0.96, NOW - 60)
+    with queue.connect() as connection:
+        connection.execute(f"UPDATE {usage_readings.ACCOUNT_READINGS} SET resets_at = ?", (int(NOW) + 590,))
+    job_id = queue.enqueue(
+        JobRequest("owner/repo", "floored", "build", "claude", "go-floored", 600),
+        dedupe_key="claude:floored",
+    ).id
+    assert pool.claim("claude") is None
+
+    dispatcher = Dispatcher(
+        queue.path,
+        queue,
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+        devices=SimpleNamespace(config=config, pool=pool, reconcile=lambda *_: None),
+    )
+    for seconds in range(60, 601, 60):
+        now[0] = NOW + seconds
+        dispatcher.reconcile_jobs()
+
+    assert not placement_blocks(queue, config, None).blocks("box", "claude"), "the windows reset at +590"
+    (job,) = [job for job in queue.outstanding() if job.id == job_id]
+    assert job.state == "queued", "the floor's hold did not use up its timeout"
+    assert pool.claim("claude") is not None
