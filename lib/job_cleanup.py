@@ -48,8 +48,9 @@ never touched; the host labels each one live, recent, retry-held or
 unknown.
 
 `orch cleanup run --bot <bot>` sweeps only the jobs that bot received, on
-that bot's targets, after a 10 minute grace. Its plan names every id the bot
-owns, so on a work root several bots share the device leaves the rest alone.
+that bot's targets, after a default 10 minute grace. Its plan names every id
+the bot owns, so on a work root several bots share the device leaves the rest
+alone.
 """
 
 from __future__ import annotations
