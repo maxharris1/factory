@@ -21,6 +21,7 @@ from lib.job_state import MAX_FREE_REQUEUES, free_requeues
 from lib.machines_yml import load_machines_yml
 from lib.remote import SSH_UNREACHABLE, Exchanged
 from tests.test_account_doctor import SIGNED_OUT_CLAUDE, claude_reply, framed
+from tests.test_skill_preflight import with_job_events
 from tests.test_waiter import FakeSpawn, enqueue, slots, state
 from tests.test_waiter_remote import make_waiter, remote_machines
 
@@ -96,6 +97,7 @@ def pc_waiter(tmp_path: Path, transport: LoginTransport):
     waiter, queue, db = make_waiter(
         tmp_path, remote_machines(tmp_path, box_enabled=False), spawn, log=log, transport=transport
     )
+    with_job_events(db)
     return waiter, queue, db, spawn, log
 
 
@@ -132,7 +134,7 @@ def test_a_signed_out_preflight_does_not_launch_and_holds_the_pair(tmp_path: Pat
     assert state(db, job_id) == "queued"
     assert counters(db, job_id) == before, "no attempt or generation is charged"
     assert slots(db) == {}
-    assert holds(db) == {("claude-bot", "pc", "preflight")}
+    assert holds(db) == {("claude-default", "pc", "preflight")}
     [(event, detail)] = events_of(db, job_id)
     assert event == "requeued-signed-out"
     assert detail.endswith("; requeued, no round or attempt charged")
@@ -154,7 +156,7 @@ def test_repeated_signed_out_preflights_never_burn_a_retry(tmp_path: Path) -> No
     assert state(db, job_id) == "queued", "a bad login never fails the job, so T6 never retries it"
     assert counters(db, job_id) == before
     assert [event for event, _ in events_of(db, job_id)] == ["requeued-signed-out"] * (MAX_FREE_REQUEUES + 3)
-    assert holds(db) == {("claude-bot", "pc", "preflight")}, "one hold however many launches fail"
+    assert holds(db) == {("claude-default", "pc", "preflight")}, "one hold however many launches fail"
 
 
 def test_a_signed_in_preflight_launches(tmp_path: Path) -> None:
