@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -933,6 +934,84 @@ def test_a_checkout_waits_while_cleanup_holds_the_job_lock(tmp_path: Path) -> No
     assert (jobs / "j.claimed").stat().st_mtime > wall_clock_days_ago(1 / 24)
 
 
+LOGGED_FLOCK = '#!/bin/sh\necho "$*" >> "$FLOCK_LOG"\nexec {flock} "$@"\n'
+
+
+def wait_for(done: Callable[[], bool], what: str, seconds: float = 30) -> None:
+    end = time.monotonic() + seconds
+    while not done():
+        assert time.monotonic() < end, what
+        time.sleep(0.01)
+
+
+def lines(path: Path) -> int:
+    return len(path.read_text().splitlines()) if path.exists() else 0
+
+
+@pytest.mark.parametrize("shell", ["sh", "bash"])
+def test_a_claim_waiting_on_the_old_lock_relocks_the_new_one(tmp_path: Path, shell: str) -> None:
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+    log = tmp_path / "flock.log"
+    logged = tmp_path / "flock"
+    logged.write_text(LOGGED_FLOCK.format(flock=shutil.which("flock")))
+    logged.chmod(0o755)
+    path = jobs / "j.lock"
+
+    with open(path, "a") as old:
+        fcntl.flock(old, fcntl.LOCK_EX)
+        claim = subprocess.Popen(
+            [shell, "-c", f'd=$1; lk={logged}; {remote._CLAIM}', "claim", str(jobs / "j")],
+            env={**os.environ, "FLOCK_LOG": str(log)})
+        wait_for(lambda: lines(log) == 1, "the claim never waited on the old lock")
+        path.unlink()
+        with open(path, "a") as new:
+            fcntl.flock(new, fcntl.LOCK_EX)
+            old.close()
+            wait_for(lambda: lines(log) == 2 or claim.poll() is not None,
+                     "the claim neither relocked nor finished")
+            assert not (jobs / "j.claimed").exists(), "claimed on the old inode"
+            assert claim.poll() is None
+        assert claim.wait(timeout=30) == 0
+
+    assert (jobs / "j.claimed").exists() and path.exists()
+
+
+def test_cleanup_relocks_when_the_lock_was_replaced(tmp_path: Path, monkeypatch) -> None:
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+    path = jobs / "j.lock"
+    real_flock = fcntl.flock
+    waits: list[int] = []
+    entered: list[int] = []
+
+    def flock(fd, operation):
+        if threading.current_thread() is waiter:
+            waits.append(os.fstat(fd if isinstance(fd, int) else fd.fileno()).st_ino)
+        real_flock(fd, operation)
+
+    def wait_then_enter() -> None:
+        with job_cleanup._claim_lock(jobs, "j") as locked:
+            assert locked
+            entered.append(path.stat().st_ino)
+
+    monkeypatch.setattr(job_cleanup.fcntl, "flock", flock)
+    waiter = threading.Thread(target=wait_then_enter)
+    with job_cleanup._claim_lock(jobs, "j"):
+        old = path.stat().st_ino
+        waiter.start()
+        wait_for(lambda: len(waits) == 1, "the second holder never waited")
+        path.unlink()
+        new = open(path, "a")
+        real_flock(new, fcntl.LOCK_EX)
+    try:
+        wait_for(lambda: len(waits) == 2 or bool(entered), "the second holder never woke")
+        assert entered == [] and waits == [old, path.stat().st_ino]
+    finally:
+        new.close()
+    waiter.join(timeout=30)
+
+    assert entered == [waits[1]]
 
 
 @pytest.mark.parametrize("dry_run", [True, False])
@@ -1018,10 +1097,10 @@ def test_leftover_claimed_and_lock_from_the_jobs_own_run_do_not_block(tmp_path: 
     assert set(report.removed) == {"j"} and report.kept == {}
     assert not folder.exists()
     assert not (jobs / "j.claimed").exists() and not (jobs / "j.launched").exists()
-    assert (jobs / "j.lock").exists()
+    assert not (jobs / "j.lock").exists()
 
 
-def test_a_collected_job_leaves_only_its_lock_under_jobs(tmp_path: Path) -> None:
+def test_a_collected_job_leaves_nothing_under_jobs(tmp_path: Path) -> None:
     root = work_root(tmp_path)
     finished_with_leftovers(root, "j")
     db = database(tmp_path, [("j", "t1", "done", OLD)])
@@ -1030,8 +1109,33 @@ def test_a_collected_job_leaves_only_its_lock_under_jobs(tmp_path: Path) -> None
                                     now=NOW, grace_hours=6, dry_run=False)
 
     assert set(report.removed) == {"j"}
-    assert [path.name for path in (root / "jobs").iterdir()
-            if path.name == "j" or path.name.startswith("j.")] == ["j.lock"]
+    assert list((root / "jobs").iterdir()) == []
+
+
+class PlanFromAnOlderHost(InProcessTransport):
+    def __init__(self, root: Path):
+        super().__init__(root)
+        self.sent: list[dict] = []
+
+    def call(self, argv, *, timeout: float, input: bytes | None = None) -> Called:
+        sent = json.loads(input.decode())
+        self.sent.append(sent)
+        older = {key: value for key, value in sent.items() if key != "unlink_lock"}
+        return super().call(argv, timeout=timeout, input=json.dumps(older).encode())
+
+
+def test_a_plan_from_an_older_host_leaves_the_lock(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    folder = finished_with_leftovers(root, "j")
+    transport = PlanFromAnOlderHost(root)
+
+    [(_, report)] = job_cleanup.run(database(tmp_path, DONE), machines(tmp_path, "pc"),
+                                    transport, now=NOW, grace_hours=6, dry_run=False)
+
+    assert set(report.removed) == {"j"} and not folder.exists()
+    assert [path.name for path in (root / "jobs").iterdir()] == ["j.lock"]
+    assert [(plan["step"], plan["unlink_lock"]) for plan in transport.sent] == [
+        (job_cleanup.HOLD, True), (job_cleanup.FINISH, True)]
 
 
 def stale_worktree(tmp_path: Path, root: Path, job_id: str = "j") -> Path:
@@ -1245,7 +1349,7 @@ def test_an_orphan_record_with_a_dead_owner_is_unlinked_and_its_commit_pinned(
     report = collect_stale(tmp_path, root)
 
     assert report.removed == {"j": 0} and report.kept == {}
-    assert not (root / "jobs" / "j.json").exists()
+    assert list((root / "jobs").iterdir()) == []
     assert registered(root) == []
     assert pinned(root) == commit
 
@@ -1546,10 +1650,11 @@ def test_a_worker_that_starts_between_hold_and_finish_keeps_the_folder(
 
 
 def test_the_plan_carries_each_jobs_finish_time_to_the_device(tmp_path: Path) -> None:
-    plan = Plan(frozenset({"a", "b"}), NOW, True, finished_at={"a": OLD, "b": OLD + 1})
+    plan = Plan(frozenset({"a", "b"}), NOW, True, finished_at={"a": OLD, "b": OLD + 1},
+                unlink_lock=True)
     assert Plan.parse(plan.to_json()) == plan
     legacy = Plan.parse(json.dumps({"finished": ["a"], "cutoff": NOW, "dry_run": False}))
-    assert legacy.own_finish("a") == NOW
+    assert legacy.own_finish("a") == NOW and not legacy.unlink_lock
     with pytest.raises(ValueError):
         Plan.parse(json.dumps({"finished": ["a"], "cutoff": NOW, "dry_run": False,
                                "finished_at": {"../x": 1.0}}))
@@ -1639,9 +1744,8 @@ def test_archive_mirrors_jobs_and_drops_the_trees(tmp_path: Path, layout: str) -
     assert written["archived"] == archived
     assert (written["id"], written["finished_at"]) == ("j", OLD)
     assert written["removed_bytes"] == report.removed["j"]
-    for name in ("j", "j.claimed", "j.launched", "j.gone", "j.cleanup"):
+    for name in ("j", "j.claimed", "j.launched", "j.gone", "j.cleanup", "j.lock"):
         assert not os.path.lexists(jobs / name), name
-    assert (jobs / "j.lock").exists()
 
 
 @pytest.mark.parametrize("layout", ["remote", "local"])
@@ -1984,7 +2088,7 @@ def test_a_crash_after_the_commit_point_is_finished_by_the_next_pass(
     report = collect(root, DONE)
 
     assert set(report.removed) == {"j"} and report.kept == {}
-    assert [path.name for path in jobs.iterdir()] == ["j.lock"]
+    assert list(jobs.iterdir()) == []
     assert archived(root) == archived(reference)
     record = json.loads((root / "jobs-kept" / "j" / job_leftovers.KEPT_JSON).read_text())
     assert record["archived"] == sorted(archived(reference))
@@ -2009,7 +2113,7 @@ def test_a_crash_after_the_commit_point_with_a_record_is_finished_by_the_next_pa
     report = collect(root, DONE)
 
     assert set(report.removed) == {"j"} and report.kept == {}
-    assert [path.name for path in jobs.iterdir()] == ["j.lock"]
+    assert list(jobs.iterdir()) == []
     assert registered(root) == [] and pinned(root) == commit
     fresh = apply_to_a_fresh_worktree(tmp_path, root, commit,
                                       root / "jobs-kept" / "j" / "worktree.patch")
