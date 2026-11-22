@@ -24,6 +24,7 @@ from pathlib import Path
 
 from lib.feeder_gates import path_matches
 from lib.hold import MergeStep, MergeUpdate
+from lib.secret_scan import ScanResult, scan_added
 
 MARKER_SIZE = 61
 _MARKER_RUN = re.compile(rb"([<|=>])\1*")
@@ -110,6 +111,41 @@ def merge_update(clone: Path, approved_head: str, head: str, base_ref: str) -> M
         tuple(steps),
         _own_files(clone, approved, base_ref),
         _own_files(clone, new, base_ref),
+    )
+
+
+@dataclass(frozen=True)
+class MovedHead:
+    parents: tuple[str, ...]
+    second_parent_on_base: bool
+    remerge_empty: bool
+    paths: frozenset[str]
+    scan: ScanResult
+
+
+def moved_head_probe(clone: Path, base_ref: str, ok: str, head: str) -> MovedHead:
+    """What a head that moved past a hold ok at `ok` is (#1310): its parents,
+    whether its second parent is on base_ref, whether git's own remerge of
+    those parents gives exactly head, every path changed since ok, and the
+    secrets scan of the lines added since ok. Raises ValueError (or an
+    OSError or SubprocessError) when the clone cannot answer."""
+    old = _resolve(clone, ok)
+    new = _resolve(clone, head)
+    _resolve(clone, base_ref)
+    _commit, *parents = _output(clone, "rev-list", "--parents", "-n1", new).decode("ascii").split()
+    remerge = _output(
+        clone, "show", "--remerge-diff", "--format=", "--no-ext-diff", "--no-color", new
+    )
+    listed = _output(clone, "diff", "--name-only", "-z", "--no-renames", old, new)
+    added = _output(
+        clone, "diff", "--no-ext-diff", "--no-textconv", "--text", "--unified=0", old, new
+    )
+    return MovedHead(
+        tuple(parents),
+        len(parents) >= 2 and _on_base(clone, parents[1], base_ref),
+        not remerge,
+        frozenset(path.decode("utf-8") for path in listed.split(b"\0") if path),
+        scan_added(added),
     )
 
 
