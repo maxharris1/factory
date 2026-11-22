@@ -47,6 +47,7 @@ KEPT_REF = "refs/orch-kept/{job_id}"
 PATCH = "worktree.patch"
 INDEX_PATCH = "index.patch"
 _SET_ASIDE = (".cleanup", ".gone")
+_OPERATION_STATE = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply")
 
 _NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
 _JOB_ID = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -292,12 +293,24 @@ def keep_reason(path: Path, start: str | None = None) -> str | None:
     if status.strip():
         return "uncommitted changes"
     try:
+        unsavable = _unsavable_state(path)
         excluded = ["--remotes"] + ([start] if start else [])
         unpushed = _git(path, "rev-list", "--count", "HEAD", "--not", *excluded)
     except WorktreeError:
         return "not a readable git worktree"
+    if unsavable is not None:
+        return unsavable
     if unpushed.strip() not in ("", "0"):
         return "unpushed commits"
+    return None
+
+
+def _unsavable_state(path: Path) -> str | None:
+    if _git(path, "ls-files", "--unmerged"):
+        return "conflict stages in its index"
+    for state in _OPERATION_STATE:
+        if os.path.lexists(path / _git(path, "rev-parse", "--git-path", state).strip()):
+            return f"a git operation in progress ({state})"
     return None
 
 
@@ -402,8 +415,9 @@ def keep_work(root: Path, record: Path, folder: Path, dest: Path) -> None:
     first free `.1`, `.2` name; one already holding the same patch is kept),
     applicable with `git apply` on HEAD. Staged content that differs from it
     goes to `dest/index.patch` the same way. Unpushed commits are pinned by
-    `_pin_if_unpushed`. A nested git repository raises before anything is
-    saved: the patch cannot hold its work.
+    `_pin_if_unpushed`. A nested git repository, conflict stages in the index,
+    or a merge, rebase, cherry-pick or revert in progress raises before
+    anything is saved: no patch can hold that work.
     """
     loaded = _named_record(root, record)
     if loaded is None:
@@ -411,6 +425,9 @@ def keep_work(root: Path, record: Path, folder: Path, dest: Path) -> None:
     checkout = loaded[0]
     with _clone_lock(checkout.clone):
         _require_worktree_of(folder, checkout.clone)
+        unsavable = _unsavable_state(folder)
+        if unsavable is not None:
+            raise WorktreeError(f"{folder} has {unsavable}")
         with tempfile.TemporaryDirectory(prefix="orch-patch-") as scratch:
             index = {"GIT_INDEX_FILE": str(Path(scratch) / "index")}
             _git(folder, "read-tree", "HEAD", env=index)

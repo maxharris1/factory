@@ -1389,6 +1389,71 @@ def test_a_nested_repository_with_its_own_work_keeps_the_folder(tmp_path: Path) 
     assert (root / "jobs" / "j.json").exists()
 
 
+def detour(folder: Path, text: str) -> str:
+    start = git_out(folder, "rev-parse", "HEAD")
+    commit = commit_in(folder, text)
+    git_out(folder, "reset", "-q", "--hard", start)
+    return commit
+
+
+def conflicted_merge(folder: Path) -> str:
+    incoming = detour(folder, "unique incoming merge work\n")
+    commit_in(folder, "ours\n")
+    subprocess.run(["git", "-C", str(folder), "merge", "--no-edit", incoming],
+                   capture_output=True)
+    (folder / "tracked.txt").write_text("ours\n")
+    return git_out(folder, "rev-parse", ":3:tracked.txt")
+
+
+def resolved_merge(folder: Path) -> str:
+    incoming = detour(folder, "unique incoming merge work\n")
+    commit_in(folder, "ours\n")
+    subprocess.run(["git", "-C", str(folder), "merge", "--no-edit", incoming],
+                   capture_output=True)
+    git_out(folder, "add", "tracked.txt")
+    return incoming
+
+
+def stopped_rebase(folder: Path) -> str:
+    first = commit_in(folder, "first\n")
+    later = commit_in(folder, "unique later work\n")
+    subprocess.run(["git", "-C", str(folder), "-c", "user.name=t",
+                    "-c", "user.email=t@example.invalid", "rebase", "-q",
+                    "--exec", "false", "--force-rebase", f"{first}~1"], capture_output=True)
+    assert (folder / "tracked.txt").read_text() == "first\n"
+    return later
+
+
+@pytest.mark.parametrize("state", [conflicted_merge, resolved_merge, stopped_rebase])
+def test_index_or_operation_state_no_patch_holds_keeps_the_folder(
+        tmp_path: Path, state) -> None:
+    root = work_root(tmp_path)
+    folder = stale_worktree(tmp_path, root)
+    work = state(folder)
+
+    report = collect_stale(tmp_path, root)
+
+    assert report.removed == {} and report.kept["j"].startswith("error:")
+    assert (root / "jobs" / "j.json").exists()
+    assert git_out(root / "jobs" / "j", "cat-file", "-t", work) in ("blob", "commit")
+
+
+def test_gc_keeps_a_clean_worktree_whose_rebase_holds_the_only_copy(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    folder = stale_worktree(tmp_path, root)
+    start = git_out(folder, "rev-parse", "HEAD")
+    later = commit_in(folder, "unique later work\n")
+    git_out(folder, "-c", "sequence.editor=printf 'break\\n' >", "rebase", "-q", "-i", start)
+    assert git_out(folder, "rev-parse", "HEAD") == start
+    assert git_out(folder, "status", "--porcelain", "--untracked-files=all") == ""
+    logged: list[str] = []
+
+    worktrees.gc(root, older_than_hours=0, log=logged.append, now=NOW)
+
+    assert folder.exists(), logged
+    assert git_out(folder, "cat-file", "-t", later) == "commit"
+
+
 def test_a_held_lock_keeps_the_folder_without_waiting(tmp_path: Path) -> None:
     root = work_root(tmp_path)
     finished_with_leftovers(root, "j")
