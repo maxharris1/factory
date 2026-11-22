@@ -225,7 +225,32 @@ def test_a_cap_whose_header_does_not_round_trip_escalates_header_invalid(monkeyp
 
 def test_first_cap_grant_does_not_rule_on_a_moved_head() -> None:
     assert not FirstCapGrant().applies(MOVED)
-    assert decide(MOVED) == Ruling("no-rule", Escalate("no-rule"), ())
+    assert decide(MOVED).rule == "moved-head-lands"
+
+
+PURE_PROBE = dataclasses.replace(MOVED.probe, parents=(MOVED.ok_head, sha("c" * 40)), second_parent_on_base=True)
+
+
+@pytest.mark.parametrize(
+    "facts, outcome",
+    [
+        (dataclasses.replace(MOVED, probe=PURE_PROBE), Land()),
+        (dataclasses.replace(MOVED, probe=PURE_PROBE, ci="pending"), Wait()),
+        (MOVED, Escalate("pure-merge")),
+        (
+            dataclasses.replace(MOVED, probe=PURE_PROBE, held_patterns=(git_path("lib/**"),)),
+            Escalate("held-paths"),
+        ),
+        (dataclasses.replace(MOVED, probe=None, ci="pending"), Escalate("probe-unknown")),
+    ],
+)
+def test_moved_head_lands_runs_all_five_checks_and_rules_on_the_first_failure(
+    facts: MovedHeadFacts, outcome: Outcome
+) -> None:
+    ruling = decide(facts)
+    assert ruling.outcome == outcome
+    names = ["pure-merge", "remerge-diff", "held-paths", "secrets-scan", "ci"]
+    assert [check.name for check in ruling.checks] == names
 
 
 REPEAT = dataclasses.replace(STOP, site="repeat", stop="repeat", finding_ids=(finding_id("f-1"),), repeat_stops=1, round=2)

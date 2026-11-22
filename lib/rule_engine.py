@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Literal, NewType, Protocol
 
 from lib import handoff
+from lib.hold import glob_matches
 
 Site = Literal["cap", "repeat", "moved-head"]
 StopKind = Literal["capped", "stalled", "repeat"]
@@ -151,7 +152,37 @@ class FirstCapGrant:
         return Ruling(self.name, Grant(header), (*checks, Check("header", True, header)))
 
 
-RULES: tuple[Rule, ...] = (FirstCapGrant(),)
+class MovedHeadLands:
+    name = "moved-head-lands"
+
+    def applies(self, facts: Facts) -> bool:
+        return isinstance(facts, MovedHeadFacts)
+
+    def rule(self, facts: Facts) -> Ruling:
+        assert isinstance(facts, MovedHeadFacts)
+        ci = Check("ci", None if facts.ci == "pending" else facts.ci == "success", facts.ci)
+        probe = facts.probe
+        if probe is None:
+            unknown = (Check(name, None, None) for name in ("pure-merge", "remerge-diff", "held-paths", "secrets-scan"))
+            return Ruling(self.name, Escalate("probe-unknown"), (*unknown, ci))
+        held = [
+            path for path in probe.changed_paths if any(glob_matches(pattern, path) for pattern in facts.held_patterns)
+        ]
+        pure = len(probe.parents) == 2 and probe.parents[0] == facts.ok_head and probe.second_parent_on_base
+        checks = (
+            Check("pure-merge", pure, len(probe.parents)),
+            Check("remerge-diff", probe.remerge_empty, None),
+            Check("held-paths", not held, len(held)),
+            Check("secrets-scan", probe.scan == "clean", probe.scan),
+            ci,
+        )
+        failed = next((check for check in checks if check.passed is False), None)
+        if failed is not None:
+            return Ruling(self.name, Escalate(failed.name), checks)
+        return Ruling(self.name, Wait() if ci.passed is None else Land(), checks)
+
+
+RULES: tuple[Rule, ...] = (FirstCapGrant(), MovedHeadLands())
 
 
 def decide(facts: Facts, rules: Sequence[Rule] = RULES) -> Ruling:
