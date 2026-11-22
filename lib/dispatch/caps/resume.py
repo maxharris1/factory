@@ -8,7 +8,7 @@ from lib.dispatch.constants import UNANNOUNCED_AFTER_CAP
 from lib.dispatch.decisions import record_decisions
 from lib.dispatch.helpers import _comment_link, _scope, red_checks
 from lib.dispatch.transitions import write_workflow_state
-from lib.dispatch.types import Comment, TrackedTicket
+from lib.dispatch.types import Comment, RoundGrant, TrackedTicket
 from lib.dispatch.verdict.shipped import _approved_round
 from lib.queue import JobRequest
 
@@ -33,7 +33,7 @@ class ResumeMixin:
         when none of these holds. A go _may_lift_cap refuses wakes Grok
         once with go-not-from-approver and changes nothing (#122, #174).
         """
-        lifted = self._lift_cap(ticket, comment, building=building)
+        lifted = self._apply_round_grant(ticket, RoundGrant.approver(comment, building=building))
         if lifted is None:
             return None
         outcome, queued, reopened = lifted
@@ -48,13 +48,7 @@ class ResumeMixin:
         self._write_state_label(ticket, "fixing")
         return True, outcome
 
-    def _lift_cap(
-        self,
-        ticket: TrackedTicket,
-        comment: Comment,
-        *,
-        building: bool,
-    ) -> tuple[str, bool, bool] | None:
+    def _apply_round_grant(self, ticket: TrackedTicket, grant: RoundGrant) -> tuple[str, bool, bool] | None:
         scope = _scope(ticket.repo, ticket.ticket_id)
         ticket = self._fresh_issue(ticket)
         with self._connect() as connection:
@@ -64,7 +58,7 @@ class ResumeMixin:
                 SELECT outcome FROM review_events
                 WHERE repo = ? AND ticket_id = ? AND comment_id = ?
                 """,
-                (ticket.repo.lower(), ticket.ticket_id, comment.id),
+                (ticket.repo.lower(), ticket.ticket_id, grant.key),
             ).fetchone()
             if prior is not None:
                 connection.commit()
@@ -86,11 +80,11 @@ class ResumeMixin:
             if handed_off:
                 completed = _approved_round(self._shipped_approval(ticket), completed)
                 if completed + 1 <= self._effective_cap(ticket, connection):
-                    if not building or ticket.factory.ship != "handoff":
+                    if not grant.building or ticket.factory.ship != "handoff":
                         connection.commit()
                         return None
                     reopen = True
-            if not self._may_lift_cap(comment.author):
+            if grant.released_by == "approver" and not self._may_lift_cap(grant.trigger.author):
                 connection.commit()
                 return "go-not-from-approver", False, False
             cap_extra = int(row["cap_extra"]) + (0 if reopen else 1)
@@ -102,27 +96,31 @@ class ResumeMixin:
                 """,
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchone()
-            verdict = _comment_link(comment) if handed_off else None
+            verdict = _comment_link(grant.trigger) if handed_off else None
             if capping is not None and not handed_off:
                 stop = next((item for item in ticket.comments if item.id == capping["comment_id"]), None)
                 verdict = _comment_link(stop) if stop is not None else f"comment:{capping['comment_id']}"
-                if stop is not None:
+                if stop is not None and grant.released_by == "approver":
                     record_decisions(
                         connection,
                         ticket,
                         stop.id,
-                        [self._stop_decision(ticket, stop, self._capped_stop(ticket, stop), comment, "Another round")],
+                        [
+                            self._stop_decision(
+                                ticket, stop, self._capped_stop(ticket, stop), grant.trigger, "Another round"
+                            )
+                        ],
                     )
             self._enqueue_step(
                 connection,
                 ticket,
-                comment,
+                grant.trigger,
                 JobRequest(
                     repo=ticket.repo,
                     ticket_id=ticket.ticket_id,
                     action="fix",
                     recipient=ticket.factory.builder_harness,
-                    source_comment_id=comment.id,
+                    source_comment_id=grant.trigger.id,
                     timeout_seconds=ticket.job_timeout_minutes * 60,
                     generation=int(row["generation"]),
                     head=ticket.current_head,
@@ -139,7 +137,7 @@ class ResumeMixin:
                         connection=connection,
                     ),
                 ),
-                dedupe_key=f"t1:{scope}:fix:{comment.id}",
+                dedupe_key=f"t1:{scope}:fix:{grant.key}",
             )
             cleared = {"cap_extra": cap_extra} | (
                 {
@@ -178,7 +176,7 @@ class ResumeMixin:
                 INSERT INTO review_events (repo, ticket_id, comment_id, outcome)
                 VALUES (?, ?, ?, 'queued-fix')
                 """,
-                (ticket.repo.lower(), ticket.ticket_id, comment.id),
+                (ticket.repo.lower(), ticket.ticket_id, grant.key),
             )
             connection.commit()
         return "queued-fix", True, reopen
@@ -412,18 +410,9 @@ class ResumeMixin:
                     ticket, comment, "go-not-from-approver", "go-not-from-approver"
                 )
                 return True, "go-not-from-approver"
-            if parked == "repeat":
-                with self._connect() as connection:
-                    connection.execute("BEGIN IMMEDIATE")
-                    connection.execute(
-                        """
-                        UPDATE ticket_state SET cap_extra = cap_extra + 1
-                        WHERE repo = ? AND ticket_id = ? AND review_round >= ?
-                        """,
-                        (ticket.repo.lower(), ticket.ticket_id, self._effective_cap(ticket, connection)),
-                    )
-                    connection.commit()
-            return self._resume_paused(ticket, comment)
+            return self._resume_paused(
+                ticket, comment, grant=RoundGrant.approver(comment) if parked == "repeat" else None
+            )
         with self._connect() as connection:
             resumed = connection.execute(
                 """

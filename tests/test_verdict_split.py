@@ -32,6 +32,7 @@ RULE_MODULE = {
     "_convergence": "repeat",
     "_accepted_revises": "repeat",
     "_repeat_stops": "repeat",
+    "_stop_history": "repeat",
     "_repeat_detail": "repeat",
     "_t3_repeat": "repeat",
     "_stop_question": "repeat",
