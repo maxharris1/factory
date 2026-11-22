@@ -740,17 +740,17 @@ def _ref_status(node: object, linked_merged: bool) -> RefStatus:
     kind = node.get("__typename")
     state = node.get("state")
     if kind == "PullRequest":
+        labels = node.get("labels")
+        nodes = labels.get("nodes") if isinstance(labels, dict) else None
+        abandoned = isinstance(nodes, list) and any(
+            isinstance(label, dict) and label.get("name") == GITHUB_STATE_LABEL_PREFIX + "abandoned"
+            for label in nodes
+        )
         if node.get("merged") is True or state == "MERGED":
-            return RefStatus(Progress.DONE, is_pull=True)
+            return RefStatus(Progress.DONE, is_pull=True, abandoned=abandoned)
         if state == "CLOSED":
-            return RefStatus(Progress.UNFINISHED, is_pull=True, detail="closed without merge")
+            return RefStatus(Progress.UNFINISHED, is_pull=True, detail="closed without merge", abandoned=abandoned)
         if state == "OPEN":
-            labels = node.get("labels")
-            nodes = labels.get("nodes") if isinstance(labels, dict) else None
-            abandoned = isinstance(nodes, list) and any(
-                isinstance(label, dict) and label.get("name") == GITHUB_STATE_LABEL_PREFIX + "abandoned"
-                for label in nodes
-            )
             return RefStatus(Progress.OPEN, is_pull=True, abandoned=abandoned)
     elif kind == "Issue":
         if linked_merged:

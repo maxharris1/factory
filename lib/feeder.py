@@ -181,7 +181,7 @@ from lib.brief_comment import FACTORY_MD_HEADING
 from lib.device_pool import free_slots, placement_blocked, slots_in_use
 from lib.device_sync import Blocked
 from lib.dispatch.bookkeeping import LockLedger, bookkeeping_write, must_write
-from lib.dispatch.constants import TERMINAL_STATES
+from lib.dispatch.constants import FINISHED_STATES, TERMINAL_STATES
 from lib.dispatch.types import BaseCheck, FailedCheck
 from lib.dispatcher import Comment, TicketRef, TrackedTicket, safe_ship_error
 from lib.evidence.ci import CIEvidence, MainRed, ci_evidence, main_red
@@ -798,13 +798,16 @@ def _holding(lines: GateLines, capped: bool) -> GateLines:
 @dataclass(frozen=True)
 class _Holder:
     """A fed ticket's feeder row: its gate lines, PR, whether its PR ended
-    (`released`), its dispatcher ticket and whether it last held as capped."""
+    (`released`), its dispatcher ticket, whether it last held as capped and
+    whether its PR's status is still read (`watch`: unreleased, or fed with a
+    ticket not yet merged or done, so a later abandoned label retires it)."""
 
     lines: GateLines
     pull: Ref | None
     released: bool
     ticket: tuple[str, str] | None
     capped_release: bool
+    watch: bool
 
 
 class _StateWrite(NamedTuple):
@@ -1264,29 +1267,6 @@ class Feeder:
         for repo, issue, _, reason in retired:
             self.log(f"feeder: retired {repo}#{issue}: {reason}")
         return True
-
-    def _retire_labelled(self, refs: Sequence[Ref]) -> None:
-        """A fed or done row whose open PR carries orch:state/abandoned is abandoned."""
-        if not refs:
-            return
-
-        retired: list[Ref] = []
-
-        def work(connection: sqlite3.Connection) -> None:
-            retired.clear()
-            for ref in refs:
-                cursor = connection.execute(
-                    f"UPDATE {FEEDER_TABLE} SET state = 'abandoned', "
-                    "waiting_reason = 'PR labelled orch:state/abandoned', released = 1 "
-                    f"WHERE repo = ? AND issue = ? AND state IN ({','.join('?' * len(FED))})",
-                    (ref.repo, ref.key, *FED),
-                )
-                if cursor.rowcount:
-                    retired.append(ref)
-
-        if bookkeeping_write(self.queue.connect, work, site="_retire_labelled", ledger=self.ledger):
-            for ref in retired:
-                self.log(f"feeder: retired {ref.repo}#{ref.key}: PR labelled orch:state/abandoned")
 
     def _contexts(self) -> tuple[list[tuple[Project, FactoryContext]], int]:
         found: list[tuple[Project, FactoryContext]] = []
@@ -1932,7 +1912,7 @@ class Feeder:
             for ref, row in rows.items()
             if not row.released and (row.lines or ref in conflicts or row.pull in conflicts)
         }
-        watched = {ref: row.pull for ref, row in rows.items() if not row.released and row.pull is not None}
+        watched = {ref: row.pull for ref, row in rows.items() if row.watch and row.pull is not None}
         tracked = {project.repo.lower() for project in self.config.projects}
         blockers = {ref for lines in gated.values() for ref in lines.blocked_by}
         flaggable = {ref: lines for ref, lines in lines_of.items() if ref not in refused}
@@ -1975,16 +1955,16 @@ class Feeder:
         released: list[Ref] = []
         labelled: list[Ref] = []
         for ref, pull in sorted(watched.items()):
-            if _progress(statuses, pull) in (Progress.DONE, Progress.UNFINISHED):
-                released.append(ref)
-            elif (status := statuses.get(pull)) is not None and status.abandoned:
-                released.append(ref)
+            if (status := statuses.get(pull)) is not None and status.abandoned:
                 labelled.append(ref)
+            elif not rows[ref].released and _progress(statuses, pull) in (Progress.DONE, Progress.UNFINISHED):
+                released.append(ref)
+        ended = {*released, *labelled}
         capped = self._capped({row.ticket for row in holders.values() if row.ticket})
         flips: list[tuple[Ref, bool]] = []
         capped_refs: set[Ref] = set()
         for ref, row in sorted(holders.items()):
-            if ref in released:
+            if ref in ended:
                 continue
             pull = row.pull
             is_capped = row.ticket in capped
@@ -1999,8 +1979,7 @@ class Feeder:
                 holds.take(ref, (), GateLines(), "status unreadable")
             elif status.is_pull and status.progress is Progress.OPEN:
                 holds.take(ref, (), GateLines())
-        self._release(released)
-        self._retire_labelled(labelled)
+        self._end_holds(released, labelled)
         self._flip_capped(flips)
         shared = {repo: policy.shared for repo, policy in holds.policies.items()}
         blocks = _dependents_by_blocker(candidates, gated, pull_of)
@@ -2025,14 +2004,24 @@ class Feeder:
         """Tickets fed or feeding."""
         with self.queue.connect() as connection:
             connection.row_factory = sqlite3.Row
+            finished = "0"
+            if _has_table(connection, "ticket_state"):
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(ticket_state)")}
+                if {"repo", "ticket_id", "workflow_state"} <= columns:
+                    finished = f"""EXISTS (
+                        SELECT 1 FROM ticket_state AS ticket
+                        WHERE lower(ticket.repo) = feed.repo AND ticket.ticket_id = feed.ticket_id
+                          AND ticket.workflow_state IN ({",".join(f"'{state}'" for state in FINISHED_STATES)})
+                    )"""
             rows = connection.execute(
                 f"""
                 SELECT repo, issue, tracker, pr_number, ticket_id, touches, conflicts,
-                       released, capped_release
-                FROM {FEEDER_TABLE}
+                       released, capped_release,
+                       NOT released OR (state IN ({",".join("?" * len(FED))}) AND NOT {finished}) AS watch
+                FROM {FEEDER_TABLE} AS feed
                 WHERE state IN ({",".join("?" * len(HOLDING))})
                 """,
-                HOLDING,
+                (*FED, *HOLDING),
             ).fetchall()
         found: dict[Ref, _Holder] = {}
         for row in rows:
@@ -2047,6 +2036,7 @@ class Feeder:
                 released=bool(row["released"]),
                 ticket=(row["repo"], row["ticket_id"]) if row["ticket_id"] else None,
                 capped_release=bool(row["capped_release"]),
+                watch=bool(row["watch"]),
             )
         return found
 
@@ -2111,15 +2101,34 @@ class Feeder:
                 else f"feeder: re-held locks of {name}"
             )
 
-    def _release(self, refs: Sequence[Ref]) -> None:
-        """A holder whose PR merged or closed stops holding, for good."""
-        if not refs:
+    def _end_holds(self, released: Sequence[Ref], labelled: Sequence[Ref]) -> None:
+        """A holder whose PR merged or closed stops holding, for good; a fed or
+        done row whose PR carries orch:state/abandoned is abandoned too."""
+        if not released and not labelled:
             return
-        with self.queue.connect() as connection:
+        retired: list[Ref] = []
+
+        def work(connection: sqlite3.Connection) -> None:
+            retired.clear()
             connection.executemany(
                 f"UPDATE {FEEDER_TABLE} SET released = 1 WHERE repo = ? AND issue = ?",
-                [(ref.repo, ref.key) for ref in refs],
+                [(ref.repo, ref.key) for ref in (*released, *labelled)],
             )
+            for ref in labelled:
+                cursor = connection.execute(
+                    f"UPDATE {FEEDER_TABLE} SET state = 'abandoned', "
+                    "waiting_reason = 'PR labelled orch:state/abandoned' "
+                    f"WHERE repo = ? AND issue = ? AND state IN ({','.join('?' * len(FED))})",
+                    (ref.repo, ref.key, *FED),
+                )
+                if cursor.rowcount:
+                    retired.append(ref)
+
+        if not bookkeeping_write(self.queue.connect, work, site="_end_holds", ledger=self.ledger):
+            self.log("feeder: ended holds not recorded, orch.db is locked; retrying next poll")
+            return
+        for ref in retired:
+            self.log(f"feeder: retired {ref.repo}#{ref.key}: PR labelled orch:state/abandoned")
 
     def _sync_attention(
         self,
