@@ -63,6 +63,17 @@ def flock_on_path(tmp_path_factory, monkeypatch) -> None:
     monkeypatch.setenv("PATH", f"{shim}:{os.environ['PATH']}")
 
 
+@pytest.fixture(autouse=True)
+def no_ambient_git_identity(tmp_path_factory, monkeypatch) -> None:
+    config = tmp_path_factory.mktemp("gitconfig") / "config"
+    config.write_text("[user]\n\tuseConfigOnly = true\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for name in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME",
+                 "GIT_COMMITTER_EMAIL", "EMAIL"):
+        monkeypatch.delenv(name, raising=False)
+
+
 def _this_test_and_its_descendants() -> set[str]:
     parent_of = {}
     for stat in Path("/proc").glob("[0-9]*/stat"):
@@ -1057,17 +1068,96 @@ def age_job(root: Path, job_id: str) -> None:
         age(path, OLD - HOUR)
 
 
-@pytest.mark.parametrize("work", ["uncommitted-edit", "untracked-file", "unpushed-commit"])
-def test_a_dead_owners_worktree_holding_work_keeps_the_folder(tmp_path: Path, work: str) -> None:
-    root = work_root(tmp_path)
-    make_work(stale_worktree(tmp_path, root), work)
+CLONE = Path("clones") / "acme" / "widgets.git"
+
+
+def git_out(cwd: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True,
+                          check=True).stdout.strip()
+
+
+def registered(root: Path) -> list[str]:
+    return [line.removeprefix("worktree ") for line in
+            git_out(root / CLONE, "worktree", "list", "--porcelain").splitlines()
+            if line.startswith("worktree ") and "/jobs/" in line]
+
+
+def pinned(root: Path, ref: str = "refs/orch-kept/j") -> str:
+    return git_out(root / CLONE, "rev-parse", "--verify", ref)
+
+
+def collect_stale(tmp_path: Path, root: Path) -> job_cleanup.Report:
     age_job(root, "j")
-    live_cases_unchanged(root, "j", "worktree-work", [("j", "t1", "done", OLD)], tmp_path)
+    db = tmp_path / "orch.db"
+    [(_, report)] = job_cleanup.run(db if db.exists() else database(tmp_path, DONE),
+                                    machines(tmp_path, "pc"),
+                                    InProcessTransport(root), now=NOW, grace_hours=6,
+                                    dry_run=False)
+    return report
 
 
-def test_work_made_in_a_dead_owners_worktree_after_hold_keeps_it_at_finish(tmp_path: Path) -> None:
+def assert_retired(root: Path, report: job_cleanup.Report) -> None:
+    jobs = root / "jobs"
+    assert set(report.removed) == {"j"} and report.kept == {}
+    assert not (jobs / "j").exists() and not (jobs / "j.json").exists()
+    assert registered(root) == []
+
+
+def test_a_dead_owners_worktree_with_an_unpushed_commit_is_retired_and_pinned(
+    tmp_path: Path
+) -> None:
+    root = work_root(tmp_path)
+    folder = stale_worktree(tmp_path, root)
+    make_work(folder, "unpushed-commit")
+    commit = git_out(folder, "rev-parse", "HEAD")
+
+    assert_retired(root, collect_stale(tmp_path, root))
+
+    assert pinned(root) == commit
+    assert git_out(root / CLONE, "show", f"{commit}:tracked.txt") == "committed, never pushed"
+    assert not (root / "jobs-kept" / "j" / "worktree.patch").exists()
+
+
+def apply_to_a_fresh_worktree(tmp_path: Path, root: Path, start: str, patch: Path) -> Path:
+    fresh = tmp_path / "fresh"
+    git_out(root / CLONE, "worktree", "add", "-q", "--detach", str(fresh), start)
+    git_out(fresh, "apply", "--check", str(patch))
+    git_out(fresh, "apply", str(patch))
+    return fresh
+
+
+UNCOMMITTED = {
+    "tracked-edit": ("tracked.txt", b"valuable uncommitted edit\n"),
+    "untracked-file": ("notes.md", b"valuable new file\n"),
+    "new-file-one-level-down": ("docs/plan.md", b"\x00binary\xffplan\n"),
+}
+
+
+@pytest.mark.parametrize("work", UNCOMMITTED)
+def test_a_dead_owners_uncommitted_work_is_saved_as_a_patch_that_applies(
+    tmp_path: Path, work: str
+) -> None:
+    root = work_root(tmp_path)
+    folder = stale_worktree(tmp_path, root)
+    start = json.loads((root / "jobs" / "j.json").read_text())["start"]
+    name, content = UNCOMMITTED[work]
+    (folder / name).parent.mkdir(parents=True, exist_ok=True)
+    (folder / name).write_bytes(content)
+
+    assert_retired(root, collect_stale(tmp_path, root))
+
+    patch = root / "jobs-kept" / "j" / "worktree.patch"
+    fresh = apply_to_a_fresh_worktree(tmp_path, root, start, patch)
+    assert (fresh / name).read_bytes() == content
+    assert git_out(root / CLONE, "for-each-ref", "refs/orch-kept/") == ""
+
+
+def test_work_made_in_a_dead_owners_worktree_after_hold_is_saved_at_finish(
+    tmp_path: Path
+) -> None:
     root = work_root(tmp_path)
     stale_worktree(tmp_path, root)
+    start = json.loads((root / "jobs" / "j.json").read_text())["start"]
     age_job(root, "j")
     jobs = root / "jobs"
     plan = Plan(frozenset({"j"}), NOW - 6 * HOUR, False, finished_at={"j": OLD})
@@ -1077,24 +1167,308 @@ def test_work_made_in_a_dead_owners_worktree_after_hold_keeps_it_at_finish(tmp_p
     done = job_cleanup.device_step(
         root, Plan(frozenset({"j"}), plan.cutoff, False, job_cleanup.FINISH, {"j": OLD}))
 
-    assert done.removed == {} and done.kept == {"j": "worktree-work"}
-    assert (jobs / "j" / "tracked.txt").read_text() == "valuable uncommitted edit\n"
+    assert set(done.removed) == {"j"} and done.kept == {}
+    assert not (jobs / "j.json").exists() and registered(root) == []
+    fresh = apply_to_a_fresh_worktree(tmp_path, root, start,
+                                      root / "jobs-kept" / "j" / "worktree.patch")
+    assert (fresh / "tracked.txt").read_text() == "valuable uncommitted edit\n"
 
 
-def test_a_dead_owners_clean_worktree_no_longer_keeps_the_folder(tmp_path: Path) -> None:
+def test_a_dead_owners_clean_worktree_is_retired_with_its_record(tmp_path: Path) -> None:
     root = work_root(tmp_path)
-    folder = stale_worktree(tmp_path, root)
-    age_job(root, "j")
-    db = database(tmp_path, [("j", "t1", "done", OLD)])
+    stale_worktree(tmp_path, root)
 
-    [(_, report)] = job_cleanup.run(db, machines(tmp_path, "pc"), InProcessTransport(root),
-                                    now=NOW, grace_hours=6, dry_run=False)
+    assert_retired(root, collect_stale(tmp_path, root))
 
     jobs = root / "jobs"
-    assert set(report.removed) == {"j"} and report.kept == {}
-    assert not folder.exists()
-    assert not (jobs / "j.claimed").exists() and not (jobs / "j.launched").exists()
-    assert (jobs / "j.lock").exists() and (jobs / "j.json").exists()
+    assert not (jobs / "j.claimed").exists()
+    assert not (root / "jobs-kept" / "j" / "worktree.patch").exists()
+    assert git_out(root / CLONE, "for-each-ref", "refs/orch-kept/") == ""
+
+
+def test_a_requeued_job_retired_twice_keeps_both_pins_and_both_patches(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    folder = stale_worktree(tmp_path, root)
+    make_work(folder, "unpushed-commit")
+    (folder / "first.txt").write_text("first run\n")
+    first = git_out(folder, "rev-parse", "HEAD")
+    assert_retired(root, collect_stale(tmp_path, root))
+    again = worktrees.prepare(root, "j", "acme/widgets", git_out(tmp_path / "origin", "rev-parse",
+                              "HEAD"), url_template=str(tmp_path / "origin"), pid=dead_pid())
+    (again.path / "tracked.txt").write_text("second run\n")
+    subprocess.run(["git", "-C", str(again.path), "-c", "user.name=t", "-c",
+                    "user.email=t@example.invalid", "commit", "-qam", "second"], check=True)
+    (again.path / "second.txt").write_text("second run\n")
+    second = git_out(again.path, "rev-parse", "HEAD")
+
+    assert_retired(root, collect_stale(tmp_path, root))
+
+    assert {pinned(root), pinned(root, "refs/orch-kept/j.1")} == {first, second}
+    kept = root / "jobs-kept" / "j"
+    patches = sorted(path.read_text() for path in kept.glob("worktree.patch*"))
+    assert len(patches) == 2
+    assert any("first run" in text for text in patches)
+    assert any("second run" in text for text in patches)
+
+
+def test_a_dead_owners_record_over_a_folder_that_is_not_its_worktree_keeps_it(
+    tmp_path: Path
+) -> None:
+    root = work_root(tmp_path)
+    stale_worktree(tmp_path, root, "other")
+    finished_with_leftovers(root, "j")
+    record = json.loads((root / "jobs" / "other.json").read_text())
+    shutil.rmtree(root / "jobs" / "other")
+    (root / "jobs" / "j.json").write_text(json.dumps({**record, "job_id": "j"}))
+    age(root / "jobs" / "j.json", OLD - HOUR)
+
+    live_cases_unchanged(root, "j", "worktree-record", DONE, tmp_path)
+
+
+def orphan_record(tmp_path: Path, root: Path, owner: int) -> str:
+    folder = stale_worktree(tmp_path, root)
+    make_work(folder, "unpushed-commit")
+    commit = git_out(folder, "rev-parse", "HEAD")
+    shutil.rmtree(folder)
+    record = root / "jobs" / "j.json"
+    record.write_text(json.dumps({**json.loads(record.read_text()), "pid": owner}))
+    (root / "jobs" / "j.claimed").unlink()
+    return commit
+
+
+def test_an_orphan_record_with_a_dead_owner_is_unlinked_and_its_commit_pinned(
+    tmp_path: Path
+) -> None:
+    root = work_root(tmp_path)
+    commit = orphan_record(tmp_path, root, dead_pid())
+
+    report = collect_stale(tmp_path, root)
+
+    assert report.removed == {"j": 0} and report.kept == {}
+    assert not (root / "jobs" / "j.json").exists()
+    assert registered(root) == []
+    assert pinned(root) == commit
+
+
+def test_an_orphan_record_with_a_live_owner_is_kept(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    orphan_record(tmp_path, root, os.getpid())
+    before = (root / "jobs" / "j.json").read_bytes()
+
+    report = collect_stale(tmp_path, root)
+
+    assert report.removed == {} and report.kept == {"j": "worktree-owner-live"}
+    assert (root / "jobs" / "j.json").read_bytes() == before
+    assert len(registered(root)) == 1
+
+
+def test_an_orphan_record_the_plan_does_not_name_is_untouched(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    orphan_record(tmp_path, root, dead_pid())
+    before = (root / "jobs" / "j.json").read_bytes()
+    age_job(root, "j")
+
+    [(_, report)] = job_cleanup.run(database(tmp_path, [("j", "t1", "running", None)]),
+                                    machines(tmp_path, "pc"), InProcessTransport(root),
+                                    now=NOW, grace_hours=6, dry_run=False)
+
+    assert report.removed == {} and "j" not in report.kept
+    assert (root / "jobs" / "j.json").read_bytes() == before
+    assert len(registered(root)) == 1
+
+
+def commit_in(folder: Path, text: str) -> str:
+    (folder / "tracked.txt").write_text(text)
+    subprocess.run(["git", "-C", str(folder), "-c", "user.name=t", "-c",
+                    "user.email=t@example.invalid", "commit", "-qam", text], check=True)
+    return git_out(folder, "rev-parse", "HEAD")
+
+
+def survives_gc(root: Path, commit: str) -> bool:
+    clone = root / CLONE
+    git_out(clone, "reflog", "expire", "--expire=now", "--all")
+    git_out(clone, "gc", "-q", "--prune=now")
+    return subprocess.run(["git", "-C", str(clone), "cat-file", "-e", commit]).returncode == 0
+
+
+def test_every_orphan_in_one_clone_keeps_its_commit_when_one_is_retired(
+    tmp_path: Path
+) -> None:
+    root = work_root(tmp_path)
+    commits = {"j": commit_in(stale_worktree(tmp_path, root), "j never pushed\n")}
+    k = worktrees.prepare(root, "k", "acme/widgets", None,
+                          url_template=str(tmp_path / "origin"), pid=dead_pid())
+    commits["k"] = commit_in(k.path, "k never pushed\n")
+    for job_id in commits:
+        shutil.rmtree(root / "jobs" / job_id)
+        age_job(root, job_id)
+    database(tmp_path, [*DONE, ("k", "t2", "done", OLD)])
+
+    report = collect_stale(tmp_path, root)
+
+    assert set(report.removed) == {"j", "k"} and report.kept == {}
+    assert {job_id: pinned(root, f"refs/orch-kept/{job_id}") for job_id in commits} == commits
+    assert all(survives_gc(root, commit) for commit in commits.values())
+
+
+def test_finishing_another_job_pins_a_missing_worktrees_unpushed_commit(
+    tmp_path: Path
+) -> None:
+    root = work_root(tmp_path)
+    commit = commit_in(stale_worktree(tmp_path, root), "never pushed\n")
+    shutil.rmtree(root / "jobs" / "j")
+    other = worktrees.prepare(root, "k", "acme/widgets", None,
+                              url_template=str(tmp_path / "origin"), pid=dead_pid())
+
+    assert worktrees.finish(other, lambda _: None)
+
+    assert pinned(root) == commit and survives_gc(root, commit)
+
+
+def test_staged_work_that_differs_from_the_working_file_is_saved(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    folder = stale_worktree(tmp_path, root)
+    start = json.loads((root / "jobs" / "j.json").read_text())["start"]
+    (folder / "tracked.txt").write_text("unique staged work\n")
+    git_out(folder, "add", "tracked.txt")
+    (folder / "tracked.txt").write_text("different working edit\n")
+
+    assert_retired(root, collect_stale(tmp_path, root))
+
+    kept = root / "jobs-kept" / "j"
+    staged = apply_to_a_fresh_worktree(tmp_path, root, start, kept / "index.patch")
+    assert (staged / "tracked.txt").read_text() == "unique staged work\n"
+    shutil.rmtree(staged)
+    git_out(root / CLONE, "worktree", "prune")
+    working = apply_to_a_fresh_worktree(tmp_path, root, start, kept / "worktree.patch")
+    assert (working / "tracked.txt").read_text() == "different working edit\n"
+
+
+def hold_then_finish(root: Path, between: Callable[[], None]) -> job_cleanup.Report:
+    age_job(root, "j")
+    plan = Plan(frozenset({"j"}), NOW - 6 * HOUR, False, finished_at={"j": OLD})
+    assert job_cleanup.device_step(root, plan, scan=lambda _: set()).held == ("j",)
+    between()
+    return job_cleanup.device_step(
+        root, Plan(frozenset({"j"}), plan.cutoff, False, job_cleanup.FINISH, {"j": OLD}),
+        scan=lambda _: set())
+
+
+def test_gc_between_hold_and_finish_leaves_the_work_to_be_saved(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    folder = stale_worktree(tmp_path, root)
+    start = json.loads((root / "jobs" / "j.json").read_text())["start"]
+    commit = commit_in(folder, "never pushed\n")
+    (folder / "notes.md").write_text("valuable uncommitted note\n")
+
+    done = hold_then_finish(root, lambda: worktrees.gc(root, older_than_hours=0,
+                                                         log=lambda _: None, now=NOW))
+
+    assert set(done.removed) == {"j"} and done.kept == {}
+    assert pinned(root) == commit
+    fresh = apply_to_a_fresh_worktree(tmp_path, root, start,
+                                      root / "jobs-kept" / "j" / "worktree.patch")
+    assert (fresh / "notes.md").read_text() == "valuable uncommitted note\n"
+
+
+def test_a_set_aside_worktree_whose_record_vanished_is_kept(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    folder = stale_worktree(tmp_path, root)
+    (folder / "notes.md").write_text("valuable uncommitted note\n")
+
+    done = hold_then_finish(root, (root / "jobs" / "j.json").unlink)
+
+    assert done.removed == {} and done.kept["j"].startswith("error:")
+    assert (root / "jobs" / "j" / "notes.md").read_text() == "valuable uncommitted note\n"
+
+
+def test_a_nested_repository_with_its_own_work_keeps_the_folder(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    nested = stale_worktree(tmp_path, root) / "nested"
+    nested.mkdir()
+    git_out(nested, "init", "-q")
+    (nested / "work.txt").write_text("unique nested work\n")
+    git_out(nested, "add", ".")
+    git_out(nested, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+            "commit", "-qm", "nested")
+
+    report = collect_stale(tmp_path, root)
+
+    assert report.removed == {} and report.kept["j"].startswith("error:")
+    assert (root / "jobs" / "j" / "nested" / "work.txt").read_text() == "unique nested work\n"
+    assert git_out(root / "jobs" / "j" / "nested", "log", "--format=%s") == "nested"
+    assert (root / "jobs" / "j.json").exists()
+
+
+def detour(folder: Path, text: str) -> str:
+    start = git_out(folder, "rev-parse", "HEAD")
+    commit = commit_in(folder, text)
+    git_out(folder, "reset", "-q", "--hard", start)
+    return commit
+
+
+def stop_on_merge_conflict(folder: Path) -> str:
+    incoming = detour(folder, "unique incoming merge work\n")
+    commit_in(folder, "ours\n")
+    merge = subprocess.run(["git", "-C", str(folder), "-c", "user.name=t", "-c",
+                            "user.email=t@example.invalid", "merge", "--no-edit", incoming],
+                           capture_output=True, text=True)
+    assert merge.returncode == 1 and "CONFLICT" in merge.stdout, merge.stderr
+    assert git_out(folder, "rev-parse", "MERGE_HEAD") == incoming
+    return incoming
+
+
+def conflicted_merge(folder: Path) -> str:
+    stop_on_merge_conflict(folder)
+    (folder / "tracked.txt").write_text("ours\n")
+    return git_out(folder, "rev-parse", ":3:tracked.txt")
+
+
+def resolved_merge(folder: Path) -> str:
+    incoming = stop_on_merge_conflict(folder)
+    git_out(folder, "add", "tracked.txt")
+    assert git_out(folder, "ls-files", "--unmerged") == ""
+    return incoming
+
+
+def stopped_rebase(folder: Path) -> str:
+    first = commit_in(folder, "first\n")
+    later = commit_in(folder, "unique later work\n")
+    subprocess.run(["git", "-C", str(folder), "-c", "user.name=t",
+                    "-c", "user.email=t@example.invalid", "rebase", "-q",
+                    "--exec", "false", "--force-rebase", f"{first}~1"], capture_output=True)
+    assert (folder / "tracked.txt").read_text() == "first\n"
+    return later
+
+
+@pytest.mark.parametrize("state", [conflicted_merge, resolved_merge, stopped_rebase])
+def test_index_or_operation_state_no_patch_holds_keeps_the_folder(
+        tmp_path: Path, state) -> None:
+    root = work_root(tmp_path)
+    folder = stale_worktree(tmp_path, root)
+    work = state(folder)
+
+    report = collect_stale(tmp_path, root)
+
+    assert report.removed == {} and report.kept["j"].startswith("error:")
+    assert (root / "jobs" / "j.json").exists()
+    assert git_out(root / "jobs" / "j", "cat-file", "-t", work) in ("blob", "commit")
+
+
+def test_gc_keeps_a_clean_worktree_whose_rebase_holds_the_only_copy(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    folder = stale_worktree(tmp_path, root)
+    start = git_out(folder, "rev-parse", "HEAD")
+    later = commit_in(folder, "unique later work\n")
+    git_out(folder, "-c", "sequence.editor=printf 'break\\n' >", "rebase", "-q", "-i", start)
+    assert git_out(folder, "rev-parse", "HEAD") == start
+    assert git_out(folder, "status", "--porcelain", "--untracked-files=all") == ""
+    logged: list[str] = []
+
+    worktrees.gc(root, older_than_hours=0, log=logged.append, now=NOW)
+
+    assert folder.exists(), logged
+    assert git_out(folder, "cat-file", "-t", later) == "commit"
 
 
 def test_a_held_lock_keeps_the_folder_without_waiting(tmp_path: Path) -> None:
@@ -1424,11 +1798,6 @@ def worktree_owner_live(root, monkeypatch, stack):
     return DONE, job_cleanup.jobs_held_open
 
 
-def worktree_work(root, monkeypatch, stack):
-    (root / "jobs" / "j.json").write_text(json.dumps({"job_id": "j", "pid": dead_pid()}))
-    return DONE, job_cleanup.jobs_held_open
-
-
 def worker_exits(code: int):
     def arrange(root, monkeypatch, stack):
         monkeypatch.setattr(job_cleanup.remote, "worker_check_script",
@@ -1456,7 +1825,6 @@ PART_1_GUARDS = {
     "claimed-since": claimed_since,
     "worktree-record": worktree_record,
     "worktree-owner-live": worktree_owner_live,
-    "worktree-work": worktree_work,
     "worker-live": worker_exits(1),
     "worker-unsure": worker_exits(3),
     "held-open": held_open,
@@ -1621,6 +1989,31 @@ def test_a_crash_after_the_commit_point_is_finished_by_the_next_pass(
     record = json.loads((root / "jobs-kept" / "j" / job_leftovers.KEPT_JSON).read_text())
     assert record["archived"] == sorted(archived(reference))
     assert record["id"] == "j" and record["finished_at"] == OLD
+
+
+@pytest.mark.parametrize("point", ("after the rename", "after the archive",
+                                   "after the folder is deleted"))
+def test_a_crash_after_the_commit_point_with_a_record_is_finished_by_the_next_pass(
+    tmp_path: Path, monkeypatch, point: str
+) -> None:
+    root = work_root(tmp_path)
+    folder = stale_worktree(tmp_path, root)
+    make_work(folder, "unpushed-commit")
+    commit = git_out(folder, "rev-parse", "HEAD")
+    (folder / "tracked.txt").write_text("uncommitted on top\n")
+    age_job(root, "j")
+    jobs = root / "jobs"
+    crash_while_finishing(root, point, monkeypatch)
+    assert (jobs / "j.json").exists()
+
+    report = collect(root, DONE)
+
+    assert set(report.removed) == {"j"} and report.kept == {}
+    assert [path.name for path in jobs.iterdir()] == ["j.lock"]
+    assert registered(root) == [] and pinned(root) == commit
+    fresh = apply_to_a_fresh_worktree(tmp_path, root, commit,
+                                      root / "jobs-kept" / "j" / "worktree.patch")
+    assert (fresh / "tracked.txt").read_text() == "uncommitted on top\n"
 
 
 @pytest.mark.parametrize("since", ["requeued", "claimed after the host read"])

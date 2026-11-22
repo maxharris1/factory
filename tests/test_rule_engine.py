@@ -10,8 +10,11 @@ import pytest
 from lib import handoff
 from lib.handoff import parse_comment
 from lib.rule_engine import (
+    Check,
     Escalate,
     Facts,
+    FirstCapGrant,
+    Grant,
     HeadProbe,
     Land,
     MovedHeadFacts,
@@ -19,6 +22,7 @@ from lib.rule_engine import (
     Ruling,
     StopFacts,
     Wait,
+    comment_id,
     decide,
     finding_id,
     git_path,
@@ -29,7 +33,7 @@ from lib.rule_engine import (
 STOP = StopFacts(
     site="cap",
     stop="capped",
-    verdict_id=4242,
+    verdict_id=comment_id("4242"),
     finding_ids=(finding_id("f-1"), finding_id("ac-2")),
     repeat_stops=0,
     prior_grants=frozenset(),
@@ -73,7 +77,7 @@ class _Loose:
 
 @pytest.mark.parametrize("facts", [STOP, MOVED])
 def test_an_empty_registry_escalates_no_rule(facts: Facts) -> None:
-    assert decide(facts) == Ruling("no-rule", Escalate("no-rule"), ())
+    assert decide(facts, ()) == Ruling("no-rule", Escalate("no-rule"), ())
 
 
 def test_the_first_applying_rule_rules_and_a_rule_that_does_not_apply_is_skipped() -> None:
@@ -86,6 +90,9 @@ def test_the_first_applying_rule_rules_and_a_rule_that_does_not_apply_is_skipped
     [
         (finding_id, "merge now"),
         (finding_id, "f-0"),
+        (comment_id, ""),
+        (comment_id, "12 34"),
+        (comment_id, "merge now"),
         (sha, "HEAD"),
         (sha, "abc12"),
         (git_path, "../x"),
@@ -106,6 +113,8 @@ def test_a_constructor_refuses_text_that_is_not_its_kind(parse: Any, text: str) 
     [
         (finding_id, "ac-1"),
         (finding_id, "f-12"),
+        (comment_id, "7083338990"),
+        (comment_id, "revise-3"),
         (sha, "abc1234"),
         (sha, "0" * 40),
         (git_path, "lib/rule_engine.py"),
@@ -166,3 +175,54 @@ def test_go_header_escalates_a_header_that_parses_back_to_other_fields(monkeypat
         handoff, "format_header", lambda fields: "<!-- orch:v1 kind=go from=orch round=4/3 state=review -->"
     )
     assert go_header(4, 3) == Escalate("header-invalid")
+
+
+def test_a_first_cap_on_fresh_findings_grants_one_round_with_the_go_header() -> None:
+    assert decide(STOP) == Ruling(
+        "first-cap-grant",
+        Grant("<!-- orch:v1 kind=go from=orch round=4/4 state=fixing -->"),
+        (
+            Check("stop", True, "capped"),
+            Check("finding-ids", True, 2),
+            Check("stuck", True, 0),
+            Check("earlier-round", True, None),
+            Check("header", True, "<!-- orch:v1 kind=go from=orch round=4/4 state=fixing -->"),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "change, failed",
+    [
+        ({"stop": "stalled"}, Check("stop", False, "stalled")),
+        ({"finding_ids": ()}, Check("finding-ids", False, 0)),
+        ({"stuck": True}, Check("stuck", False, 1)),
+        ({"prior_grants": frozenset({finding_id("ac-2"), finding_id("f-9")})}, Check("earlier-round", False, "ac-2")),
+    ],
+)
+def test_a_cap_that_fails_one_check_escalates_on_that_check(change: dict, failed: Check) -> None:
+    ruling = decide(dataclasses.replace(STOP, **change))
+    assert ruling.rule == "first-cap-grant"
+    assert ruling.outcome == Escalate(failed.name)
+    assert failed in ruling.checks
+    assert [check.name for check in ruling.checks if check.passed is False] == [failed.name]
+
+
+def test_a_prior_grant_on_another_finding_still_grants() -> None:
+    ruling = decide(dataclasses.replace(STOP, prior_grants=frozenset({finding_id("f-2")})))
+    assert isinstance(ruling.outcome, Grant)
+
+
+def test_a_cap_whose_header_does_not_round_trip_escalates_header_invalid(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        handoff, "format_header", lambda fields: "<!-- orch:v1 kind=go from=orch round=4/4 state=review -->"
+    )
+    ruling = decide(STOP)
+    assert ruling.outcome == Escalate("header-invalid")
+    assert ruling.checks[-1] == Check("header", False, None)
+
+
+@pytest.mark.parametrize("facts", [dataclasses.replace(STOP, site="repeat", stop="repeat", repeat_stops=1), MOVED])
+def test_first_cap_grant_rules_only_on_a_cap_stop(facts: Facts) -> None:
+    assert not FirstCapGrant().applies(facts)
+    assert decide(facts) == Ruling("no-rule", Escalate("no-rule"), ())

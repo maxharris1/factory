@@ -53,6 +53,10 @@ convergence. convergence lets a REVISE that cuts the open blocking findings
 to a new low, or a first flat round, go on past the cap;
 review.auto_extra_rounds is not read under it.
 
+rule_engine is optional (issue #1320): on or off, default off. on lets the
+rule engine rule at the cap (issue #1308), and at the repeat and moved-head
+sites once later parts read it. It is a trust key, so a PR that flips it is held.
+
 review.verify_unavailable is optional (issue #596): a boolean, default
 false. True says the review.verify skill may not be on the reviewed base
 yet: the review brief tells the reviewer to list it as not run there
@@ -90,13 +94,22 @@ a check run starts after its head commit's committer date (issue #1286).
 So does a green from runs that started before the poller first saw a
 glob newly added to required_checks, or saw required_checks switched back
 to none, the all-checks gate. A commit status counts by when it was
-posted. With force_rerun_paths given, branches may be omitted, and every
-base is a CI base.
+posted. A ship or merge read also holds a green head that lacks the PR
+base's newest commit touching these paths until the head contains that
+commit (issue #1287). The factory asks for one
+fresh run: a full rerun, or for a base change, the merge queue's update
+from base. With force_rerun_paths given,
+branches may be omitted, and every base is a CI base.
 
 shared_paths is optional (issue #261): a list of repo-relative paths or
 globs, a trailing / naming a directory. A Touches: path that matches never
 causes a feeder collision wait, and in a matching file a conflict hunk kept
 as both sides still counts as a trivial update. Absent, it is empty.
+
+human_reviewers is optional (issue #1198): a list of GitHub logins. On a
+ship: handoff ticket handed off after an APPROVE, a CHANGES_REQUESTED PR
+review from one of them, or from an approver, reopens the ticket as an
+approver's go does. Absent, it is empty. It is a trust field.
 
 feeder is optional (issue #269): a mapping with max_holders_per_path (an
 integer of at least 1, default 2) and exclusive_paths (a list like
@@ -188,10 +201,12 @@ _TOP_KEYS = {
     "hold",
     "finish_line",
     "shared_paths",
+    "human_reviewers",
     "feeder",
     "plan",
     "ci",
     "qa",
+    "rule_engine",
 }
 _CI_KEYS = {"branches", "local_checks", "required_checks", "force_rerun_paths"}
 DEFAULT_CI_FORCE_RERUN_PATHS = (".github/workflows/**",)
@@ -200,7 +215,7 @@ DEFAULT_PLAN_MAX_LINES = 400
 PLAN_ESTIMATE_FACTOR = Fraction(27, 20)
 DEFAULT_PLAN_MAX_CRITERIA = 5
 _HOLD_KEYS = {"label", "approver", "paths"}
-TRUST_KEYS = ("hold", "ship", "finish_line", "builder", "reviewer", "ci", "qa")
+TRUST_KEYS = ("hold", "ship", "finish_line", "builder", "reviewer", "ci", "qa", "rule_engine", "human_reviewers")
 _FEEDER_KEYS = {"max_holders_per_path", "exclusive_paths", "required_checks"}
 DEFAULT_MAX_HOLDERS_PER_PATH = 2
 QA_RUNNERS = ("claude-cloud", "cursor-cloud")
@@ -308,6 +323,7 @@ class FactoryConfig:
     # code gets the same default as one parsed from factory.md.
     finish_line: str | None = None
     shared_paths: tuple[str, ...] = ()
+    human_reviewers: tuple[str, ...] = ()
     followup_from_round: int | None = None
     auto_extra_rounds: int = 0
     start_before_ci: bool = False
@@ -325,6 +341,7 @@ class FactoryConfig:
     ci_required_checks: tuple[str, ...] = ()
     ci_force_rerun_paths: tuple[str, ...] = DEFAULT_CI_FORCE_RERUN_PATHS
     qa: QaConfig | None = None
+    rule_engine: str = "off"
 
     def __post_init__(self) -> None:
         if self.finish_line is None:
@@ -445,6 +462,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
     hold = _hold(data, findings, unknown)
     finish_line = _finish_line(data, ship, findings)
     shared_paths = _path_list(data.get("shared_paths"), "shared_paths", findings)
+    human_reviewers = _human_reviewers(data.get("human_reviewers"), findings)
     max_holders_per_path, exclusive_paths, required_checks = _feeder(data, findings, unknown)
     plan_max_lines, plan_max_criteria = _plan(data, findings, unknown)
     ci_branches, ci_local_checks, ci_required_checks, ci_force_rerun_paths = _ci(
@@ -452,6 +470,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
     )
     qa, qa_findings = _qa(data, strict)
     findings.extend(qa_findings)
+    rule_engine = _rule_engine(data, findings, unknown)
 
     if builder_harness is not None and reviewer_harness is not None:
         findings.extend(
@@ -517,6 +536,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
         hold=hold,
         finish_line=finish_line,
         shared_paths=shared_paths,
+        human_reviewers=human_reviewers,
         followup_from_round=followup_from_round,
         auto_extra_rounds=auto_extra_rounds,
         start_before_ci=start_before_ci,
@@ -534,6 +554,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
         ci_required_checks=ci_required_checks,
         ci_force_rerun_paths=ci_force_rerun_paths,
         qa=qa,
+        rule_engine=rule_engine,
     )
     return config, findings
 
@@ -712,6 +733,17 @@ def _stop_on(review: dict, findings: list[Finding], unknown: str) -> str:
     if not isinstance(value, str) or value not in STOP_ON:
         findings.append(Finding(unknown, "review.stop_on must be rounds or convergence"))
         return "rounds"
+    return value
+
+
+def _rule_engine(data: dict, findings: list[Finding], unknown: str) -> str:
+    value = data.get("rule_engine", "off")
+    # YAML 1.1 loads bare on/off as booleans, and True == 1, so test the type.
+    if type(value) is bool:
+        return "on" if value else "off"
+    if value not in ("on", "off"):
+        findings.append(Finding(unknown, "rule_engine must be on or off"))
+        return "off"
     return value
 
 
@@ -1272,6 +1304,25 @@ def _path_list(value: object, name: str, findings: list[Finding]) -> tuple[str, 
                 )
             )
     return tuple(paths)
+
+
+def _human_reviewers(value: object, findings: list[Finding]) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        findings.append(Finding("error", "human_reviewers must be a list"))
+        return ()
+    logins: list[str] = []
+    seen: set[str] = set()
+    for index, item in enumerate(value):
+        if not isinstance(item, str) or _LOGIN.fullmatch(item) is None:
+            findings.append(Finding("error", f"human_reviewers[{index}] must be a GitHub login"))
+        elif item.casefold() in seen:
+            findings.append(Finding("error", f"human_reviewers[{index}] is listed twice"))
+        else:
+            seen.add(item.casefold())
+            logins.append(item)
+    return tuple(logins)
 
 
 def _is_glob(value: object) -> bool:

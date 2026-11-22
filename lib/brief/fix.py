@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import re
+from typing import NamedTuple
+
 from lib.brief.build import base_step, builder_notes, proof_lines
 from lib.brief.common import GH, TEST_SCOPE, Lead, code_span, comment_url, detail_of, evidence_part, fenced, pr_ref
 from lib.queue import Job
+
+_REVIEW_ID = re.compile(r"#pullrequestreview-(\d+)$")
 
 
 def lead(job: Job, facts: dict) -> Lead:
@@ -11,8 +16,10 @@ def lead(job: Job, facts: dict) -> Lead:
     verdict = _revise_verdict_url(detail, facts)
     if _qa_only(detail):
         goal, lines, proof = _qa_fix(qa, facts)
+    elif detail.get("kind") == "reopen" and detail.get("source") == "review":
+        goal, lines, proof = _reopen_fix(facts, _review_ask(facts, verdict))
     elif detail.get("kind") == "reopen":
-        goal, lines, proof = _reopen_fix(facts, verdict or "the approver's go")
+        goal, lines, proof = _reopen_fix(facts, _go_ask(verdict or "the approver's go"))
     elif verdict:
         goal, lines, proof = _review_fix(detail, facts, verdict)
     else:
@@ -88,25 +95,55 @@ def _review_fix(detail: dict[str, object], facts: dict, verdict: str) -> tuple[s
     )
 
 
-def _reopen_fix(facts: dict, go: str) -> tuple[str, list[str], str]:
+class _Ask(NamedTuple):
+    goal: str
+    why: str
+    change: str
+    proof: str
+
+
+def _go_ask(go: str) -> _Ask:
+    return _Ask(
+        f"the approver's go at {go}",
+        "The approver's go reopens it",
+        "3. Make the changes the go asks for.",
+        "each change the go asked for",
+    )
+
+
+def _review_ask(facts: dict, review: str | None) -> _Ask:
+    found = _REVIEW_ID.search(review or "")
+    listing = (
+        f" `{GH} api repos/{facts['repo']}/pulls/{facts['pr']}/reviews/{found.group(1)}/comments` lists them."
+        if found and facts["repo"] and facts["pr"]
+        else ""
+    )
+    return _Ask(
+        f"the CHANGES_REQUESTED review at {review}" if review else "the CHANGES_REQUESTED review",
+        "A trusted reviewer's CHANGES_REQUESTED review reopens it",
+        f"3. Make the changes the review asks for, including its inline comments.{listing}",
+        "each change the review asked for",
+    )
+
+
+def _reopen_fix(facts: dict, ask: _Ask) -> tuple[str, list[str], str]:
     base = facts["base"] or "<base branch>"
     return (
-        f"Make the changes the approver's go at {go} asks for on {pr_ref(facts)}, "
-        f"after bringing `origin/{base}` in.",
+        f"Make the changes {ask.goal} asks for on {pr_ref(facts)}, after bringing `origin/{base}` in.",
         [
-            "The PR was handed off after an APPROVE. The approver's go reopens it for one more review round. "
+            f"The PR was handed off after an APPROVE. {ask.why} for one more review round. "
             "Follow the router in Skills below.",
             _checkout(facts),
             f"2. `git fetch origin {base}`. If `git merge-base --is-ancestor origin/{base} HEAD` succeeds, the "
             f"base is already in: skip the merge. Otherwise `git merge origin/{base}`: a merge commit only, "
             "no rebase, no force-push. Resolve any conflict without changing behavior.",
-            "3. Make the changes the go asks for. Write tests first, as the `tdd` skill says.",
+            f"{ask.change} Write tests first, as the `tdd` skill says.",
             f"4. Run only the new tests and the tests for the files you touched, plus a short smoke set, {TEST_SCOPE} "
             "Then run the router's \"Before ready\" steps.",
             "5. Push, then post the ready handoff below with the head you pushed.",
         ],
         f"The ready names the pushed head, says whether the merge of `origin/{base}` ran or was skipped, "
-        "and gives each change the go asked for with the test that covers it.",
+        f"and gives {ask.proof} with the test that covers it.",
     )
 
 

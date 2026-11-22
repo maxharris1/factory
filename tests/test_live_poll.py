@@ -135,6 +135,8 @@ class FakeGh:
             value = self.issues
         elif endpoint.endswith("/files?per_page=100"):
             value = self.files
+        elif "/commits?sha=" in endpoint:
+            value = []
         elif endpoint.endswith("/labels?per_page=100"):
             number = int(endpoint.split("/")[-2])
             value = next(
@@ -145,6 +147,8 @@ class FakeGh:
             value = self.label_events
         elif endpoint.endswith("/pulls"):
             value = self.branch_pulls
+        elif endpoint.endswith("/reviews?per_page=100"):
+            value = []
         elif "/pulls/" in endpoint:
             value = {**self.pull, "head": {"sha": self.head, **self.pull.get("head", {})}}
         elif endpoint.endswith("/comments?per_page=100"):

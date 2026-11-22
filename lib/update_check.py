@@ -24,6 +24,7 @@ from pathlib import Path
 
 from lib.feeder_gates import path_matches
 from lib.hold import MergeStep, MergeUpdate
+from lib.secret_scan import ScanResult, scan_added
 
 MARKER_SIZE = 61
 _MARKER_RUN = re.compile(rb"([<|=>])\1*")
@@ -31,6 +32,15 @@ _LINE = re.compile(rb"[^\n]*\n|[^\n]+")
 TIMEOUT_SECONDS = 120.0
 _REGULAR_MODES = ("100644", "100755")
 _TREE_ID = re.compile(rb"[0-9a-f]{40}|[0-9a-f]{64}")
+_PLAIN_DIFF = (
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--ignore-submodules=none",
+    "--submodule=short",
+    "--no-relative",
+    "--no-renames",
+)
 
 
 @dataclass(frozen=True)
@@ -113,13 +123,47 @@ def merge_update(clone: Path, approved_head: str, head: str, base_ref: str) -> M
     )
 
 
+@dataclass(frozen=True)
+class MovedHead:
+    parents: tuple[str, ...]
+    second_parent_on_base: bool
+    remerge_empty: bool
+    paths: frozenset[str]
+    scan: ScanResult
+
+
+def moved_head_probe(clone: Path, base_ref: str, ok: str, head: str) -> MovedHead:
+    """What a head that moved past a hold ok at `ok` is (#1310): its parents,
+    whether its second parent is on base_ref, whether git's own remerge of
+    those parents gives exactly head, every path changed since ok, and the
+    secrets scan of the lines added since ok. Raises ValueError (or an
+    OSError or SubprocessError) when the clone cannot answer."""
+    old = _resolve(clone, ok)
+    new = _resolve(clone, head)
+    _resolve(clone, base_ref)
+    _commit, *parents = _output(clone, "rev-list", "--parents", "-n1", new).decode("ascii").split()
+    remerge = _output(clone, "show", "--remerge-diff", "--format=", *_PLAIN_DIFF, new)
+    listed = _output(clone, "diff", "--name-only", "-z", *_PLAIN_DIFF, old, new)
+    added = _output(
+        clone, "diff", *_PLAIN_DIFF, "--text", "--unified=0",
+        "--src-prefix=a/", "--dst-prefix=b/", old, new,
+    )
+    return MovedHead(
+        tuple(parents),
+        len(parents) >= 2 and _on_base(clone, parents[1], base_ref),
+        not remerge,
+        frozenset(path.decode("utf-8") for path in listed.split(b"\0") if path),
+        scan_added(added),
+    )
+
+
 def head_diff(clone: Path, since: str | None, head: str, base_ref: str) -> HeadDiff:
     """What QA scope needs to know about head (#763): the stable patch id of
     head's own change from base_ref, and each path changed since `since`
     (head's fork from base_ref when None) with its added plus deleted lines.
     Raises ValueError when the clone cannot list the paths."""
     fork = _merge_base(clone, head, base_ref)
-    listed = _output(clone, "diff", "--numstat", "--no-renames", "-z", since or fork, head)
+    listed = _output(clone, "diff", "--numstat", "-z", *_PLAIN_DIFF, since or fork, head)
     files = []
     for record in listed.split(b"\0"):
         if record:

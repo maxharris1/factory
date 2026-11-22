@@ -3,10 +3,16 @@
 A slot is one row in `device_slots`, in the dispatcher database next to
 `jobs`. `claim` moves the first queued job for a harness, in the queue's
 claim order (lib/queue.py claim_order), to running
-and holds a slot for it on the least-loaded device (lowest utilization,
-slots held over slot_max; a tie goes to a remote before the local box,
-remotes in machines.yml order; issue #223) that is schedulable, not
-draining, and lists that harness (issue #85). A job of a project pinned
+and holds a slot for it on an (account, device) pair (#1315). Devices rank
+by utilization (slots held over slot_max; a tie goes to a remote before the
+local box, remotes in machines.yml order; issue #223) among those that are
+schedulable, not draining, and list that harness (issue #85). Of the
+accounts signed in for the harness on a free device that are neither
+usage-limited, at max_jobs across every device nor under FLOOR fresh
+headroom, the one with the highest score wins (then fewer running jobs, its
+best device, its id) and takes its best-ranked device. The score is fresh
+headroom (UNREAD_HEADROOM with none) less PENDING_CHARGE per job placed
+since the account's newest reading (#1316). A job of a project pinned
 to devices (orch.yml projects[].devices, #1172) takes only a listed device;
 with none free it stays queued and the next job in claim order is tried.
 Both writes happen
@@ -72,14 +78,16 @@ This module starts nothing and contacts no device.
 
 from __future__ import annotations
 
+import math
 import sqlite3
+from collections import Counter
 from collections.abc import Callable, Collection, Mapping
 import json
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
 
-from lib import device_sync, lane_limit, live_settings
+from lib import account_doctor, device_sync, lane_limit, live_settings, usage_readings
 from lib.device_sync import NOTHING_BLOCKED, Blocked
 from lib.machines_yml import (
     Device,
@@ -200,6 +208,131 @@ def run_account(config: MachinesConfig, placement: Placement) -> tuple[str, str 
     return account, config.account_home(placement.device, placement.harness, account)
 
 
+FLOOR = 0.05
+PENDING_CHARGE = 0.02
+UNREAD_HEADROOM = 0.5
+
+
+@dataclass(frozen=True)
+class AccountLoads:
+    running: Mapping[str, int]
+    held: frozenset[str]
+    closed: frozenset[str]
+    score: Mapping[str, float]
+    signed_in: frozenset[tuple[str, str]] | None
+    signed_out: frozenset[tuple[str, str]]
+
+    def taking_work(self, config: MachinesConfig, device: str, harness: str) -> list[str]:
+        own = config.device(device)
+        login = None if own is None else own.account_for(harness)
+        return [
+            account
+            for account in config.accounts_on(device, harness)
+            if account not in self.closed
+            and (account, device) not in self.signed_out
+            and (account == login or self.signed_in is None or (account, device) in self.signed_in)
+        ]
+
+    def holds(self, account: str, device: str) -> bool:
+        return account in self.held or (account, device) in self.signed_out
+
+    def score_of(self, account: str) -> float:
+        return self.score.get(account, UNREAD_HEADROOM)
+
+
+def account_loads(
+    connection: sqlite3.Connection, config: MachinesConfig | None, now: float
+) -> AccountLoads:
+    placed: list[tuple[str, float]] = []
+    if _has_table(connection, SLOTS_TABLE):
+        for device_name, harness, account, placed_at in connection.execute(
+            f"SELECT device, harness, account, placed_at FROM {SLOTS_TABLE}"
+        ):
+            if account is None:
+                device = None if config is None else config.device(str(device_name))
+                account = None if device is None else device.account_for(str(harness))
+            if account is not None:
+                placed.append((str(account), float(placed_at)))
+    running = Counter(account for account, _ in placed)
+    newest = usage_readings.newest_by_account(usage_readings.stored(connection) or [])
+    read_at = {account: max(r.observed_at for r in windows.values()) for account, windows in newest.items()}
+    pending = Counter(account for account, at in placed if at > read_at.get(account, -math.inf))
+    fresh = {account: usage_readings.headroom(list(windows.values()), now) for account, windows in newest.items()}
+    score = {
+        account: round(
+            (UNREAD_HEADROOM if fresh.get(account) is None else fresh[account])
+            - PENDING_CHARGE * pending[account],
+            6,
+        )
+        for account in running.keys() | fresh.keys()
+    }
+    held = set(lane_limit.account_limits(connection, now))
+    held.update(account for account, left in fresh.items() if left is not None and left < FLOOR)
+    closed = set(held)
+    for item in config.accounts if config is not None else ():
+        if item.max_jobs is not None and running.get(item.id, 0) >= item.max_jobs:
+            closed.add(item.id)
+    signed_in = None
+    if _has_table(connection, account_doctor.TABLE):
+        signed_in = frozenset(
+            (str(account), str(device))
+            for account, device in connection.execute(
+                f"SELECT account, device FROM {account_doctor.TABLE} WHERE status = 'ok'"
+            )
+        )
+    return AccountLoads(running, frozenset(held), frozenset(closed), score, signed_in, account_doctor.held(connection))
+
+
+def _ranked_free(
+    config: MachinesConfig,
+    harness: str,
+    used: Mapping[str, int],
+    blocked: Blocked,
+    avoid: Collection[str],
+    allowed: Collection[str] | None,
+) -> list[tuple[tuple[bool, Fraction, bool, int], Device]]:
+    candidates = []
+    for index, device in enumerate(config.devices):
+        if not _places(device, harness, blocked, allowed):
+            continue
+        assert device.slot_max is not None
+        held = used.get(device.name, 0)
+        if held < device.slot_max:
+            rank = (device.name in avoid, Fraction(held, device.slot_max), device.local, index)
+            candidates.append((rank, device))
+    return sorted(candidates, key=lambda candidate: candidate[0])
+
+
+def choose_pair(
+    config: MachinesConfig,
+    harness: str,
+    used: Mapping[str, int],
+    blocked: Blocked,
+    loads: AccountLoads,
+    avoid: Collection[str] = frozenset(),
+    allowed: Collection[str] | None = None,
+) -> tuple[str, Device] | None:
+    """The account to run the next job and its best free device, or None (#1315).
+
+    The avoid flag leads, so a device in `avoid` is used only when no other
+    pair exists (#218).
+    """
+    best: dict[str, tuple[tuple[bool, Fraction, bool, int], Device]] = {}
+    for rank, device in _ranked_free(config, harness, used, blocked, avoid, allowed):
+        for account in loads.taking_work(config, device.name, harness):
+            best.setdefault(account, (rank, device))
+    if not best:
+        return None
+
+    def order(account: str) -> tuple:
+        rank, _ = best[account]
+        avoided = rank[0]
+        return avoided, -loads.score_of(account), loads.running.get(account, 0), rank, account
+
+    account = min(best, key=order)
+    return account, best[account][1]
+
+
 def choose_device(
     config: MachinesConfig,
     harness: str,
@@ -217,18 +350,8 @@ def choose_device(
     in `avoid` is chosen only when no other has a free slot (#218). With
     `allowed`, no device outside it is chosen.
     """
-    candidates = []
-    for index, device in enumerate(config.devices):
-        if not _places(device, harness, blocked, allowed):
-            continue
-        assert device.slot_max is not None
-        held = used.get(device.name, 0)
-        if held < device.slot_max:
-            rank = (device.name in avoid, Fraction(held, device.slot_max), device.local, index)
-            candidates.append((rank, device))
-    if not candidates:
-        return None
-    return min(candidates, key=lambda candidate: candidate[0])[1]
+    ranked = _ranked_free(config, harness, used, blocked, avoid, allowed)
+    return ranked[0][1] if ranked else None
 
 
 def free_slots(
@@ -352,7 +475,8 @@ class DevicePool:
         Runs inside the caller's open BEGIN IMMEDIATE transaction, the one
         that moves the job to running. True for an unpinned project, which
         holds no slot; False when no listed device has a free slot, and for
-        every project while the pins are unknown (None).
+        every project while the pins are unknown (None). QA runs under no
+        harness account, so a limited or capped account never closes its slot.
         """
         pins = self.pins()
         if pins is None:
@@ -362,7 +486,7 @@ class DevicePool:
             return True
         now = self.queue.now()
         config, _ = self._placement(connection)
-        blocked = placement_blocked(connection, now, config, self.head())
+        blocked = device_blocked(connection, now, config, self.head())
         used = _used(connection, config)
         for harness in sorted(HARNESSES):
             device = choose_device(config, harness, used, blocked, allowed=allowed)
@@ -424,7 +548,8 @@ class DevicePool:
             )
             blocked = placement_blocked(connection, now, config, self.head())
             used = _used(connection, config)
-            if choose_device(config, harness, used, blocked) is None:
+            loads = account_loads(connection, config, now)
+            if choose_pair(config, harness, used, blocked, loads) is None:
                 connection.commit()
                 return None
             for row in claim_order(
@@ -433,18 +558,19 @@ class DevicePool:
                 if str(row["id"]) in excluded:
                     continue
                 allowed = pins.get(str(row["repo"]).lower())
-                device = choose_device(config, harness, used, blocked, allowed=allowed)
-                if device is not None:
+                pair = choose_pair(config, harness, used, blocked, loads, allowed=allowed)
+                if pair is not None:
                     break
             else:
                 connection.commit()
                 return None
             dropped = _lost_on(connection, str(row["id"]))
-            if dropped == device.name:
-                device = choose_device(
-                    config, harness, used, blocked, avoid={dropped}, allowed=allowed
+            if dropped == pair[1].name:
+                pair = choose_pair(
+                    config, harness, used, blocked, loads, avoid={dropped}, allowed=allowed
                 )
-                assert device is not None
+                assert pair is not None
+            account, device = pair
             changed = connection.execute(
                 """
                 UPDATE jobs
@@ -456,7 +582,6 @@ class DevicePool:
             if changed != 1:
                 raise QueueError(f"job {row['id']} changed during claim")
             os_user = device.harnesses[harness]
-            account = device.account_for(harness)
             claimer_pid, claimer_start = autostart if autostart is not None else (None, None)
             connection.execute(
                 f"""
@@ -1062,27 +1187,37 @@ def orphan_slot(connection: sqlite3.Connection, job_id: str, now: float) -> None
     connection.execute(f"DELETE FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,))
 
 
-def placement_blocked(
+def device_blocked(
     connection: sqlite3.Connection,
     now: float,
     config: MachinesConfig | None,
     head: str | None,
 ) -> Blocked:
     blocked = device_sync.checkout_blocks(device_sync.read(connection), head, orch_host(config))
-    limited = lane_limit.account_limits(connection, now)
-    pairs = {
-        (device.name, harness)
-        for device in (config.devices if config is not None else ())
-        for harness in device.harnesses
-        if device.account_for(harness) in limited
-    }
     backed_off = {
         str(row[0])
         for table in (BACKOFF_TABLE, MEMORY_HOLDS_TABLE)
         if _has_table(connection, table)
         for row in connection.execute(f"SELECT device FROM {table} WHERE until > ?", (now,))
     }
-    return replace(blocked, pairs=blocked.pairs | pairs, devices=blocked.devices | backed_off)
+    return replace(blocked, devices=blocked.devices | backed_off)
+
+
+def placement_blocked(
+    connection: sqlite3.Connection,
+    now: float,
+    config: MachinesConfig | None,
+    head: str | None,
+) -> Blocked:
+    blocked = device_blocked(connection, now, config, head)
+    loads = account_loads(connection, config, now)
+    pairs = {
+        (device.name, harness)
+        for device in (config.devices if config is not None else ())
+        for harness in device.harnesses
+        if not loads.taking_work(config, device.name, harness)
+    }
+    return replace(blocked, pairs=blocked.pairs | pairs)
 
 
 def placement_blocks(

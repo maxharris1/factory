@@ -2,10 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from lib import cli
+from lib import cli, lane_limit
 from lib.device_pool import DevicePool
+from lib.machines_yml import Account, Device, MachinesConfig
 from lib.orch_yml import OrchConfig, ProjectPins
-from lib.queue import SQLiteJobQueue
+from lib.queue import JobRequest, SQLiteJobQueue
 from tests.qa_support import REPO
 from tests.test_pinned_placement import CONFIG, FREE, PINNED, enqueue, state, write_orch
 from tests.test_qa_cloud import Lab
@@ -148,3 +149,50 @@ def test_the_qa_worker_runtime_reads_its_pins_from_orch_yml(
     queue.finish(holder.id, owner="claude", handoff_comment_id="ready-1")
     assert pool.release(holder.id, owner="claude") is True
     assert places(pinned_qa.id, "Owner/Pinned") is True
+
+
+ONE_CODEX_ACCOUNT = MachinesConfig(
+    devices=(Device("box", 4, {"codex": "codex-bot"}, local=True),),
+    accounts=(Account("codex-default", "codex", max_jobs=1),),
+)
+
+
+def lab_pinned_to_box(tmp_path: Path) -> tuple[Lab, DevicePool]:
+    lab = Lab(tmp_path, lanes=1)
+    pool = DevicePool(lab.run.queue, ONE_CODEX_ACCOUNT, pins=lambda: {REPO.lower(): frozenset({"box"})})
+    lab.worker.place = pool.place_qa
+    return lab, pool
+
+
+def test_pinned_qa_takes_a_spare_slot_while_every_harness_account_is_at_max_jobs(tmp_path: Path) -> None:
+    lab, pool = lab_pinned_to_box(tmp_path)
+    lab.run.queue.enqueue(JobRequest(REPO, "holder", "build", "codex", "holder", 60), dedupe_key="holder")
+    assert pool.claim("codex") is not None
+    lab.run.queue.enqueue(JobRequest(REPO, "next", "build", "codex", "next", 60), dedupe_key="next")
+    assert pool.claim("codex") is None
+    qa_id = lab.enqueue(ids=1)
+
+    lab.worker._claim()
+
+    assert state(lab.run.queue, qa_id) == "running"
+    assert pool.used() == {"box": 2}
+
+
+def test_pinned_qa_takes_a_spare_slot_while_every_harness_account_is_usage_limited(tmp_path: Path) -> None:
+    lab, pool = lab_pinned_to_box(tmp_path)
+    holder = lab.run.queue.enqueue(
+        JobRequest(REPO, "holder", "build", "codex", "holder", 60), dedupe_key="holder"
+    )
+    now = lab.run.now[0]
+    with lab.run.queue.connect() as connection:
+        lane_limit.record(
+            connection, job_id=holder.id, harness="codex", bot="codex-bot", account="codex-default",
+            limit=lane_limit.UsageLimit(int(now) + 3600), now=now,
+        )
+    assert pool.claim("codex") is None
+    qa_id = lab.enqueue(ids=1)
+
+    lab.worker._claim()
+
+    assert state(lab.run.queue, qa_id) == "running"
+    assert pool.used() == {"box": 1}

@@ -148,12 +148,14 @@ from lib.state_backup import (
 from lib.status import main as status_main
 from lib.update_check import (
     HeadDiff,
+    MovedHead,
     RebaseScope,
     UpdateClass,
     classify as classify_update,
     head_diff,
     merge_base,
     merge_update,
+    moved_head_probe,
     rebase_scope,
 )
 from lib.wait import (
@@ -1416,12 +1418,14 @@ def _runtime(
         approvals=approvals(config),
         ci_logs=source.github.failed_run_logs,
         ci_rerun=source.github.rerun_failed_jobs,
+        ci_full_rerun=source.github.rerun_workflow_runs,
         ci_base_checks=source.github.base_checks,
         ci_runs=source.github.run_jobs,
         ci_job_log=source.github.job_log,
         ci_pool=source.github.list_runners,
         hold_carry=_hold_carry,
         qa_diff=_qa_diff,
+        moved_head=_moved_head_probe,
     )
     source.error_sink = dispatcher.record_poll_error
     source.warning_sink = lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True)
@@ -1468,6 +1472,13 @@ def _hold_carry(repo: str, base: str, approved: str, head: str) -> MergeUpdate:
         worktrees.work_root(None), repo, (approved, head), worktrees.url_template(None)
     )
     return merge_update(clone, approved, head, f"refs/remotes/origin/{base}")
+
+
+def _moved_head_probe(repo: str, base: str, ok: str, head: str) -> MovedHead:
+    clone = worktrees.fetched_clone(
+        worktrees.work_root(None), repo, (ok, head), worktrees.url_template(None)
+    )
+    return moved_head_probe(clone, f"refs/remotes/origin/{base}", ok, head)
 
 
 def _feeder(

@@ -145,8 +145,8 @@ from lib.remote import TAG_ENV, WORKER_ENV_END, WORKER_ENV_MARK
 from lib.codex_rollout import THREAD_ID
 from lib.codex_rollout import latest as rollout_latest
 from lib.codex_rollout import default_home as codex_home
-from lib import exposure, lane_limit
-from lib.job_state import USAGE_LIMIT, record_job_event
+from lib import account_doctor, exposure, lane_limit
+from lib.job_state import SIGNED_OUT, USAGE_LIMIT, record_job_event
 from lib.machines_yml import DEFAULT_ORCH_HOST, default_account
 from lib.usage_readings import Reading, parse_codex, parse_rate_limit_event, store
 from lib.pstack_pin import ROOT as FACTORY_CHECKOUT
@@ -1660,6 +1660,8 @@ class Session:
         self._worker_env = worker_env  # a remote start's environment report is still to come
         self._limit: lane_limit.UsageLimit | None = None
         self._limit_recorded = False
+        self._signout = False
+        self._signout_recorded = False
 
     # Runs on the reader thread until the command's stdout closes.
     def consume(self, stream: IO[bytes]) -> None:
@@ -1721,6 +1723,9 @@ class Session:
                 self._limit = lane_limit.detect(self.harness, event, self.clock())
                 if self._limit is not None:
                     self.flush()
+            if not self._signout and account_doctor.detect_signout(self.harness, event):
+                self._signout = True
+                self.flush()
             if self.harness == "claude":
                 self.add_usage(parse_rate_limit_event(event, self.clock()))
             try:
@@ -1825,6 +1830,7 @@ class Session:
                             own_login=own_login,
                         )
                     self._record_limit(connection)
+                    self._record_signout(connection)
                     was = None if model is None else exposure.replace_model(connection, self.job_id, model)
             if was is not None:
                 self._warn("model", f"exposure: model {model} from the harness's report (was {was})")
@@ -1847,6 +1853,21 @@ class Session:
         if held is not None:
             record_job_event(connection, self.job_id, USAGE_LIMIT, lane_limit.label(held), now)
         self._limit_recorded = True
+
+    def _record_signout(self, connection: sqlite3.Connection) -> None:
+        if not self._signout or self._signout_recorded:
+            return
+        now = self.clock()
+        account = self.account or default_account(self.harness)
+        account_doctor.hold(connection, account, self.device, "runtime", account_doctor.AUTHENTICATION_FAILED, now)
+        record_job_event(
+            connection,
+            self.job_id,
+            SIGNED_OUT,
+            f"{account}@{self.device}: {account_doctor.AUTHENTICATION_FAILED}; pair held",
+            now,
+        )
+        self._signout_recorded = True
 
     def add_usage(self, readings: list[Reading], account: str | None = None, own_login: bool = False) -> None:
         """Keep each window's newest reading per account; the next flush stores them (#151)."""

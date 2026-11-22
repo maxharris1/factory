@@ -1,0 +1,25 @@
+[
+  {
+    "id": 901,
+    "user": {"login": "olivermillard"},
+    "state": "CHANGES_REQUESTED",
+    "body": "Please rename the helper.",
+    "submitted_at": "2026-11-10T20:00:00Z",
+    "html_url": "https://github.com/owner/repo/pull/42#pullrequestreview-901"
+  },
+  {
+    "id": 902,
+    "user": {"login": "max-login"},
+    "state": "PENDING",
+    "body": "",
+    "html_url": "https://github.com/owner/repo/pull/42#pullrequestreview-902"
+  },
+  {
+    "id": 903,
+    "user": {"login": "codex-login"},
+    "state": "COMMENTED",
+    "body": "",
+    "submitted_at": "2026-11-10T20:05:00Z",
+    "html_url": "https://github.com/owner/repo/pull/42#pullrequestreview-903"
+  }
+]

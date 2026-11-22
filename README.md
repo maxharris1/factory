@@ -228,10 +228,43 @@ and `slot_max`) and runs those restarts itself; see "Device settings" under
 moves the first queued job for that harness, in claim order (a priority tier
 first, then a ticket marked urgent, then a job resuming a paused step, then a
 ticket marked bug, then the ticket that unblocks more, then the oldest; issues
-#85, #258), to running and holds a slot on the least-loaded device
-(the lowest utilization, slots held over `slot_max`; a tie goes to a remote
-device before the local box, remotes in `machines.yml` order; issue #223) that is enabled, is not draining, has no placeholder and lists the harness. Slots are generic: any
-free slot on an eligible device takes any harness. The job update and the
+#85, #258), to running and holds a slot for it on an (account, device)
+pair (issues #1315, #1316 and #1317). Slots are generic: any free slot on an
+eligible device takes any harness.
+
+A device is free for the harness when it is enabled, is not draining, has
+no placeholder, lists the harness, has a free slot, and is not held back by
+its checkout, a backoff or a memory hold. A job of a project with
+`projects[].devices` sees only its listed devices. Free devices rank by
+utilization (slots held over `slot_max`; a tie goes to a remote device
+before the local box, remotes in `machines.yml` order; issue #223). The
+candidate accounts on a device are its own login, then each account whose
+`signed_in_on` names it. An account takes no job while it is usage-limited,
+while it runs `max_jobs` jobs across every device, or while its fresh
+headroom is under the floor, 0.05. Fresh headroom is the least `1 - used`
+over the fresh windows of the account's newest readings. Each open account
+gets a score. The score is its fresh headroom (0.5 when it has no fresh
+reading) less a pending charge of 0.02 for each running job placed on it
+since its newest reading. The charge covers jobs that reading has not seen
+yet, so a burst of claims spreads across accounts. The claim compares open
+accounts by these keys, in order, and the winner takes its best-ranked free
+device:
+
+1. A best free device that the job need not avoid (issue #218).
+2. The higher score.
+3. Fewer running jobs.
+4. The better rank of its best free device.
+5. The account id, in sort order.
+
+After `orch accounts doctor` has written the `account_signins` table, an
+account other than the device's own login places on a device only when its
+row for that device is `ok`. The device's own login needs no row. Before the
+table exists, placement does not check sign-ins. `placement_blocks` applies
+the same rules, so a device and harness where no account can take a job
+counts as blocked. A queued job whose candidate account is limited or under
+the floor, and that has no free placement, restarts its queue wait instead
+of timing out. [docs/decisions/1064-account-placement.md](docs/decisions/1064-account-placement.md)
+records why the defaults are what they are. The job update and the
 `device_slots` row commit in one `BEGIN IMMEDIATE` transaction in the
 dispatcher database, so two claims cannot take the same last slot. With no
 eligible free slot the job stays queued. Grok jobs never hold a slot.
@@ -1869,8 +1902,8 @@ in as that one user). The account's folder on that device is
 Codex account no device lists, `signed_in_on` on an `external` or Cursor
 account, and a device named twice for one account (twice in `signed_in_on`,
 or there and as the device's own login). `max_jobs`, a positive
-integer, caps the account's running jobs once account choice lands
-(#1064); today it is only checked.
+integer, caps the account's running jobs across every device. Placement
+(see "Device pool") gives an account at its cap no new job.
 
 Account homes (issues #1183 and #1184). One bot user on one device can run
 several accounts of its harness, each from its own folder. A job placed on
@@ -1914,7 +1947,9 @@ account` and drop `usage_account_readings`, `usage_account_observations`,
 
 A usage limit pauses only the account that hit it. The other accounts of
 that harness keep taking jobs, and the recipient's queue pauses only when
-every account serving it is limited.
+every account serving it is limited. Readings also rank accounts for
+placement through the score and the floor (see "Device pool"). They do not
+change which harness builds or reviews a job.
 
 Grok and Cursor usage is visible only to Grok Bot, so an `external` account
 takes readings from a command:
@@ -2086,7 +2121,9 @@ by script. `scripted_in_flight` counts such jobs still running.
 `bot_to_bot` counts jobs routed to `grok`: each wakes Grok Bot to hand off
 by hand. `scripted_share` is `scripted / (scripted + bot_to_bot)`. Bot
 messages outside the factory are not in the database, so Grok wakes stand
-in for bot-to-bot handoffs.
+in for bot-to-bot handoffs. `engine_handled` counts granted plus landed
+rulings in the `engine_decisions` log, and `engine_escalated` counts its
+escalated rulings.
 
 **Redaction.** Only allowlisted columns are read: never heads, comment
 bodies or other free-form job data. `jobs.detail` is read only for its

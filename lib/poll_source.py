@@ -48,6 +48,7 @@ from lib.dispatch.types import (
     CIChange,
     LinearState,
     LinearStateRead,
+    PullReview,
     ci_fresh,
     pr_ci,
 )
@@ -654,6 +655,7 @@ class LastRead(NamedTuple):
     comments: tuple[Comment, ...]
     ci: CIResult
     hold_inputs: dict[str, Any]
+    reviews: tuple[PullReview, ...] = ()
 
 
 def reusable(last: LastRead | None, probed: str | None, now: float) -> bool:
@@ -2050,7 +2052,7 @@ class LivePollSource:
             if not allow_merged:
                 raise _TerminalTicket()
         if last is not None:
-            comments, ci, hold_inputs = last.comments, last.ci, last.hold_inputs
+            comments, ci, hold_inputs, reviews = last.comments, last.ci, last.hold_inputs, last.reviews
         else:
             if comments is None:
                 comments = (
@@ -2060,9 +2062,10 @@ class LivePollSource:
                 )
             hold_inputs = self._hold_inputs(project.repo, number, factory, pull)
             ci = self.github.ci_status(project.repo, head)
+            reviews = self._reviews(project.repo, number, factory)
             if not fresh and None not in hold_inputs.values():
                 self._last_reads[(project.repo.lower(), number)] = LastRead(
-                    probed, read_at, pull, comments, ci, hold_inputs
+                    probed, read_at, pull, comments, ci, hold_inputs, reviews
                 )
         brief = canonical_brief(comments, self._trusted)
         source_issue = github_source(pull, project.repo, number)
@@ -2073,7 +2076,12 @@ class LivePollSource:
             factory=factory,
             comments=comments,
             current_head=head,
-            ci={head: self._gated_ci(project.repo, number, number, factory, pull, ci, hold_inputs)},
+            ci={
+                head: self._gated_ci(
+                    project.repo, number, number, factory, pull, ci, hold_inputs, fresh=fresh
+                )
+            },
+            reviews=reviews,
             risk=self._intake_risk(project.repo, number, comments) or "high",
             job_timeout_minutes=resolve_job_timeout(self.config, project.repo),
             ticket_url=_optional_string(pull.get("html_url")),
@@ -2101,6 +2109,9 @@ class LivePollSource:
         )
         self._ticket_cache[cache_key] = ticket
         return ticket
+
+    def _reviews(self, repo: str, number: str, factory: FactoryConfig) -> tuple[PullReview, ...]:
+        return self.github.list_reviews(repo, number) if factory.ship == "handoff" else ()
 
     def _merged_ticket(
         self,
@@ -2135,6 +2146,8 @@ class LivePollSource:
         pull: Mapping[str, Any],
         raw: CIResult,
         hold_inputs: Mapping[str, Any],
+        *,
+        fresh: bool = False,
     ) -> CIResult:
         ci = pr_ci(raw, factory, _pr_base(pull))
         changes = list(
@@ -2155,16 +2168,26 @@ class LivePollSource:
             )
             if files is None:
                 return unread
+            head = _pr_head(pull, repo, number)
             if any(
                 glob_matches(pattern, path)
                 for pattern in factory.ci_force_rerun_paths
                 for path in files
             ):
-                head = _pr_head(pull, repo, number)
                 at = self._per_head(
                     "committed", repo, number, pull, lambda: self.github.committed_at(repo, head)
                 )
                 changes.append(CIChange("head-workflow", at))
+            if fresh:
+                missing = [
+                    at
+                    for commit, at in self.github.base_workflow_commits(
+                        repo, _pr_base(pull) or factory.base_branch, factory.ci_force_rerun_paths
+                    )
+                    if not self.github.contains_commit(repo, head, commit)
+                ]
+                if missing:
+                    changes.append(CIChange("base-workflow", max(missing)))
         except Exception as exc:
             self._record(repo, ticket_id, exc)
             return unread
@@ -2368,6 +2391,7 @@ class LivePollSource:
         self._linear_branch_pulls[identifier] = pr_number
         pull_facts: dict[str, Any] = {"merged": False}
         pull: Mapping[str, Any] = {}
+        reviews: tuple[PullReview, ...] = ()
         if pr_number is not None:
             pull = self._github_pull(project.repo, pr_number, fresh=fresh or uncached)
             # #108: a cached discovery read still carries the merge.
@@ -2377,8 +2401,11 @@ class LivePollSource:
             head = _pr_head(pull, project.repo, pr_number)
             pr_title = _open_title(pull)
             raw = self.github.ci_status(project.repo, head)
-            ci[head] = self._gated_ci(project.repo, identifier, pr_number, factory, pull, raw, {})
+            ci[head] = self._gated_ci(
+                project.repo, identifier, pr_number, factory, pull, raw, {}, fresh=fresh
+            )
             github_comments = self.github.list_comments(project.repo, pr_number)
+            reviews = self._reviews(project.repo, pr_number, factory)
             comments = tuple(
                 sorted(
                     (*linear_comments, *github_comments),
@@ -2404,6 +2431,7 @@ class LivePollSource:
             comments=comments,
             current_head=head,
             ci=ci,
+            reviews=reviews,
             risk=self._linear_risk(project.repo, identifier, issue, comments, pr_number, pull),
             job_timeout_minutes=resolve_job_timeout(self.config, project.repo),
             ticket_url=_optional_string(issue.get("url")),

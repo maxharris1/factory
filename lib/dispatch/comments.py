@@ -72,12 +72,17 @@ class CommentsMixin:
             return
         if self._sync_base_mismatch(ticket) is not None:
             return
+        try:
+            self._apply_engine_grants(ticket)
+        except Exception as exc:
+            self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
         comments = sorted(ticket.comments, key=_comment_order)
         try:
             self._cancel_answered_jobs(ticket)
             self._redrive_handoffs(ticket)
             self._resume_unannounced_review(ticket)
             self._process_comments(ticket, comments)
+            self._reopen_on_reviews(self._polled.get(key, ticket))
             if _base_mismatch(self._polled.get(key, ticket)) is not None:
                 return
             self._requeue_unanswered_jobs(ticket)
@@ -104,6 +109,10 @@ class CommentsMixin:
             self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
         try:
             self._charge_unannounced_red(ticket)
+        except Exception as exc:
+            self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
+        try:
+            self._request_fresh_ci(ticket)
         except Exception as exc:
             self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
         try:
@@ -323,7 +332,8 @@ class CommentsMixin:
             self._ensure_stuck_wake(ticket.repo, ticket.ticket_id)
             return "ticket-stuck"
         resumed = (
-            self._resume_for_max(ticket, comment)
+            self._overrule_stop(ticket, comment)
+            or self._resume_for_max(ticket, comment)
             or self._resume_after_blocked(ticket, comment)
             or self._resume_after_cap(ticket, comment)
             or self._resume_paused(ticket, comment)

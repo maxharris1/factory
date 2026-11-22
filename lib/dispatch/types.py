@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Literal, Protocol
@@ -12,7 +12,7 @@ from lib.factory_md import FactoryConfig
 from lib.hold import LabelEvent, MergeUpdate
 from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES
 from lib.queue import Job
-from lib.update_check import HeadDiff, RebaseScope, UpdateClass
+from lib.update_check import HeadDiff, MovedHead, RebaseScope, UpdateClass
 
 if TYPE_CHECKING:
     from lib.dispatch.bookkeeping import LockLedger
@@ -33,6 +33,31 @@ class Comment:
     created_at: float
     url: str | None = None
     edited_at: float | None = None
+
+
+@dataclass(frozen=True)
+class RoundGrant:
+    key: str
+    trigger: Comment
+    released_by: Literal["approver", "engine"]
+    building: bool = False
+
+    @classmethod
+    def approver(cls, go: Comment, *, building: bool = False) -> RoundGrant:
+        return cls(go.id, go, "approver", building)
+
+    @classmethod
+    def engine(cls, stop: Comment) -> RoundGrant:
+        return cls(f"engine:{stop.id}", stop, "engine")
+
+
+@dataclass(frozen=True)
+class PullReview:
+    id: str
+    author: str
+    state: str
+    submitted_at: float
+    url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -132,6 +157,7 @@ class CIResult:
     pending: tuple[str, ...] = ()
     checks: tuple[CheckRow, ...] = field(default=(), compare=False)
     statuses: tuple[CheckRow, ...] = field(default=(), compare=False)
+    stale: tuple[CIChange, ...] = field(default=(), compare=False)
 
     def __post_init__(self) -> None:
         if self.status not in CI_STATUSES:
@@ -207,7 +233,7 @@ def pr_ci(result: CIResult, factory: FactoryConfig, pr_base: str | None) -> CIRe
     return ci_required(result, factory.ci_required_checks)
 
 
-CIChangeKind = Literal["head-workflow", "required-set"]
+CIChangeKind = Literal["head-workflow", "required-set", "base-workflow"]
 
 
 @dataclass(frozen=True)
@@ -215,6 +241,10 @@ class CIChange:
     kind: CIChangeKind
     at: float
     globs: tuple[str, ...] = ()
+
+    @property
+    def trigger(self) -> str:
+        return f"{self.kind}:{','.join(self.globs)}@{self.at:.0f}"
 
 
 def _named_units(rows: tuple[CheckRow, ...]) -> list[tuple[str, list[CheckRow]]]:
@@ -233,21 +263,59 @@ def _gate_units(
 
 
 def _fresh(row: CheckRow, change: CIChange) -> bool:
+    # A run's start time does not say which base it merged: a workflow commit
+    # can be pushed long after it was made. Only a head containing the commit
+    # runs the base workflow, and such a head raises no base-workflow change.
+    if change.kind == "base-workflow":
+        return False
     return row.conclusion == "success" and row.started_at is not None and row.started_at > change.at
 
 
-def ci_fresh(result: CIResult, changes: tuple[CIChange, ...], required: tuple[str, ...]) -> CIResult:
-    if result.status != "success":
-        return result
-    stale = dict.fromkeys(
-        f"{unit} (stale after {change.kind})"
-        for change in changes
+def stale_units(
+    result: CIResult, change: CIChange, required: tuple[str, ...]
+) -> list[tuple[str, list[CheckRow]]]:
+    return [
+        (unit, rows)
         for unit, rows in _gate_units(result, change, required)
         if not any(_fresh(row, change) for row in rows)
+    ]
+
+
+def _unreported(result: CIResult, changes: tuple[CIChange, ...]) -> tuple[CIChange, ...]:
+    added = [change for change in changes if change.kind == "required-set" and change.globs]
+    missing = tuple(
+        change
+        for change in added
+        if f"{change.globs[0]} (not reported)" in result.pending
+        and all(
+            row.conclusion is not None and (row.started_at or 0) <= change.at
+            for row in result.checks
+        )
     )
+    names = {f"{change.globs[0]} (not reported)" for change in missing}
+    return missing if result.checks and set(result.pending) <= names else ()
+
+
+def ci_fresh(result: CIResult, changes: tuple[CIChange, ...], required: tuple[str, ...]) -> CIResult:
+    if result.status == "pending":
+        missing = _unreported(result, changes)
+        return replace(result, stale=missing) if missing else result
+    if result.status != "success":
+        return result
+    stale = {
+        change: [f"{unit} (stale after {change.kind})" for unit, _rows in units]
+        for change in changes
+        if (units := stale_units(result, change, required))
+    }
     if not stale:
         return result
-    return CIResult("pending", pending=tuple(stale), checks=result.checks, statuses=result.statuses)
+    return CIResult(
+        "pending",
+        pending=tuple(dict.fromkeys(name for names in stale.values() for name in names)),
+        checks=result.checks,
+        statuses=result.statuses,
+        stale=tuple(stale),
+    )
 
 
 # Where a Linear issue stands relative to the project's ready state (the
@@ -280,6 +348,7 @@ class TrackedTicket:
     ticket_url: str | None = None
     git_branch_name: str | None = None
     pr_number: str | None = None
+    reviews: tuple[PullReview, ...] = ()
     brief: str | None = None
     brief_text: str | None = None
     brief_url: str | None = None
@@ -647,6 +716,10 @@ RebaseClassifier = Callable[[str, str, str, str], RebaseScope | None]
 
 class HoldCarry(Protocol):
     def __call__(self, repo: str, base: str, approved: str, head: str) -> MergeUpdate: ...
+
+
+class MovedHeadProbe(Protocol):
+    def __call__(self, repo: str, base: str, ok: str, head: str) -> MovedHead: ...
 
 
 class QaDiff(Protocol):
