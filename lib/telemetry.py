@@ -64,9 +64,11 @@ stdout on a pipe and hands the pipe to a `Session` here:
   a box Codex run's come from its own session rollout, found by the
   `thread.started` thread id and read on each flush
   (lib/codex_rollout.py); a remote one's once when the run ends
-  (`add_rollout`). They are written to `usage_readings` in the same
-  transaction as the telemetry row, per harness, bot and device, with the
-  placed device's usage account.
+  (`add_rollout`). The other accounts signed in on the placed device are
+  read on the same passes (lib/usage_probe.py) and kept apart, one bucket
+  per account. Each account's readings are stored in the same transaction
+  as the telemetry row, per account and device; only the device's own
+  login also writes `usage_readings`.
 * Tokens are the harness's own session total, cached input and helper
   agents included (#1015); the first source present wins. Claude: the sum
   over every model in the `result` event's `modelUsage`, else that event's
@@ -1631,10 +1633,10 @@ class Session:
         self.connect = connect
         self.guard = guard
         self.device = device
-        self.account = account
-        self.own_login = own_login
+        self.account = account or default_account(harness)
         self.rollout_home = rollout_home  # a box Codex run's CODEX_HOME (#151)
-        self.usage: dict[str, Reading] = {}
+        self.usage: dict[str, dict[str, Reading]] = {self.account: {}}
+        self._own_login = {self.account: own_login}
         self.job_id = job_id
         self.bot = bot
         self.repo = repo
@@ -1795,7 +1797,10 @@ class Session:
             self._read_rollout()
             data = self.row(code, finished=finished)
             with self._lock:
-                readings = list(self.usage.values())
+                buckets = [
+                    (account, self._own_login[account], list(windows.values()))
+                    for account, windows in self.usage.items()
+                ]
                 model = self.summary.model
             marks = ", ".join("?" for _ in COLUMNS)
             with closing(self.connect()) as connection:
@@ -1808,16 +1813,17 @@ class Session:
                         f"INSERT OR REPLACE INTO {TABLE} ({', '.join(COLUMNS)}) VALUES ({marks})",
                         tuple(data[name] for name in COLUMNS),
                     )
-                    store(
-                        connection,
-                        harness=self.harness,
-                        bot=self.bot,
-                        device=self.device,
-                        job_id=self.job_id,
-                        readings=readings,
-                        account=self.account,
-                        own_login=self.own_login,
-                    )
+                    for account, own_login, readings in buckets:
+                        store(
+                            connection,
+                            harness=self.harness,
+                            bot=self.bot,
+                            device=self.device,
+                            job_id=self.job_id,
+                            readings=readings,
+                            account=account,
+                            own_login=own_login,
+                        )
                     self._record_limit(connection)
                     was = None if model is None else exposure.replace_model(connection, self.job_id, model)
             if was is not None:
@@ -1834,7 +1840,7 @@ class Session:
             job_id=self.job_id,
             harness=self.harness,
             bot=self.bot,
-            account=self.account or default_account(self.harness),
+            account=self.account,
             limit=self._limit,
             now=now,
         )
@@ -1842,21 +1848,28 @@ class Session:
             record_job_event(connection, self.job_id, USAGE_LIMIT, lane_limit.label(held), now)
         self._limit_recorded = True
 
-    def add_usage(self, readings: list[Reading]) -> None:
-        """Keep each window's newest reading; the next flush stores them (#151)."""
+    def add_usage(self, readings: list[Reading], account: str | None = None, own_login: bool = False) -> None:
+        """Keep each window's newest reading per account; the next flush
+        stores them (#151). account None is the placed account, whose own_login
+        the session already knows."""
+        account = account or self.account
         with self._lock:
+            windows = self.usage.setdefault(account, {})
+            self._own_login.setdefault(account, own_login)
             for reading in readings:
-                kept = self.usage.get(reading.window)
+                kept = windows.get(reading.window)
                 if kept is None or reading.observed_at >= kept.observed_at:
-                    self.usage[reading.window] = reading
+                    windows[reading.window] = reading
 
-    def add_rollout(self, found: object) -> None:
-        """One Codex rollout read (lib/codex_rollout.py `latest`): its rate
-        limits as readings and each rollout's session token total; the next flush stores both."""
+    def add_rollout(self, found: object, account: str | None = None, own_login: bool = False) -> None:
+        """One Codex rollout read (lib/codex_rollout.py `latest` or `newest`):
+        its rate limits as account's readings and, for the placed account,
+        each rollout's session token total; the next flush stores both."""
         try:
-            self.add_usage(parse_codex(found, self.clock()))
-            with self._lock:
-                self.summary.codex_total(found.get("totals") if isinstance(found, dict) else None)
+            self.add_usage(parse_codex(found, self.clock()), account, own_login)
+            if account in (None, self.account):
+                with self._lock:
+                    self.summary.codex_total(found.get("totals") if isinstance(found, dict) else None)
         except Exception as exc:
             self._warn("rollout", f"telemetry: rollout not read ({type(exc).__name__})")
 

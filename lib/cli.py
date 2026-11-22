@@ -27,6 +27,7 @@ from typing import Any
 from lib import (
     account_doctor,
     account_home,
+    codex_rollout,
     codex_sandbox,
     containers,
     exposure,
@@ -68,7 +69,7 @@ from lib.factory_md import EXAMPLE_PATHS, QA_RUNNERS, FactoryConfig, load_factor
 from lib.github_actions import GitHubAdapterError, _status as gh_status
 from lib.grok_delivery import GrokDeliveryError, wake_delivery
 from lib.handoff import format_header
-from lib.harness_env import CPU_CAP, account_tokens, harness_env
+from lib.harness_env import CPU_CAP, account_environ, harness_env
 from lib.hold import MergeUpdate
 from lib.hook_t7 import T7Hook
 from lib.hook_t8 import T8Hook
@@ -2333,18 +2334,12 @@ def _job_run_command(argv: list[str]) -> int:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
 
-    dropped = account_tokens(owner, placed.account_home)
-    environment = {name: value for name, value in os.environ.items() if name not in dropped}
     # Never pass on a token this process inherited (another job's run).
-    environment.pop(job_token.PROOF_ENV, None)
-    environment.update(
-        {
-            "ORCH_JOB_ID": args.job_id,
-            "ORCH_JOB_BOT": args.bot,
-            DB_ENV: str(database),
-            **harness_env(owner, placed.account_home),
-        }
+    inherited = {name: value for name, value in os.environ.items() if name != job_token.PROOF_ENV}
+    inherited.update(
+        {"ORCH_JOB_ID": args.job_id, "ORCH_JOB_BOT": args.bot, DB_ENV: str(database), **harness_env(owner)}
     )
+    environment = account_environ(inherited, owner, placed.account_home)
     if proof is not None and not placed.remote:
         # Not sent to a remote device: it would be on the ssh command line.
         environment[job_token.PROOF_ENV] = proof
@@ -2367,7 +2362,7 @@ def _job_run_command(argv: list[str]) -> int:
         guard=lambda connection: require_latest_claim(connection, args.job_id, claim_proof),
         skills_root=None if factory_root is None else f"{factory_root}/skills",
     )
-    usage_read = None
+    usage_reads: list = []
     if session is None:
         log("usage probe: skipped (telemetry off)")
     else:
@@ -2377,13 +2372,16 @@ def _job_run_command(argv: list[str]) -> int:
         if binary is None:
             log(f"usage probe: skipped ({session.flags.reason})")
         else:
-            target, probe_env = placed.target, dict(environment)
-            usage_read = usage_probe.start_claude(
-                session.add_usage,
+            target = placed.target
+            usage_reads = usage_probe.start_pass(
+                usage_probe.account_probes(
+                    machines, placed.device.name, session.harness, (placed.account, placed.account_home), log
+                ),
+                lambda readings, account, home: session.add_usage(readings, account, own_login=home is None),
                 session.clock,
-                (lambda: usage_probe.claude_remote(placed.transport, target, home=placed.account_home))
+                (lambda home: usage_probe.claude_remote(placed.transport, target, home=home))
                 if target is not None
-                else (lambda: usage_probe.claude_local(binary, probe_env)),
+                else (lambda home: usage_probe.claude_local(binary, account_environ(inherited, "claude", home))),
                 log,
             )
     checkout: list[worktrees.JobCheckout] = []
@@ -2570,14 +2568,23 @@ def _job_run_command(argv: list[str]) -> int:
             _record_wall_clock(queue, args.job_id, budget, placed.device.name, log, claim_proof)
             if session is not None:
                 session.wall_clock(budget.elapsed())
-        if usage_read is not None:
-            usage_read.join(usage_probe.TIMEOUT_SECONDS)
+        usage_probe.join_pass(usage_reads)
         if session is not None:
             if placed.target is not None:
                 session.add_rollout(usage_probe.remote_codex(
                     placed.transport, placed.target, session.harness, session.summary.thread_id,
                     home=placed.account_home,
                 ))
+            if session.harness == "codex":
+                for account, home in usage_probe.account_probes(
+                    machines, placed.device.name, "codex", (placed.account, placed.account_home), log
+                )[1:]:
+                    found = (
+                        usage_probe.idle_codex_remote(placed.transport, placed.target, home=home)
+                        if placed.target is not None
+                        else codex_rollout.newest(home or codex_rollout.default_home(inherited))
+                    )
+                    session.add_rollout(found, account, own_login=home is None)
             session.finish(code)
         placed.ended(code)  # #91: the exit reason, while the job still runs
         # A remote run's job is finished by its waiter on the box, from the

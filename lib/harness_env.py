@@ -85,6 +85,15 @@ def account_tokens(harness: str, home: str | None = None) -> tuple[str, ...]:
     return () if home is None else _isolation(harness).tokens
 
 
+def account_environ(base: Mapping[str, str], harness: str, home: str | None) -> dict[str, str]:
+    """base as the account at home sees it; None is the device's own login."""
+    dropped = account_tokens(harness, home)
+    env = {name: value for name, value in base.items() if name not in dropped}
+    if home is not None:
+        env[_isolation(harness).home] = home
+    return env
+
+
 def _isolation(harness: str) -> AccountIsolation:
     if harness not in ACCOUNT_ISOLATION:
         raise ValueError(f"harness {harness!r} cannot run from an account folder")

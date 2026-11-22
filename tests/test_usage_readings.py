@@ -32,7 +32,8 @@ from lib.dashboard import collect_snapshot
 from lib.dashboard_usage import read_usage
 from lib.device_pool import DevicePool
 from lib.job_token import PROOF_ENV
-from lib.machines_yml import Device, MachinesConfig
+from lib.harness_env import account_environ
+from lib.machines_yml import Account, Device, MachinesConfig
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.remote import TAG_ENV, Exchanged, RemoteTarget, SshTransport, ssh_argv
 from lib.telemetry import Scrubber, Session, harness_argv, stream_flags
@@ -315,6 +316,49 @@ def test_the_reader_opens_only_the_jobs_own_regular_rollout(tmp_path: Path) -> N
     assert codex_rollout.latest(str(home), thread) is None
 
 
+def _day(home: Path, day: str, thread: str, rollout: bytes) -> None:
+    folder = home / "sessions" / "2026" / "11" / day
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"rollout-2026-11-{day}T09-00-00-{thread}.jsonl").write_bytes(rollout)
+
+
+IDLE_THREAD = "00000000-0000-4000-8000-000000000152"
+
+
+def test_codex_newest_reads_only_rate_limits_of_the_newest_rollout(tmp_path: Path) -> None:
+    home = codex_home(tmp_path)
+    _day(home, "15", IDLE_THREAD, b"".join(ROLLOUT.splitlines(keepends=True)[:3]))
+
+    found = codex_rollout.newest(str(home))
+
+    assert found == {
+        "rate_limits": {
+            "primary": {"used_percent": 5.0, "window_minutes": 300, "resets_at": 1794684332},
+            "secondary": {"used_percent": 20.0, "window_minutes": 10080, "resets_at": 1795204800},
+        },
+        "timestamp": "2026-11-14T16:22:00.000Z",
+    }
+    assert codex_rollout.newest(str(tmp_path / "no-such-home")) is None
+
+
+def test_codex_newest_never_opens_a_symlink_or_a_folder_outside_sessions(tmp_path: Path) -> None:
+    home = codex_home(tmp_path, b"".join(ROLLOUT.splitlines(keepends=True)[:3]))
+    inside = codex_rollout.newest(str(home))
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    (other / "secret.jsonl").write_bytes(ROLLOUT)
+    outside = other / "16"
+    outside.mkdir()
+    (outside / f"rollout-2026-11-16T09-00-00-{IDLE_THREAD}.jsonl").write_bytes(ROLLOUT)
+    (home / "sessions" / "2026" / "11" / "16").symlink_to(outside)
+    assert inside is not None and codex_rollout.newest(str(home)) == inside
+
+    linked = home / "sessions" / "2026" / "11" / "15"
+    linked.mkdir()
+    (linked / f"rollout-2026-11-15T09-00-00-{IDLE_THREAD}.jsonl").symlink_to(other / "secret.jsonl")
+    assert codex_rollout.newest(str(home)) is None
+
+
 def test_the_reader_runs_alone_under_isolated_python_as_on_a_remote_device(tmp_path: Path) -> None:
     home = codex_home(tmp_path)
     source = Path(codex_rollout.__file__).read_text(encoding="utf-8")
@@ -389,7 +433,7 @@ def test_rereading_the_same_rollout_event_never_makes_it_fresher(tmp_path: Path)
     assert entry["state"] == "stale" and entry["headroom"] is None
     assert entry["seven_day"] == {"used": None, "resets_at": SEVEN_DAY_RESET, "observed_at": EMITTED,
                                   "state": "stale"}
-    assert session.usage["seven_day"].observed_at == EMITTED
+    assert session.usage["codex-default"]["seven_day"].observed_at == EMITTED
 
 
 @pytest.mark.parametrize(
@@ -700,15 +744,79 @@ def test_the_codex_rollout_script_reads_the_account_homes_rollout(tmp_path: Path
     assert codex_rollout.latest(str(account_home), THREAD) != codex_rollout.latest(str(login_codex), THREAD)
 
 
+@pytest.mark.parametrize("account", ["side", "login"])
+def test_the_idle_codex_script_reads_the_newest_rollout_under_the_account_home(tmp_path: Path, account: str) -> None:
+    home = _login_home(tmp_path, "codex")
+    login_codex = codex_home(tmp_path, b"".join(ROLLOUT.splitlines(keepends=True)[:3])).rename(home / ".codex")
+    account_home = codex_home(tmp_path)
+
+    script = usage_probe.codex_remote_script(None, str(account_home) if account == "side" else None)
+    out = _on_the_device(script, home)
+
+    assert out.returncode == 0, out.stderr
+    read = account_home if account == "side" else login_codex
+    assert json.loads(out.stdout) == codex_rollout.newest(str(read))
+    assert codex_rollout.newest(str(account_home)) != codex_rollout.newest(str(login_codex))
+
+
+def test_the_local_probe_for_a_non_default_account_drops_tokens_and_sets_its_home() -> None:
+    envs = []
+
+    def run(argv, **kwargs):
+        envs.append(kwargs["env"])
+        return subprocess.CompletedProcess(argv, 0, GET_USAGE, b"")
+
+    login = {"HOME": "/h", **dict.fromkeys(ACCOUNT_TOKENS["claude"], TOKEN_VALUE)}
+    home = "/home/claude-bot/.factory-accounts/claude-b"
+    assert usage_probe.claude_local("claude", account_environ(login, "claude", home), run=run) == GET_USAGE
+    assert envs == [{"HOME": "/h", "CLAUDE_CONFIG_DIR": home}]
+
+
+def test_every_account_on_the_device_is_probed_the_placed_one_first() -> None:
+    accounts = tuple(Account(f"claude-{n}", "claude", signed_in_on=frozenset({"pc"})) for n in "bc")
+    config = MachinesConfig(
+        (Device("pc", 2, {"claude": "claude-bot"}, home="/home/{bot}"),), accounts=accounts)
+    side = "/home/claude-bot/.factory-accounts/claude-b"
+    lines: list[str] = []
+
+    probes = usage_probe.account_probes(config, "pc", "claude", ("claude-b", side), lines.append)
+
+    assert probes == [("claude-b", side), ("claude-default", None),
+                      ("claude-c", "/home/claude-bot/.factory-accounts/claude-c")]
+    assert lines == []
+
+
+def test_an_account_without_a_home_is_skipped_with_one_line() -> None:
+    config = MachinesConfig(
+        (Device("pc", 2, {"claude": "claude-bot"}),),
+        accounts=(Account("claude-b", "claude", signed_in_on=frozenset({"pc"})),))
+    lines: list[str] = []
+
+    probes = usage_probe.account_probes(config, "pc", "claude", ("claude-default", None), lines.append)
+
+    assert probes == [("claude-default", None)]
+    assert len(lines) == 1 and "claude-b" in lines[0]
+
+
 def test_the_remote_probes_send_the_account_homes_scripts() -> None:
     home = "/home/claude-bot/.factory-accounts/claude-max-2"
     transport = FakeTransport(Exchanged(0, GET_USAGE, ""))
     usage_probe.claude_remote(transport, TARGET, home=home)
     usage_probe.remote_codex(transport, TARGET, "codex", THREAD, home=home)
+    usage_probe.idle_codex_remote(transport, TARGET, home=home)
     assert [argv for argv, _data in transport.calls] == [
         ssh_argv(TARGET, usage_probe.claude_remote_script(home)),
         ssh_argv(TARGET, usage_probe.codex_remote_script(THREAD, home)),
+        ssh_argv(TARGET, usage_probe.codex_remote_script(None, home)),
     ]
+
+
+def test_an_idle_codex_read_returns_its_line_and_none_on_any_failure() -> None:
+    line = {"rate_limits": {"primary": {"used_percent": 5.0}}, "timestamp": "2026-11-14T16:22:00.000Z"}
+    found = FakeTransport(Exchanged(0, json.dumps(line).encode() + b"\n", ""))
+    assert usage_probe.idle_codex_remote(found, TARGET, home=None) == line
+    assert usage_probe.idle_codex_remote(FakeTransport(Exchanged(255, b"", "")), TARGET, home=None) is None
+    assert usage_probe.idle_codex_remote(FakeTransport(Exchanged(0, b"not json\n", "")), TARGET, home=None) is None
 
 @pytest.mark.parametrize(
     ("out", "line"),
@@ -733,7 +841,8 @@ if "--input-format" in argv:
     request = sys.stdin.read()
     with open(os.path.join(here, "probe-stdin"), "a", encoding="utf-8") as seen:
         seen.write(request)
-    json.dump(dict(os.environ), open(os.path.join(here, "probe-env.json"), "w"))
+    account = os.path.basename(os.environ.get("CLAUDE_CONFIG_DIR", "login"))
+    json.dump(dict(os.environ), open(os.path.join(here, f"probe-env-{{account}}.json"), "w"))
     print({marker!r}, *os.environ.values(), flush=True)
     print({marker!r}, *os.environ.values(), file=sys.stderr, flush=True)
     mode = open(os.path.join(here, "probe-mode"), encoding="utf-8").read().strip()
@@ -817,16 +926,17 @@ sys.stdout.buffer.write(open({str(FIXTURES / "codex-exec-json.jsonl")!r}, "rb").
 """
 
 
+@pytest.mark.parametrize("placed", ["side", "login"])
 @pytest.mark.parametrize("harness", ["claude", "codex"])
-def test_a_remote_jobs_usage_reads_run_as_its_slots_account(
-    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory, harness: str
+def test_a_remote_job_reads_every_account_on_its_device_under_its_own_home(
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory, harness: str, placed: str
 ) -> None:
     from tests.test_remote_start import Ssh, config_of, enqueue, machines_file
 
-    bot, placed = f"{harness}-bot", f"{harness}-max-2"
+    bot, side, login = f"{harness}-bot", f"{harness}-max-2", f"{harness}-default"
     machines = machines_file(tmp_path, box_enabled=False)
     machines.write_text(
-        f"accounts:\n  - {{id: {placed}, harness: {harness}, signed_in_on: [pc]}}\n"
+        f"accounts:\n  - {{id: {side}, harness: {harness}, signed_in_on: [pc]}}\n"
         + machines.read_text(encoding="utf-8").replace(
             "    ssh_alias: fakepc-{bot}\n", f"    ssh_alias: fakepc-{{bot}}\n    home: {tmp_path}/homes/{{bot}}\n"
         ),
@@ -836,8 +946,9 @@ def test_a_remote_jobs_usage_reads_run_as_its_slots_account(
     assert _migrate(queue.path, tmp_path_factory.mktemp("manual")) is True
     job_id = enqueue(queue, harness, "1")
     assert DevicePool(queue, config_of(machines)).claim(harness) is not None
-    with queue.connect() as connection:
-        connection.execute("UPDATE device_slots SET account = ? WHERE job_id = ?", (placed, job_id))
+    if placed == "side":
+        with queue.connect() as connection:
+            connection.execute("UPDATE device_slots SET account = ? WHERE job_id = ?", (side, job_id))
     ssh = Ssh(tmp_path)
     worker_bin = tmp_path / "worker-bin"
     _probe_bin(worker_bin, "reply")
@@ -849,7 +960,7 @@ def test_a_remote_jobs_usage_reads_run_as_its_slots_account(
     (home / ".bash_profile").write_text(
         profile + f"export PATH={shlex.quote(str(worker_bin))}:$PATH\n", encoding="utf-8"
     )
-    account_home = home / ".factory-accounts" / placed
+    account_home = home / ".factory-accounts" / side
     account_home.parent.mkdir(parents=True)
     codex_home(tmp_path).rename(account_home)
     codex_home(tmp_path, b"".join(ROLLOUT.splitlines(keepends=True)[:3])).rename(home / ".codex")
@@ -862,15 +973,25 @@ def test_a_remote_jobs_usage_reads_run_as_its_slots_account(
 
     assert run.returncode == 0, run.stderr
     if harness == "claude":
-        probed = json.loads((worker_bin / "probe-env.json").read_text(encoding="utf-8"))
-        assert probed["CLAUDE_CONFIG_DIR"] == str(account_home)
-        assert not set(ACCOUNT_TOKENS["claude"]) & set(probed)
+        assert (worker_bin / "probe-stdin").read_bytes() == usage_probe.REQUEST * 2
+        side_env = json.loads((worker_bin / f"probe-env-{side}.json").read_text(encoding="utf-8"))
+        assert side_env["CLAUDE_CONFIG_DIR"] == str(account_home)
+        assert not set(ACCOUNT_TOKENS["claude"]) & set(side_env)
+        login_env = json.loads((worker_bin / "probe-env-login.json").read_text(encoding="utf-8"))
+        assert "CLAUDE_CONFIG_DIR" not in login_env
+        assert {login_env[name] for name in ACCOUNT_TOKENS["claude"]} == {TOKEN_VALUE}
+        expected = {login: (0.125, 0.345), side: (0.125, 0.345)}
+    else:
+        expected = {login: (0.05, 0.2), side: (0.125, 0.345)}
     with sqlite3.connect(queue.path) as connection:
         rows = connection.execute(
-            "SELECT account, window, used FROM usage_account_readings ORDER BY window").fetchall()
-        login_rows = connection.execute("SELECT COUNT(*) FROM usage_readings").fetchone()
-    assert rows == [(placed, "five_hour", 0.125), (placed, "seven_day", 0.345)]
-    assert login_rows == (0,), "a side account never writes the login's old row"
+            "SELECT account, window, used FROM usage_account_readings ORDER BY account, window").fetchall()
+        login_rows = connection.execute(
+            "SELECT account, window, used FROM usage_readings ORDER BY window").fetchall()
+    assert rows == [(account, window, used) for account, pair in sorted(expected.items())
+                    for window, used in zip(("five_hour", "seven_day"), pair)]
+    assert login_rows == [row for row in rows if row[0] == login], "only the login account writes the old row"
+
 
 def _probe_lines(run: subprocess.CompletedProcess) -> list[str]:
     for secret in (PROBE_MARKER, CLAIM_PROOF, TAG_VALUE, ENV_VALUE):
@@ -1828,6 +1949,45 @@ def test_a_session_for_a_side_account_stores_only_the_account_row(tmp_path: Path
         ).fetchall()
     assert legacy == [("claude-default", 0.4)]
     assert keyed == [("claude-b", "five_hour", 0.125), ("claude-b", "seven_day", 0.345)]
+
+
+def test_side_account_readings_store_under_their_account_and_never_in_the_login_row(tmp_path: Path) -> None:
+    db = _migrated_db(tmp_path)
+    session = Session(
+        connect=lambda: sqlite3.connect(db), job_id="job-1", bot="claude-bot", repo="acme/widgets",
+        harness="claude", flags=stream_flags(["claude", "-p"]), raw_log=None, scrub=Scrubber({}),
+        log=lambda _m: None, stdout=io.BytesIO(), clock=lambda: CAPTURED + 60, device="box",
+    )
+    session.add_usage(parse_get_usage(GET_USAGE, CAPTURED + 60))
+    session.add_usage(
+        parse_get_usage(reply({"five_hour": {"utilization": 90, "resets_at": "2026-11-14T19:25:32+00:00"}}),
+                        CAPTURED + 60),
+        account="claude-b", own_login=False,
+    )
+    session.finish(0)
+    with closing(sqlite3.connect(db)) as connection:
+        legacy = connection.execute(
+            "SELECT account, window, used FROM usage_readings WHERE harness = 'claude' AND job_id = 'job-1'"
+            " ORDER BY window").fetchall()
+        keyed = connection.execute(
+            "SELECT account, window, used FROM usage_account_readings WHERE job_id = 'job-1'"
+            " ORDER BY account, window").fetchall()
+    assert legacy == [("claude-default", "five_hour", 0.125), ("claude-default", "seven_day", 0.345)]
+    assert keyed == [
+        ("claude-b", "five_hour", 0.9), ("claude-b", "seven_day", None),
+        ("claude-default", "five_hour", 0.125), ("claude-default", "seven_day", 0.345),
+    ]
+
+
+def test_a_side_accounts_rollout_never_adds_to_the_jobs_token_total(tmp_path: Path) -> None:
+    found = codex_rollout.latest(str(codex_home(tmp_path)), THREAD)
+    session = _start(tmp_path, WRAPPER, "codex-bot", {}, worker_env=True)
+    session.clock = lambda: CAPTURED
+    session.add_rollout(found, account="codex-b", own_login=False)
+    session.finish(0)
+    with sqlite3.connect(tmp_path / "orch.db") as connection:
+        tokens = connection.execute("SELECT tokens_in, tokens_unknown FROM job_telemetry").fetchone()
+    assert tokens == (0, 1)
 
 
 # --- no credential file ---------------------------------------------------------------------

@@ -1471,7 +1471,8 @@ ACCOUNT_HARNESS = f"""#!{sys.executable}
 import json, os, sys
 here = os.path.dirname(os.path.abspath(__file__))
 probe = "--input-format" in sys.argv
-json.dump(dict(os.environ), open(os.path.join(here, "probe-env.json" if probe else "env.json"), "w"))
+account = os.path.basename(os.environ.get("CLAUDE_CONFIG_DIR", "login"))
+json.dump(dict(os.environ), open(os.path.join(here, f"probe-env-{{account}}.json" if probe else "env.json"), "w"))
 if probe:
     sys.stdout.write(open({str(USAGE / "claude-2.1.322-get_usage.jsonl")!r}).read())
 elif os.path.basename(__file__) == "codex":
@@ -1490,7 +1491,7 @@ def _plant_rollout(home: Path, lines: int | None = None) -> None:
 
 @pytest.mark.parametrize("account", ["placed", "default"])
 @pytest.mark.parametrize("owner", ["claude", "codex"])
-def test_cli_job_run_runs_a_box_job_as_its_slots_account(
+def test_cli_job_run_runs_a_box_job_as_its_slots_account_and_reads_every_account_on_the_box(
     tmp_path: Path, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch, owner: str,
     account: str,
 ) -> None:
@@ -1517,10 +1518,8 @@ def test_cli_job_run_runs_a_box_job_as_its_slots_account(
     if account == "placed":
         with queue.connect() as connection:
             connection.execute("UPDATE device_slots SET account = ? WHERE job_id = ?", (placed, job.id))
-        _plant_rollout(account_home)
-        _plant_rollout(login / ".codex", lines=3)
-    else:
-        _plant_rollout(login / ".codex")
+    _plant_rollout(account_home)
+    _plant_rollout(login / ".codex", lines=3)
     harness = tmp_path / "bin" / owner
     harness.parent.mkdir()
     harness.write_text(ACCOUNT_HARNESS, encoding="utf-8")
@@ -1538,28 +1537,32 @@ def test_cli_job_run_runs_a_box_job_as_its_slots_account(
     _, stderr = proc.communicate(timeout=30)
 
     assert proc.returncode == 0, stderr
-    seen = [json.loads((harness.parent / "env.json").read_text())]
+    as_side = [json.loads((harness.parent / "env.json").read_text())] if account == "placed" else []
+    as_login = [] if account == "placed" else [json.loads((harness.parent / "env.json").read_text())]
     if owner == "claude":
-        seen.append(json.loads((harness.parent / "probe-env.json").read_text()))
-    for env in seen:
-        if account == "placed":
-            assert env[ACCOUNT_HOME[owner]] == str(account_home)
-            assert not set(ACCOUNT_TOKENS[owner]) & set(env)
-        else:
-            assert ACCOUNT_HOME[owner] not in env
-            assert {name: env[name] for name in ACCOUNT_TOKENS[owner]} == {
-                name: planted[name] for name in ACCOUNT_TOKENS[owner]
-            }
+        as_side.append(json.loads((harness.parent / f"probe-env-{placed}.json").read_text()))
+        as_login.append(json.loads((harness.parent / "probe-env-login.json").read_text()))
+    for env in as_side:
+        assert env[ACCOUNT_HOME[owner]] == str(account_home)
+        assert not set(ACCOUNT_TOKENS[owner]) & set(env)
+    for env in as_login:
+        assert ACCOUNT_HOME[owner] not in env
+        assert {name: env[name] for name in ACCOUNT_TOKENS[owner]} == {
+            name: planted[name] for name in ACCOUNT_TOKENS[owner]
+        }
     with sqlite3.connect(tmp_path / "orch.db") as connection:
         rows = connection.execute(
-            "SELECT account, window, used FROM usage_account_readings ORDER BY window"
+            "SELECT account, window, used FROM usage_account_readings ORDER BY account, window"
         ).fetchall()
         login_rows = connection.execute(
             "SELECT account, window, used FROM usage_readings ORDER BY window"
         ).fetchall()
-    expected = placed if account == "placed" else f"{owner}-default"
-    assert rows == [(expected, "five_hour", 0.125), (expected, "seven_day", 0.345)]
-    assert login_rows == ([] if account == "placed" else rows), "only the device's login writes the old row"
+    login_used = (0.125, 0.345) if owner == "claude" else (0.05, 0.2)
+    assert rows == [
+        (f"{owner}-default", "five_hour", login_used[0]), (f"{owner}-default", "seven_day", login_used[1]),
+        (placed, "five_hour", 0.125), (placed, "seven_day", 0.345),
+    ]
+    assert login_rows == rows[:2], "only the device's login writes the old row"
 
 
 CAPPED_ENV = {

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from lib.harness_env import CPU_CAP, cpu_cap_env, cpu_window, harness_env
+from lib.harness_env import CPU_CAP, account_environ, cpu_cap_env, cpu_window, harness_env
 
 ROOT = Path(__file__).resolve().parents[1]
 CAPPED = {
@@ -28,6 +28,22 @@ def test_every_harness_env_carries_the_cpu_cap(harness: str) -> None:
 @pytest.mark.parametrize("harness", ["claude", "codex"])
 def test_an_account_home_keeps_the_cpu_cap(harness: str) -> None:
     assert harness_env(harness, "/srv/accounts/a").items() >= CAPPED.items()
+
+
+@pytest.mark.parametrize(
+    ("harness", "home", "tokens"),
+    [
+        ("claude", "CLAUDE_CONFIG_DIR", ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")),
+        ("codex", "CODEX_HOME", ("OPENAI_API_KEY", "CODEX_API_KEY")),
+    ],
+)
+def test_an_account_environ_drops_its_tokens_and_names_its_home(
+    harness: str, home: str, tokens: tuple[str, ...]
+) -> None:
+    base = {"PATH": "/usr/bin", home: "/login/home", **dict.fromkeys(tokens, "sk-test")}
+    assert account_environ(base, harness, "/srv/accounts/a") == {"PATH": "/usr/bin", home: "/srv/accounts/a"}
+    login = account_environ(base, harness, None)
+    assert login == base and login is not base
 
 
 def test_the_cap_is_four_cpus_in_code_and_runners_get_one_less() -> None:
