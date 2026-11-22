@@ -5,13 +5,19 @@ stops holding its Touches paths and is never fed again."""
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
+
+import pytest
+
+import lib.feeder as feeder_module
+from lib.dispatch.bookkeeping import bookkeeping_write
 
 from lib.feeder_gates import Progress, RefStatus
 from lib.queue import SQLiteJobQueue
 from lib.status import SQLiteStatusReader, build_status, render
 from tests.test_feeder import dispatcher_for, issue, make_feeder, rows
-from tests.test_feeder_gates import HOME, OPEN_PULL, ref
+from tests.test_feeder_gates import CLOSED_PULL, HOME, MERGED, OPEN_PULL, ref
 from tests.test_feeder_idle import _job
 
 LABELLED = RefStatus(Progress.OPEN, is_pull=True, abandoned=True)
@@ -181,3 +187,77 @@ def test_eight_abandoned_parents_free_a_blocked_ticket_on_the_next_poll(tmp_path
     assert "fed, job queued" not in output
     for number, pull in PARENTS.items():
         assert f"owner/app#{number} split into parts, not fed -> PR #{pull}" in output
+
+
+def _done_row(tmp_path: Path):
+    feeder, queue, github, _ = make_feeder(tmp_path, box=3)
+    dispatcher_for(tmp_path, queue)
+    github.issues[HOME] = [issue(1, body="No paths named.")]
+    (fed,) = feeder.feed_once().fed
+    _job(queue, fed.ticket_id)
+    feeder.feed_once()
+    assert rows(tmp_path / "orch.db")["1"]["state"] == "done"
+    return feeder, github, ref(int(fed.ticket_id))
+
+
+def test_a_closed_pr_labelled_abandoned_retires_its_row(tmp_path: Path) -> None:
+    feeder, github, pull = _done_row(tmp_path)
+    github.statuses = {pull: replace(CLOSED_PULL, abandoned=True)}
+
+    feeder.feed_once()
+
+    assert rows(tmp_path / "orch.db")["1"]["state"] == "abandoned"
+    assert "#1 fed, job queued" not in _status(tmp_path)
+
+
+def test_a_row_released_on_an_earlier_poll_is_retired_when_its_pr_is_labelled(tmp_path: Path) -> None:
+    feeder, github, pull = _done_row(tmp_path)
+    github.statuses = {pull: CLOSED_PULL}
+    feeder.feed_once()
+    assert (rows(tmp_path / "orch.db")["1"]["state"], rows(tmp_path / "orch.db")["1"]["released"]) == ("done", 1)
+    github.statuses = {pull: LABELLED}
+
+    feeder.feed_once()
+
+    assert rows(tmp_path / "orch.db")["1"]["state"] == "abandoned"
+
+
+def test_a_released_row_of_a_merged_ticket_is_not_read_again(tmp_path: Path) -> None:
+    feeder, github, pull = _done_row(tmp_path)
+    github.statuses = {pull: MERGED}
+    feeder.feed_once()
+    _state(tmp_path, int(pull.key), "merged")
+    reads = len(github.status_reads)
+
+    feeder.feed_once()
+
+    assert all(pull not in read for read in github.status_reads[reads:])
+    assert rows(tmp_path / "orch.db")["1"]["state"] == "done"
+
+
+def test_a_labelled_retirement_lost_to_a_lock_lands_on_the_next_poll(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    feeder, github, pull = _done_row(tmp_path)
+    github.statuses = {pull: LABELLED}
+    armed = []
+    read = github.ref_statuses
+
+    def reading(refs):
+        armed.append(True)
+        return read(refs)
+
+    def locked(connect, work, **kwargs):
+        if armed:
+            armed.clear()
+            return False
+        return bookkeeping_write(connect, work, **kwargs)
+
+    monkeypatch.setattr(github, "ref_statuses", reading)
+    monkeypatch.setattr(feeder_module, "bookkeeping_write", locked)
+    feeder.feed_once()
+    assert rows(tmp_path / "orch.db")["1"]["state"] == "done"
+
+    feeder.feed_once()
+
+    assert rows(tmp_path / "orch.db")["1"]["state"] == "abandoned"

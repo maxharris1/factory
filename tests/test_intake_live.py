@@ -443,6 +443,21 @@ def test_ref_statuses_marks_an_open_pr_labelled_abandoned() -> None:
     assert "labels(first: 30) { nodes { name } }" in " ".join(gh.calls[0])
 
 
+def test_ref_statuses_keeps_the_abandoned_label_on_a_closed_or_merged_pr() -> None:
+    from lib.feeder_gates import github_ref
+
+    labelled = {"nodes": [{"name": "orch:state/abandoned"}]}
+    gh = GraphQLGh({"owner/app": {
+        1: {**pull_node("CLOSED"), "labels": labelled},
+        2: {**pull_node("MERGED", merged=True), "labels": labelled},
+        3: pull_node("CLOSED"),
+    }})
+    found = GitHubIntakeClient(gh).ref_statuses([github_ref("owner/app", n) for n in (1, 2, 3)])
+    assert {int(ref.key): (status.progress, status.abandoned) for ref, status in found.items()} == {
+        1: (Progress.UNFINISHED, True), 2: (Progress.DONE, True), 3: (Progress.UNFINISHED, False),
+    }
+
+
 def test_ref_statuses_is_one_cached_graphql_read_per_repo() -> None:
     from lib.feeder_gates import github_ref
 
