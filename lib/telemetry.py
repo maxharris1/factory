@@ -1849,9 +1849,7 @@ class Session:
         self._limit_recorded = True
 
     def add_usage(self, readings: list[Reading], account: str | None = None, own_login: bool = False) -> None:
-        """Keep each window's newest reading per account; the next flush
-        stores them (#151). account None is the placed account, whose own_login
-        the session already knows."""
+        """Keep each window's newest reading per account; the next flush stores them (#151)."""
         account = account or self.account
         with self._lock:
             windows = self.usage.setdefault(account, {})

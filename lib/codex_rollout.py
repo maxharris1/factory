@@ -215,7 +215,6 @@ def latest(home: str, thread_id: str) -> dict | None:
 
 
 def newest(home: str) -> dict | None:
-    """The newest rollout's last `token_count` rate limits and timestamp, or None."""
     path = _newest_path(home, "rollout-*.jsonl")
     if path is None:
         return None

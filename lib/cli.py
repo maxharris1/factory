@@ -2607,7 +2607,6 @@ def _read_idle_codex(
     inherited: Mapping[str, str],
     log: Callable[[str], None],
 ) -> None:
-    """Each other Codex account's newest rollout, read as the job ends; never raises."""
     try:
         probes = usage_probe.account_probes(
             machines, placed.device.name, "codex", (placed.account, placed.account_home), log
@@ -2619,7 +2618,7 @@ def _read_idle_codex(
                 else codex_rollout.newest(home or codex_rollout.default_home(dict(inherited)))
             )
             session.add_rollout(found, account, own_login=home is None)
-    except Exception as exc:  # a usage read never touches the job's end
+    except Exception as exc:
         log(f"usage probe: idle codex accounts not read ({type(exc).__name__})")
 
 

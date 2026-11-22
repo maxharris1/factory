@@ -167,7 +167,6 @@ def codex_remote(
     home: str | None = None,
     timeout: float = TIMEOUT_SECONDS,
 ) -> object:
-    """thread_id None reads the account's newest rollout."""
     if thread_id is not None and not codex_rollout.THREAD_ID.fullmatch(thread_id):
         return None
     out = _exchange(transport, ssh_argv(target, codex_remote_script(thread_id, home)), b"", timeout)
@@ -185,7 +184,6 @@ def account_probes(
     placed: tuple[str, str | None],
     log: Callable[[str], None],
 ) -> list[tuple[str, str | None]]:
-    """Each account signed in for harness on device with its home, the placed one first."""
     probes = [placed]
     for account in config.accounts_on(device, harness):
         if account == placed[0]:
@@ -236,8 +234,6 @@ def start_pass(
     probe: Callable[[str | None], bytes],
     log: Callable[[str], None],
 ) -> list[threading.Thread]:
-    """One Claude probe thread per (account, home); the placed account, first,
-    keeps the unlabelled log lines."""
     return [
         start_claude(
             lambda readings, a=account, h=home: add(readings, a, h),
@@ -276,8 +272,7 @@ def remote_codex(
 
 
 def idle_codex_remote(transport: Transport, target: RemoteTarget, *, home: str | None) -> object:
-    """Another Codex account's newest rollout read on the device; None on any failure."""
     try:
         return codex_remote(transport, target, None, home=home)
-    except Exception:  # a usage read never touches the job's end
+    except Exception:
         return None
