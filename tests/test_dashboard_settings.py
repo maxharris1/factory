@@ -12,6 +12,7 @@ import pytest
 
 from lib import live_settings
 from lib.dashboard import collect_snapshot, render_pages, write_snapshot_pages
+from lib.settings_apply import Applier, SettingsRequest, append_audit, claim_lock
 from tests import test_dashboard_layout as layout
 from tests.test_dashboard import GH_CLASSIC, GH_OAUTH, GH_PAT, NOW, make_db
 from tests.test_dashboard_layout import BAR, HARNESS, _no_script, _section, _text, needs_node
@@ -75,7 +76,7 @@ def test_device_rows_carry_local_and_drain(tmp_path: Path) -> None:
 def test_settings_results_keep_only_audit_keys_oldest_first(tmp_path: Path) -> None:
     results = _snapshot(tmp_path)["settings"]["results"]
     assert [r["id"] for r in results] == ["a" * 16, "b" * 16, "c" * 16]
-    assert all(set(r) == set(AUDIT[0]) - {"token"} | {"version"} for r in results)
+    assert all(set(r) == set(AUDIT[0]) - {"token"} | {"version", "target", "account"} for r in results)
     assert results[0]["restarted"] == ["poller", "waiter-codex"]
     assert results[1]["previous"] is False and results[1]["new"] is True
 
@@ -322,3 +323,149 @@ def test_an_error_shows_inline_on_its_card(tmp_path: Path, status: int, error: s
     html = out["html"]["settings"]
     assert f'<div class="st-out bad" role="status">error: {error}</div>' in _card(html, "box")
     assert f"error: {error}" not in _card(html, "pc")
+
+
+def test_an_old_audit_line_loads_with_no_target_or_account(tmp_path: Path) -> None:
+    (row,) = _snapshot(tmp_path, [AUDIT[0]])["settings"]["results"]
+    assert (row["target"], row["account"], row["result"]) == (None, None, "applied")
+
+
+def test_target_and_account_reach_the_results(tmp_path: Path) -> None:
+    entry = {**AUDIT[0], "target": "account", "account": "claude-max-2", "device": "pc", "field": "doctor"}
+    (row,) = _snapshot(tmp_path, [entry])["settings"]["results"]
+    assert (row["target"], row["account"]) == ("account", "claude-max-2")
+
+
+def test_a_device_card_drops_account_lines(tmp_path: Path) -> None:
+    entry = {**AUDIT[0], "id": "f" * 16, "target": "account", "account": "claude-max-2", "field": "doctor"}
+    snapshot = _snapshot(tmp_path, [entry])
+    pc = _card(_section(_no_script(render_pages(snapshot)["settings.html"]), "settings"), "pc")
+    assert "doctor" not in pc
+    assert '<p class="empty">no changes yet</p>' in pc
+
+
+def _landed(id_: str, version: int | None, **extra: object) -> dict:
+    return {**AUDIT[0], "id": id_ * 16, "result": "pending", "pending": ["waiter-codex-bot"],
+            "version": version, **extra}
+
+
+@pytest.mark.parametrize("later", [
+    _landed("2", 2, previous=2, new=4),
+    _landed("2", 2, result="applied", pending=[]),
+], ids=["pending", "applied"])
+def test_a_later_landed_change_to_the_same_field_supersedes(tmp_path: Path, later: dict) -> None:
+    first, second = _snapshot(tmp_path, [_landed("1", 1), later], "adopted")["settings"]["results"]
+    assert (first["result"], first["superseded_by"]) == ("superseded", "2" * 16)
+    assert second["result"] != "superseded" and "superseded_by" not in second
+
+
+@pytest.mark.parametrize("later", [
+    _landed("2", 2, field="drain", previous=False, new=True),
+    _landed("2", 2, device="box"),
+    _landed("2", 2, target="account", account="claude-max-2"),
+    _landed("2", None, result="refused"),
+    _landed("2", None, result="failed"),
+    _landed("2", 1),
+    _landed("2", None),
+], ids=["other-field", "other-device", "other-target", "refused", "failed", "not-later", "no-version"])
+def test_only_a_later_landed_change_to_the_same_field_supersedes(tmp_path: Path, later: dict) -> None:
+    first, _ = _snapshot(tmp_path, [_landed("1", 1), later], "adopted")["settings"]["results"]
+    assert first["result"] == "pending" and "superseded_by" not in first
+
+
+def test_the_earliest_later_change_names_the_supersession(tmp_path: Path) -> None:
+    audit = [_landed("1", 1), _landed("2", 2), _landed("3", 3)]
+    rows = _snapshot(tmp_path, audit, "adopted")["settings"]["results"]
+    assert [(r["result"], r.get("superseded_by")) for r in rows][:2] == [
+        ("superseded", "2" * 16), ("superseded", "3" * 16)]
+
+
+ACCOUNT = {"target": "account", "account": "claude-max-2", "device": None}
+
+
+@pytest.mark.parametrize("op", ["add", "remove"])
+def test_an_add_or_remove_of_the_account_supersedes_its_changes(tmp_path: Path, op: str) -> None:
+    audit = [_landed("1", 1, **ACCOUNT, field="max_jobs"), _landed("2", 2, **ACCOUNT, field=op)]
+    first, _ = _snapshot(tmp_path, audit, "adopted")["settings"]["results"]
+    assert (first["result"], first["superseded_by"]) == ("superseded", "2" * 16)
+
+
+def test_an_add_of_another_account_does_not_supersede(tmp_path: Path) -> None:
+    audit = [_landed("1", 1, **ACCOUNT, field="max_jobs"),
+             _landed("2", 2, **{**ACCOUNT, "account": "claude-max-3"}, field="add")]
+    first, _ = _snapshot(tmp_path, audit, "adopted")["settings"]["results"]
+    assert first["result"] == "pending"
+
+
+REPLAY_MACHINES = (
+    "devices:\n"
+    "  - {name: box, local: true, slot_max: 3, harnesses: {claude: claude-bot}}\n"
+    "  - name: pc\n"
+    "    tailscale_name: pc.example.ts.net\n"
+    "    slot_max: 6\n"
+    "    harnesses: {codex: codex-bot}\n"
+    "    workdir_root: '/srv/work/{bot}'\n"
+    "    ssh_alias: 'pc-{bot}'\n"
+    "    factory_root: /srv/factory\n"
+)
+
+
+def _replay_slot_max(tmp_path: Path) -> list[dict]:
+    """#990 f-2: apply and adopt slot_max 6→1, then 1→4, with the codex waiter
+    owned by another account, and return the snapshot after each step."""
+    db = tmp_path / "orch.db"
+    make_db(db)
+    machines = tmp_path / "machines.yml"
+    machines.write_text(REPLAY_MACHINES, encoding="utf-8")
+    applier = Applier(machines, tmp_path, tmp_path / "deploy", "maxharris1", {}, ("poller",),
+                      ("waiter-codex-bot",), claim_lock(db), run=lambda *_: 0)
+
+    def poller_adopts(waiter_restarted: bool = False) -> None:
+        with sqlite3.connect(db, isolation_level=None) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            live, _ = live_settings.adopted(connection, machines)
+            if waiter_restarted:
+                live_settings.record_seen(connection, "codex", live.adopted)
+            connection.execute("COMMIT")
+
+    def snapshot() -> dict:
+        return collect_snapshot(db, tmp_path / "poller.log", now=NOW, machines_path=machines)
+
+    snapshots = []
+    for id_, expect, value in (("1", 6, 1), ("2", 1, 4)):
+        entry = applier.apply(SettingsRequest(id_ * 16, "maxharris1", "2026-11-17T10:00:00Z",
+                                              "pc", "slot_max", expect, value))
+        assert entry.result == "pending", entry
+        append_audit(applier.audit_path, entry)
+        poller_adopts()
+        snapshots.append(snapshot())
+    poller_adopts(waiter_restarted=True)
+    snapshots.append(snapshot())
+    return snapshots
+
+
+def test_a_superseded_slot_max_never_keeps_restart_pending(tmp_path: Path) -> None:
+    first_adopted, second_adopted, waiter_restarted = _replay_slot_max(tmp_path)
+    (only,) = first_adopted["settings"]["results"]
+    assert only["result"] == "pending", "6→1 waits on the codex waiter until it restarts"
+    for snapshot in (second_adopted, waiter_restarted):
+        first, second = snapshot["settings"]["results"]
+        assert (first["result"], first["superseded_by"]) == ("superseded", "2" * 16)
+        pc = _card(_section(_no_script(render_pages(snapshot)["settings.html"]), "settings"), "pc")
+        assert f'<span class="st-sup">superseded by {"2" * 16}</span>' in pc
+        assert pc.count("restart pending") == (1 if second["result"] == "pending" else 0)
+    assert waiter_restarted["settings"]["results"][1]["result"] == "applied"
+    pc = _card(_section(_no_script(render_pages(waiter_restarted)["settings.html"]), "settings"), "pc")
+    assert "restart pending" not in pc
+
+
+@needs_node
+def test_script_draws_superseded_and_drops_account_lines_like_the_server(tmp_path: Path) -> None:
+    _, _, snapshot = _replay_slot_max(tmp_path)
+    snapshot["settings"]["results"].append(
+        {**AUDIT[0], "id": "f" * 16, "target": "account", "account": "claude-max-2", "field": "doctor"})
+    out = _run(tmp_path, snapshot, _harness(None))
+    server = _section(_no_script(render_pages(snapshot)["settings.html"]), "settings")
+    assert out["html"]["settings"] == server[server.index(">") + 1:server.rindex("<")]
+    assert "superseded by " + "2" * 16 in out["text"]["settings"]
+    assert "restart pending" not in out["text"]["settings"] and "doctor" not in out["text"]["settings"]

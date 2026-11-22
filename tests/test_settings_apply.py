@@ -153,12 +153,14 @@ def test_the_approvers_request_is_applied_backed_up_audited_and_restarted(tmp_pa
     (line,) = box.audit()
     assert set(line) == {"id", "actor", "requested_at", "applied_at", "device", "field",
                          "previous", "new", "result", "error", "backup", "restarted", "pending",
-                             "version"}
+                         "version", "target", "account"}
     assert {k: line[k] for k in ("id", "actor", "requested_at", "applied_at", "device",
-                                 "field", "previous", "new", "result", "error")} == {
+                                 "field", "previous", "new", "result", "error", "target",
+                                 "account")} == {
         "id": rid, "actor": "maxharris1", "requested_at": "2026-11-17T10:00:00Z",
         "applied_at": heal.stamp(NOW), "device": "box", "field": "slot_max",
-        "previous": 6, "new": 4, "result": "pending", "error": None}
+        "previous": 6, "new": 4, "result": "pending", "error": None, "target": None,
+        "account": None}
     assert line["restarted"] == ["poller", "waiter-claude-bot", "waiter-codex-bot"]
     assert line["pending"] == ["waiter-cursor-bot"]
     (backup,) = box.backups()

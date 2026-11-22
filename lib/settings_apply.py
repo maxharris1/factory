@@ -155,6 +155,8 @@ class AuditEntry:
     restarted: tuple[str, ...] = ()
     pending: tuple[str, ...] = ()
     version: int | None = None
+    target: str | None = None
+    account: str | None = None
 
     def line(self) -> str:
         data = asdict(self)
