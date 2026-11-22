@@ -302,3 +302,41 @@ def test_a_command_with_no_output_block_is_still_refused_beside_raw_output() -> 
     assert missing(REVIEW_ITEMS[:2], ready) == [
         "Proof entry ac-2 (review) needs the command in backticks and its output in a fenced block"
     ]
+
+
+@pytest.mark.parametrize("output", ["  1 passed", "1 passed"])
+@pytest.mark.parametrize(
+    "before",
+    [
+        "- ```python\n  print(\"hello\")\n  ```",
+        "1. ~~~\n   print(\"hello\")\n   ~~~",
+        "    ```\n    a literal fence in an indented code block",
+        "    ```\n    literal\n    ```\n\n- ```\n  x\n  ```",
+    ],
+)
+def test_a_code_example_before_the_proof_section_leaves_the_entries_intact(before: str, output: str) -> None:
+    ready = f"Changed the docs example.\n\n{before}\n\n## Proof\n- ac-1 (review): `pytest -q`\n  ```\n{output}\n  ```\n"
+    assert missing(REVIEW_ITEMS[:1], ready) == []
+
+
+@pytest.mark.parametrize("output", ["    1 passed", "1 passed"])
+def test_a_fence_in_a_nested_list_inside_an_entry_leaves_the_next_entry_intact(output: str) -> None:
+    ready = _ready(
+        f"- ac-1 (review): `pytest -q`\n  - nested\n    ```\n{output}\n    ```",
+        "- ac-2 (review): `pytest -q tests/test_b.py`\n  ```\n2 passed\n  ```",
+    )
+    assert missing(REVIEW_ITEMS[:2], ready) == []
+
+
+def test_a_list_fence_opened_on_the_marker_line_inside_proof_keeps_raw_output() -> None:
+    ready = _ready(
+        "- ac-1 (review): `pytest -q`\n\n  ```\n1 passed\n  ```",
+        "- ```\n  not an entry\n  ```",
+        "- ac-2 (review): `pytest -q tests/test_b.py`\n  ```\n2 passed\n  ```",
+    )
+    assert missing(REVIEW_ITEMS[:2], ready) == []
+
+
+def test_a_cut_fence_whose_closer_sits_too_deep_still_returns() -> None:
+    ready = _ready("- ac-1 (review): `pytest -q`\n  ```\n1 passed\n\n- ac-2 x\n          ```\n  text\n  ```")
+    assert missing(REVIEW_ITEMS[:1], ready) == []
