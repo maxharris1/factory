@@ -2472,6 +2472,31 @@ def test_cli_bot_pass_keeps_jobs_inside_its_ten_minute_grace(
     assert (root / "jobs" / "fresh" / "repo" / "README").exists()
 
 
+class NoCalls:
+    def call(self, argv, *, timeout: float, input: bytes | None = None) -> Called:
+        raise AssertionError(f"a pass ran beside another: {argv}")
+
+
+def test_bot_pass_exits_when_another_pass_of_that_bot_runs(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    root = work_root(tmp_path)
+    job_folder(root, "done1")
+    db = database(tmp_path, [("done1", "t1", "done", OLD)])
+    monkeypatch.setattr(job_cleanup.health, "load_machines", lambda _: machines(tmp_path, "pc"))
+
+    with open(db.parent / "cleanup-claude-bot.lock", "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        code, out = cleanup(["run", "--bot", "claude-bot", "--db", str(db)], NoCalls(), capsys)
+
+    assert code == 0
+    assert out == "orch cleanup run: cleanup for claude-bot already running\n"
+    assert (root / "jobs" / "done1").exists()
+    code, out = cleanup(["run", "--bot", "claude-bot", "--db", str(db)],
+                        InProcessTransport(root), capsys)
+    assert code == 0 and not (root / "jobs" / "done1").exists(), out
+
+
 def test_cli_run_takes_backlog_or_bot_but_not_both(tmp_path: Path, capsys) -> None:
     db = database(tmp_path, [])
     both = job_cleanup.main(["run", "--backlog", "--bot", "claude-bot", "--db", str(db)],
