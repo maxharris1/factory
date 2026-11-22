@@ -11,6 +11,7 @@ from pathlib import Path
 from lib import device_sync, job_detail, lane_limit, skill_preflight
 from lib.device_pool import (
     UNREACHABLE_BACKOFF_SECONDS,
+    account_loads,
     back_off,
     backed_off_through,
     device_lost_detail,
@@ -254,6 +255,29 @@ class JobsMixin:
 
         return full
 
+    def _account_held(self) -> Callable[[Job], bool]:
+        config = getattr(self.devices, "config", None)
+        if config is None:
+            return lambda job: False
+        with self.queue.connect() as connection:
+            loads = account_loads(connection, config, self.queue.now())
+        used = used_slots(self.queue, config)
+        blocked = placement_blocks(self.queue, config, self._head())
+        pins = self._pins()
+
+        def held(job: Job) -> bool:
+            harness = job.request.recipient
+            allowed = pins.get(job.request.repo.lower())
+            accounts = {
+                account
+                for device in config.devices
+                if device.takes_new(harness) and (allowed is None or device.name in allowed)
+                for account in config.accounts_on(device.name, harness)
+            }
+            return bool(accounts & loads.held) and free_slots(config, harness, used, blocked, allowed=allowed) == 0
+
+        return held
+
     def _pins(self) -> Mapping[str, frozenset[str]]:
         pool = getattr(self.devices, "pool", None)
         pins = None if pool is None else pool.pins()
@@ -344,6 +368,7 @@ class JobsMixin:
         self._close_abandoned_jobs()
         now = self.queue.now()
         no_free_slot = self._no_free_slot()
+        account_held = self._account_held()
         lag_blocked = self._lag_blocked_recipients()
         serving = self._serving()
         with self._connect() as connection:
@@ -355,7 +380,7 @@ class JobsMixin:
             paused = lane_limit.paused_through(connection, now, serving)
         backed_off = self._backed_off_through()
         for job in self.queue.outstanding():
-            if job.state == "queued" and job.request.recipient in limited:
+            if job.state == "queued" and (job.request.recipient in limited or account_held(job)):
                 self._restart_queue_wait(job, now)
                 continue
             # A queued job's last_activity_at is its queue-wait start: when
