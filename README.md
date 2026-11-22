@@ -239,9 +239,9 @@ its checkout, a backoff or a memory hold. A job of a project with
 utilization (slots held over `slot_max`; a tie goes to a remote device
 before the local box, remotes in `machines.yml` order; issue #223). The
 candidate accounts on a device are its own login, then each account whose
-`signed_in_on` names it. An account takes no job while it is usage-limited,
-while it runs `max_jobs` jobs across every device, or while its fresh
-headroom is under the floor, 0.05. Fresh headroom is the least `1 - used`
+`signed_in_on` names it. An account takes no job while it is paused or
+usage-limited, while it runs `max_jobs` jobs across every device, or while
+its fresh headroom is under the floor, 0.05. Fresh headroom is the least `1 - used`
 over the fresh windows of the account's newest readings. Each open account
 gets a score. The score is its fresh headroom (0.5 when it has no fresh
 reading) less a pending charge of 0.02 for each running job placed on it
@@ -1909,6 +1909,9 @@ account, and a device named twice for one account (twice in `signed_in_on`,
 or there and as the device's own login). `max_jobs`, a positive
 integer, caps the account's running jobs across every device. Placement
 (see "Device pool") gives an account at its cap no new job.
+`paused` (true or false, default false) gives the account no new job while
+its running jobs finish. A pause or a lower `max_jobs` reaches placement at
+once, and a resume or a higher `max_jobs` once the poller adopts the file.
 
 Account homes (issues #1183 and #1184). One bot user on one device can run
 several accounts of its harness, each from its own folder. A job placed on

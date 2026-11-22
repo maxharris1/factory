@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 import os
@@ -11,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from lib import live_settings
-from lib.live_settings import CLOSED, Live, Switch
+from lib.live_settings import ACCOUNT_CLOSED, CLOSED, AccountSwitch, Live, Switch
 from lib.machines_yml import MachinesConfig, load_machines_yml
 
 PC = """\
@@ -431,3 +432,157 @@ def test_adopted_holds_reads_one_field_of_the_adopted_switches(
     live, _ = adopt(db, machines)
 
     assert live.adopted_holds(device, name, value) is holds
+
+
+ACCOUNTS = """\
+devices:
+  - name: box
+    local: true
+    slot_max: 4
+    harnesses: {{claude: {{bot: claude-bot, account: max-1}}}}
+accounts:
+  - {{id: max-1, harness: claude{max_1}}}
+"""
+
+
+def accounts_text(**max_1: object) -> str:
+    fields = "".join(f", {key}: {str(value).lower()}" for key, value in max_1.items())
+    return ACCOUNTS.format(max_1=fields)
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "met"),
+    [
+        (AccountSwitch(False, 3), AccountSwitch(False, 3), AccountSwitch(False, 3)),
+        (AccountSwitch(False, 3), AccountSwitch(True, 3), AccountSwitch(True, 3)),
+        (AccountSwitch(False, 6), AccountSwitch(False, 1), AccountSwitch(False, 1)),
+        (AccountSwitch(False, None), AccountSwitch(False, 4), AccountSwitch(False, 4)),
+        (AccountSwitch(False, None), AccountSwitch(False, None), AccountSwitch(False, None)),
+        (AccountSwitch(False, 4), ACCOUNT_CLOSED, ACCOUNT_CLOSED),
+    ],
+)
+def test_account_meet_is_paused_if_either_side_is_and_keeps_the_lower_cap(
+    first: AccountSwitch, second: AccountSwitch, met: AccountSwitch
+) -> None:
+    assert first.meet(second) == met
+    assert second.meet(first) == met, "meet is symmetric"
+
+
+def test_placement_config_takes_paused_and_max_jobs_from_the_row(tmp_path: Path, db) -> None:
+    machines = tmp_path / "machines.yml"
+    loaded = write(machines, accounts_text(max_jobs=6))
+    write(machines, accounts_text(paused=True, max_jobs=2))
+    live, _ = adopt(db, machines)
+
+    account = live.placement_config(loaded).account("max-1")
+
+    assert account is not None and (account.paused, account.max_jobs) == (True, 2)
+    assert dict(live.accounts) == {"max-1": AccountSwitch(True, 2)}
+
+
+@pytest.mark.parametrize(
+    ("narrower", "expected"),
+    [({"paused": True}, AccountSwitch(True, 3)), ({"max_jobs": 1}, AccountSwitch(False, 1))],
+    ids=["pause", "lower-max-jobs"],
+)
+def test_recorded_applies_an_account_narrowing_at_once(
+    tmp_path: Path, db, narrower: dict, expected: AccountSwitch
+) -> None:
+    machines = tmp_path / "machines.yml"
+    write(machines, accounts_text(max_jobs=3))
+    adopt(db, machines)
+    write(machines, accounts_text(**{"max_jobs": 3, **narrower}))
+
+    live = narrow(db, machines)
+
+    assert dict(live.accounts) == {"max-1": expected}
+    assert not live.places_by_adopted()
+    assert live_settings.peek(db) == live
+
+
+@pytest.mark.parametrize(
+    ("loaded", "wider"),
+    [({"paused": True, "max_jobs": 3}, {"max_jobs": 3}), ({"max_jobs": 1}, {"max_jobs": 3}),
+     ({"max_jobs": 1}, {})],
+    ids=["resume", "raise-max-jobs", "drop-max-jobs"],
+)
+def test_an_account_widening_waits_for_the_pollers_adopt(
+    tmp_path: Path, db, loaded: dict, wider: dict
+) -> None:
+    machines = tmp_path / "machines.yml"
+    write(machines, accounts_text(**loaded))
+    before, _ = adopt(db, machines)
+    write(machines, accounts_text(**wider))
+
+    after = narrow(db, machines)
+
+    assert after.accounts == before.accounts, "a widening waits for the poller's adopt"
+    adopted, _ = adopt(db, machines)
+    assert dict(adopted.accounts) == {
+        "max-1": AccountSwitch(False, wider.get("max_jobs"))
+    }
+
+
+def test_an_account_missing_from_the_row_is_closed_until_the_poller_adopts(
+    tmp_path: Path, db
+) -> None:
+    machines = tmp_path / "machines.yml"
+    write(machines, BOX_ONLY)
+    adopt(db, machines)
+    loaded = write(machines, accounts_text())
+
+    live = narrow(db, machines)
+
+    account = live.placement_config(loaded).account("max-1")
+    assert account is not None and account.paused and account.max_jobs == 0
+    adopted, _ = adopt(db, machines)
+    account = adopted.placement_config(loaded).account("max-1")
+    assert account is not None and not account.paused and account.max_jobs is None
+
+
+def test_a_device_row_written_without_its_account_row_closes_accounts_until_rerecorded(
+    tmp_path: Path, db
+) -> None:
+    machines = tmp_path / "machines.yml"
+    loaded = write(machines, accounts_text())
+    adopt(db, machines)
+    db.execute(f"DROP TABLE {live_settings.ACCOUNT_TABLE}")
+
+    stale = live_settings.peek(db)
+
+    assert stale is not None
+    assert stale.placement_config(loaded).account("max-1").paused, (
+        "an older binary wrote device_live alone"
+    )
+    adopted, _ = adopt(db, machines)
+    assert not adopted.placement_config(loaded).account("max-1").paused
+
+
+def test_the_requested_files_pause_holds_through_another_checkouts_adopt(
+    tmp_path: Path, db
+) -> None:
+    settings, stale = checkouts(tmp_path, "settings", "stale")
+    write(stale, accounts_text(max_jobs=6))
+    write(settings, accounts_text(paused=True, max_jobs=6))
+    request(db, settings)
+
+    live, _ = adopt(db, stale)
+
+    assert live.accounts["max-1"] == AccountSwitch(True, 6), "the Settings pause holds"
+
+
+def test_the_shipped_config_keeps_its_digest() -> None:
+    shipped = Path(__file__).resolve().parents[1] / "machines.yml"
+    config, findings = load_machines_yml(shipped)
+    assert config is not None, findings
+    devices = {
+        d.name: {"enabled": d.enabled, "drain": d.drain, "slot_max": d.slot_max}
+        for d in sorted(config.devices, key=lambda item: item.name)
+    }
+    before = hashlib.sha256(json.dumps(devices, separators=(",", ":")).encode("utf-8")).hexdigest()
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+
+    live, _ = adopt(connection, shipped)
+
+    assert live.adopted_digest == before, "the digest #852 shipped, for a file with no accounts"
+    assert live.places_by_adopted()

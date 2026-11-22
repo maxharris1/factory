@@ -8,7 +8,7 @@ by utilization (slots held over slot_max; a tie goes to a remote before the
 local box, remotes in machines.yml order; issue #223) among those that are
 schedulable, not draining, and list that harness (issue #85). Of the
 accounts signed in for the harness on a free device that are neither
-usage-limited, at max_jobs across every device nor under FLOOR fresh
+paused, usage-limited, at max_jobs across every device nor under FLOOR fresh
 headroom, the one with the highest score wins (then fewer running jobs, its
 best device, its id) and takes its best-ranked device. The score is fresh
 headroom (UNREAD_HEADROOM with none) less PENDING_CHARGE per job placed
@@ -23,12 +23,14 @@ own transaction. Slots are generic: any free slot on an eligible device takes
 any harness. Inside that transaction a pool given `machines_path` reads
 the shared settings row (lib/live_settings.py, #852) with machines.yml as
 it is now written into it, and places by the row's enabled, drain and
-slot_max, not by the config the process loaded. A settings change written
-under the same lock (lib/settings_apply.py) that disables, drains or lowers
-slot_max stops the next claim in every process (#777). An enable, an
-undrain or a higher slot_max reaches placement once the poller's
-DeviceMonitor adopts the file and every machines.yml the row holds allows
-it, with no restart. Until the poller first adopts, every device is closed.
+slot_max, and each account's paused and max_jobs, not by the config the
+process loaded. A settings change written under the same lock
+(lib/settings_apply.py) that disables, drains or lowers slot_max, or pauses
+an account or lowers its max_jobs, stops the next claim in every process
+(#777). An enable, an undrain, a resume or a higher cap reaches placement
+once the poller's DeviceMonitor adopts the file and every machines.yml the
+row holds allows it, with no restart. Until the poller first adopts, every
+device and every declared account is closed.
 
 A running harness job with no slot row (claimed without a device: an older
 `orch wait`, issue #90) counts as one slot on the box, so the box never runs
@@ -302,7 +304,7 @@ def account_loads(
     held.update(account for account, left in fresh.items() if left is not None and left < FLOOR)
     closed = set(held)
     for item in config.accounts if config is not None else ():
-        if item.max_jobs is not None and running.get(item.id, 0) >= item.max_jobs:
+        if item.paused or (item.max_jobs is not None and running.get(item.id, 0) >= item.max_jobs):
             closed.add(item.id)
     signed_in = None
     if _has_table(connection, account_doctor.TABLE):

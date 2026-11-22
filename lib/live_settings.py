@@ -12,6 +12,10 @@ is enabled only if the adopted switches and every file say so, drained if
 any does, and its slot_max is the lowest. A device the poller has not
 adopted is closed, so nothing is placed before the first adopt.
 
+Each declared account's `paused` and `max_jobs` ride the same row, kept in
+the sibling `account_live` table and written in the same transaction, with
+the same meet: paused if any side says so, and the lowest max_jobs.
+
 * `recorded` runs inside every claim's BEGIN IMMEDIATE. When the caller's
   file changed since its entry was written, it replaces that entry. A
   narrowing in any file reaches placement at once; an entry that widens lets
@@ -53,6 +57,7 @@ from lib.machines_yml import MachinesConfig, load_machines_yml
 
 TABLE = "device_live"
 SEEN_TABLE = "device_live_seen"
+ACCOUNT_TABLE = "account_live"
 
 
 @dataclass(frozen=True)
@@ -75,6 +80,19 @@ _FIELDS = tuple(item.name for item in fields(Switch))
 
 
 @dataclass(frozen=True)
+class AccountSwitch:
+    paused: bool
+    max_jobs: int | None
+
+    def meet(self, other: AccountSwitch) -> AccountSwitch:
+        caps = [cap for cap in (self.max_jobs, other.max_jobs) if cap is not None]
+        return AccountSwitch(self.paused or other.paused, min(caps) if caps else None)
+
+
+ACCOUNT_CLOSED = AccountSwitch(paused=True, max_jobs=0)
+
+
+@dataclass(frozen=True)
 class Live:
     switches: Mapping[str, Switch]
     written: int
@@ -82,6 +100,7 @@ class Live:
     adopted_digest: str = ""
     seen: Mapping[str, int] = field(default_factory=dict)
     adopted_switches: Mapping[str, Switch] = field(default_factory=dict)
+    accounts: Mapping[str, AccountSwitch] = field(default_factory=dict)
 
     def placement_config(self, config: MachinesConfig) -> MachinesConfig:
         devices = []
@@ -89,7 +108,11 @@ class Live:
             switch = self.switches.get(device.name, CLOSED)
             devices.append(replace(device, enabled=switch.enabled, drain=switch.drain,
                                    slot_max=switch.slot_max))
-        return replace(config, devices=tuple(devices))
+        accounts = []
+        for account in config.accounts:
+            switch = self.accounts.get(account.id, ACCOUNT_CLOSED)
+            accounts.append(replace(account, paused=switch.paused, max_jobs=switch.max_jobs))
+        return replace(config, devices=tuple(devices), accounts=tuple(accounts))
 
     def is_applied(self, version: int) -> bool:
         return self.adopted >= version
@@ -99,19 +122,25 @@ class Live:
         return switch is not None and name in _FIELDS and getattr(switch, name) == value
 
     def places_by_adopted(self) -> bool:
-        return self.adopted > 0 and _digest(self.switches) == self.adopted_digest
+        return self.adopted > 0 and _digest(self.switches, self.accounts) == self.adopted_digest
 
 
 @dataclass(frozen=True)
 class _Source:
     key: str
     switches: Mapping[str, Switch]
-    pinned: bool = False
+    pinned: bool
+    accounts: Mapping[str, AccountSwitch] | None
+
+    @property
+    def has_accounts(self) -> bool:
+        return self.accounts is not None
 
 
 @dataclass(frozen=True)
 class _Row:
     adopted_switches: Mapping[str, Switch]
+    adopted_accounts: Mapping[str, AccountSwitch] | None
     written: int
     adopted: int
     adopted_digest: str
@@ -119,16 +148,22 @@ class _Row:
 
     def live(self) -> Live:
         switches = dict(self.adopted_switches)
+        accounts = dict(self.adopted_accounts or {})
         for source in self.sources.values():
             switches = {
                 name: switch.meet(source.switches.get(name, CLOSED))
                 for name, switch in switches.items()
             }
+            found = source.accounts or {}
+            accounts = {
+                name: switch.meet(found.get(name, ACCOUNT_CLOSED))
+                for name, switch in accounts.items()
+            }
         return Live(switches, self.written, self.adopted, self.adopted_digest,
-                    adopted_switches=self.adopted_switches)
+                    adopted_switches=self.adopted_switches, accounts=accounts)
 
 
-EMPTY = _Row({}, written=0, adopted=0, adopted_digest="", sources={})
+EMPTY = _Row({}, {}, written=0, adopted=0, adopted_digest="", sources={})
 
 
 def file_key(machines: Path) -> str:
@@ -154,7 +189,8 @@ def _record(connection: sqlite3.Connection, machines: Path, *, pin: bool) -> Liv
     row = _read(connection) or EMPTY
     source = row.sources.get(path)
     pinned = pin or (source is not None and source.pinned)
-    if source is not None and source.key == key and source.pinned == pinned:
+    if (source is not None and source.key == key and source.pinned == pinned
+            and source.has_accounts):
         return row.live()
     config = _load(machines)
     if config is None:
@@ -162,7 +198,8 @@ def _record(connection: sqlite3.Connection, machines: Path, *, pin: bool) -> Liv
     sources = {name: replace(item, pinned=item.pinned and not pin)
                for name, item in row.sources.items()}
     row = replace(row, written=row.written + 1,
-                  sources={**sources, path: _Source(key, _switches(config), pinned)})
+                  sources={**sources, path: _Source(key, _switches(config), pinned,
+                                                    _account_switches(config))})
     _write(connection, row)
     return row.live()
 
@@ -185,10 +222,11 @@ def adopted(connection: sqlite3.Connection, machines: Path) -> tuple[Live, Machi
     prior = found.sources.get(path)
     written = found.written + (prior is None or prior.key != key)
     switches = _switches(config)
+    accounts = _account_switches(config)
     kept = {name: item for name, item in found.sources.items() if item.pinned}
-    own = _Source(key, switches, prior is not None and prior.pinned)
-    row = _Row(switches, written=written, adopted=written, adopted_digest=_digest(switches),
-               sources={**kept, path: own})
+    own = _Source(key, switches, prior is not None and prior.pinned, accounts)
+    row = _Row(switches, accounts, written=written, adopted=written,
+               adopted_digest=_digest(switches, accounts), sources={**kept, path: own})
     _write(connection, row)
     return row.live(), config
 
@@ -245,6 +283,10 @@ def _switches(config: MachinesConfig) -> dict[str, Switch]:
     return {d.name: Switch(d.enabled, d.drain, d.slot_max) for d in config.devices}
 
 
+def _account_switches(config: MachinesConfig) -> dict[str, AccountSwitch]:
+    return {a.id: AccountSwitch(a.paused, a.max_jobs) for a in config.accounts}
+
+
 def _plain(switches: Mapping[str, Switch]) -> dict[str, dict]:
     return {
         name: {"enabled": s.enabled, "drain": s.drain, "slot_max": s.slot_max}
@@ -259,8 +301,25 @@ def _parsed(plain: Mapping[str, Mapping]) -> dict[str, Switch]:
     }
 
 
-def _digest(switches: Mapping[str, Switch]) -> str:
-    encoded = json.dumps(_plain(switches), separators=(",", ":"))
+def _plain_accounts(accounts: Mapping[str, AccountSwitch]) -> dict[str, dict]:
+    return {
+        name: {"paused": s.paused, "max_jobs": s.max_jobs}
+        for name, s in sorted(accounts.items())
+    }
+
+
+def _parsed_accounts(plain: Mapping[str, Mapping]) -> dict[str, AccountSwitch]:
+    return {
+        str(name): AccountSwitch(bool(value["paused"]), value["max_jobs"])
+        for name, value in plain.items()
+    }
+
+
+def _digest(switches: Mapping[str, Switch], accounts: Mapping[str, AccountSwitch]) -> str:
+    plain: dict = _plain(switches)
+    if accounts:
+        plain = {"devices": plain, "accounts": _plain_accounts(accounts)}
+    encoded = json.dumps(plain, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
@@ -277,6 +336,16 @@ def _create(connection: sqlite3.Connection) -> None:
         )
         """
     )
+    connection.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {ACCOUNT_TABLE} (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            adopted_accounts TEXT,
+            adopted INTEGER NOT NULL,
+            sources TEXT NOT NULL
+        )
+        """
+    )
 
 
 def _read(connection: sqlite3.Connection) -> _Row | None:
@@ -286,12 +355,31 @@ def _read(connection: sqlite3.Connection) -> _Row | None:
     ).fetchone()
     if row is None:
         return None
-    sources = {
-        str(path): _Source(str(source["key"]), _parsed(source["switches"]),
-                           bool(source.get("pinned", False)))
-        for path, source in json.loads(row[4]).items()
-    }
-    return _Row(_parsed(json.loads(row[0])), int(row[1]), int(row[2]), str(row[3]), sources)
+    adopted = int(row[2])
+    try:
+        account_row = connection.execute(
+            f"SELECT adopted_accounts, adopted, sources FROM {ACCOUNT_TABLE} WHERE id = 1"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        account_row = None
+    adopted_accounts = None
+    account_sources: dict = {}
+    if account_row is not None:
+        written_with_this_row = int(account_row[1]) == adopted
+        if account_row[0] is not None and written_with_this_row:
+            adopted_accounts = _parsed_accounts(json.loads(account_row[0]))
+        account_sources = json.loads(account_row[2])
+    sources = {}
+    for path, source in json.loads(row[4]).items():
+        key = str(source["key"])
+        entry = account_sources.get(path) or {}
+        found = entry.get("accounts") if entry.get("key") == key else None
+        sources[str(path)] = _Source(
+            key, _parsed(source["switches"]), bool(source.get("pinned", False)),
+            None if found is None else _parsed_accounts(found),
+        )
+    return _Row(_parsed(json.loads(row[0])), adopted_accounts, int(row[1]), adopted,
+                str(row[3]), sources)
 
 
 def _seen(connection: sqlite3.Connection) -> dict[str, int]:
@@ -317,4 +405,19 @@ def _write(connection: sqlite3.Connection, row: _Row) -> None:
         """,
         (json.dumps(_plain(row.adopted_switches), separators=(",", ":")), row.written,
          row.adopted, row.adopted_digest, json.dumps(sources, separators=(",", ":"))),
+    )
+    account_sources = {
+        path: {"key": source.key,
+               "accounts": None if source.accounts is None else _plain_accounts(source.accounts)}
+        for path, source in sorted(row.sources.items())
+    }
+    adopted_accounts = (None if row.adopted_accounts is None
+                        else json.dumps(_plain_accounts(row.adopted_accounts), separators=(",", ":")))
+    connection.execute(
+        f"""
+        INSERT INTO {ACCOUNT_TABLE} (id, adopted_accounts, adopted, sources) VALUES (1, ?, ?, ?)
+        ON CONFLICT (id) DO UPDATE SET adopted_accounts = excluded.adopted_accounts,
+            adopted = excluded.adopted, sources = excluded.sources
+        """,
+        (adopted_accounts, row.adopted, json.dumps(account_sources, separators=(",", ":"))),
     )

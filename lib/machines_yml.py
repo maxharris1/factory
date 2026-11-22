@@ -53,9 +53,9 @@ in on; each such device names home, the bot's home folder there (the
 workdir_root path rules, but no {bot} beside ssh_user), and the account
 runs from <home>/.factory-accounts/<id>. Every declared account other
 than an external one must be signed in on some device. An optional
-max_jobs must be a positive integer. The older
-{bot, account} harness value, which names the device's own login
-account, still loads with a deprecation warning. The device name
+max_jobs must be a positive integer, and an optional paused true or
+false. The older {bot, account} harness value, which names the device's
+own login account, still loads with a deprecation warning. The device name
 `external` is reserved for external readings.
 """
 
@@ -87,7 +87,7 @@ _TOP_KEYS = {"devices", "orch_host", "accounts"}
 EXTERNAL = "external"
 ACCOUNT_HARNESSES = (*HARNESSES, EXTERNAL)
 _ACCOUNT_ID = re.compile(r"^(?!\.\.?$)[A-Za-z0-9._-]{1,64}$")
-_ACCOUNT_KEYS = {"id", "harness", "plan", "label", "signed_in_on", "max_jobs"}
+_ACCOUNT_KEYS = {"id", "harness", "plan", "label", "signed_in_on", "max_jobs", "paused"}
 ACCOUNTS_DIR = ".factory-accounts"
 _ACCOUNT_TEXT_MAX = 100
 _HARNESS_VALUE_KEYS = {"bot", "account"}
@@ -124,6 +124,7 @@ class Account:
     label: str | None = None
     signed_in_on: frozenset[str] = frozenset()
     max_jobs: int | None = None
+    paused: bool = False
 
 
 @dataclass(frozen=True)
@@ -450,6 +451,7 @@ def _accounts(
             findings.append(
                 Finding("error", f"{prefix}.max_jobs must be a positive integer")
             )
+        paused = _bool(item, "paused", False, prefix, findings)
         if _error_count(findings) > errors_before:
             continue
         if account_id in accounts:
@@ -463,6 +465,7 @@ def _accounts(
             item.get("label"),
             frozenset(signed_in_on),
             max_jobs,
+            paused,
         )
     return accounts, positions
 
