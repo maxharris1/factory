@@ -19,25 +19,36 @@
   prints its rate limits and token totals. On the box the session
   reads it in process on each flush (lib/telemetry.py).
 
-Nothing here reads a credential: the CLI and the rollout reader run with
-the job's placed account, the bot's own login or, for another account,
+Each pass reads every account signed in for the harness on the placed
+device (`account_probes`), the placed account first: one Claude probe
+thread per account, whose log lines name any account but the placed one,
+and, when a Codex run ends, each other account's newest rollout, rate
+limits only (`codex_rollout.newest`). An account without a home is
+skipped with one line. Each reading is kept under its own account.
+
+Nothing here reads a credential: the CLI and the rollout reader run as
+each account, the bot's own login or, for another account,
 CLAUDE_CONFIG_DIR or CODEX_HOME set to its home with its token variables
-dropped by name, and only their stdout comes back. The run's proof
-token and worker tag are never passed to the probe.
+dropped by name (`harness_env.account_environ` on the box), and only
+their stdout comes back. The run's proof token and worker tag are never
+passed to the probe.
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import shlex
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from lib import codex_rollout, telemetry
 from lib.harness_env import ACCOUNT_ISOLATION
 from lib.job_token import PROOF_ENV
+from lib.machines_yml import MachinesConfig
 from lib.remote import LOGIN_SHELL, TAG_ENV, ByteTransport, RemoteTarget, Transport, ssh_argv
 from lib.usage_readings import (
     GET_USAGE_ID,
@@ -115,11 +126,16 @@ def claude_remote_script(home: str | None = None) -> str:
     return _login(f'cd && exec {_as_account("claude")} claude "${{@:2}}"', (home, *CLAUDE_ARGS))
 
 
-def codex_remote_script(thread_id: str, home: str | None = None) -> str:
+def codex_remote_script(thread_id: str | None, home: str | None = None) -> str:
     source = Path(codex_rollout.__file__).read_text(encoding="utf-8")
+    args = (source,) if thread_id is None else (source, thread_id)
     if home is None:
-        return _login('exec python3 -I -S -c "$1" "$2"', (source, thread_id))
-    return _login(f'exec {_as_account("codex")} python3 -I -S -c "$2" "$3"', (home, source, thread_id))
+        return _login(f"exec python3 -I -S -c {_positional(1, len(args))}", args)
+    return _login(f'exec {_as_account("codex")} python3 -I -S -c {_positional(2, len(args))}', (home, *args))
+
+
+def _positional(first: int, count: int) -> str:
+    return " ".join(f'"${n}"' for n in range(first, first + count))
 
 
 def _exchange(transport: Transport, argv: list[str], data: bytes, timeout: float) -> bytes:
@@ -146,12 +162,12 @@ def claude_remote(
 def codex_remote(
     transport: Transport,
     target: RemoteTarget,
-    thread_id: str,
+    thread_id: str | None,
     *,
     home: str | None = None,
     timeout: float = TIMEOUT_SECONDS,
 ) -> object:
-    if not codex_rollout.THREAD_ID.fullmatch(thread_id):
+    if thread_id is not None and not codex_rollout.THREAD_ID.fullmatch(thread_id):
         return None
     out = _exchange(transport, ssh_argv(target, codex_remote_script(thread_id, home)), b"", timeout)
     lines = out.strip().splitlines()
@@ -161,11 +177,30 @@ def codex_remote(
         return None
 
 
+def account_probes(
+    config: MachinesConfig,
+    device: str,
+    harness: str,
+    placed: tuple[str, str | None],
+    log: Callable[[str], None],
+) -> list[tuple[str, str | None]]:
+    probes = [placed]
+    for account in config.accounts_on(device, harness):
+        if account == placed[0]:
+            continue
+        try:
+            probes.append((account, config.account_home(device, harness, account)))
+        except ValueError:
+            log(f"usage probe ({account}): skipped (no account home on {device})")
+    return probes
+
+
 def start_claude(
     add: Callable[[list[Reading]], None],
     clock: Callable[[], float],
     probe: Callable[[], bytes],
     log: Callable[[str], None],
+    label: str = "usage probe",
 ) -> threading.Thread:
     """The readings are observed when the probe was asked, so a
     `rate_limit_event` the job streams meanwhile stays the newer reading."""
@@ -175,21 +210,46 @@ def start_claude(
         try:
             out = probe()
         except ProbeFailed as failed:
-            log(f"usage probe: failed ({failed})")
+            log(f"{label}: failed ({failed})")
             return
         except Exception as exc:
-            log(f"usage probe: failed ({type(exc).__name__})")
+            log(f"{label}: failed ({type(exc).__name__})")
             return
         readings = parse_get_usage(out, asked)
         if not readings:
-            log("usage probe: no reply")
+            log(f"{label}: no reply")
         elif all(r.used is None and r.resets_at is None for r in readings):
-            log("usage probe: no rate limits for this login")
+            log(f"{label}: no rate limits for this login")
         add(readings)
 
     thread = threading.Thread(target=work, name="orch-usage", daemon=True)
     thread.start()
     return thread
+
+
+def start_pass(
+    probes: Sequence[tuple[str, str | None]],
+    add: Callable[[list[Reading], str, str | None], None],
+    clock: Callable[[], float],
+    probe: Callable[[str | None], bytes],
+    log: Callable[[str], None],
+) -> list[threading.Thread]:
+    return [
+        start_claude(
+            lambda readings, a=account, h=home: add(readings, a, h),
+            clock,
+            functools.partial(probe, home),
+            log,
+            "usage probe" if index == 0 else f"usage probe ({account})",
+        )
+        for index, (account, home) in enumerate(probes)
+    ]
+
+
+def join_pass(threads: Sequence[threading.Thread], timeout: float = TIMEOUT_SECONDS) -> None:
+    deadline = time.monotonic() + timeout
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
 
 
 
@@ -209,3 +269,35 @@ def remote_codex(
         return codex_remote(transport, target, thread_id, home=home)
     except Exception:  # a usage read never touches the job's end
         return None
+
+
+def read_idle_codex(
+    config: MachinesConfig,
+    device: str,
+    harness: str,
+    placed: tuple[str, str | None],
+    add: Callable[[object, str, str | None], None],
+    read: Callable[[str | None], object],
+    log: Callable[[str], None],
+) -> None:
+    if harness != "codex":
+        return
+    try:
+        probes = account_probes(config, device, harness, placed, log)
+    except Exception as exc:
+        log(f"usage probe: idle codex accounts not read ({type(exc).__name__})")
+        return
+    for account, home in probes[1:]:
+        label = f"usage probe ({account})"
+        try:
+            found = read(home)
+        except ProbeFailed as failed:
+            log(f"{label}: failed ({failed})")
+            continue
+        except Exception as exc:
+            log(f"{label}: failed ({type(exc).__name__})")
+            continue
+        if found is None:
+            log(f"{label}: no rollout")
+        else:
+            add(found, account, home)

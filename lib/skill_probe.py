@@ -53,7 +53,7 @@ from typing import Literal
 
 from lib.codex_sandbox import for_device
 from lib.device_monitor import remote_target
-from lib.harness_env import account_tokens, harness_env
+from lib.harness_env import account_environ, account_tokens, harness_env
 from lib.machines_yml import BOT_USERS, MachinesConfig, load_machines_yml
 from lib.remote import LOGIN_SHELL, RemoteError, RemoteTarget, new_tag, ssh_argv, start_script
 from lib.waiter import WaiterError, default_harness_config, load_harness_command
@@ -635,13 +635,12 @@ def run_launch(
     started = clock()
     if launch.remote is None:
         Path(launch.run_dir).mkdir(parents=True, exist_ok=False)
-    dropped = account_tokens(launch.harness, launch.account_home)
     code = run(
         launch_argv(launch),
         stdin=prompt.encode("utf-8"),
         log=log_path,
         cwd=launch.run_dir if launch.remote is None else None,
-        env={**{k: v for k, v in os.environ.items() if k not in dropped}, **launch.env},
+        env={**account_environ(os.environ, launch.harness, launch.account_home), **launch.env},
         timeout=timeout,
     )
     note = f"timed out after {timeout:g}s" if code is None else (f"exit {code}" if code else "")

@@ -18,13 +18,16 @@ first line, its `session_meta`, names the job's thread, or another
 helper's, as its parent. Of any other rollout no older than the job's,
 only that first line is decoded. Every
 other key and line is dropped unread: a tail line is decoded only when it
-holds `"token_count"`. A symlink, a non-regular file or a path outside
-`sessions/` is never opened, and no other file is.
+holds `"token_count"`. `newest(home)` reads an idle account, one with no
+job thread: the newest rollout file's last `token_count` rate limits and
+timestamp, and nothing else. A symlink, a non-regular file or a path
+outside `sessions/` is never opened, and no other file is.
 
 The file is stdlib only and has no repo imports: for a job on a remote
 device, lib/usage_probe.py sends this source to the device as
-`python3 -I -S -c <source> <thread id>`, and `main` prints one JSON line
-(or nothing). CODEX_HOME is the device's own (default `~/.codex`).
+`python3 -I -S -c <source> [<thread id>]`, and `main` prints one JSON line
+(or nothing): `latest` for a thread id, `newest` without one. CODEX_HOME
+is the device's own (default `~/.codex`).
 """
 
 from __future__ import annotations
@@ -53,8 +56,12 @@ def rollout_path(home: str, thread_id: str) -> str | None:
     """The job's own rollout file, or None. Only directory names are listed."""
     if not THREAD_ID.fullmatch(thread_id):
         return None
+    return _newest_path(home, f"rollout-*-{thread_id}.jsonl")
+
+
+def _newest_path(home: str, name: str) -> str | None:
     sessions = os.path.realpath(os.path.join(home, "sessions"))
-    pattern = os.path.join(glob.escape(sessions), "*", "*", "*", f"rollout-*-{thread_id}.jsonl")
+    pattern = os.path.join(glob.escape(sessions), "*", "*", "*", name)
     for path in sorted(glob.glob(pattern), reverse=True):
         parent = os.path.realpath(os.path.dirname(path))
         if parent.startswith(sessions + os.sep):
@@ -207,8 +214,26 @@ def latest(home: str, thread_id: str) -> dict | None:
     return found
 
 
+def newest(home: str) -> dict | None:
+    path = _newest_path(home, "rollout-*.jsonl")
+    if path is None:
+        return None
+    try:
+        data = _read(path, tail=True)
+    except OSError:
+        return None
+    found = next(filter(None, map(_reading, reversed(data.splitlines()))), None)
+    if found is None:
+        return None
+    return {"rate_limits": found["rate_limits"], "timestamp": found["timestamp"]}
+
+
 def main(argv: list[str]) -> int:
-    found = latest(default_home(), argv[0]) if len(argv) == 1 else None
+    found = None
+    if not argv:
+        found = newest(default_home())
+    elif len(argv) == 1:
+        found = latest(default_home(), argv[0])
     if found is not None:
         sys.stdout.write(json.dumps(found, allow_nan=False) + "\n")
     return 0
