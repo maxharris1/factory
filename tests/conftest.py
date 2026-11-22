@@ -119,6 +119,27 @@ def _no_real_ssh(tmp_path_factory: pytest.TempPathFactory):
 
 
 @pytest.fixture(autouse=True, scope="session")
+def _signed_in_harnesses(_no_real_ssh: Path, tmp_path_factory: pytest.TempPathFactory):
+    guard = tmp_path_factory.mktemp("signed-in-harnesses")
+    replies = {
+        "claude": ("auth status", "printf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}'"),
+        "codex": ("login status", "echo 'Logged in using ChatGPT' >&2"),
+    }
+    for name, (status, reply) in replies.items():
+        script = guard / name
+        script.write_text(
+            f'#!/bin/sh\nif [ "$*" = "{status}" ]; then {reply}; exit 0; fi\n'
+            f"echo 'tests: real {name} is disabled' >&2\nexit 127\n",
+            encoding="utf-8",
+        )
+        script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    previous = os.environ.get("PATH", "")
+    os.environ["PATH"] = f"{guard}{os.pathsep}{previous}"
+    yield guard
+    os.environ["PATH"] = previous
+
+
+@pytest.fixture(autouse=True, scope="session")
 def _no_real_gh(_no_real_ssh: Path, tmp_path_factory: pytest.TempPathFactory):
     """No test reaches GitHub through `gh` (#191: `orch job done` reads its
     handoff comment). tests/fake_gh.py answers from $FAKE_GH_STORE and

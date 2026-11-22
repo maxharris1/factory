@@ -857,7 +857,9 @@ class Waiter:
                 account_home=account_home,
             )
             if placed:
-                account_doctor.check_login(self.transport, self.pool.config, device, placement.harness, account)
+                account_doctor.check_login(
+                    self.transport, self.pool.config, device, placement.harness, account, self.environ
+                )
             job_dir = self._job_dir(job.id)
             argv = job_run_argv(
                 self.orch,

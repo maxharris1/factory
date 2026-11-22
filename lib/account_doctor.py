@@ -6,6 +6,7 @@ import json
 import re
 import shlex
 import sqlite3
+import subprocess
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -13,6 +14,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
 from lib import attention, lane_limit
+from lib.harness_env import account_tokens, harness_env
 from lib.machines_yml import Device, MachinesConfig
 from lib.remote import (
     _UNTRACE,
@@ -225,29 +227,31 @@ def parse_codex(account: str, device: str, code: int, reply: bytes) -> Probe:
 @dataclass(frozen=True)
 class _Status:
     command: str
-    streams: str
+    merged_stderr: bool
     home_variable: str
     token_variables: tuple[str, ...]
     parse: Callable[[str, str, int, bytes], Probe]
 
 
 _STATUS: dict[Harness, _Status] = {
-    "claude": _Status("claude auth status", "2>/dev/null", "CLAUDE_CONFIG_DIR",
+    "claude": _Status("claude auth status", False, "CLAUDE_CONFIG_DIR",
                       ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"), parse_claude),
-    "codex": _Status("codex login status", "2>&1", "CODEX_HOME", ("OPENAI_API_KEY", "CODEX_API_KEY"), parse_codex),
+    "codex": _Status("codex login status", True, "CODEX_HOME", ("OPENAI_API_KEY", "CODEX_API_KEY"), parse_codex),
 }
 _TOKEN_VARIABLES = tuple(name for status in _STATUS.values() for name in status.token_variables)
 
 
-def status_script(harness: Harness, homes: Sequence[str | None]) -> str:
+def status_script(harness: Harness, homes: Sequence[str | None], *, drop_profile_login: bool = True) -> str:
     status = _STATUS[harness]
+    streams = "2>&1" if status.merged_stderr else "2>/dev/null"
     calls = [
         "code=0; (" + ("" if home is None else f"{status.home_variable}={shlex.quote(home)} ")
-        + f"{status.command} </dev/null {status.streams}) || code=$?; printf '\\nORCH-ACCOUNT %d %d\\n' {index} \"$code\";"
+        + f"{status.command} </dev/null {streams}) || code=$?; printf '\\nORCH-ACCOUNT %d %d\\n' {index} \"$code\";"
         for index, home in enumerate(homes)
     ]
     inner = " ".join([
-        f"{_UNTRACE}set +e; unset {' '.join(_TOKEN_VARIABLES)} {status.home_variable};",
+        f"{_UNTRACE}set +e;",
+        *([f"unset {' '.join(_TOKEN_VARIABLES)} {status.home_variable};"] if drop_profile_login else []),
         f"printf '\\n%s\\n' {_BEGIN.decode()};",
         *calls,
     ])
@@ -281,7 +285,13 @@ def probe(transport: ByteTransport, config: MachinesConfig, device: Device, harn
 
 
 def _probe_accounts(
-    transport: ByteTransport, config: MachinesConfig, device: Device, harness: Harness, accounts: Sequence[str]
+    transport: ByteTransport,
+    config: MachinesConfig,
+    device: Device,
+    harness: Harness,
+    accounts: Sequence[str],
+    *,
+    drop_profile_login: bool = True,
 ) -> list[Probe]:
     if not accounts:
         return []
@@ -289,7 +299,9 @@ def _probe_accounts(
     if device.placeholder or alias is None:
         detail = PLACEHOLDER_DEVICE if device.placeholder else NO_SSH_ALIAS.format(harness, device.name)
         return [_unreached(account, device.name, harness, detail) for account in accounts]
-    script = status_script(harness, [config.account_home(device.name, harness, account) for account in accounts])
+    script = status_script(
+        harness, [config.account_home(device.name, harness, account) for account in accounts], drop_profile_login=drop_profile_login
+    )
     exchanged = transport.exchange(
         [SSH_BINARY, *SSH_OPTIONS, "-l", device.login_for(harness), "--", alias, script],
         timeout=PROBE_TIMEOUT_SECONDS,
@@ -313,11 +325,41 @@ class SignedOut(Exception):
         self.detail = detail
 
 
-def check_login(transport: ByteTransport, config: MachinesConfig, device: Device, harness: str, account: str) -> None:
-    """Raise SignedOut when the account's login on device reads not logged in."""
+def _probe_local(
+    device: Device, harness: Harness, account: str, home: str | None, environ: Mapping[str, str]
+) -> Probe:
+    status = _STATUS[harness]
+    try:
+        done = subprocess.run(
+            shlex.split(status.command),
+            env={k: v for k, v in environ.items() if k not in account_tokens(harness, home)}
+            | harness_env(harness, home),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT if status.merged_stderr else subprocess.DEVNULL,
+            timeout=PROBE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return _unreached(account, device.name, harness, NO_REPLY)
+    return status.parse(account, device.name, done.returncode, done.stdout)
+
+
+def check_login(
+    transport: ByteTransport,
+    config: MachinesConfig,
+    device: Device,
+    harness: str,
+    account: str,
+    environ: Mapping[str, str],
+) -> None:
     if harness not in _STATUS:
         return
-    [reading] = _probe_accounts(transport, config, device, harness, (account,))
+    home = config.account_home(device.name, harness, account)
+    if device.local:
+        reading = _probe_local(device, harness, account, home, environ)
+    else:
+        [reading] = _probe_accounts(transport, config, device, harness, (account,), drop_profile_login=home is not None)
     if reading.detail == NOT_LOGGED_IN:
         raise SignedOut(account, device.name, harness, reading.detail)
 
