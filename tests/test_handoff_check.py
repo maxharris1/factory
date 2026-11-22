@@ -90,3 +90,13 @@ def test_an_inline_triple_backtick_span_before_the_live_section_is_still_refused
     found = _check(_job(action), body, "2026-12-15T00:00:00Z")
     assert len(found) == 1
     assert "Features:" in found[0]
+
+
+def test_a_ready_whose_fenced_output_starts_at_column_zero_passes() -> None:
+    body = (
+        f"{HEADER}\nWhat changed.\n\n## Proof\n"
+        "- ac-1 (review): `pytest -q tests/test_a.py`\n  ```\n..\n2 passed in 0.01s\n  ```\n"
+        "- ac-2 (review): `pytest -q tests/test_b.py`\n  ```\n.\n1 passed in 0.01s\n  ```\n"
+        "- ac-3 (qa): `verify run search`\n  ```\nsearch PASS\n  ```\n"
+    )
+    assert _check(_job(proof=PROOF), body) == []
