@@ -11,6 +11,7 @@ import fcntl
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -182,7 +183,8 @@ def work_root(tmp_path: Path, name: str = "pc") -> Path:
 
 
 def database(tmp_path: Path, rows: list[tuple[str, str, str, float | None]],
-             unhandled: frozenset[str] = frozenset()) -> Path:
+             unhandled: frozenset[str] = frozenset(),
+             recipients: dict[str, str] | None = None) -> Path:
     db = tmp_path / "orch.db"
     SQLiteJobQueue(db, clock=lambda: NOW)
     with SQLiteJobQueue(db, clock=lambda: NOW).connect() as connection:
@@ -192,9 +194,10 @@ def database(tmp_path: Path, rows: list[tuple[str, str, str, float | None]],
                 INSERT INTO jobs (id, dedupe_key, repo, ticket_id, action, recipient,
                     source_comment_id, timeout_seconds, generation, attempt, state,
                     created_at, last_activity_at, finished_at, failure_handled)
-                VALUES (?, ?, 'Owner/Repo', ?, 'build', 'claude', 'c1', 60, 1, 1, ?, ?, ?, ?, ?)
+                VALUES (?, ?, 'Owner/Repo', ?, 'build', ?, 'c1', 60, 1, 1, ?, ?, ?, ?, ?)
                 """,
-                (job_id, job_id, ticket, state, OLD, OLD, finished_at,
+                (job_id, job_id, ticket, (recipients or {}).get(job_id, "claude"), state, OLD,
+                 OLD, finished_at,
                  0 if job_id in unhandled else 1),
             )
     return db
@@ -277,7 +280,7 @@ def test_finished_checkout_goes_and_its_logs_and_records_stay(tmp_path: Path) ->
     assert (root.parent / "outside" / "keep").exists()
 
 
-def test_cli_backlog_pass_prints_one_line_per_target(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_backlog_pass_prints_a_summary_and_one_line_per_id(tmp_path: Path, capsys, monkeypatch) -> None:
     root = work_root(tmp_path)
     job_folder(root, "done1")
     db = database(tmp_path, [("done1", "t1", "done", OLD)])
@@ -286,8 +289,10 @@ def test_cli_backlog_pass_prints_one_line_per_target(tmp_path: Path, capsys, mon
     code, out = cleanup(["run", "--backlog", "--db", str(db)], ShellTransport(tmp_path), capsys)
 
     assert code == 0
-    assert out.startswith(f"pc claude-bot {root}: removed 1 checkouts (")
-    assert out.rstrip().endswith("kept 0")
+    summary, removed = out.splitlines()
+    assert summary.startswith(f"pc claude-bot {root}: removed 1 checkouts (")
+    assert summary.endswith("kept 0")
+    assert re.fullmatch(rf"pc claude-bot {root}: removed done1 \d+ bytes", removed), removed
 
 
 def test_run_without_backlog_is_refused(tmp_path: Path, capsys) -> None:
@@ -2322,3 +2327,175 @@ def test_a_dry_run_lists_a_gone_folder_and_writes_nothing(tmp_path: Path, monkey
     assert {str(path.relative_to(root)): None if path.is_dir() else path.read_bytes()
             for path in root.rglob("*") if not path.is_symlink()} == before
     assert (jobs / "j.gone").is_dir()
+
+
+BOTS = {"claude": "claude-bot", "codex": "codex-bot"}
+
+
+def fleet(tmp_path: Path) -> MachinesConfig:
+    def device(name: str, workdir_root: str) -> Device:
+        return Device(
+            name=name, slot_max=2, harnesses=MappingProxyType(BOTS),
+            tailscale_name=f"{name}.example.ts.net", local=False, enabled=True,
+            workdir_root=workdir_root, ssh_alias=f"{name}-{{bot}}", factory_root=str(ROOT),
+        )
+
+    return MachinesConfig(devices=(device("pc", f"{tmp_path}/pc/{{bot}}/work"),
+                                   device("box", f"{tmp_path}/box/work")))
+
+
+class FleetTransport:
+    """Runs each device step in process on the work root the target's ssh alias names."""
+
+    def __init__(self, tmp_path: Path):
+        self.roots = {f"pc-{bot}": tmp_path / "pc" / bot / "work" for bot in BOTS.values()}
+        self.roots |= {f"box-{bot}": tmp_path / "box" / "work" for bot in BOTS.values()}
+        self.sent: list[tuple[str, dict, job_cleanup.Report]] = []
+
+    def call(self, argv, *, timeout: float, input: bytes | None = None) -> Called:
+        alias = argv[-2]
+        report = job_cleanup.device_step(self.roots[alias], Plan.parse(input.decode()))
+        self.sent.append((alias, json.loads(input.decode()), report))
+        return Called(0, f"{job_cleanup.MARK} {report.to_json()}\n", "")
+
+
+def gone_folder(root: Path, job_id: str) -> Path:
+    folder = job_folder(root, job_id)
+    return folder.rename(folder.with_name(f"{job_id}{job_leftovers.GONE}"))
+
+
+def pending_record(root: Path, job_id: str) -> Path:
+    record = root / "jobs-kept" / job_id / job_leftovers.PENDING
+    record.parent.mkdir(parents=True)
+    record.write_text(json.dumps({"id": job_id, "removed_bytes": 7}))
+    return record
+
+
+def tree(root: Path) -> dict[str, bytes | None]:
+    return {str(path.relative_to(root)): None if path.is_dir() or path.is_symlink()
+            else path.read_bytes() for path in sorted(root.rglob("*"))}
+
+
+SHARED_ROWS = [("c1", "t1", "done", OLD), ("c3", "t3", "done", OLD),
+               ("x1", "t11", "done", OLD), ("x2", "t12", "done", OLD),
+               ("x3", "t13", "done", OLD), ("x4", "t14", "done", OLD)]
+CODEX_IDS = {"x1": "codex", "x2": "codex", "x3": "codex", "x4": "codex"}
+
+
+def shared_root(tmp_path: Path) -> tuple[Path, dict[str, bytes | None]]:
+    root = tmp_path / "box" / "work"
+    job_folder(root, "c1")
+    gone_folder(root, "c3")
+    job_folder(root, "x1")
+    aside = job_folder(root, "x2")
+    aside.rename(aside.with_name("x2.cleanup"))
+    gone_folder(root, "x3")
+    pending_record(root, "x4")
+    codex = {name: value for name, value in tree(root).items()
+             if name.startswith(("jobs/x", "jobs-kept/x"))}
+    return root, codex
+
+
+def test_bot_passes_on_a_shared_root_touch_only_their_own_jobs(tmp_path: Path) -> None:
+    root, codex = shared_root(tmp_path)
+    db = database(tmp_path, SHARED_ROWS, recipients=CODEX_IDS)
+    transport = FleetTransport(tmp_path)
+
+    outcomes = job_cleanup.run(db, fleet(tmp_path), transport, now=NOW, grace_hours=6,
+                               dry_run=False, bot="claude-bot")
+
+    box = [report for target, report in outcomes if target.device == "box"]
+    assert len(box) == 1 and not isinstance(box[0], str), box
+    assert set(box[0].removed) == {"c1", "c3"} and box[0].kept == {}
+    for alias, plan, report in transport.sent:
+        if alias.startswith("box-"):
+            assert set(report.held) <= {"c1", "c3"}, (plan["step"], report.held)
+            assert set(report.removed) | set(report.kept) <= {"c1", "c3"}, report
+    jobs = root / "jobs"
+    assert not (jobs / "c1").exists() and not (jobs / "c3.gone").exists()
+    assert (root / "jobs-kept" / "c1" / job_leftovers.KEPT_JSON).exists()
+    assert {name: value for name, value in tree(root).items()
+            if name.startswith(("jobs/x", "jobs-kept/x"))} == codex
+    assert not (jobs / "x2").exists()
+
+
+def test_bot_pass_reaches_only_targets_of_that_bot(tmp_path: Path) -> None:
+    db = database(tmp_path, [("c1", "t1", "done", OLD), ("x1", "t11", "done", OLD),
+                             ("x5", "t15", "running", None)],
+                  recipients={"x1": "codex", "x5": "codex"})
+    transport = FleetTransport(tmp_path)
+
+    outcomes = job_cleanup.run(db, fleet(tmp_path), transport, now=NOW, grace_hours=6,
+                               dry_run=True, bot="codex-bot")
+
+    assert sorted(target.label for target, _ in outcomes) == ["box codex-bot", "pc codex-bot"]
+    assert sorted(alias for alias, _, _ in transport.sent) == ["box-codex-bot", "pc-codex-bot"]
+    assert all(plan["owned"] == ["x1", "x5"] and plan["finished"] == ["x1"]
+               for _, plan, _ in transport.sent)
+
+
+def test_report_prints_one_line_per_removed_and_kept_id(tmp_path: Path) -> None:
+    [target, *_] = job_cleanup.targets(fleet(tmp_path))
+    label = f"{target.label} {target.remote.workdir_root}"
+    live = job_cleanup.Report({"b": 20, "a": 10}, {"d": "live", "c": "error: x"}, False)
+
+    assert job_cleanup.report_lines(target, live) == [
+        job_cleanup.summary(target, live),
+        f"{label}: removed a 10 bytes",
+        f"{label}: removed b 20 bytes",
+        f"{label}: kept c error: x",
+        f"{label}: kept d live",
+    ]
+    dry = job_cleanup.Report({"a": 10}, {}, True)
+    assert job_cleanup.report_lines(target, dry) == [
+        job_cleanup.summary(target, dry), f"{label}: would remove a 10 bytes"]
+    assert job_cleanup.report_lines(target, "ssh failed") == [f"{label}: failed: ssh failed"]
+
+
+def test_cli_bot_pass_keeps_jobs_inside_its_ten_minute_grace(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    root = work_root(tmp_path)
+    job_folder(root, "old")
+    job_folder(root, "fresh")
+    db = database(tmp_path, [("old", "t1", "done", NOW - 11 * 60),
+                             ("fresh", "t2", "done", NOW - 9 * 60)])
+    monkeypatch.setattr(job_cleanup.health, "load_machines", lambda _: machines(tmp_path, "pc"))
+
+    code, out = cleanup(["run", "--bot", "claude-bot", "--db", str(db)],
+                        InProcessTransport(root), capsys)
+
+    assert code == 0, out
+    label = f"pc claude-bot {root}"
+    summary, removed, kept = out.splitlines()
+    assert summary.startswith(f"{label}: removed 1 checkouts (")
+    assert re.fullmatch(rf"{label}: removed old \d+ bytes", removed), removed
+    assert kept == f"{label}: kept fresh recent"
+    assert (root / "jobs" / "fresh" / "repo" / "README").exists()
+
+
+def test_cli_run_takes_backlog_or_bot_but_not_both(tmp_path: Path, capsys) -> None:
+    db = database(tmp_path, [])
+    both = job_cleanup.main(["run", "--backlog", "--bot", "claude-bot", "--db", str(db)],
+                            clock=lambda: NOW)
+    unknown = job_cleanup.main(["run", "--bot", "grok-bot", "--db", str(db)], clock=lambda: NOW)
+    assert both == 2 and unknown == 2
+
+
+def test_a_plan_without_owned_owns_every_id(tmp_path: Path) -> None:
+    plan = Plan.parse(json.dumps({"finished": ["c1"], "cutoff": NOW, "dry_run": False}))
+    assert plan.owned is None and "owned" not in json.loads(plan.to_json())
+    owned = Plan(frozenset({"c1"}), NOW, False, owned=frozenset({"c1", "c2"}))
+    assert Plan.parse(owned.to_json()) == owned
+
+    root, _ = shared_root(tmp_path)
+    jobs = root / "jobs"
+    db = database(tmp_path, SHARED_ROWS, recipients=CODEX_IDS)
+
+    outcomes = job_cleanup.run(db, fleet(tmp_path), FleetTransport(tmp_path), now=NOW,
+                               grace_hours=6, dry_run=False)
+
+    [box] = [report for target, report in outcomes if target.device == "box"]
+    assert set(box.removed) == {"c1", "c3", "x1", "x2", "x3", "x4"} and box.kept == {}
+    assert [path.name for path in jobs.iterdir()] == []
+    assert (root / "jobs-kept" / "x4" / job_leftovers.KEPT_JSON).exists()

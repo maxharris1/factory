@@ -197,7 +197,7 @@ commands:
   wait             block until the dispatcher queues a job for a bot
   job              run, heartbeat, finish or cancel a job
   gc               remove stale job worktrees with no changes
-  cleanup          delete finished job checkouts on every device (issue #928)
+  cleanup          delete finished job checkouts on every device, or one bot's with --bot (#928)
   dashboard        write (and optionally push) the read-only status snapshot
   linear-webhook   serve the Linear webhook listener that marks issues dirty
   health           component heartbeats: report or forget (issue #92)
