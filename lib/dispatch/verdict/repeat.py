@@ -464,6 +464,7 @@ class RepeatBlockMixin:
         states: tuple[str, ...] = REVISE_ROUND_STATES,
     ) -> tuple[bool, str]:
         from lib.dispatch.rule_engine import prior_grants
+        from lib.evidence.findings import blocking_ids
 
         key = (ticket.repo.lower(), ticket.ticket_id)
         stops = self._repeat_stops(ticket, comment, repeated.rule_id)
@@ -471,6 +472,9 @@ class RepeatBlockMixin:
         question = self._stop_question(ticket, comment, "repeat", frozenset({repeated.rule_id}))
         engine = ticket.factory.rule_engine == "on"
         prior_grant = prior_grants(self._stop_history(ticket), comment.id) if engine else frozenset()
+        repeated_ids = frozenset(
+            {repeated.rule_id, *blocking_ids(_handoff(comment.body)[1]), *(qa.failed if qa is not None else ())}
+        )
         if engine:
             ticket = self._fresh_issue(ticket)
         with self._connect() as connection:
@@ -530,7 +534,7 @@ class RepeatBlockMixin:
                 (*key, comment.id, failed_column(qa)),
             )
             granted = engine and self._rule_on_repeat(
-                connection, ticket, comment, repeated.rule_id, stops, prior_grant, reported_round
+                connection, ticket, comment, repeated_ids, stops, prior_grant, reported_round
             )
             if granted:
                 self._resume_step(

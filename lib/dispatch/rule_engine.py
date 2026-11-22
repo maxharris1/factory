@@ -117,7 +117,7 @@ class RuleEngineMixin:
         connection: sqlite3.Connection,
         ticket: TrackedTicket,
         verdict: Comment,
-        rule_id: str,
+        named: frozenset[str],
         stops: int,
         prior: frozenset[FindingId],
         round_number: int,
@@ -126,7 +126,9 @@ class RuleEngineMixin:
             subject = comment_id(verdict.id)
         except ValueError:
             return False
-        ids = _valid_ids((rule_id,))
+        ids = _valid_ids(named)
+        if len(ids) != len(named):
+            ids = ()
         state = connection.execute(
             "SELECT stuck FROM ticket_state WHERE repo = ? AND ticket_id = ?",
             (ticket.repo.lower(), ticket.ticket_id),

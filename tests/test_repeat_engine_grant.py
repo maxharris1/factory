@@ -222,3 +222,21 @@ def test_a_notice_cut_short_after_the_grant_is_posted_once_at_the_next_poll(
     flow.dispatcher.process(flow.snapshot())
 
     assert_resumed(flow, fixes, "revise-2", "<!-- orch:v1 kind=go from=orch round=3/3 state=fixing -->", 0)
+
+
+@pytest.mark.parametrize("other_id", ["f-1", "f-10"])
+def test_a_stop_that_repeats_a_granted_finding_beside_another_wakes_grok(tmp_path: Path, other_id: str) -> None:
+    flow = sized(tmp_path)
+    other = F1.replace("f-1", other_id)
+    repeated = F2
+    assert rounds(flow, repeated, other + repeated) == "waiting-max-repeat"
+    assert flow.state()["workflow_state"] == "fixing"
+    next_review(flow, 2)
+
+    assert revise(flow, "3/3", "revise-3", body=other + repeated) == "waiting-max-repeat"
+
+    assert_parked_for_grok(flow, "revise-3", "stops=2, for=max")
+    assert len(notices(flow)) == 1
+    granted, escalated = rows(flow)
+    assert sorted(json.loads(granted["finding_ids"])) == sorted([other_id, "f-2"])
+    assert (escalated["subject"], escalated["outcome"]) == ("revise-3", "escalated")
