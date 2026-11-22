@@ -346,7 +346,7 @@ def runner_locks() -> bool:
     return shutil.which("flock") is not None
 
 
-def _same_inode(lock, path: Path) -> bool:
+def _still_the_lock_file(lock, path: Path) -> bool:
     try:
         return os.fstat(lock.fileno()).st_ino == os.stat(path).st_ino
     except FileNotFoundError:
@@ -356,7 +356,6 @@ def _same_inode(lock, path: Path) -> bool:
 @contextmanager
 def _claim_lock(jobs: Path, job_id: str, *, wait: bool = True,
                 create: bool = True) -> Iterator[bool]:
-    """A holder that waited on a lock file another holder unlinked relocks the new one."""
     path = jobs / f"{job_id}{LOCK}"
     while True:
         try:
@@ -372,7 +371,7 @@ def _claim_lock(jobs: Path, job_id: str, *, wait: bool = True,
             except BlockingIOError:
                 yield False
                 return
-            if _same_inode(lock, path):
+            if _still_the_lock_file(lock, path):
                 yield True
                 return
 
