@@ -90,6 +90,22 @@ A holder whose ticket is `capped` in `ticket_state` (read-only) holds only
 its `Conflicts with` edges while it waits for a go, and takes its paths back
 on the poll after the round resumes (#270).
 
+Idle and blocked (#1262): a GitHub-ticket project with ready tickets waiting
+on open blockers, and no ticket fed or waiting on capacity this poll, no
+queued or running non-Grok job, no ticket fed in the last
+FED_PENDING_SECONDS without a job and no open factory PR, raises
+needs-attention (`idle-blocked-ready`, `waiting on #18`) on each such ticket.
+An open PR is factory work when the feeder recorded it, its branch starts
+with `factory/`, or `ticket_state` tracks it in a non-terminal state.
+A `feeder_idle_stalls` row names each project's stall by when it began, and
+the project's one Grok `blocked` wake is keyed on it. The row also records the
+latest non-Grok job activity (created or finished) the stall has seen, read in
+the same statement as the in-flight check. The stall ends when the project
+stops stalling, and a new one begins (flags re-raised, a new wake) when a
+non-Grok job was created or finished after that mark, so a job that ran
+between polls counts and one that finished before the first alert does not. A failed open-PR read keeps that project's
+row and flags as they were and wakes nothing.
+
 Stop the line (#1025): for a project whose factory.md sets
 `feeder.required_checks`, each poll reads its base branch's checks once
 (GitHubIntake.base_checks). While a required check is red there, or the read
@@ -165,6 +181,7 @@ from lib.brief_comment import FACTORY_MD_HEADING
 from lib.device_pool import free_slots, placement_blocked, slots_in_use
 from lib.device_sync import Blocked
 from lib.dispatch.bookkeeping import LockLedger, bookkeeping_write, must_write
+from lib.dispatch.constants import TERMINAL_STATES
 from lib.dispatch.types import BaseCheck, FailedCheck
 from lib.dispatcher import Comment, TicketRef, TrackedTicket, safe_ship_error
 from lib.evidence.ci import CIEvidence, MainRed, ci_evidence, main_red
@@ -172,6 +189,7 @@ from lib.evidence.criteria import numbered
 from lib.factory_md import FactoryContext
 from lib.feeder_gates import (
     ATTENTION_CRITICAL_PATH,
+    ATTENTION_IDLE_BLOCKED,
     FILE_PATH,
     MAIN_FIX_LABEL,
     WAIT_REASONS,
@@ -192,7 +210,7 @@ from lib.feeder_gates import (
     path_matches,
     paths_collide,
 )
-from lib.followups import has_marker
+from lib.followups import has_marker, split_parent
 from lib.github_actions import TIMEOUT_SECONDS
 from lib.handoff import Handoff, HandoffError, format_comment, parse_comment
 from lib.journeys import (
@@ -237,10 +255,16 @@ from lib.queue import (
     rank,
     set_ticket_priority,
 )
+from lib.split_parent import close_split_parent, split_evidence
 from lib.ticket_type import TICKET_TYPES
 
 FEEDER_TABLE = "feeder_items"
 POLL_TABLE = "feeder_poll"  # one row: when the feeder last read intake
+IDLE_TABLE = "feeder_idle_stalls"  # one row per project in an idle-blocked-ready stall
+SPLIT_CURSOR_TABLE = "feeder_split_cursor"
+SPLIT_UNSETTLED_TABLE = "feeder_split_unsettled"
+SPLIT_CURSOR_OVERLAP_SECONDS = 120  # clock skew between orch and GitHub
+SPLIT_RECHECK_SECONDS = 120  # GitHub search allows 30 reads a minute
 # eligible: seen this poll, not fed yet; waiting-capacity: no room for its
 # harness this poll; feeding: some steps done; error: a step failed (retried
 # next poll); fed: brief and go posted; done: fed and its job is queued;
@@ -253,6 +277,7 @@ STATES = (
     "waiting-capacity",
     "waiting-blocked",
     "refused-intake",
+    "split-parent",
     "feeding",
     "error",
     "fed",
@@ -260,7 +285,7 @@ STATES = (
     "closed",
 )
 FEED_NOT_BEGUN = "branch IS NULL"
-UNSTARTED = ("eligible", "waiting-capacity", "waiting-blocked", "refused-intake")
+UNSTARTED = ("eligible", "waiting-capacity", "waiting-blocked", "refused-intake", "split-parent")
 IN_FLIGHT = ("feeding", "error")
 FED = ("fed", "done")
 FINAL = (*FED, "closed")
@@ -275,6 +300,7 @@ _COLUMNS = (
     ("unblocks", "INTEGER NOT NULL DEFAULT 0"),
     ("base_branch", "TEXT"),
     ("own_tier", "INTEGER"),
+    ("split_noted", "INTEGER NOT NULL DEFAULT 0"),
 )
 ORCHESTRATOR = "grok-bot"
 FACTORY_LABEL = "factory"
@@ -611,6 +637,8 @@ class GitHubIntake(Protocol):
 
     def find_pull(self, repo: str, branch: str) -> int | None: ...
 
+    def branch_pulls(self, repo: str, branch: str) -> Sequence[int]: ...
+
     def ahead_commits(self, repo: str, base: str, tip: str) -> Sequence[str]: ...
 
     def open_pull_commits(self, repo: str) -> Mapping[int, OpenPull]: ...
@@ -653,7 +681,17 @@ class GitHubIntake(Protocol):
 
     def marked_issues(self, repo: str, marker: str, since: float) -> tuple[int, ...]: ...
 
-    def close_issue(self, repo: str, number: int, comment: str | None) -> None: ...
+    def close_issue(
+        self, repo: str, number: int, comment: str | None, *, completed: bool = False
+    ) -> None: ...
+
+    def remove_issue_label(self, repo: str, number: int, label: str) -> None: ...
+
+    def closed_issues_since(self, repo: str, since: float) -> Sequence[IssueRecord]: ...
+
+    def split_children(self, repo: str, parent: int) -> Sequence[IssueRecord]: ...
+
+    def issue_record(self, repo: str, number: int) -> IssueRecord: ...
 
     def post_issue_comment_once(self, repo: str, number: int, body: str, marker: str) -> str: ...
 
@@ -786,6 +824,12 @@ class _Held(Exception):
         self.wait = wait
 
 
+class _SplitParent(Exception):
+    def __init__(self, evidence: str):
+        super().__init__(evidence)
+        self.evidence = evidence
+
+
 def _key_order(key: str) -> tuple[int, int, str]:
     """A ticket number sorts as a number (9 before 10), an identifier as text."""
     return (0, int(key), "") if key.isdigit() else (1, 0, key)
@@ -869,12 +913,35 @@ def ensure_tables(connection: sqlite3.Connection) -> None:
     for name, kind in _COLUMNS:
         if name not in present:
             connection.execute(f"ALTER TABLE {FEEDER_TABLE} ADD COLUMN {name} {kind}")
+    if "split_noted" not in present and _has_merge_states(connection):
+        connection.execute(
+            f"""
+            UPDATE {FEEDER_TABLE} SET split_noted = 1
+            WHERE tracker = 'github' AND EXISTS (
+                SELECT 1 FROM ticket_state AS ticket
+                WHERE lower(ticket.repo) = {FEEDER_TABLE}.repo
+                  AND ticket.ticket_id = {FEEDER_TABLE}.ticket_id
+                  AND ticket.workflow_state = 'merged'
+            )
+            """
+        )
     attention.ensure_table(connection)
     connection.execute(
         f"CREATE TABLE IF NOT EXISTS {POLL_TABLE} "
         "(id INTEGER PRIMARY KEY CHECK (id = 1), at REAL NOT NULL)"
     )
+    connection.execute(
+        f"CREATE TABLE IF NOT EXISTS {SPLIT_CURSOR_TABLE} (repo TEXT PRIMARY KEY, at REAL NOT NULL)"
+    )
+    connection.execute(
+        f"CREATE TABLE IF NOT EXISTS {SPLIT_UNSETTLED_TABLE} "
+        "(repo TEXT NOT NULL, parent INTEGER NOT NULL, checked_at REAL NOT NULL, "
+        "PRIMARY KEY (repo, parent))"
+    )
     ensure_priority_table(connection)
+    connection.execute(
+        f"CREATE TABLE IF NOT EXISTS {IDLE_TABLE} (repo TEXT PRIMARY KEY, since REAL NOT NULL, seen REAL NOT NULL)"
+    )
     connection.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {MAIN_FIX_TABLE} (
@@ -919,6 +986,31 @@ def last_feeder_poll(connection: sqlite3.Connection) -> float | None:
         return None
     row = connection.execute(f"SELECT at FROM {POLL_TABLE}").fetchone()
     return None if row is None else float(row[0])
+
+
+def _has_merge_states(connection: sqlite3.Connection) -> bool:
+    if not _has_table(connection, "ticket_state"):
+        return False
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(ticket_state)")}
+    return {"repo", "ticket_id", "workflow_state"} <= columns
+
+
+def _merged_issues(
+    connection: sqlite3.Connection, repo: str, *, unnoted: bool = False
+) -> frozenset[int]:
+    if not _has_merge_states(connection):
+        return frozenset()
+    rows = connection.execute(
+        f"""
+        SELECT feed.issue FROM {FEEDER_TABLE} AS feed
+        JOIN ticket_state AS ticket
+          ON lower(ticket.repo) = feed.repo AND ticket.ticket_id = feed.ticket_id
+        WHERE feed.repo = ? AND feed.tracker = 'github'
+          AND ticket.workflow_state = 'merged'
+        """ + (" AND feed.split_noted = 0" if unnoted else ""),
+        (repo.lower(),),
+    ).fetchall()
+    return frozenset(int(issue) for (issue,) in rows if str(issue).isdigit())
 
 
 def feeder_items(connection: sqlite3.Connection) -> list[dict[str, object]]:
@@ -986,6 +1078,7 @@ class Feeder:
     def feed_once(self) -> FeedReport:
         now = self.queue.now()
         contexts, context_errors = self._contexts()
+        context_errors += self._close_split_parents(contexts, now)
         mains, main_errors = self._main_reads(contexts)
         main_errors += self._file_main_fixes(mains, now)
         candidates, read_repos, read_errors = self._candidates(contexts)
@@ -996,21 +1089,25 @@ class Feeder:
         self._mark_done()
         states = {candidate.ref: self._state(candidate) for candidate in candidates}
         begun = {c.ref for c in candidates if self._row(c)["branch"] is not None}
+        split = {c.ref for c in candidates if states[c.ref] == "split-parent"}
         unread, map_errors = self._add_map_defects(candidates, states)
         refused = {
             candidate.ref
             for candidate in candidates
-            if states[candidate.ref] in UNSTARTED and candidate.template.defects
+            if states[candidate.ref] in UNSTARTED
+            and candidate.template.defects
+            and candidate.ref not in split
         }
+        skip = refused | split
         writes = [self._refuse(candidate) for candidate in candidates if candidate.ref in refused]
-        writes += [_state_write(c, "eligible") for c in candidates if c.ref in unread - refused]
+        writes += [_state_write(c, "eligible") for c in candidates if c.ref in unread - skip]
         self._sync_intake_attention(
             [c for c in candidates if c.ref in refused], read_repos, now
         )
         waits, critical, holds, capped, gate_read, unblocks, tiers = self._gates(
-            candidates, states, refused
+            candidates, states, skip
         )
-        stops, stop_errors = self._line_stops(candidates, begun, refused, mains)
+        stops, stop_errors = self._line_stops(candidates, begun, skip, mains)
         for candidate in candidates:
             candidate.unblocks = unblocks[candidate.ref]
             candidate.effective_tier = tiers[candidate.ref]
@@ -1022,6 +1119,8 @@ class Feeder:
         fed: list[TicketRef] = []
         waiting = 0
         blocked = 0
+        blocked_on: list[tuple[_Candidate, Wait]] = []
+        busy: set[str] = set()
         errors = read_errors + stop_errors + map_errors + (0 if gate_read else 1)
         order = sorted(candidates, key=lambda item: (states[item.ref] not in IN_FLIGHT, *item.order()))
         while order:
@@ -1030,7 +1129,7 @@ class Feeder:
                 order[0],
             )
             order.remove(candidate)
-            if candidate.ref in refused or candidate.ref in unread:
+            if candidate.ref in skip or candidate.ref in unread:
                 continue
             state = self._state(candidate)
             if state in FINAL:
@@ -1042,11 +1141,14 @@ class Feeder:
                 wait = waits.get(candidate.ref) or holds.collision(candidate.ref, candidate.lines)
             if wait is not None:
                 writes.append(_state_write(candidate, "waiting-blocked", reason=wait.reason))
+                if wait.open_blockers and candidate.ref.tracker == "github":
+                    blocked_on.append((candidate, wait))
                 blocked += 1
                 continue
             if room.get(candidate.harness, 0) <= 0:
                 if state not in IN_FLIGHT:
                     writes.append(_state_write(candidate, "waiting-capacity"))
+                busy.add(candidate.ref.repo)
                 waiting += 1
                 continue
             room[candidate.harness] = room.get(candidate.harness, 0) - 1
@@ -1059,6 +1161,13 @@ class Feeder:
                 room[candidate.harness] += 1
                 writes.append(_state_write(candidate, "waiting-blocked", reason=held.wait.reason))
                 blocked += 1
+                continue
+            except _SplitParent as refusal:
+                holds.drop(candidate.ref)
+                room[candidate.harness] += 1
+                reason = f"already split into parts ({refusal.evidence})"
+                writes.append(_state_write(candidate, "split-parent", reason=reason))
+                self.log(f"feeder: {candidate.issue.repo}#{candidate.issue.key} refused: {reason}")
                 continue
             except Exception as exc:  # one ticket's failure never stops the poll
                 errors += 1
@@ -1077,6 +1186,7 @@ class Feeder:
                 )
                 continue
             fed.append(ref)
+            busy.add(candidate.ref.repo)
             if candidate.ref.repo in share_room:
                 share_room[candidate.ref.repo] -= 1
             self.log(f"feeder: fed {candidate.issue.repo}#{candidate.issue.key} as {ref.ticket_id}")
@@ -1087,6 +1197,8 @@ class Feeder:
                 )
                 self.log(f"feeder: {candidate.issue.repo}#{candidate.issue.key} shares {shares}")
         self._set_states(writes)
+        if gate_read:
+            self._sync_idle(blocked_on, busy, read_repos, now)
         return FeedReport(
             fed=tuple(fed),
             eligible=len(candidates),
@@ -1106,6 +1218,100 @@ class Feeder:
                 errors += 1
                 self.log(f"feeder: cannot read intake for {project.repo}: {safe_ship_error(exc)}")
         return found, errors
+
+    def _close_split_parents(
+        self, contexts: Sequence[tuple[Project, FactoryContext]], now: float
+    ) -> int:
+        errors = 0
+        for project, context in contexts:
+            intake = project.intake
+            assert intake is not None
+            if project.linear_project_ids or intake.label is None or context.config.tickets != "github":
+                continue
+            errors += self._close_repo_split_parents(project.repo, intake.label, now)
+        return errors
+
+    def _close_repo_split_parents(self, repo: str, label: str, now: float) -> int:
+        key = repo.lower()
+        with self.queue.connect() as connection:
+            row = connection.execute(
+                f"SELECT at FROM {SPLIT_CURSOR_TABLE} WHERE repo = ?", (key,)
+            ).fetchone()
+            pending = dict(connection.execute(
+                f"SELECT parent, checked_at FROM {SPLIT_UNSETTLED_TABLE} WHERE repo = ?", (key,)
+            ).fetchall())
+            if row is not None:
+                cursor = float(row[0])
+            else:
+                last = last_feeder_poll(connection)
+                cursor = now if last is None else last - SPLIT_CURSOR_OVERLAP_SECONDS
+        try:
+            closed = self.github.closed_issues_since(repo, cursor)
+        except Exception as exc:
+            self.log(f"feeder: cannot read closed issues for {repo}: {safe_ship_error(exc)}")
+            return 1
+        errors = 0
+        triggers: dict[int, list[IssueRecord]] = {}
+        for record in closed:
+            parent = split_parent(record.body)
+            if record.reason == "completed" and parent is not None:
+                triggers.setdefault(parent, []).append(record)
+        noted: list[int] = []
+        merged_parents: set[int] = set()
+        for issue in sorted(self._merged_issues(repo, unnoted=True)):
+            try:
+                record = self.github.issue_record(repo, issue)
+            except Exception as exc:
+                errors += 1
+                self.log(f"feeder: cannot read merged part {repo}#{issue}: {safe_ship_error(exc)}")
+                continue
+            noted.append(issue)
+            parent = split_parent(record.body)
+            if parent is not None:
+                merged_parents.add(parent)
+        due = {parent for parent, at in pending.items() if now - at >= SPLIT_RECHECK_SECONDS}
+        check = merged_parents | due | (triggers.keys() - pending.keys())
+        merged = self._merged_issues(repo) if check else frozenset()
+        unsettled = {parent: at for parent, at in pending.items() if parent not in check}
+        for parent in sorted(check):
+            try:
+                outcome = close_split_parent(
+                    self.github, repo, parent, triggers.get(parent, ()), merged, label
+                )
+            except Exception as exc:
+                errors += 1
+                unsettled[parent] = now
+                self.log(f"feeder: cannot close split parent {repo}#{parent}: {safe_ship_error(exc)}")
+                continue
+            if outcome == "parts-open":
+                unsettled[parent] = now
+            elif outcome == "closed":
+                self.log(f"feeder: closed split parent {repo}#{parent} (all parts merged)")
+        if not closed and not check and not noted:
+            return errors
+
+        def work(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                f"INSERT INTO {SPLIT_CURSOR_TABLE} (repo, at) VALUES (?, ?) "
+                "ON CONFLICT(repo) DO UPDATE SET at = excluded.at",
+                (key, now - SPLIT_CURSOR_OVERLAP_SECONDS),
+            )
+            connection.execute(f"DELETE FROM {SPLIT_UNSETTLED_TABLE} WHERE repo = ?", (key,))
+            connection.executemany(
+                f"INSERT INTO {SPLIT_UNSETTLED_TABLE} (repo, parent, checked_at) VALUES (?, ?, ?)",
+                [(key, parent, at) for parent, at in sorted(unsettled.items())],
+            )
+            connection.executemany(
+                f"UPDATE {FEEDER_TABLE} SET split_noted = 1 WHERE repo = ? AND issue = ?",
+                [(key, str(issue)) for issue in noted],
+            )
+
+        bookkeeping_write(self.queue.connect, work, site="_close_split_parents", ledger=self.ledger)
+        return errors
+
+    def _merged_issues(self, repo: str, *, unnoted: bool = False) -> frozenset[int]:
+        with self.queue.connect() as connection:
+            return _merged_issues(connection, repo, unnoted=unnoted)
 
     def _candidates(
         self, contexts: Sequence[tuple[Project, FactoryContext]]
@@ -1845,6 +2051,114 @@ class Feeder:
             attention.sync(connection, WAIT_REASONS, repos, flags, now)
             attention.sync(connection, (ATTENTION_CRITICAL_PATH,), tracked, critical, now)
 
+    def _sync_idle(
+        self,
+        blocked: Sequence[tuple[_Candidate, Wait]],
+        busy: set[str],
+        repos: set[str],
+        now: float,
+    ) -> None:
+        """Flag each ticket waiting on open blockers in a project with nothing
+        in flight, and wake the project's Grok bot once per stall. busy holds
+        the repos that fed a ticket or had one wait on capacity this poll."""
+        stalls: dict[str, list[tuple[_Candidate, Wait]]] = {}
+        for candidate, wait in blocked:
+            if candidate.ref.repo not in busy:
+                stalls.setdefault(candidate.ref.repo, []).append((candidate, wait))
+        scope = set(repos)
+        seen: dict[str, float] = {}
+        with self.queue.connect() as connection:
+            for repo in sorted(stalls):
+                running, seen[repo] = connection.execute(
+                    "SELECT COALESCE(SUM(state IN ('queued', 'running')), 0),"
+                    " COALESCE(MAX(MAX(created_at, COALESCE(finished_at, created_at))), 0)"
+                    " FROM jobs WHERE lower(repo) = ? AND recipient != 'grok'",
+                    (repo,),
+                ).fetchone()
+                pending = connection.execute(
+                    f"{_FED_WITHOUT_JOB} AND item.repo = ?", (now - FED_PENDING_SECONDS, repo)
+                ).fetchone()[0]
+                if running or pending:
+                    del stalls[repo]
+                    continue
+                project = stalls[repo][0][0].project
+                try:
+                    open_pulls = self.github.open_pull_commits(project.repo)
+                except Exception as exc:
+                    self.log(f"feeder: cannot read open PRs of {project.repo}: {safe_ship_error(exc)}")
+                    scope.discard(repo)
+                    del stalls[repo]
+                    continue
+                if _factory_pull(connection, repo, open_pulls):
+                    del stalls[repo]
+            since: dict[str, float] = {}
+            for repo in sorted(scope):
+                if repo not in stalls:
+                    connection.execute(f"DELETE FROM {IDLE_TABLE} WHERE repo = ?", (repo,))
+                    continue
+                row = connection.execute(
+                    f"SELECT since, seen FROM {IDLE_TABLE} WHERE repo = ?", (repo,)
+                ).fetchone()
+                if row is None or seen[repo] > row[1]:
+                    connection.execute(
+                        f"INSERT INTO {IDLE_TABLE} (repo, since, seen) VALUES (?, ?, ?)"
+                        " ON CONFLICT(repo) DO UPDATE SET since = excluded.since, seen = excluded.seen",
+                        (repo, now, seen[repo]),
+                    )
+                    connection.execute(
+                        "DELETE FROM needs_attention WHERE repo = ? AND reason = ?",
+                        (repo, ATTENTION_IDLE_BLOCKED),
+                    )
+                    since[repo] = now
+                else:
+                    since[repo] = row[0]
+            flags = {
+                (repo, candidate.ref.key, ATTENTION_IDLE_BLOCKED): f"waiting on {_open_blockers(wait, repo)}"
+                for repo, waiting in stalls.items()
+                for candidate, wait in waiting
+            }
+            attention.sync(connection, (ATTENTION_IDLE_BLOCKED,), scope, flags, now)
+            for repo, waiting in sorted(stalls.items()):
+                waiting.sort(key=lambda item: _key_order(item[0].issue.key))
+                self._wake_idle(connection, waiting, since[repo])
+
+    def _wake_idle(
+        self, connection: sqlite3.Connection, waiting: Sequence[tuple[_Candidate, Wait]], stall: float
+    ) -> None:
+        """Queue the stall's Grok wake, keyed on when the stall began."""
+        first = waiting[0][0]
+        project = first.project
+        repo = project.repo
+        tickets = "; ".join(
+            f"{candidate.ref.label(repo)} waits on {_open_blockers(wait, repo)}"
+            for candidate, wait in waiting
+        )
+        detail = f"{repo} has no work in flight: {tickets}."
+        before = connection.total_changes
+        self.queue.enqueue_in_transaction(
+            connection,
+            JobRequest(
+                repo=repo,
+                ticket_id=first.issue.key,
+                action="blocked",
+                recipient="grok",
+                source_comment_id=f"feeder-idle:{repo}:{stall!r}",
+                timeout_seconds=resolve_job_timeout(self.config, repo) * 60,
+                detail=json.dumps(
+                    {
+                        "project_bot": project.grok_bot,
+                        "detail": detail,
+                        "ticket_url": first.issue.url,
+                        "blocked": [candidate.issue.key for candidate, _ in waiting],
+                    },
+                    sort_keys=True,
+                ),
+            ),
+            dedupe_key=f"feeder-idle:{repo.lower()}:{stall!r}",
+        )
+        if connection.total_changes > before:
+            self.log(f"feeder: {detail} Woke {project.grok_bot}")
+
     # -- capacity --------------------------------------------------------------
 
     def _placement(
@@ -2100,6 +2414,9 @@ class Feeder:
         issue = candidate.issue
         config = candidate.context.config
         row = self._row(candidate)
+        evidence = self._split_evidence(candidate, row)
+        if evidence is not None:
+            raise _SplitParent(evidence)
         branch = row["branch"] or self._branch_for(issue)
         if not _BRANCH.fullmatch(branch) or ".." in branch:
             raise ValueError(f"branch name {branch!r} is not safe")
@@ -2312,6 +2629,22 @@ class Feeder:
         self.log(f"feeder: {repo}#{ticket_id} held: {wait.reason}")
         return wait
 
+    def _split_evidence(self, candidate: _Candidate, row: sqlite3.Row) -> str | None:
+        issue = candidate.issue
+        if issue.tracker != "github":
+            return None
+        repo = candidate.project.repo
+        number = int(issue.key)
+        children = self.github.split_children(repo, number)
+        pulls = set(self.github.branch_pulls(repo, row["branch"] or self._branch_for(issue)))
+        if row["pr_number"]:
+            pulls.add(int(row["pr_number"]))
+        comments = list(self.github.comments(repo, number))
+        for pull in sorted(pulls):
+            comments += self.github.comments(repo, pull)
+        trusted = intake_trusted(self.config, candidate.project) | self._orchestrator_authors("github")
+        return split_evidence(issue.body, comments, trusted, children)
+
     def _orchestrator_authors(self, tracker: str) -> frozenset[str]:
         """Who may have posted the orchestrator's own brief or go (#87 F1.3).
 
@@ -2409,6 +2742,31 @@ def _paths_meet(first: Collection[str], second: Collection[str], shared: Collect
 def _progress(statuses: Mapping[Ref, RefStatus], ref: Ref) -> Progress | None:
     status = statuses.get(ref)
     return None if status is None else status.progress
+
+
+def _open_blockers(wait: Wait, home: str) -> str:
+    return ", ".join(blocker.label(home) for blocker in wait.open_blockers)
+
+
+def _factory_pull(connection: sqlite3.Connection, repo: str, pulls: Mapping[int, OpenPull]) -> bool:
+    if any(pull.branch.startswith("factory/") for pull in pulls.values()):
+        return True
+    tracked = {
+        str(number)
+        for (number,) in connection.execute(
+            f"SELECT pr_number FROM {FEEDER_TABLE} WHERE repo = ? AND pr_number IS NOT NULL", (repo,)
+        )
+    }
+    if _has_table(connection, "ticket_state"):
+        tracked |= {
+            str(ticket)
+            for (ticket,) in connection.execute(
+                "SELECT ticket_id FROM ticket_state WHERE lower(repo) = ?"
+                f" AND COALESCE(workflow_state, '') NOT IN ({','.join('?' * len(TERMINAL_STATES))})",
+                (repo, *TERMINAL_STATES),
+            )
+        }
+    return not tracked.isdisjoint(str(number) for number in pulls)
 
 
 def _ticket_name(issue: IntakeIssue) -> str:

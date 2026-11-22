@@ -28,13 +28,14 @@ from lib.feeder import (
     FEEDER_TABLE,
     Feeder,
     IntakeIssue,
+    IssueRecord,
     ensure_tables,
     feeder_counts,
     feeder_items,
     go_state_for,
 )
 from lib.feeder_gates import Progress, Ref, RefStatus
-from lib.followups import has_marker
+from lib.followups import has_marker, split_parent
 from lib.github_actions import GhResult, GitHubReviewActions
 from lib.handoff import Handoff, format_comment, parse_comment
 from lib.machines_yml import load_machines_yml
@@ -168,6 +169,7 @@ class FakeGitHub:
         self._next_pr = 500
         self._next_issue = 899
         self._next_comment = 9000
+        self.clock = lambda: 0.0
 
     def _maybe_fail(self, step: str) -> None:
         left = self.fail.get(step, 0)
@@ -207,6 +209,13 @@ class FakeGitHub:
             if pull_repo == repo and pull["head"] == branch and pull.get("state", "open") == "open":
                 return number
         return None
+
+    def branch_pulls(self, repo: str, branch: str) -> tuple[int, ...]:
+        self.calls.append(f"branch-pulls:{repo}:{branch}")
+        return tuple(
+            number for (pull_repo, number), pull in sorted(self.pulls.items())
+            if pull_repo == repo and pull["head"] == branch
+        )
 
     def pull_state(self, repo: str, number: int) -> str:
         pull = self.pulls[(repo, number)]
@@ -250,6 +259,7 @@ class FakeGitHub:
                 complete=True,
                 base=pull.get("base", "main"),
                 head=self.branches.get((repo, pull["head"]), pull["head"]),
+                branch=pull["head"],
             )
             for (pull_repo, number), pull in self.pulls.items()
             if pull_repo == repo and pull.get("state", "open") == "open" and not pull.get("merged")
@@ -314,11 +324,47 @@ class FakeGitHub:
             if filed_repo == repo and has_marker(item["body"], marker)
         ))
 
-    def close_issue(self, repo: str, number: int, comment: str | None = None) -> None:
+    def close_issue(
+        self, repo: str, number: int, comment: str | None = None, *, completed: bool = False
+    ) -> None:
         if comment is not None:
             self.post_comment(repo, number, comment)
-        self.filed[(repo, number)]["state"] = "closed"
-        self.issues[repo] = [item for item in self.issues[repo] if item.key != str(number)]
+        self._maybe_fail("close")
+        self.calls.append(f"close:{repo}#{number}")
+        self.filed[(repo, number)].update(
+            state="closed", reason="completed" if completed else None, closed_at=self.clock()
+        )
+        self.issues[repo] = [item for item in self.issues.get(repo, []) if item.key != str(number)]
+
+    def remove_issue_label(self, repo: str, number: int, label: str) -> None:
+        self._maybe_fail("unlabel")
+        self.calls.append(f"unlabel:{repo}#{number}:{label}")
+        item = self.filed[(repo, number)]
+        item["labels"] = tuple(name for name in item["labels"] if name != label)
+
+    def _record(self, number: int, item: dict) -> IssueRecord:
+        return IssueRecord(number=number, state=item["state"], reason=item.get("reason"),
+                           body=item["body"])
+
+    def closed_issues_since(self, repo: str, since: float) -> tuple[IssueRecord, ...]:
+        self._maybe_fail("closed_issues")
+        self.calls.append(f"closed-since:{repo}:{since}")
+        return tuple(
+            self._record(number, item) for (filed_repo, number), item in sorted(self.filed.items())
+            if filed_repo == repo and item["state"] == "closed" and item.get("closed_at", 0.0) >= since
+        )
+
+    def split_children(self, repo: str, parent: int) -> tuple[IssueRecord, ...]:
+        self._maybe_fail("split_children")
+        self.calls.append(f"split-children:{repo}#{parent}")
+        return tuple(
+            self._record(number, item) for (filed_repo, number), item in sorted(self.filed.items())
+            if filed_repo == repo and split_parent(item["body"]) == parent
+        )
+
+    def issue_record(self, repo: str, number: int) -> IssueRecord:
+        self.calls.append(f"issue-record:{repo}#{number}")
+        return self._record(number, self.filed[(repo, number)])
 
     def issue_state(self, repo: str, number: int) -> str:
         return self.filed[(repo, number)]["state"]

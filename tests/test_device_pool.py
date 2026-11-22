@@ -1089,7 +1089,7 @@ def unreachable(queue: SQLiteJobQueue, device_name: str, until: float) -> None:
 
 def memory_hold(queue: SQLiteJobQueue, device_name: str, until: float) -> None:
     with queue.connect() as connection:
-        device_pool.hold_memory(connection, device_name, until=until, reason=HELD, now=queue.now())
+        device_pool.hold_memory(connection, device_name, until=until, reason=HELD)
 
 
 def clear_memory(queue: SQLiteJobQueue, device_name: str) -> None:
@@ -1163,52 +1163,34 @@ def test_a_pinned_qa_job_waits_while_its_device_is_memory_held(tmp_path: Path) -
     assert qa_slots() == ["pc"]
 
 
-def test_a_shorter_memory_hold_never_shortens_or_takes_over_an_unreachable_backoff(
-    tmp_path: Path,
+def blocked(queue: SQLiteJobQueue, pool: DevicePool) -> bool:
+    return "pc" in device_pool.placement_blocks(queue, pool.config, None).devices
+
+
+@pytest.mark.parametrize("held_until", [280.0, 500.0])
+def test_a_memory_hold_and_an_unreachable_backoff_each_block_to_their_own_deadline(
+    tmp_path: Path, held_until: float
 ) -> None:
     now = [100.0]
     pool, queue = make_pool(tmp_path, device("pc", 4, "claude"), now=now)
-    enqueue(queue, "claude", "1")
     unreachable(queue, "pc", 400.0)
-    memory_hold(queue, "pc", 280.0)
+    memory_hold(queue, "pc", held_until)
 
-    assert backoff_row(queue, "pc") == (400.0, UNREACHABLE)
-    clear_memory(queue, "pc")
-    assert backoff_row(queue, "pc") == (400.0, UNREACHABLE)
     now[0] = 399.0
-    assert pool.claim("claude") is None
+    assert blocked(queue, pool)
+    now[0] = 450.0
+    assert blocked(queue, pool) is (held_until > 450.0)
+
+    clear_memory(queue, "pc")
+    now[0] = 399.0
+    assert blocked(queue, pool)
     now[0] = 400.0
-    assert pool.claim("claude") is not None
+    assert not blocked(queue, pool)
 
 
-def test_an_unreachable_backoff_over_a_memory_hold_owns_the_row(tmp_path: Path) -> None:
-    pool, queue = make_pool(tmp_path, device("pc", 4, "claude"))
-    enqueue(queue, "claude", "1")
-    memory_hold(queue, "pc", 280.0)
-    unreachable(queue, "pc", 400.0)
-
-    assert backoff_row(queue, "pc") == (400.0, UNREACHABLE)
-    clear_memory(queue, "pc")
-    assert backoff_row(queue, "pc") == (400.0, UNREACHABLE)
-    assert pool.claim("claude") is None
-
-
-def test_a_longer_memory_hold_extends_a_live_unreachable_backoff_but_keeps_its_reason(
+def test_a_memory_hold_over_an_expired_unreachable_backoff_blocks_until_cleared(
     tmp_path: Path,
 ) -> None:
-    now = [100.0]
-    pool, queue = make_pool(tmp_path, device("pc", 4, "claude"), now=now)
-    enqueue(queue, "claude", "1")
-    unreachable(queue, "pc", 400.0)
-    memory_hold(queue, "pc", 500.0)
-
-    assert backoff_row(queue, "pc") == (500.0, UNREACHABLE)
-    clear_memory(queue, "pc")
-    now[0] = 399.0
-    assert pool.claim("claude") is None
-
-
-def test_a_memory_hold_over_an_expired_unreachable_row_clears_away(tmp_path: Path) -> None:
     now = [100.0]
     pool, queue = make_pool(tmp_path, device("pc", 4, "claude"), now=now)
     enqueue(queue, "claude", "1")
@@ -1216,10 +1198,8 @@ def test_a_memory_hold_over_an_expired_unreachable_row_clears_away(tmp_path: Pat
     now[0] = 500.0
     memory_hold(queue, "pc", 680.0)
 
-    assert backoff_row(queue, "pc") == (680.0, HELD)
     assert pool.claim("claude") is None
     clear_memory(queue, "pc")
-    assert backoff_row(queue, "pc") is None
     assert pool.claim("claude") is not None
 
 
@@ -1232,7 +1212,7 @@ def test_a_later_back_off_never_shortens_a_longer_one(tmp_path: Path) -> None:
     assert backoff_row(queue, "pc") == (400.0, "lost")
 
 
-def test_clearing_a_memory_hold_on_a_device_with_no_backoff_table_is_a_no_op(
+def test_clearing_a_memory_hold_that_was_never_set_is_a_no_op(
     tmp_path: Path,
 ) -> None:
     pool, queue = make_pool(tmp_path, device("pc", 4, "claude"))

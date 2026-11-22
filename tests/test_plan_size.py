@@ -313,6 +313,33 @@ def test_an_over_size_parsed_split_files_its_parts_and_abandons(tmp_path: Path) 
     assert size_wakes(flow) == []
 
 
+class RecordingActions(FlakyCreates):
+    def __init__(self) -> None:
+        super().__init__()
+        self.called: list[str] = []
+
+    def __getattribute__(self, name: str):
+        value = super().__getattribute__(name)
+        if callable(value) and not name.startswith("_"):
+            super().__getattribute__("called").append(name)
+        return value
+
+
+def test_an_auto_split_leaves_the_parent_issue_open(tmp_path: Path) -> None:
+    flow = SplitFlow(tmp_path)
+    flow.actions = RecordingActions()
+    flow.dispatcher.review_actions = flow.actions
+
+    assert flow.plan("500", "ac=met", estimated(300, SPLIT_BODY)) == "auto-split"
+
+    assert list(flow.actions.issues) == [300, 301]
+    assert flow.state()["workflow_state"] == "abandoned"
+    assert "file_issue" in flow.actions.called
+    assert not [name for name in flow.actions.called if "close" in name]
+    assert 1117 not in flow.actions.closed
+    assert 1117 not in flow.actions.issue_comments
+
+
 def test_a_failed_filing_leaves_the_ticket_at_plan_check_and_the_next_poll_finishes(tmp_path: Path) -> None:
     flow = SplitFlow(tmp_path, fail_at=2)
 

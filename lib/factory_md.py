@@ -76,7 +76,18 @@ local_checks (a list of short check labels, default none). A head with no
 check run and no commit status on a PR whose base is not in branches is
 CI not-run: the CI gates do not wait, and the build, fix and review
 briefs ask for the local_checks results instead. Absent, every base is
-treated as a CI base.
+treated as a CI base. required_checks (issue #1278) is a list of job-name
+globs, default none. When set, it is the whole PR CI gate on a CI base
+(issue #1279). CI fails when a matching check run failed, clears when every
+glob matched a successful run and no matching run is still going, and is
+pending otherwise, a skipped or neutral match alone included. Other check
+runs and commit statuses are ignored. With required_checks given, branches
+may be omitted, and every base is a CI base. It is independent of
+feeder.required_checks. force_rerun_paths (issue #1285) is a list of
+repo-relative paths or globs, default .github/workflows/**, and [] turns
+it off. It is parsed and validated only. The stale-green CI gate that
+reads it lands in a later part of #1276. With force_rerun_paths given,
+branches may be omitted, and every base is a CI base.
 
 shared_paths is optional (issue #261): a list of repo-relative paths or
 globs, a trailing / naming a directory. A Touches: path that matches never
@@ -178,7 +189,8 @@ _TOP_KEYS = {
     "ci",
     "qa",
 }
-_CI_KEYS = {"branches", "local_checks"}
+_CI_KEYS = {"branches", "local_checks", "required_checks", "force_rerun_paths"}
+DEFAULT_CI_FORCE_RERUN_PATHS = (".github/workflows/**",)
 _PLAN_KEYS = {"max_lines", "max_criteria"}
 DEFAULT_PLAN_MAX_LINES = 400
 PLAN_ESTIMATE_FACTOR = Fraction(27, 20)
@@ -306,6 +318,8 @@ class FactoryConfig:
     plan_max_criteria: int = DEFAULT_PLAN_MAX_CRITERIA
     ci_branches: tuple[str, ...] | None = None
     ci_local_checks: tuple[str, ...] = ()
+    ci_required_checks: tuple[str, ...] = ()
+    ci_force_rerun_paths: tuple[str, ...] = DEFAULT_CI_FORCE_RERUN_PATHS
     qa: QaConfig | None = None
 
     def __post_init__(self) -> None:
@@ -429,7 +443,9 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
     shared_paths = _path_list(data.get("shared_paths"), "shared_paths", findings)
     max_holders_per_path, exclusive_paths, required_checks = _feeder(data, findings, unknown)
     plan_max_lines, plan_max_criteria = _plan(data, findings, unknown)
-    ci_branches, ci_local_checks = _ci(data, findings, unknown)
+    ci_branches, ci_local_checks, ci_required_checks, ci_force_rerun_paths = _ci(
+        data, findings, unknown
+    )
     qa, qa_findings = _qa(data, strict)
     findings.extend(qa_findings)
 
@@ -511,6 +527,8 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
         plan_max_criteria=plan_max_criteria,
         ci_branches=ci_branches,
         ci_local_checks=ci_local_checks,
+        ci_required_checks=ci_required_checks,
+        ci_force_rerun_paths=ci_force_rerun_paths,
         qa=qa,
     )
     return config, findings
@@ -944,18 +962,21 @@ def _feeder(
         )
         limit = 1
     exclusive = _path_list(value.get("exclusive_paths"), "feeder.exclusive_paths", findings)
-    required = value.get("required_checks", [])
-    if not isinstance(required, list):
-        findings.append(Finding("error", "feeder.required_checks must be a list"))
-        required = []
-    checks: list[str] = []
-    for index, item in enumerate(required):
+    required = _glob_names(value.get("required_checks", []), "feeder.required_checks", findings)
+    return int(limit), exclusive, required
+
+
+def _glob_names(value: object, field: str, findings: list[Finding]) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        findings.append(Finding("error", f"{field} must be a list"))
+        return ()
+    names: list[str] = []
+    for index, item in enumerate(value):
         if isinstance(item, str) and item.strip():
-            checks.append(item)
+            names.append(item)
         else:
-            message = f"feeder.required_checks[{index}] must be a non-empty job name glob"
-            findings.append(Finding("error", message))
-    return int(limit), exclusive, tuple(checks)
+            findings.append(Finding("error", f"{field}[{index}] must be a non-empty job name glob"))
+    return tuple(names)
 
 
 def _plan(data: dict, findings: list[Finding], unknown: str) -> tuple[int, int]:
@@ -972,21 +993,15 @@ def _plan(data: dict, findings: list[Finding], unknown: str) -> tuple[int, int]:
 
 def _ci(
     data: dict, findings: list[Finding], unknown: str
-) -> tuple[tuple[str, ...] | None, tuple[str, ...]]:
+) -> tuple[tuple[str, ...] | None, tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
     if "ci" not in data:
-        return None, ()
+        return None, (), (), DEFAULT_CI_FORCE_RERUN_PATHS
     value = data["ci"]
     if not isinstance(value, dict):
         findings.append(Finding("error", "ci must be a mapping"))
-        return None, ()
+        return None, (), (), DEFAULT_CI_FORCE_RERUN_PATHS
     findings.extend(_unknown(value, _CI_KEYS, "ci", "error"))
-    branches = value.get("branches")
-    if not isinstance(branches, list) or not branches:
-        findings.append(Finding("error", "ci.branches must be a non-empty list"))
-        branches = []
-    for index, item in enumerate(branches):
-        if not isinstance(item, str) or _BRANCH.fullmatch(item) is None:
-            findings.append(Finding("error", f"ci.branches[{index}] must be a branch name"))
+    branches = _ci_branches(value, findings)
     checks = value.get("local_checks", [])
     if not isinstance(checks, list):
         findings.append(Finding("error", "ci.local_checks must be a list"))
@@ -994,7 +1009,25 @@ def _ci(
     for index, item in enumerate(checks):
         if not isinstance(item, str) or CHECK_LABEL.fullmatch(item) is None:
             findings.append(Finding("error", f"ci.local_checks[{index}] must be a short label"))
-    return tuple(str(item) for item in branches), tuple(str(item) for item in checks)
+    required = _glob_names(value.get("required_checks", []), "ci.required_checks", findings)
+    rerun = value.get("force_rerun_paths", list(DEFAULT_CI_FORCE_RERUN_PATHS))
+    if rerun is None:
+        findings.append(Finding("error", "ci.force_rerun_paths must be a list"))
+    rerun_paths = _path_list(rerun, "ci.force_rerun_paths", findings)
+    return branches, tuple(str(item) for item in checks), required, rerun_paths
+
+
+def _ci_branches(value: dict, findings: list[Finding]) -> tuple[str, ...] | None:
+    if "branches" not in value and ("required_checks" in value or "force_rerun_paths" in value):
+        return None
+    branches = value.get("branches")
+    if not isinstance(branches, list) or not branches:
+        findings.append(Finding("error", "ci.branches must be a non-empty list"))
+        return ()
+    for index, item in enumerate(branches):
+        if not isinstance(item, str) or _BRANCH.fullmatch(item) is None:
+            findings.append(Finding("error", f"ci.branches[{index}] must be a branch name"))
+    return tuple(str(item) for item in branches)
 
 
 def _qa(data: dict, strict: bool) -> tuple[QaConfig | None, list[Finding]]:

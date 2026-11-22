@@ -3,6 +3,8 @@ from __future__ import annotations
 MIN_AVAILABLE_BYTES = 8 * 1024**3
 MAX_PSI_SOME_AVG10 = 10.0
 MEMORY_WAIT = "memory-wait"
+HOLD_SECONDS = 180.0
+READ_TIMEOUT_SECONDS = 10.0
 _GIB = 1024**3
 
 

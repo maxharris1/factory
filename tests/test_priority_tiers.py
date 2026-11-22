@@ -263,7 +263,9 @@ def test_inside_a_tier_the_ticket_that_unblocks_most_goes_first(tmp_path: Path) 
     assert fed == ["factory/issue-1"]
     assert order == [("1", 0), ("2", 0), ("3", 0), ("4", 0)]
     assert github.status_reads == without.status_reads
-    assert github.calls == [call.replace("issue-1", "issue-2") for call in without.calls]
+    assert github.calls == [
+        call.replace("issue-1", "issue-2").replace(f"{HOME}#1", f"{HOME}#2") for call in without.calls
+    ]
 
 
 def test_tickets_waiting_on_a_path_count_toward_its_holder(tmp_path: Path) -> None:

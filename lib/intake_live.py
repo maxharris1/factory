@@ -27,9 +27,13 @@ Reads:
   in one repo folder at a commit (`contents/`), for the feature map check
   and the truncated tree walk (#1029);
 * closed_issues_since: issues closed at or after a time (`issues?state=closed&since=`);
-* split_children: every issue whose body says `Split from #<parent>` (`search/issues`);
-  a search that returns fewer issues than its total_count, as past the
-  1,000-result ceiling, fails the read rather than returning a partial set.
+* split_children: every issue whose body says `Split from #<parent>`, found
+  by search (`search/issues`) or by the parent's timeline cross-references
+  (`issues/<parent>/timeline`), which a lagging search index cannot omit;
+  the timeline's copy wins. A search that returns fewer issues than its
+  total_count, as past the 1,000-result ceiling, fails the read rather than
+  returning a partial set;
+* issue_record: one issue's state, close reason and body (`issues/<n>`).
 
 Writes (each one exactly once per call; the feeder makes them idempotent):
 the empty start commit (git data API: the base commit's tree, one parent),
@@ -121,7 +125,7 @@ OPEN_PULLS_MAX_PAGES = 20
 OPEN_PULL_COMMITS_QUERY = (
     "query($owner: String!, $name: String!, $after: String) "
     "{ repository(owner: $owner, name: $name) { pullRequests(states: OPEN, first: 50, after: $after) "
-    "{ nodes { number baseRefName headRefOid commits(first: 100) { totalCount nodes { commit { oid } } } } "
+    "{ nodes { number baseRefName headRefName headRefOid commits(first: 100) { totalCount nodes { commit { oid } } } } "
     "pageInfo { hasNextPage endCursor } } } }"
 )
 OPEN_PULLS_TTL = 60.0
@@ -271,13 +275,41 @@ class GitHubIntakeClient(GitHubReviewActions):
             raise GitHubAdapterError(
                 f"issue search returned {returned} of {max(totals)} issues"
             )
-        items = _issue_items(found)
-        children = [
-            _issue_record(item)
-            for item in items
-            if split_parent(_text(item.get("body"))) == parent
+        children = {
+            child.number: child
+            for child in map(_issue_record, _issue_items(found))
+            if split_parent(child.body) == parent
+        }
+        children.update((child.number, child) for child in self._referencing_children(repo, parent))
+        return tuple(sorted(children.values(), key=lambda child: child.number))
+
+    def _referencing_children(self, repo: str, parent: int) -> list[IssueRecord]:
+        path = _repo_path(repo)
+        pages = self._pages(f"{path}/issues/{parent}/timeline?per_page=100")
+        if not all(isinstance(page, list) for page in pages):
+            raise GitHubAdapterError("issue timeline page is not a list")
+        here = f"https://api.github.com/{path}".lower()
+        sources = [
+            event["source"]["issue"]
+            for page in pages
+            for event in page
+            if isinstance(event, dict)
+            and event.get("event") == "cross-referenced"
+            and isinstance(event.get("source"), dict)
+            and isinstance(event["source"].get("issue"), dict)
+            and _text(event["source"]["issue"].get("repository_url")).lower() == here
         ]
-        return tuple(sorted(children, key=lambda child: child.number))
+        return [
+            child
+            for child in map(_issue_record, _issue_items([sources]))
+            if split_parent(child.body) == parent
+        ]
+
+    def issue_record(self, repo: str, number: int) -> IssueRecord:
+        items = _issue_items([[self._json(f"{_repo_path(repo)}/issues/{number}")]])
+        if not items:
+            raise GitHubAdapterError(f"{repo}#{number} is not an issue")
+        return _issue_record(items[0])
 
     def _applied_by(self, repo: str, number: int, label: str, updated_at: str) -> str | None:
         key = (repo.lower(), number, label, updated_at)
@@ -449,6 +481,17 @@ class GitHubIntakeClient(GitHubReviewActions):
         the poller does not discover it, so its brief and go would go
         nowhere.
         """
+        numbers = sorted(
+            item["number"]
+            for item in self._branch_pull_items(repo, branch)
+            if item.get("state") == "open" and item.get("merged_at") is None
+        )
+        return numbers[0] if numbers else None
+
+    def branch_pulls(self, repo: str, branch: str) -> tuple[int, ...]:
+        return tuple(sorted(item["number"] for item in self._branch_pull_items(repo, branch)))
+
+    def _branch_pull_items(self, repo: str, branch: str) -> list[dict]:
         owner = repo.split("/", 1)[0]
         endpoint = (
             f"{_repo_path(repo)}/pulls?state=all&per_page=100"
@@ -457,17 +500,14 @@ class GitHubIntakeClient(GitHubReviewActions):
         pulls = self._json(endpoint)
         if not isinstance(pulls, list):
             raise GitHubAdapterError("pulls list is not a list")
-        numbers = sorted(
-            item["number"]
+        return [
+            item
             for item in pulls
             if isinstance(item, dict)
             and isinstance(item.get("number"), int)
             and not isinstance(item.get("number"), bool)
-            and item.get("state") == "open"
-            and item.get("merged_at") is None
             and ((item.get("head") or {}).get("ref") == branch)
-        )
-        return numbers[0] if numbers else None
+        ]
 
     def ahead_commits(self, repo: str, base: str, tip: str) -> tuple[str, ...]:
         """The commits on tip that base lacks (#205). The compare read
@@ -650,8 +690,11 @@ def _open_pull(node: object) -> tuple[int, OpenPull]:
     number = node.get("number") if isinstance(node, dict) else None
     if not isinstance(number, int) or isinstance(number, bool):
         raise GitHubAdapterError("open pull request has no number")
-    base, head = node.get("baseRefName"), node.get("headRefOid")
-    if not _github_branch(base) or not isinstance(head, str) or not _SHA.fullmatch(head):
+    base, head, branch = node.get("baseRefName"), node.get("headRefOid"), node.get("headRefName")
+    if (
+        not _github_branch(base) or not isinstance(branch, str)
+        or not isinstance(head, str) or not _SHA.fullmatch(head)
+    ):
         raise GitHubAdapterError(f"open PR #{number} base or head is not readable")
     commits = node.get("commits")
     nodes = commits.get("nodes") if isinstance(commits, dict) else None
@@ -666,7 +709,7 @@ def _open_pull(node: object) -> tuple[int, OpenPull]:
     if any(not isinstance(sha, str) or not _SHA.fullmatch(sha) for sha in shas) or total < len(shas):
         raise GitHubAdapterError(f"open PR #{number} commits are not readable")
     return number, OpenPull(
-        commits=frozenset(shas), complete=total == len(shas), base=base, head=head
+        commits=frozenset(shas), complete=total == len(shas), base=base, head=head, branch=branch
     )
 
 
