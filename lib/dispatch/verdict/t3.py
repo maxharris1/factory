@@ -12,6 +12,7 @@ from lib.dispatch.qa import QaFix, ReviewFix, Wait, failed_column
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, Registration, TrackedTicket
 from lib.dispatch.verdict.convergence import Continue, Repeated, Stalled
+from lib.handoff import parse_comment
 from lib.queue import JobRequest
 
 
@@ -84,8 +85,8 @@ class T3Mixin:
         if state is None:
             self._wake_comment_problem(ticket, comment, "stale", outcome)
             return True, outcome
-        if state == "capped":
-            self._wake_capped(ticket, comment)
+        if state == "capped" and self._wake_capped(ticket, comment):
+            return True, outcome
         self._write_state_label(ticket, state)
         return True, outcome
 
@@ -100,6 +101,8 @@ class T3Mixin:
         *,
         convergence: Continue | Stalled,
     ) -> tuple[str, str | None]:
+        from lib.evidence.findings import blocking_ids
+
         ticket = self._fresh_issue(ticket)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -206,8 +209,8 @@ class T3Mixin:
             connection.execute(
                 """
                 INSERT INTO review_events (
-                    repo, ticket_id, comment_id, outcome, qa_failed, stop
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    repo, ticket_id, comment_id, outcome, qa_failed, stop, finding_ids
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     ticket.repo.lower(),
@@ -216,6 +219,11 @@ class T3Mixin:
                     outcome,
                     failed_column(qa),
                     "stalled" if next_state == "capped" and isinstance(convergence, Stalled) else None,
+                    (
+                        json.dumps(sorted(blocking_ids(parse_comment(comment.body).body)))
+                        if next_state == "capped"
+                        else None
+                    ),
                 ),
             )
             if granted is not None:

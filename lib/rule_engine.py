@@ -15,16 +15,24 @@ ScanResult = Literal["clean", "found", "too-large"]
 CIState = Literal["success", "pending", "failure", "not-run", "unknown"]
 
 FindingId = NewType("FindingId", str)
+CommentId = NewType("CommentId", str)
 Sha = NewType("Sha", str)
 GitPath = NewType("GitPath", str)
 
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_COMMENT_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def finding_id(text: str) -> FindingId:
     if handoff.FINDING_ID.fullmatch(text) is None:
         raise ValueError(f"bad finding id {text!r}")
     return FindingId(text)
+
+
+def comment_id(text: str) -> CommentId:
+    if _COMMENT_ID.fullmatch(text) is None:
+        raise ValueError(f"bad comment id {text!r}")
+    return CommentId(text)
 
 
 def sha(text: str) -> Sha:
@@ -43,7 +51,7 @@ def git_path(text: str) -> GitPath:
 class StopFacts:
     site: Literal["cap", "repeat"]
     stop: StopKind
-    verdict_id: int
+    verdict_id: CommentId
     finding_ids: tuple[FindingId, ...]
     repeat_stops: int
     prior_grants: frozenset[FindingId]
@@ -118,7 +126,31 @@ class Rule(Protocol):
     def rule(self, facts: Facts) -> Ruling: ...
 
 
-RULES: tuple[Rule, ...] = ()
+class FirstCapGrant:
+    name = "first-cap-grant"
+
+    def applies(self, facts: Facts) -> bool:
+        return isinstance(facts, StopFacts) and facts.site == "cap"
+
+    def rule(self, facts: Facts) -> Ruling:
+        assert isinstance(facts, StopFacts)
+        repeated = sorted(set(facts.finding_ids) & facts.prior_grants)
+        checks = (
+            Check("stop", facts.stop != "stalled", facts.stop),
+            Check("finding-ids", bool(facts.finding_ids), len(facts.finding_ids)),
+            Check("stuck", not facts.stuck, int(facts.stuck)),
+            Check("earlier-round", not repeated, repeated[0] if repeated else None),
+        )
+        failed = next((check for check in checks if not check.passed), None)
+        if failed is not None:
+            return Ruling(self.name, Escalate(failed.name), checks)
+        header = go_header(facts.round + 1, facts.cap + 1)
+        if isinstance(header, Escalate):
+            return Ruling(self.name, header, (*checks, Check("header", False, None)))
+        return Ruling(self.name, Grant(header), (*checks, Check("header", True, header)))
+
+
+RULES: tuple[Rule, ...] = (FirstCapGrant(),)
 
 
 def decide(facts: Facts, rules: Sequence[Rule] = RULES) -> Ruling:

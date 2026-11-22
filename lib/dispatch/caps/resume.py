@@ -116,8 +116,7 @@ class ResumeMixin:
                 )
             ]
         for comment_id in unlabelled:
-            if row is not None and row["workflow_state"] == "fixing":
-                self._after_lift(ticket, queued=False, reopened=False)
+            self._after_lift(ticket, queued=False, reopened=False)
             self._mark_handled(ticket, comment_id, "queued-fix")
         if row is None or row["workflow_state"] != "handed-off":
             return
@@ -147,6 +146,8 @@ class ResumeMixin:
                 return
 
     def _after_lift(self, ticket: TrackedTicket, queued: bool, reopened: bool) -> None:
+        if self._review_context(ticket)[0] != "fixing":
+            return
         if queued:
             self.clear_attention(ticket.repo, ticket.ticket_id, "ready-after-cap")
             self.clear_attention(ticket.repo, ticket.ticket_id, UNANNOUNCED_AFTER_CAP)

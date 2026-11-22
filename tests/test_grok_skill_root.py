@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "grok" / "orchestrate-project" / "SKILL.md"
 PLAYBOOK = "skills/poteto-mode/playbooks/orchestrate.md"
 MAX_LINES = 180
-MAX_BYTES = 18941
+MAX_BYTES = 19042
 
 STALE = (
     r"second[^.|]*(unmet|acceptance-criterion)",
@@ -76,7 +76,7 @@ def test_every_named_orch_command_exists() -> None:
 
 def test_commands_section_names_max_and_grok_commands() -> None:
     commands = section("Commands")
-    for phrase in ("`/go`", "`/ok <sha>`", "`orch retry", "Auto extra round"):
+    for phrase in ("`/go`", "`/ok <sha>`", "`orch retry", "Auto extra round", "`orch-engine` notice"):
         assert phrase in commands, phrase
     go = parse_slash_go("/go\nFactory: narrower instruction")
     assert go is not None and go.instruction.startswith("Factory:")

@@ -2,14 +2,145 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterable
+from typing import Literal
 
-from lib.dispatch.types import TrackedTicket
-from lib.rule_engine import Escalate, FindingId, Grant, Land, Ruling, Site, Wait
+from lib.dispatch.types import Comment, RoundGrant, TrackedTicket
+from lib.rule_engine import (
+    Escalate,
+    FindingId,
+    Grant,
+    Land,
+    Ruling,
+    Site,
+    StopFacts,
+    Wait,
+    comment_id,
+    decide,
+    finding_id,
+)
 
 OUTCOME_COLUMN = {Grant: "granted", Land: "landed", Wait: "waiting", Escalate: "escalated"}
 
 
+def engine_marker(site: Site, subject: str) -> str:
+    return f"<!-- orch-engine site={site} subject={subject} -->"
+
+
+def _valid_ids(texts: Iterable[str]) -> tuple[FindingId, ...]:
+    valid = []
+    for text in texts:
+        try:
+            valid.append(finding_id(text))
+        except ValueError:
+            continue
+    return tuple(sorted(valid))
+
+
+def _cap_notice(ids: list[str], header: str, subject: str) -> str:
+    return (
+        f"Factory granted one more review round at the cap in code, because blocking findings"
+        f" {', '.join(ids)} had no earlier extra round. It needs no action.\n\n"
+        f"Validated header: `{header}`\n\n"
+        f"{engine_marker('cap', subject)}\n"
+    )
+
+
 class RuleEngineMixin:
+    def _rule_on_cap(self, ticket: TrackedTicket, verdict: Comment, stop: Literal["capped", "stalled"]) -> bool:
+        try:
+            subject = comment_id(verdict.id)
+        except ValueError:
+            return False
+        history = self._stop_history(ticket)
+        named = next((record.finding_ids for record in history if record.verdict_id == verdict.id), frozenset())
+        ids = _valid_ids(named)
+        if len(ids) != len(named):
+            ids = ()
+        prior = frozenset(
+            _valid_ids(
+                found
+                for record in history
+                if record.released_by is not None and record.verdict_id != verdict.id
+                for found in record.finding_ids
+            )
+        )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            logged = connection.execute(
+                """
+                SELECT outcome, notice_status FROM engine_decisions
+                WHERE lower(repo) = ? AND ticket_id = ? AND site = 'cap' AND subject = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, subject),
+            ).fetchone()
+            if logged is None:
+                state = connection.execute(
+                    "SELECT review_round, stuck FROM ticket_state WHERE repo = ? AND ticket_id = ?",
+                    (ticket.repo.lower(), ticket.ticket_id),
+                ).fetchone()
+                ruling = decide(
+                    StopFacts(
+                        site="cap",
+                        stop=stop,
+                        verdict_id=subject,
+                        finding_ids=ids,
+                        repeat_stops=0,
+                        prior_grants=prior,
+                        round=int(state["review_round"]),
+                        cap=self._effective_cap(ticket, connection),
+                        stuck=bool(state["stuck"]),
+                    )
+                )
+                self._log_ruling(connection, ticket, "cap", subject, ruling, ids)
+                granted = isinstance(ruling.outcome, Grant)
+            else:
+                granted = logged["outcome"] == "granted" and logged["notice_status"] != "void"
+            connection.commit()
+        if not granted:
+            return False
+        self._apply_engine_grants(ticket)
+        return True
+
+    def _apply_engine_grants(self, ticket: TrackedTicket) -> None:
+        with self._connect() as connection:
+            pending = connection.execute(
+                """
+                SELECT subject, finding_ids, header FROM engine_decisions
+                WHERE lower(repo) = ? AND ticket_id = ? AND site = 'cap'
+                  AND outcome = 'granted' AND notice_status = 'pending'
+                ORDER BY decided_at, subject
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchall()
+        for row in pending:
+            subject = str(row["subject"])
+            stop = next((item for item in ticket.comments if item.id == subject), None)
+            if stop is None:
+                continue
+            result = self._apply_round_grant(ticket, RoundGrant.engine(stop))
+            if result is None or result[0] != "queued-fix":
+                self._mark_notice(ticket, subject, "void")
+                continue
+            self._after_lift(ticket, queued=True, reopened=False)
+            self._review_actions(ticket).comment_once(
+                ticket,
+                _cap_notice(json.loads(row["finding_ids"]), str(row["header"]), subject),
+                engine_marker("cap", subject),
+            )
+            self._mark_notice(ticket, subject, "posted")
+
+    def _mark_notice(self, ticket: TrackedTicket, subject: str, status: Literal["void", "posted"]) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE engine_decisions SET notice_status = ?
+                WHERE lower(repo) = ? AND ticket_id = ? AND site = 'cap' AND subject = ?
+                """,
+                (status, ticket.repo.lower(), ticket.ticket_id, subject),
+            )
+            connection.commit()
+
     def _log_ruling(
         self,
         connection: sqlite3.Connection,
@@ -33,8 +164,8 @@ class RuleEngineMixin:
             """
             INSERT INTO engine_decisions (
                 repo, ticket_id, site, subject, rule, outcome, reason, checks,
-                finding_ids, header, decided_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                finding_ids, header, decided_at, notice_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (repo, ticket_id, site, subject) DO UPDATE SET
                 rule = excluded.rule,
                 outcome = excluded.outcome,
@@ -42,7 +173,8 @@ class RuleEngineMixin:
                 checks = excluded.checks,
                 finding_ids = excluded.finding_ids,
                 header = excluded.header,
-                decided_at = excluded.decided_at
+                decided_at = excluded.decided_at,
+                notice_status = excluded.notice_status
             WHERE engine_decisions.outcome IS NOT excluded.outcome
                 OR engine_decisions.reason IS NOT excluded.reason
                 OR engine_decisions.header IS NOT excluded.header
@@ -59,6 +191,7 @@ class RuleEngineMixin:
                 json.dumps(list(finding_ids)),
                 header,
                 self.queue.now(),
+                "pending" if isinstance(ruling.outcome, Grant) else None,
             ),
         )
         written = connection.total_changes > before

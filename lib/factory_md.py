@@ -54,8 +54,8 @@ to a new low, or a first flat round, go on past the cap;
 review.auto_extra_rounds is not read under it.
 
 rule_engine is optional (issue #1320): on or off, default off. on lets the
-rule engine rule at the cap, repeat and moved-head sites once later parts
-read it. It is a trust key, so a PR that flips it is held.
+rule engine rule at the cap (issue #1308), and at the repeat and moved-head
+sites once later parts read it. It is a trust key, so a PR that flips it is held.
 
 review.verify_unavailable is optional (issue #596): a boolean, default
 false. True says the review.verify skill may not be on the reviewed base
