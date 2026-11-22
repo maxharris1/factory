@@ -1300,6 +1300,13 @@ class Feeder:
             pending = dict(connection.execute(
                 f"SELECT parent, checked_at FROM {SPLIT_UNSETTLED_TABLE} WHERE repo = ?", (key,)
             ).fetchall())
+            fresh = {
+                int(issue) for (issue,) in connection.execute(
+                    f"SELECT issue FROM {FEEDER_TABLE} WHERE repo = ? AND tracker = 'github' "
+                    "AND state = 'split-parent' AND split_noted = 0",
+                    (key,),
+                ) if str(issue).isdigit()
+            }
             if row is not None:
                 cursor = float(row[0])
             else:
@@ -1330,7 +1337,7 @@ class Feeder:
             if parent is not None:
                 merged_parents.add(parent)
         due = {parent for parent, at in pending.items() if now - at >= SPLIT_RECHECK_SECONDS}
-        check = merged_parents | due | (triggers.keys() - pending.keys())
+        check = merged_parents | due | fresh | (triggers.keys() - pending.keys())
         merged = self._merged_issues(repo) if check else frozenset()
         unsettled = {parent: at for parent, at in pending.items() if parent not in check}
         for parent in sorted(check):
@@ -1363,7 +1370,7 @@ class Feeder:
             )
             connection.executemany(
                 f"UPDATE {FEEDER_TABLE} SET split_noted = 1 WHERE repo = ? AND issue = ?",
-                [(key, str(issue)) for issue in noted],
+                [(key, str(issue)) for issue in sorted({*noted, *fresh})],
             )
 
         bookkeeping_write(self.queue.connect, work, site="_close_split_parents", ledger=self.ledger)
