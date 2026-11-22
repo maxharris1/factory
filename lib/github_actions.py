@@ -824,17 +824,6 @@ class GitHubReviewActions:
         )
         return compare.get("status") in ("ahead", "identical")
 
-    def base_ref_at(self, repo: str, run_id: str) -> float | None:
-        # A pull_request run takes its workflow from the merge with the base
-        # at the event, and every rerun keeps that merge: only attempt 1's
-        # start dates which base revision it ran.
-        if not run_id.isdigit():
-            raise GitHubAdapterError("Actions run id is not a number")
-        attempt = _object(self._json(f"{_repo_path(repo)}/actions/runs/{run_id}/attempts/1"))
-        if attempt.get("event") not in ("pull_request", "pull_request_target"):
-            return None
-        return _display_time(attempt.get("run_started_at") or attempt.get("created_at"))
-
     def committed_at(self, repo: str, sha: str) -> float:
         commit = _object(self._json(f"{_repo_path(repo)}/commits/{_sha(sha, 'commit')}"))
         committer = _object(_object(commit.get("commit")).get("committer"))

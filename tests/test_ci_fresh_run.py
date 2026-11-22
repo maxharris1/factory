@@ -20,15 +20,12 @@ ADDED = CIChange("required-set", CHANGE, ("ci-ok",))
 BASE = CIChange("base-workflow", CHANGE)
 
 
-def actions_row(
-    name: str, started_at: float, *, base_ref: float | None = None, run_id: str | None = RUN
-) -> CheckRow:
+def actions_row(name: str, started_at: float, *, run_id: str | None = RUN) -> CheckRow:
     return CheckRow(
         name=name,
         status="completed",
         conclusion="success",
         started_at=started_at,
-        base_ref_at=base_ref,
         run_id=run_id,
         job_id=None if run_id is None else "1",
     )
@@ -38,17 +35,18 @@ def gated(*rows: CheckRow, change: CIChange = ADDED) -> CIResult:
     return ci_fresh(CIResult("success", checks=rows), (change,), ("ci-ok",))
 
 
-def test_only_a_pull_request_run_first_started_after_a_base_workflow_change_refreshes_it() -> None:
-    rerun = gated(actions_row("ci-ok", AFTER, base_ref=BEFORE), change=BASE)
-    dispatched = gated(actions_row("ci-ok", AFTER), change=BASE)
-
-    assert rerun.status == "pending" and rerun.stale == (BASE,)
-    assert dispatched.status == "pending" and dispatched.stale == (BASE,)
-    assert gated(actions_row("ci-ok", AFTER, base_ref=AFTER), change=BASE).clears
+def test_no_run_on_a_head_lacking_a_base_workflow_commit_refreshes_it() -> None:
+    for row in (
+        actions_row("ci-ok", BEFORE),
+        actions_row("ci-ok", AFTER),
+        actions_row("ci-ok", AFTER, run_id=None),
+    ):
+        held = gated(row, change=BASE)
+        assert held.status == "pending" and held.stale == (BASE,)
 
 
 def test_a_same_sha_rerun_refreshes_a_head_after_a_required_set_change() -> None:
-    assert gated(actions_row("ci-ok", AFTER, base_ref=BEFORE)).clears
+    assert gated(actions_row("ci-ok", AFTER)).clears
     assert gated(actions_row("ci-ok", BEFORE)).stale == (ADDED,)
 
 
@@ -108,24 +106,6 @@ def test_the_adapter_reads_each_glob_by_its_literal_directory_or_the_whole_branc
 
 
 @pytest.mark.parametrize(
-    ("event", "base_ref"),
-    [("pull_request", BEFORE), ("pull_request_target", BEFORE), ("workflow_dispatch", None)],
-)
-def test_the_adapter_dates_a_runs_base_workflow_by_its_first_pull_request_attempt(
-    event: str, base_ref: float | None
-) -> None:
-    reads: list[str] = []
-
-    def gh(argv, timeout: float) -> GhResult:
-        reads.append(argv[-1])
-        attempt = {"id": int(RUN), "run_attempt": 1, "event": event, "run_started_at": iso(BEFORE)}
-        return GhResult(0, json.dumps(attempt), "")
-
-    assert GitHubReviewActions(gh).base_ref_at("owner/repo", RUN) == base_ref
-    assert reads == [f"{RUN_PATH}/attempts/1"]
-
-
-@pytest.mark.parametrize(
     ("status", "contains"), [("ahead", True), ("identical", True), ("behind", False), ("diverged", False)]
 )
 def test_the_adapter_reads_whether_a_head_contains_a_base_commit(status: str, contains: bool) -> None:
@@ -152,12 +132,10 @@ class BaseGh(FreshGh):
         ci: str = "",
         *,
         compare: str = "behind",
-        event: str = "pull_request",
     ):
         super().__init__(factory_md(ci), runs, ["lib/x.py"], 0)
         self.changed = changed
         self.compare = compare
-        self.event = event
 
     def __call__(self, argv, timeout):
         endpoint = next((part for part in argv if part.startswith("repos/")), "")
@@ -170,11 +148,6 @@ class BaseGh(FreshGh):
         if "/compare/" in endpoint:
             self.calls.append(list(argv))
             return GhResult(0, json.dumps({"status": self.compare}), "")
-        if endpoint.endswith(f"/actions/runs/{RUN}/attempts/1"):
-            self.calls.append(list(argv))
-            [first] = self.runs
-            attempt = {"event": self.event, "run_started_at": first["started_at"]}
-            return GhResult(0, json.dumps(attempt), "")
         return super().__call__(argv, timeout)
 
 
@@ -197,16 +170,12 @@ def test_a_merge_read_holds_a_green_head_whose_runs_predate_a_base_workflow_comm
     assert gh.read(f"/compare/{sha(9)}...{gh.head}")
 
 
-def test_a_merge_read_holds_a_run_on_the_old_branch_that_did_not_take_the_base_workflow() -> None:
-    for gh in (
-        BaseGh([actions_run("test", AFTER)], CHANGE, event="workflow_dispatch"),
-        BaseGh([run("test", AFTER)], CHANGE),
-    ):
+def test_a_merge_read_holds_a_head_lacking_the_base_commit_whatever_its_runs_started() -> None:
+    for gh in (BaseGh([actions_run("test", AFTER)], CHANGE), BaseGh([run("test", AFTER)], CHANGE)):
         assert [change.kind for change in read(gh, fresh=True).stale] == ["base-workflow"]
 
 
-def test_a_merge_read_clears_a_head_containing_the_base_commit_or_a_later_pull_request_run() -> None:
-    assert read(BaseGh([actions_run("test", AFTER)], CHANGE), fresh=True).clears
+def test_a_merge_read_clears_a_head_containing_the_base_commit() -> None:
     assert read(BaseGh([run("test", BEFORE)], CHANGE, compare="ahead"), fresh=True).clears
     assert read(BaseGh([run("test", BEFORE)], None), fresh=True).clears
 
@@ -277,7 +246,7 @@ def test_a_stale_required_set_green_in_the_merge_queue_gets_one_full_rerun_then_
     assert board.fresh_runs() == [(sha(1), "requested")]
     assert board.state("42")["workflow_state"] == "merge-queue"
 
-    board.raw[sha(1)] = gated(actions_row("ci-ok", AFTER, base_ref=BEFORE))
+    board.raw[sha(1)] = gated(actions_row("ci-ok", AFTER))
     board.poll()
 
     assert board.actions.merges == [(True, sha(1))]
@@ -311,7 +280,7 @@ def test_an_approved_queued_head_behind_a_base_workflow_change_updates_from_base
     tmp_path: Path,
 ) -> None:
     board, pr = queued(tmp_path)
-    board.raw[sha(1)] = gated(actions_row("ci-ok", AFTER, base_ref=BEFORE), change=BASE)
+    board.raw[sha(1)] = gated(actions_row("ci-ok", AFTER), change=BASE)
     board.poll()
     board.poll()
 

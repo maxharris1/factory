@@ -91,8 +91,8 @@ So does a green from runs that started before the poller first saw a
 glob newly added to required_checks, or saw required_checks switched back
 to none, the all-checks gate. A commit status counts by when it was
 posted. A ship or merge read also holds a green head that lacks the PR
-base's newest commit touching these paths, unless a pull_request run
-first started after that commit (issue #1287). The factory asks for one
+base's newest commit touching these paths until the head contains that
+commit (issue #1287). The factory asks for one
 fresh run: a full rerun, or for a base change, the merge queue's update
 from base. With force_rerun_paths given,
 branches may be omitted, and every base is a CI base.

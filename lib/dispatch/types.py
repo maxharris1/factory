@@ -97,7 +97,6 @@ class CheckRow:
     run_id: str | None = None
     job_id: str | None = None
     workflow: str = ""
-    base_ref_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -239,8 +238,12 @@ def _gate_units(
 
 
 def _fresh(row: CheckRow, change: CIChange) -> bool:
-    started = row.base_ref_at if change.kind == "base-workflow" else row.started_at
-    return row.conclusion == "success" and started is not None and started > change.at
+    # A run's start time does not say which base it merged: a workflow commit
+    # can be pushed long after it was made. Only a head containing the commit
+    # runs the base workflow, and such a head raises no base-workflow change.
+    if change.kind == "base-workflow":
+        return False
+    return row.conclusion == "success" and row.started_at is not None and row.started_at > change.at
 
 
 def stale_units(

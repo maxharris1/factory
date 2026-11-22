@@ -62,8 +62,6 @@ def test_a_same_sha_rerun_after_a_base_workflow_change_updates_the_head_instead_
             result = [{"sha": sha(9), "commit": {"committer": {"date": "2026-11-22T10:10:00Z"}}}]
         elif "/compare/" in endpoint:
             result = {"status": "diverged"}
-        elif endpoint.endswith("/actions/runs/111/attempts/1"):
-            result = {"event": "pull_request", "run_started_at": "2026-11-22T10:00:00Z"}
         else:
             raise AssertionError(endpoint)
         return GhResult(0, json.dumps(result), "")
@@ -126,8 +124,6 @@ def test_a_post_change_dispatch_on_the_old_branch_does_not_refresh_the_base_work
             commit, head = route.rpartition("/compare/")[2].split("...")
             contained = git("merge-base", "--is-ancestor", commit, head).returncode == 0
             result = {"status": "ahead" if contained else "diverged"}
-        elif route.endswith("/actions/runs/222/attempts/1"):
-            result = {"event": "workflow_dispatch", "run_started_at": "2026-11-22T10:20:00Z"}
         else:
             raise AssertionError(route)
         return subprocess.CompletedProcess(argv, 0, json.dumps(result), "")
@@ -219,3 +215,66 @@ def test_a_check_not_yet_reported_on_a_head_whose_runs_started_after_the_change_
     ))
 
     assert ci_fresh(running, (change,), ("test", "security")).stale == ()
+
+
+def test_a_pull_request_run_on_the_old_base_cannot_clear_a_later_pushed_workflow_commit(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "git"
+    repo.mkdir()
+
+    def git(*args: str, date: str = "2026-11-22T09:00:00Z") -> str:
+        return subprocess.check_output(
+            ["git", "-c", "user.name=T", "-c", "user.email=t@example.invalid", *args],
+            cwd=repo,
+            text=True,
+            stderr=subprocess.DEVNULL,
+            env={**os.environ, "GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date},
+        ).strip()
+
+    workflow = repo / ".github/workflows/test.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text("old-workflow\n")
+    git("init", "-b", "main")
+    git("add", ".")
+    git("commit", "-m", "old workflow")
+    old_base = git("rev-parse", "HEAD")
+    git("checkout", "-b", "pr")
+    (repo / "code").write_text("PR code")
+    git("add", ".")
+    git("commit", "-m", "PR", date="2026-11-22T09:30:00Z")
+    head = git("rev-parse", "HEAD")
+    git("checkout", "-b", "local-workflow", old_base)
+    workflow.write_text("new-workflow\n")
+    git("add", ".")
+    git("commit", "-m", "local workflow change", date="2026-11-22T10:10:00Z")
+    changed = git("rev-parse", "HEAD")
+    git("checkout", "main")
+    board = Board(tmp_path)
+    pr = board.open("42", head)
+    board.build_and_approve(pr, mergeable=None)
+    git("merge", "--ff-only", "local-workflow")
+
+    def runner(argv, timeout):
+        endpoint = next(arg for arg in argv if arg.startswith("repos/"))
+        if "/check-runs?" in endpoint:
+            result = {"total_count": 1, "check_runs": [check_run(55, "222", "20")]}
+        elif endpoint.endswith("/status"):
+            result = {"total_count": 0, "statuses": []}
+        elif "/commits?" in endpoint:
+            result = [{"sha": changed, "commit": {"committer": {"date": "2026-11-22T10:10:00Z"}}}]
+        elif "/compare/" in endpoint:
+            commit, target = endpoint.rsplit("/", 1)[1].split("...")
+            ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", commit, target], cwd=repo)
+            result = {"status": "ahead" if ancestor.returncode == 0 else "diverged"}
+        else:
+            raise AssertionError(endpoint)
+        return GhResult(0, json.dumps(result), "")
+
+    github = GitHubReviewActions(runner)
+    result = gated_source(board.factory, github.ci_status("owner/repo", head), head, github=github)
+
+    assert result.pending == ("test (stale after base-workflow)",)
+    merge_poll(board, pr, result)
+    assert board.actions.merges == []
+    assert len(board.jobs("update-from-main")) == 1
