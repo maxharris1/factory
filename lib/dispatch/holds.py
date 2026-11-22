@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 
 from lib.dispatch.constants import _NOT_FINISHED
 from lib.dispatch.helpers import _base_update_key, _is_full_sha, ship_mode
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, ShipError, TrackedTicket
 from lib.hold import HoldDecision, decide, ok_carries
+from lib.rule_engine import Land, Wait
 
 _HELD_BASE_UPDATE = "held-base-update"
 
@@ -195,7 +197,17 @@ class HoldsMixin:
     def _hold_decision(self, ticket: TrackedTicket, head: str) -> HoldDecision:
         hold = ticket.factory.hold
         assert hold is not None
-        return decide(
+        waited = False
+
+        def carries(ok_head: str) -> bool:
+            nonlocal waited
+            if ticket.factory.rule_engine != "on":
+                return self._ok_carries(ticket, ok_head, head)
+            outcome = self._rule_on_moved_head(ticket, ok_head, head)
+            waited = waited or isinstance(outcome, Wait)
+            return isinstance(outcome, Land)
+
+        decision = decide(
             hold,
             labels=ticket.labels,
             changed_files=ticket.changed_files,
@@ -203,9 +215,11 @@ class HoldsMixin:
             factory_md_trust_changed=ticket.factory_md_trust_changed,
             comments=ticket.comments,
             approver_allowed=self._may_approve(hold.approver),
-            covers=lambda ok_head: self._approval_covers(ticket, ok_head, head)
-            or self._ok_carries(ticket, ok_head, head),
+            covers=lambda ok_head: self._approval_covers(ticket, ok_head, head) or carries(ok_head),
         )
+        if waited and decision.blocks and decision.unread is None:
+            return replace(decision, unread="moved-head ci")
+        return decision
 
     def _ok_carries(self, ticket: TrackedTicket, ok_head: str, head: str) -> bool:
         hold = ticket.factory.hold
