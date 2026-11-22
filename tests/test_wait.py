@@ -548,6 +548,7 @@ def test_job_run_only_runs_the_command_its_owning_bot_passes(tmp_path: Path) -> 
 
 JOB_RUN_GIT_SUBCOMMANDS = {
     "init", "remote", "fetch", "rev-parse", "worktree", "cat-file", "status", "rev-list",
+    "ls-files",
 }
 
 
