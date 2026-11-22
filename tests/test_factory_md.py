@@ -1359,3 +1359,80 @@ def test_check_config_refuses_an_unknown_stop_on(tmp_path: Path) -> None:
     )
     assert result.returncode != 0
     assert STOP_ON_MESSAGE in result.stdout + result.stderr
+
+
+def factory_text(rule_engine_line: str) -> str:
+    raw = yaml.safe_dump(VALID, sort_keys=False)
+    return f"---\n{raw}{rule_engine_line}---\n"
+
+
+def test_rule_engine_defaults_to_off() -> None:
+    config, findings = parse_factory_md(factory_text(""))
+    assert findings == []
+    assert config is not None
+    assert config.rule_engine == "off"
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ("rule_engine: on\n", "on"),
+        ("rule_engine: off\n", "off"),
+        ("rule_engine: 'on'\n", "on"),
+        ("rule_engine: \"off\"\n", "off"),
+    ],
+    ids=["bare-on", "bare-off", "quoted-on", "quoted-off"],
+)
+def test_rule_engine_reads_bare_and_quoted_on_off(line: str, expected: str) -> None:
+    config, findings = parse_factory_md(factory_text(line))
+    assert findings == []
+    assert config is not None
+    assert config.rule_engine == expected
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["rule_engine: 'true'\n", "rule_engine: 1\n", "rule_engine: maybe\n", "rule_engine: [on]\n"],
+    ids=["quoted-true", "one", "maybe", "list"],
+)
+def test_rule_engine_refuses_a_bad_value(line: str) -> None:
+    config, findings = parse_factory_md(factory_text(line))
+    assert config is None
+    assert [finding.message for finding in findings] == ["rule_engine must be on or off"]
+
+
+def test_a_lenient_read_of_a_bad_rule_engine_warns_and_stays_off() -> None:
+    config, findings = parse_factory_md(factory_text("rule_engine: maybe\n"), strict=False)
+    assert config is not None
+    assert config.rule_engine == "off"
+    assert [(finding.severity, finding.message) for finding in findings] == [
+        ("warning", "rule_engine must be on or off")
+    ]
+
+
+def test_check_config_refuses_a_bad_rule_engine(tmp_path: Path) -> None:
+    path = tmp_path / "factory.md"
+    path.write_text(factory_text("rule_engine: maybe\n"), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "bin" / "orch"), "check-config", "--factory", str(path)],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "rule_engine must be on or off" in result.stdout + result.stderr
+
+
+def test_flipping_rule_engine_is_a_trust_change() -> None:
+    assert trust_front_matter_changed(
+        ROOT_FACTORY_MD, _edit("rule_engine: on\n", "rule_engine: off\n")
+    ) is True
+
+
+def test_this_repo_turns_the_rule_engine_on() -> None:
+    config, findings = parse_factory_md(ROOT_FACTORY_MD)
+    assert findings == []
+    assert config is not None
+    assert config.rule_engine == "on"
