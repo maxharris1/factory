@@ -253,7 +253,7 @@ RELAY_STEPS = 40
 SETTINGS_AUDIT = "settings-audit.jsonl"
 SETTINGS_RESULTS = 50
 AUDIT_KEYS = ("id", "actor", "requested_at", "applied_at", "device", "field", "previous", "new",
-              "result", "error", "backup", "restarted", "pending", "version")
+              "result", "error", "backup", "restarted", "pending", "version", "target", "account")
 AUDIT_RESULTS = ("applied", "pending", "refused", "failed")
 # The Linear share of the hourly API budget the poller allows itself
 # (lib/poll_source.py LINEAR_*_PER_HOUR * LINEAR_SHARE).
@@ -2547,10 +2547,28 @@ def _adopted_new(row: dict, live: live_settings.Live) -> bool:
             and live.adopted_holds(device, name, row["new"]))
 
 
+def _change_key(row: dict) -> tuple[str | None, str, str] | None:
+    subject = row["account"] if row["target"] == "account" else row["device"]
+    field = row["field"]
+    return (row["target"], subject, field) if isinstance(subject, str) and isinstance(field, str) else None
+
+
+def _supersedes(later: dict, row: dict) -> bool:
+    if later["version"] <= row["version"]:
+        return False
+    key = _change_key(row)
+    if key is not None and key == _change_key(later):
+        return True
+    return (row["target"] == later["target"] == "account" and later["field"] in ("add", "remove")
+            and isinstance(row["account"], str) and later["account"] == row["account"])
+
+
 def _settings_results(path: Path, live: live_settings.Live | None) -> list[dict]:
     """The last SETTINGS_RESULTS entries of the settings audit log (#777),
-    oldest first, each cut to the AuditEntry keys with its strings clipped."""
-    results = []
+    oldest first, each cut to the AuditEntry keys with its strings clipped.
+    A landed change that a later landed change replaced reads `superseded`
+    (#990 f-2), so it never waits on a restart that can no longer finish it."""
+    rows = []
     for line in read_log_tail(path, lines=SETTINGS_RESULTS):
         try:
             entry = json.loads(line)
@@ -2559,17 +2577,23 @@ def _settings_results(path: Path, live: live_settings.Live | None) -> list[dict]
         if isinstance(entry, dict):
             row = {key: _audit_value(entry.get(key)) for key in AUDIT_KEYS}
             row["result"] = _enum(entry.get("result"), AUDIT_RESULTS)
-            version = row["version"]
-            if row["result"] == "applied" and type(version) is int:
-                row["waiting"] = (live is None or not live.is_applied(version)
-                                  or not _adopted_new(row, live))
-                if row["waiting"]:
-                    row["result"] = "pending"
-            elif row["result"] == "pending" and type(version) is int:
-                if _every_service_uses(row["pending"], version, live) and _adopted_new(row, live):
-                    row["result"] = "applied"
-            results.append(row)
-    return results
+            rows.append(row)
+    landed = [r for r in rows if r["result"] in ("applied", "pending") and type(r["version"]) is int]
+    for i, row in enumerate(landed):
+        later = next((s for s in landed[i + 1:] if _supersedes(s, row)), None)
+        if later is not None:
+            row["result"], row["superseded_by"] = "superseded", later["id"]
+    for row in rows:
+        version = row["version"]
+        if row["result"] == "applied" and type(version) is int:
+            row["waiting"] = (live is None or not live.is_applied(version)
+                              or not _adopted_new(row, live))
+            if row["waiting"]:
+                row["result"] = "pending"
+        elif row["result"] == "pending" and type(version) is int:
+            if _every_service_uses(row["pending"], version, live) and _adopted_new(row, live):
+                row["result"] = "applied"
+    return rows
 
 
 # --- writing --------------------------------------------------------------------

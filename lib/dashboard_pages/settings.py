@@ -11,7 +11,8 @@ import json
 
 from lib.dashboard_pages.common import _chip, _e, _panel, _span
 
-RESULT_TONE = {"applied": "ok", "pending": "warn", "refused": "warn", "failed": "bad", "other": "muted"}
+RESULT_TONE = {"applied": "ok", "pending": "warn", "refused": "warn", "failed": "bad", "superseded": "muted",
+               "other": "muted"}
 RESULTS_PER_DEVICE = 5
 QUEUED = "queued (applies within ~2 min)"
 READ_ONLY = "read-only: sign-in is not available here"
@@ -38,7 +39,8 @@ def device_facts(row: dict) -> list[tuple[str, str, str]]:
 
 def device_results(snapshot: dict, name: str) -> list[dict]:
     rows = (snapshot.get("settings") or {}).get("results") or []
-    return [r for r in reversed(rows) if r.get("device") == name][:RESULTS_PER_DEVICE]
+    return [r for r in reversed(rows)
+            if r.get("device") == name and r.get("target") != "account"][:RESULTS_PER_DEVICE]
 
 
 def _value(value: object) -> str:
@@ -52,14 +54,16 @@ def result_line(row: dict) -> str:
             f" · {row.get('actor') or '—'} · {row.get('applied_at') or row.get('requested_at') or '—'}")
 
 
-def pending_line(row: dict) -> str | None:
+def status_line(row: dict) -> tuple[str, str] | None:
+    if row.get("result") == "superseded":
+        return "st-sup", f"superseded by {row.get('superseded_by')}"
     if row.get("result") != "pending":
         return None
     if row.get("waiting"):
-        return WAITING
+        return "st-err", WAITING
     if not row.get("pending"):
         return None
-    return "restart pending: " + ", ".join(row["pending"])
+    return "st-err", "restart pending: " + ", ".join(row["pending"])
 
 
 def _class(cls: str) -> str:
@@ -77,7 +81,7 @@ def _card(snapshot: dict, row: dict) -> str:
             '<li class="st-res">' + _chip(r["result"], RESULT_TONE.get(r["result"], "muted"))
             + _span("st-what", result_line(r))
             + (_span("st-err", r["error"]) if r.get("error") else "")
-            + (_span("st-err", line) if (line := pending_line(r)) else "") + "</li>"
+            + (_span(*status) if (status := status_line(r)) else "") + "</li>"
             for r in results
         ) + "</ul>"
         if results else '<p class="empty">no changes yet</p>'
@@ -113,6 +117,7 @@ CSS = """\
 .st-results{display:flex;flex-direction:column;gap:4px;margin:0;padding:0;list-style:none;font:12px/1.5 var(--mono);color:var(--text-2)}
 .st-res{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}
 .st-err,.st-out.bad{color:var(--bad)}.st-out.ok{color:var(--ok)}
+.st-sup{color:var(--muted)}
 .st-auth,.st-ctl{display:flex;flex-direction:column;gap:8px;font:12px/1.5 var(--mono);color:var(--text-2)}
 .st-auth{margin:0 0 12px}
 .st-auth .gh-row,.st-ctl .gh-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
@@ -149,7 +154,7 @@ _SCRIPT = r"""
       ' · ' + (r.applied_at || r.requested_at || '—');
   }
   function stResults(d, name) {
-    var rows = ((d.settings || {}).results || []).filter(function (r) { return r.device === name; });
+    var rows = ((d.settings || {}).results || []).filter(function (r) { return r.device === name && r.target !== 'account'; });
     return rows.reverse().slice(0, ST.perDevice);
   }
   function stSend(c, field, expect, value) {
@@ -234,7 +239,9 @@ _SCRIPT = r"""
       add(li, chip(r.result, ST.tone[r.result] || 'muted'));
       add(li, el('span', 'st-what', stLine(r)));
       if (r.error) add(li, el('span', 'st-err', r.error));
-      if (r.result === 'pending' && r.waiting) {
+      if (r.result === 'superseded') {
+        add(li, el('span', 'st-sup', 'superseded by ' + r.superseded_by));
+      } else if (r.result === 'pending' && r.waiting) {
         add(li, el('span', 'st-err', ST.waiting));
       } else if (r.result === 'pending' && (r.pending || []).length) {
         add(li, el('span', 'st-err', 'restart pending: ' + r.pending.join(', ')));
