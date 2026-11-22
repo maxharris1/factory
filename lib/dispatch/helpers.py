@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import zlib
 from collections.abc import Mapping
 from dataclasses import replace
@@ -14,7 +15,7 @@ from lib.dispatch.constants import (
     _NO_QUESTIONS,
     _QUESTIONS_HEADING,
 )
-from lib.dispatch.types import CIResult, Comment, FailedCheck, ShipError, TrackedTicket
+from lib.dispatch.types import CIResult, Comment, FailedCheck, RoundGrant, ShipError, TrackedTicket
 from lib.factory_md import FactoryConfig, family_findings
 from lib.handoff import matching_head as _matching_head
 from lib.queue import Job
@@ -27,6 +28,20 @@ def _spread(repo: str, ticket_id: str) -> int:
 
 def _scope(repo: str, ticket_id: str) -> str:
     return f"{repo.lower()}\x1f{ticket_id}"
+
+
+def grant_open(
+    connection: sqlite3.Connection, ticket: TrackedTicket, grant: RoundGrant, open_stop: str | None
+) -> bool:
+    if grant.released_by == "engine" and grant.trigger.id != open_stop:
+        return False
+    return (
+        connection.execute(
+            "SELECT 1 FROM review_events WHERE repo = ? AND ticket_id = ? AND comment_id = ?",
+            (ticket.repo.lower(), ticket.ticket_id, grant.key),
+        ).fetchone()
+        is None
+    )
 
 
 def _base_update_key(ticket: TrackedTicket, head: str) -> str:

@@ -36,6 +36,22 @@ class Comment:
 
 
 @dataclass(frozen=True)
+class RoundGrant:
+    key: str
+    trigger: Comment
+    released_by: Literal["approver", "engine"]
+    building: bool = False
+
+    @classmethod
+    def approver(cls, go: Comment, *, building: bool = False) -> RoundGrant:
+        return cls(go.id, go, "approver", building)
+
+    @classmethod
+    def engine(cls, stop: Comment) -> RoundGrant:
+        return cls(f"engine:{stop.id}", stop, "engine")
+
+
+@dataclass(frozen=True)
 class PullReview:
     id: str
     author: str

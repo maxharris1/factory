@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
 from itertools import groupby
@@ -91,6 +92,14 @@ class _EarlierRevise:
 
 
 @dataclass(frozen=True)
+class StopRecord:
+    verdict_id: str
+    stop: Literal["capped", "stalled", "repeat"]
+    finding_ids: frozenset[str]
+    released_by: Literal["approver", "engine"] | None
+
+
+@dataclass(frozen=True)
 class StopExchange:
     round: int
     verdict: Comment
@@ -171,6 +180,42 @@ def _stop_choice(stop: Stop, words: str, default: str) -> str:
 
 def _stopped_rule(wake: str) -> str:
     return str(json.loads(wake)["detail"]).split(", ", 1)[0].removeprefix("repeat-block: ")
+
+
+def _repeat_finding(connection: sqlite3.Connection, ticket: TrackedTicket, verdict_id: str) -> frozenset[str]:
+    wake = connection.execute(
+        "SELECT detail FROM jobs WHERE dedupe_key = ?",
+        (f"t3-repeat:{_scope(ticket.repo, ticket.ticket_id)}:{verdict_id}",),
+    ).fetchone()
+    if wake is not None:
+        return frozenset({_stopped_rule(str(wake["detail"]))})
+    ruled = connection.execute(
+        """
+        SELECT finding_ids FROM engine_decisions
+        WHERE lower(repo) = ? AND ticket_id = ? AND site = 'repeat' AND subject = ?
+        """,
+        (ticket.repo.lower(), ticket.ticket_id, verdict_id),
+    ).fetchone()
+    return frozenset() if ruled is None else frozenset(json.loads(ruled["finding_ids"]))
+
+
+def _released_by(
+    connection: sqlite3.Connection, ticket: TrackedTicket, verdict_id: str, site: Literal["cap", "repeat"]
+) -> Literal["approver", "engine"] | None:
+    if connection.execute(
+        """
+        SELECT 1 FROM engine_decisions
+        WHERE lower(repo) = ? AND ticket_id = ? AND site = ? AND subject = ? AND outcome = 'granted'
+        """,
+        (ticket.repo.lower(), ticket.ticket_id, site, verdict_id),
+    ).fetchone() is not None:
+        return "engine"
+    if connection.execute(
+        "SELECT 1 FROM decisions WHERE repo = ? AND ticket_id = ? AND question_id = ?",
+        (ticket.repo.lower(), ticket.ticket_id, verdict_id),
+    ).fetchone() is not None:
+        return "approver"
+    return None
 
 
 class RepeatBlockMixin:
@@ -287,11 +332,7 @@ class RepeatBlockMixin:
         if stop == "unsat":
             return frozenset({fields["unsat"]} if fields.get("unsat") else ())
         with self._connect() as connection:
-            wake = connection.execute(
-                "SELECT detail FROM jobs WHERE dedupe_key = ?",
-                (f"t3-repeat:{_scope(ticket.repo, ticket.ticket_id)}:{verdict.id}",),
-            ).fetchone()
-        return frozenset() if wake is None else frozenset({_stopped_rule(str(wake["detail"]))})
+            return _repeat_finding(connection, ticket, verdict.id)
 
     def _stop_decision(
         self, ticket: TrackedTicket, verdict: Comment, stop: Stop, answer: Comment, default: str
@@ -344,18 +385,49 @@ class RepeatBlockMixin:
         held: dict[str, Stop] = {"waiting-max-repeat": "repeat", "waiting-max-unsat": "unsat"}
         return held.get(str(row["outcome"])) or self._capped_stop(ticket, verdict), verdict
 
-    def _repeat_stops(self, ticket: TrackedTicket, comment: Comment, rule_id: str) -> int:
+    def _stop_history(self, ticket: TrackedTicket) -> tuple[StopRecord, ...]:
+        from lib.evidence.findings import blocking_ids
+
+        bodies = {item.id: item.body for item in ticket.comments}
+        history = []
         with self._connect() as connection:
-            wakes = connection.execute(
+            for row in connection.execute(
                 """
-                SELECT jobs.detail FROM review_events AS stop
-                JOIN jobs ON jobs.dedupe_key = 't3-repeat:' || ? || ':' || stop.comment_id
-                WHERE stop.repo = ? AND stop.ticket_id = ? AND stop.comment_id != ?
-                  AND stop.outcome = 'waiting-max-repeat'
+                SELECT comment_id, outcome, stop, qa_failed FROM review_events
+                WHERE repo = ? AND ticket_id = ? AND outcome IN ('capped-review', 'waiting-max-repeat')
+                ORDER BY rowid
                 """,
-                (_scope(ticket.repo, ticket.ticket_id), ticket.repo.lower(), ticket.ticket_id, comment.id),
-            ).fetchall()
-        return 1 + sum(_stopped_rule(str(row["detail"])) == rule_id for row in wakes)
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchall():
+                verdict_id = str(row["comment_id"])
+                if row["outcome"] == "waiting-max-repeat":
+                    history.append(
+                        StopRecord(
+                            verdict_id,
+                            "repeat",
+                            _repeat_finding(connection, ticket, verdict_id),
+                            _released_by(connection, ticket, verdict_id, "repeat"),
+                        )
+                    )
+                    continue
+                body = bodies.get(verdict_id)
+                history.append(
+                    StopRecord(
+                        verdict_id,
+                        "stalled" if row["stop"] == "stalled" else "capped",
+                        (frozenset() if body is None else blocking_ids(_handoff(body)[1]))
+                        | frozenset(json.loads(row["qa_failed"] or "[]")),
+                        _released_by(connection, ticket, verdict_id, "cap"),
+                    )
+                )
+        return tuple(history)
+
+    def _repeat_stops(self, ticket: TrackedTicket, comment: Comment, rule_id: str) -> int:
+        return 1 + sum(
+            1
+            for stop in self._stop_history(ticket)
+            if stop.stop == "repeat" and stop.verdict_id != comment.id and rule_id in stop.finding_ids
+        )
 
     def _repeat_detail(
         self, ticket: TrackedTicket, comment: Comment, repeated: Repeated, reported_round: int | None

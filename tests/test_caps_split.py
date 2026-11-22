@@ -25,7 +25,7 @@ RULE_MODULE = {
     "_after_lift": "resume",
     "_resume_for_max": "resume",
     "_parked_for_max": "resume",
-    "_lift_cap": "resume",
+    "_apply_round_grant": "resume",
     "_resume_after_blocked": "resume",
     "_queue_blocked_review": "resume",
     "_fix_unsat_revise": "resume",
