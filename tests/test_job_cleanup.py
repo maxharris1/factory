@@ -2345,8 +2345,6 @@ def fleet(tmp_path: Path) -> MachinesConfig:
 
 
 class FleetTransport:
-    """Runs each device step in process on the work root the target's ssh alias names."""
-
     def __init__(self, tmp_path: Path):
         self.roots = {f"pc-{bot}": tmp_path / "pc" / bot / "work" for bot in BOTS.values()}
         self.roots |= {f"box-{bot}": tmp_path / "box" / "work" for bot in BOTS.values()}
