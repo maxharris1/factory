@@ -806,6 +806,33 @@ class GitHubReviewActions:
                 )
         return tuple(events)
 
+    def base_workflow_commits(
+        self, repo: str, branch: str, paths: Sequence[str]
+    ) -> tuple[tuple[str, float], ...]:
+        # The commits API path filter takes no glob, so each glob is read by
+        # its literal directory, and one with none by the whole branch.
+        commits: dict[str, float] = {}
+        for prefix in dict.fromkeys(map(_literal_prefix, paths)):
+            path = f"&path={quote(prefix, safe='/')}" if prefix else ""
+            page = self._json(
+                f"{_repo_path(repo)}/commits?sha={quote(_branch(branch), safe='/')}"
+                f"{path}&per_page=1"
+            )
+            if not isinstance(page, list):
+                raise GitHubAdapterError("commits page is not a list")
+            for commit in map(_object, page):
+                committer = _object(_object(commit.get("commit")).get("committer"))
+                commits[_sha(commit.get("sha"), "commit")] = _created_at(committer.get("date"))
+        return tuple(commits.items())
+
+    def contains_commit(self, repo: str, head: str, commit: str) -> bool:
+        compare = _object(
+            self._json(
+                f"{_repo_path(repo)}/compare/{_sha(commit, 'commit')}...{_sha(head, 'head')}"
+            )
+        )
+        return compare.get("status") in ("ahead", "identical")
+
     def committed_at(self, repo: str, sha: str) -> float:
         commit = _object(self._json(f"{_repo_path(repo)}/commits/{_sha(sha, 'commit')}"))
         committer = _object(_object(commit.get("commit")).get("committer"))
@@ -1042,6 +1069,12 @@ class GitHubReviewActions:
             number += 1
 
     def rerun_failed_jobs(self, repo: str, run_ids: Sequence[str]) -> RerunOutcome:
+        return self._rerun(repo, run_ids, "rerun-failed-jobs")
+
+    def rerun_workflow_runs(self, repo: str, run_ids: Sequence[str]) -> RerunOutcome:
+        return self._rerun(repo, run_ids, "rerun")
+
+    def _rerun(self, repo: str, run_ids: Sequence[str], verb: str) -> RerunOutcome:
         if not all(run_id.isdigit() for run_id in run_ids):
             raise GitHubAdapterError("Actions run id is not a number")
         if not all(self._run_completed(repo, run_id) for run_id in run_ids):
@@ -1049,9 +1082,7 @@ class GitHubReviewActions:
         requested = False
         for run_id in run_ids:
             try:
-                self._call(
-                    "-X", "POST", f"{_repo_path(repo)}/actions/runs/{run_id}/rerun-failed-jobs"
-                )
+                self._call("-X", "POST", f"{_repo_path(repo)}/actions/runs/{run_id}/{verb}")
             except GitHubAdapterError as exc:
                 already = exc.http_status == 403 and "already running" in (
                     exc.api_message or ""
@@ -1292,6 +1323,13 @@ def _latest_attempts(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if current is None or _attempt_order(run) > _attempt_order(current):
             latest[key] = run
     return list(latest.values())
+
+
+def _literal_prefix(pattern: str) -> str:
+    cut = min((pattern.find(char) for char in "*?[" if char in pattern), default=-1)
+    if cut < 0:
+        return pattern.rstrip("/")
+    return pattern[:cut].rpartition("/")[0]
 
 
 _ACTIONS_RUN = re.compile(r"/actions/runs/([0-9]+)(?:/|$)")
