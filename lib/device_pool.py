@@ -221,20 +221,39 @@ class AccountLoads:
     score: Mapping[str, float]
     signed_in: frozenset[tuple[str, str]] | None
     signed_out: frozenset[tuple[str, str]]
+    running_on: Mapping[str, tuple[str, ...]]
 
-    def taking_work(self, config: MachinesConfig, device: str, harness: str) -> list[str]:
+    def signed_in_on(self, config: MachinesConfig, device: str, harness: str) -> list[str]:
         own = config.device(device)
         login = None if own is None else own.account_for(harness)
         return [
             account
             for account in config.accounts_on(device, harness)
-            if account not in self.closed
-            and (account, device) not in self.signed_out
+            if (account, device) not in self.signed_out
             and (account == login or self.signed_in is None or (account, device) in self.signed_in)
+        ]
+
+    def taking_work(self, config: MachinesConfig, device: str, harness: str) -> list[str]:
+        return [
+            account
+            for account in self.signed_in_on(config, device, harness)
+            if account not in self.closed
         ]
 
     def holds(self, account: str, device: str) -> bool:
         return account in self.held or (account, device) in self.signed_out
+
+    def signed_in_devices(self, config: MachinesConfig) -> dict[str, list[str]]:
+        found: dict[str, list[str]] = {}
+        for device in config.devices:
+            if not device.enabled or device.placeholder:
+                continue
+            for harness in device.harnesses:
+                for account in self.signed_in_on(config, device.name, harness):
+                    devices = found.setdefault(account, [])
+                    if device.name not in devices:
+                        devices.append(device.name)
+        return found
 
     def score_of(self, account: str) -> float:
         return self.score.get(account, UNREAD_HEADROOM)
@@ -244,15 +263,28 @@ def account_loads(
     connection: sqlite3.Connection, config: MachinesConfig | None, now: float
 ) -> AccountLoads:
     placed: list[tuple[str, float]] = []
+    devices_of: dict[str, set[str]] = {}
     if _has_table(connection, SLOTS_TABLE):
+        present = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({SLOTS_TABLE})")}
+        select = ", ".join(
+            name if name in present else "NULL" for name in ("device", "harness", "account", "placed_at")
+        )
         for device_name, harness, account, placed_at in connection.execute(
-            f"SELECT device, harness, account, placed_at FROM {SLOTS_TABLE}"
+            f"SELECT {select} FROM {SLOTS_TABLE}"
         ):
+            if placed_at is None:
+                continue
             if account is None:
                 device = None if config is None else config.device(str(device_name))
                 account = None if device is None else device.account_for(str(harness))
             if account is not None:
                 placed.append((str(account), float(placed_at)))
+                devices_of.setdefault(str(account), set()).add(str(device_name))
+    order = {device.name: index for index, device in enumerate(config.devices if config is not None else ())}
+    running_on = {
+        account: tuple(sorted(names, key=lambda name: (order.get(name, len(order)), name)))
+        for account, names in devices_of.items()
+    }
     running = Counter(account for account, _ in placed)
     newest = usage_readings.newest_by_account(usage_readings.stored(connection) or [])
     read_at = {account: max(r.observed_at for r in windows.values()) for account, windows in newest.items()}
@@ -280,7 +312,9 @@ def account_loads(
                 f"SELECT account, device FROM {account_doctor.TABLE} WHERE status = 'ok'"
             )
         )
-    return AccountLoads(running, frozenset(held), frozenset(closed), score, signed_in, account_doctor.held(connection))
+    return AccountLoads(
+        running, frozenset(held), frozenset(closed), score, signed_in, account_doctor.held(connection), running_on
+    )
 
 
 def _ranked_free(

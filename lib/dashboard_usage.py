@@ -21,7 +21,10 @@ NOT_ON_PLAN_READINGS fresh readings in a row that report other limits) or
 declares no Cursor account), `no reading` (no row yet), `no telemetry` (no
 table: an older database, or telemetry never on), `stale` or `ok`. Its
 limit is its own lane pause, else an older recipient-wide pause on its
-harness. No value is guessed: a missing utilization stays null.
+harness. No value is guessed: a missing utilization stays null. Each entry
+also carries what placement reads (lib/device_pool.py account_loads): its
+`running` jobs, `max_jobs`, the devices it is `signed_in` on and those it is
+`running_on` now.
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ import re
 import sqlite3
 from dataclasses import dataclass, field
 
-from lib import lane_limit
+from lib import device_pool, lane_limit
 from lib.machines_yml import EXTERNAL, MachinesConfig
 from lib.usage_readings import (
     NOT_TRACKED,
@@ -129,6 +132,8 @@ def _entry(
     readings: dict[str, Reading] | None,
     now: float,
     machines: MachinesConfig | None,
+    loads: device_pool.AccountLoads,
+    signed_in: dict[str, list[str]],
 ) -> dict:
     harness = account.harness
     windows = readings or {}
@@ -147,6 +152,10 @@ def _entry(
         "headroom": headroom(list(windows.values()), now),
         "observed_at": observed,
         "age_seconds": None if observed is None else int(max(0.0, now - observed)),
+        "running": loads.running.get(account_id, 0),
+        "max_jobs": None if declared is None else declared.max_jobs,
+        "signed_in": signed_in.get(account_id, []),
+        "running_on": [device for device in loads.running_on.get(account_id, ()) if _names(device)],
     }
     states = {entry[window]["state"] for window in WINDOWS}
     tracked = machines is not None and any(item.harness == harness for item in machines.accounts)
@@ -172,6 +181,8 @@ def read_usage(
     for account_id in sorted(stored or {}):
         accounts.setdefault(account_id, stored[account_id])
     limits = lane_limit.account_limits(connection, now)
+    loads = device_pool.account_loads(connection, machines, now)
+    signed_in = {} if machines is None else loads.signed_in_devices(machines)
     legacy: dict[str, lane_limit.LaneLimit] = {}
     for limit in lane_limit.all_active(connection, now):
         legacy.setdefault(limit.harness, limit)
@@ -183,6 +194,8 @@ def read_usage(
                 None if stored is None else stored.get(account_id, _Account(account.harness)).windows,
                 now,
                 machines,
+                loads,
+                signed_in,
             ),
             limits.get(account_id) or legacy.get(account.harness),
         )

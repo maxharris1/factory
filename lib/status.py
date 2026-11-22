@@ -22,12 +22,18 @@ from typing import Protocol, TextIO
 
 from lib import health as component_health
 from lib import lane_limit
-from lib.device_pool import SLOTS_TABLE, Placement
+from lib.device_pool import SLOTS_TABLE, Placement, placed_account
 from lib.feeder import feeder_counts, feeder_items, last_feeder_poll
 from lib.feeder_gates import ATTENTION_CRITICAL_PATH, ATTENTION_IDLE_BLOCKED
 from lib.job_state import Alive, JobStateConfig, derive, liveness, read_placements
 from lib.linear_webhook import WebhookHealth, read_health
-from lib.machines_yml import DEFAULT_ORCH_HOST, MachinesConfig, load_machines_yml, orch_host
+from lib.machines_yml import (
+    DEFAULT_ORCH_HOST,
+    MachinesConfig,
+    default_account,
+    load_machines_yml,
+    orch_host,
+)
 from lib.orch_yml import load_orch_yml
 from lib.pr_title import label, read_sources
 from lib.queue import RECIPIENTS
@@ -176,6 +182,7 @@ class Status:
     merge_queue: tuple[TrackerRow, ...] = ()
     lane_limits: Mapping[str, str] = field(default_factory=dict)
     qa_runs: tuple[QaRunRow, ...] = ()
+    accounts: Mapping[str, str] = field(default_factory=dict)
 
 
 class TrackerReader(Protocol):
@@ -573,6 +580,7 @@ def build_status(
     | None = None,
     lane_limits: Callable[[float], Mapping[str, str]] | None = None,
     host: str = DEFAULT_ORCH_HOST,
+    accounts: Mapping[str, str] | None = None,
 ) -> Status:
     """`placements` maps job id -> device for held device-pool slots. A
     running job with a placement is listed under its device. A running
@@ -672,6 +680,7 @@ def build_status(
             for row in running
         },
         unplaced=frozenset(unplaced),
+        accounts=accounts or {},
         merge_queue=tuple(
             sorted(
                 (
@@ -921,6 +930,10 @@ def main(
                 qa_runs=reader.qa_runs(),
                 lane_limits=reader.lane_limits,
                 host=orch_host(machines),
+                accounts={
+                    job_id: placed_account(machines, placement) or default_account(placement.harness)
+                    for job_id, placement in reader.slots().items()
+                },
                 health=lambda now, queued: component_health.load_report(
                     path, now, queued=queued, machines=machines, orch=orch,
                     uptime=component_health.read_uptime(clock),
@@ -945,7 +958,9 @@ def _job_line(row: JobRow, observed_at: float, since: float) -> str:
 def _running_line(status: Status, row: JobRow) -> str:
     since = status.started.get(row.id, row.created_at)
     beat = _age(status.observed_at, row.last_activity_at)
-    return f"{_job_line(row, status.observed_at, since)} (beat {beat} ago)"
+    account = status.accounts.get(row.id)
+    suffix = "" if account is None else f" account {account}"
+    return f"{_job_line(row, status.observed_at, since)} (beat {beat} ago){suffix}"
 
 
 def _label(row: TrackerRow | JobRow | AttentionRow) -> str:
