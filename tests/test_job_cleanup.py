@@ -1205,6 +1205,59 @@ def test_a_lock_left_by_a_pass_that_stopped_after_retiring_goes_with_the_next_pa
     assert [path.name for path in jobs.iterdir()] == []
 
 
+def test_a_lone_lock_another_pass_retired_first_is_not_unlinked_from_its_next_holder(
+    tmp_path: Path, monkeypatch
+) -> None:
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+    path = jobs / "j.lock"
+    path.touch()
+    plan = Plan(frozenset({"j"}), NOW - 6 * HOUR, False, unlink_lock=True)
+    enumerated, retired, looked = threading.Event(), threading.Event(), threading.Event()
+    claimant_holds = threading.Event()
+    real_iterdir = Path.iterdir
+    errors: list[BaseException] = []
+
+    def open_after_retired(file, mode="r", *args, **kwargs):
+        if threading.current_thread() is cleaner and Path(file) == path:
+            enumerated.set()
+            assert retired.wait(30), "the other pass never retired the lock"
+            try:
+                return open(file, mode, *args, **kwargs)
+            finally:
+                looked.set()
+        return open(file, mode, *args, **kwargs)
+
+    def iterdir_once_claimed(self):
+        if threading.current_thread() is cleaner and self == jobs and retired.is_set():
+            assert claimant_holds.wait(30), "the claimant never took the replacement"
+        return real_iterdir(self)
+
+    def first_pass() -> None:
+        try:
+            job_cleanup.device_step(tmp_path, plan, scan=no_process_holds)
+        except BaseException as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(job_cleanup, "open", open_after_retired, raising=False)
+    monkeypatch.setattr(Path, "iterdir", iterdir_once_claimed)
+    cleaner = threading.Thread(target=first_pass)
+    cleaner.start()
+    assert enumerated.wait(30), "the first pass never reached the lone lock"
+    job_cleanup.device_step(tmp_path, plan, scan=no_process_holds)
+    assert not path.exists(), "the second pass did not retire the lone lock"
+    retired.set()
+    assert looked.wait(30), "the first pass never looked for the retired lock"
+    with job_cleanup._claim_lock(jobs, "j") as first:
+        assert first
+        claimant_holds.set()
+        cleaner.join(30)
+        assert not cleaner.is_alive() and errors == []
+        assert path.exists(), "the first pass unlinked a lock it never held"
+        with job_cleanup._claim_lock(jobs, "j", wait=False) as second:
+            assert not second, "a second holder entered on a different inode"
+
+
 @pytest.mark.parametrize("case", ["held", "claimed", "not-named", "older-host", "dry-run"])
 def test_a_lone_lock_stays_while_claimed_or_not_retired_by_the_plan(
     tmp_path: Path, case: str

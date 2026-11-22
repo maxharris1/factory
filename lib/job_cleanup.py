@@ -66,6 +66,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TextIO
 
 from lib import health, job_leftovers, remote, worktrees
 from lib.device_deploy import PICK_PYTHON, Target, targets
@@ -355,7 +356,7 @@ def _still_the_lock_file(lock, path: Path) -> bool:
 
 @contextmanager
 def _claim_lock(jobs: Path, job_id: str, *, wait: bool = True,
-                create: bool = True) -> Iterator[bool]:
+                create: bool = True) -> Iterator[TextIO | bool]:
     path = jobs / f"{job_id}{LOCK}"
     while True:
         try:
@@ -372,15 +373,16 @@ def _claim_lock(jobs: Path, job_id: str, *, wait: bool = True,
                 yield False
                 return
             if _still_the_lock_file(lock, path):
-                yield True
+                yield lock
                 return
 
 
-def _unlink_held_lock(jobs: Path, job_id: str, plan: Plan) -> None:
+def _unlink_held_lock(jobs: Path, job_id: str, plan: Plan, held: TextIO | bool) -> None:
     lock = f"{job_id}{LOCK}"
-    if plan.unlink_lock and not plan.dry_run and not any(
+    if (plan.unlink_lock and not plan.dry_run and not isinstance(held, bool)
+            and _still_the_lock_file(held, jobs / lock) and not any(
             entry.name.split(".", 1)[0] == job_id and entry.name != lock
-            for entry in jobs.iterdir()):
+            for entry in jobs.iterdir())):
         (jobs / lock).unlink(missing_ok=True)
 
 
@@ -493,12 +495,12 @@ def _finish_crashed(root: Path, plan: Plan, locks: bool) -> tuple[dict[str, int]
                                              finished_at=plan.own_finish(job_id),
                                              removed_bytes=size)
                         if siblings:
-                            _unlink_held_lock(jobs, job_id, plan)
+                            _unlink_held_lock(jobs, job_id, plan, locked)
                     removed[job_id] = size
                 else:
                     removed[job_id] = (0 if plan.dry_run
                                        else job_leftovers.commit_record(root, job_id))
-                    _unlink_held_lock(jobs, job_id, plan)
+                    _unlink_held_lock(jobs, job_id, plan, locked)
         except (OSError, worktrees.WorktreeError) as exc:
             kept[job_id] = f"error: {exc}".splitlines()[0]
     return removed, kept
@@ -527,7 +529,7 @@ def _orphan_records(root: Path, plan: Plan,
                     continue
                 if not plan.dry_run:
                     worktrees.retire_record(root, record)
-                    _unlink_held_lock(jobs, job_id, plan)
+                    _unlink_held_lock(jobs, job_id, plan, locked)
                 removed[job_id] = 0
         except (OSError, worktrees.WorktreeError) as exc:
             kept[job_id] = f"error: {exc}".splitlines()[0]
@@ -544,8 +546,7 @@ def _unlink_stranded_locks(jobs: Path, plan: Plan) -> dict[str, str]:
             continue
         try:
             with _claim_lock(jobs, job_id, wait=False, create=False) as locked:
-                if locked:
-                    _unlink_held_lock(jobs, job_id, plan)
+                _unlink_held_lock(jobs, job_id, plan, locked)
         except OSError as exc:
             kept[job_id] = f"error: {exc}".splitlines()[0]
     return kept
@@ -606,10 +607,10 @@ def _finish(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None]) -> 
     for job_id, aside in _job_folders(jobs, SET_ASIDE).items():
         gone = jobs / f"{job_id}{GONE}"
         try:
-            with _claim_lock(jobs, job_id):
+            with _claim_lock(jobs, job_id) as locked:
                 if not aside.is_dir():
                     kept[job_id] = RECENT
-                    _unlink_held_lock(jobs, job_id, plan)
+                    _unlink_held_lock(jobs, job_id, plan, locked)
                     continue
                 reason = (_finish_reason(aside, job_id, plan, locks, scan)
                           or job_leftovers.cross_device(root)
@@ -629,7 +630,7 @@ def _finish(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None]) -> 
                 job_leftovers.retire(root, job_id, gone, siblings=True,
                                      finished_at=plan.own_finish(job_id), removed_bytes=size)
                 removed[job_id] = size
-                _unlink_held_lock(jobs, job_id, plan)
+                _unlink_held_lock(jobs, job_id, plan, locked)
         except (OSError, worktrees.WorktreeError) as exc:
             kept[job_id] = f"error: {exc}".splitlines()[0]
     return Report(removed, kept, False)
