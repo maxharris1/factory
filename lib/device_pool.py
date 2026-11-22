@@ -220,6 +220,7 @@ class AccountLoads:
     closed: frozenset[str]
     score: Mapping[str, float]
     signed_in: frozenset[tuple[str, str]] | None
+    signed_out: frozenset[tuple[str, str]]
 
     def taking_work(self, config: MachinesConfig, device: str, harness: str) -> list[str]:
         own = config.device(device)
@@ -228,6 +229,7 @@ class AccountLoads:
             account
             for account in config.accounts_on(device, harness)
             if account not in self.closed
+            and (account, device) not in self.signed_out
             and (account == login or self.signed_in is None or (account, device) in self.signed_in)
         ]
 
@@ -275,7 +277,7 @@ def account_loads(
                 f"SELECT account, device FROM {account_doctor.TABLE} WHERE status = 'ok'"
             )
         )
-    return AccountLoads(running, frozenset(held), frozenset(closed), score, signed_in)
+    return AccountLoads(running, frozenset(held), frozenset(closed), score, signed_in, account_doctor.held(connection))
 
 
 def _ranked_free(

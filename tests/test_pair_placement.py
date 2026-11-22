@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import lane_limit
+from lib import account_doctor, lane_limit
 from lib.device_pool import (
     DevicePool,
     choose_device,
@@ -121,6 +121,72 @@ def test_a_device_whose_every_account_is_limited_is_blocked_and_claims_nothing(t
     assert free_slots(config, "claude", used_slots(queue, config), blocked) == 0
     assert pool.claim("claude") is None
 
+
+
+TWO_DEVICES = "devices:\n" + local(3) + remote("pc", 3)
+
+BOTH_DEVICES = (
+    "accounts:\n"
+    "  - {id: claude-b, harness: claude, signed_in_on: [box, pc]}\n"
+    "devices:\n" + local(3) + remote("pc", 3)
+)
+
+
+def sign_out(queue: SQLiteJobQueue, account: str, device: str) -> None:
+    with queue.connect() as connection:
+        account_doctor.hold(connection, account, device, "preflight", account_doctor.NOT_LOGGED_IN, NOW)
+
+
+def doctor_reads_ok(queue: SQLiteJobQueue, config: MachinesConfig, *pairs: tuple[str, str]) -> None:
+    at = NOW + 60
+    rows = [account_doctor.SignIn(account, device, "ok", None, None, None, at, "") for account, device in pairs]
+    with queue.connect() as connection:
+        account_doctor.write(connection, rows, config, None, at)
+
+
+def test_a_signed_out_login_sends_the_job_to_the_healthy_second_device(tmp_path: Path) -> None:
+    pool, queue, config = build(tmp_path, TWO_DEVICES)
+    sign_out(queue, "claude-default", "pc")
+
+    blocked = placement_blocks(queue, config, None)
+    assert blocked.blocks("pc", "claude")
+    assert not blocked.blocks("pc", "codex"), "a held Claude login leaves Codex on pc open"
+    assert not blocked.blocks("box", "claude")
+    assert claims(pool, queue, 3) == [("box", "claude-default")] * 3
+
+
+def test_a_signed_out_login_leaves_its_device_to_the_other_account_signed_in_there(tmp_path: Path) -> None:
+    pool, queue, config = build(tmp_path, TWO_ON_BOX)
+    sign_out(queue, "claude-a", "box")
+
+    assert not placement_blocks(queue, config, None).blocks("box", "claude")
+    assert claims(pool, queue, 2) == [("box", "claude-b"), ("box", "claude-b")]
+
+
+def test_a_hold_on_one_device_leaves_the_same_account_open_on_another(tmp_path: Path) -> None:
+    pool, queue, _ = build(tmp_path, BOTH_DEVICES)
+    sign_out(queue, "claude-b", "pc")
+
+    assert claims(pool, queue, 2) == [("pc", "claude-default"), ("box", "claude-b")]
+
+
+def test_every_pair_signed_out_holds_the_job_until_the_doctor_reads_ok(tmp_path: Path) -> None:
+    pool, queue, config = build(tmp_path, TWO_DEVICES)
+    sign_out(queue, "claude-default", "box")
+    sign_out(queue, "claude-default", "pc")
+    waiting = enqueue(queue, "waiting")
+
+    blocked = placement_blocks(queue, config, None)
+    assert blocked.blocks("box", "claude") and blocked.blocks("pc", "claude")
+    assert free_slots(config, "claude", used_slots(queue, config), blocked) == 0
+    assert pool.claim("claude") is None
+    assert [job.state for job in queue.outstanding()] == ["queued"]
+
+    doctor_reads_ok(queue, config, ("claude-default", "box"), ("claude-default", "pc"))
+
+    claimed = pool.claim("claude")
+    assert claimed is not None and claimed[0].id == waiting
+    assert claimed[1].account == "claude-default"
 
 CAPPED = (
     "accounts:\n"
