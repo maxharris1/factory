@@ -50,6 +50,7 @@ from lib.dispatch.types import (
     FailedCheck,
     Registration,
     TrackedTicket,
+    stale_units,
 )
 from lib.dispatch.verdict.shipped import _approved_round
 from lib.factory_md import padded_estimate
@@ -690,10 +691,81 @@ class ReadyMixin:
         return base_red(failed_checks(result), logs, base, self._job_logs(ticket.repo, red))
 
     def _flag_rerun_refused(self, ticket: TrackedTicket, head: str, runs: str, why: str) -> None:
-        text = (
-            f"{ticket.repo}#{ticket.ticket_id} head {head[:12]}: "
+        self._flag_refused(
+            ticket, head, f"{ticket.repo}#{ticket.ticket_id} head {head[:12]}: "
             f"rerun-failed-jobs for run {runs} refused{why}"
         )
+
+    def _request_fresh_ci(self, ticket: TrackedTicket) -> None:
+        """#1287: one full rerun of the runs behind a stale green head, per
+        head and set of changes. The merge queue updates a head behind a
+        base workflow change instead, since a rerun keeps the old workflow.
+        A refusal is flagged, and the head stays pending."""
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        ticket = self._polled.get(key, ticket)
+        head = ticket.current_head
+        result = ticket.ci.get(head) if head is not None else None
+        if head is None or result is None or self.ci_full_rerun is None:
+            return
+        changes = [change for change in result.stale if change.kind != "base-workflow"]
+        if not changes:
+            return
+        if self._review_context(ticket)[0] not in _AFTER_BUILD_STATES or self._is_stuck(ticket):
+            return
+        trigger = " ".join(sorted(change.trigger for change in changes))
+        with self._connect() as connection:
+            if _harness_job_active(connection, key) or connection.execute(
+                """
+                SELECT 1 FROM ci_fresh_runs
+                WHERE repo = ? AND ticket_id = ? AND head = ? AND trigger = ?
+                """,
+                (*key, head, trigger),
+            ).fetchone():
+                return
+        units = [
+            (unit, rows)
+            for change in changes
+            for unit, rows in stale_units(result, change, ticket.factory.ci_required_checks)
+        ]
+        unrunnable = [unit for unit, rows in units if not any(row.run_id for row in rows)]
+        run_ids = list(
+            dict.fromkeys(row.run_id for _unit, rows in units for row in rows if row.run_id)
+        )
+        outcome, detail = "refused", None
+        why = f": no Actions run to rerun for {', '.join(unrunnable)}"
+        if not unrunnable:
+            try:
+                if self.ci_full_rerun(ticket.repo, run_ids) == "running":
+                    return
+                outcome, why = "requested", ""
+            except Exception as exc:
+                detail, why = _safe_refusal(exc)
+        with self._connect() as connection:
+            inserted = connection.execute(
+                """
+                INSERT OR IGNORE INTO ci_fresh_runs
+                    (repo, ticket_id, head, trigger, outcome, run_ids, requested_at, detail)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (*key, head, trigger, outcome, json.dumps(run_ids), self.queue.now(), detail),
+            ).rowcount
+        stale = ", ".join(result.pending)
+        if self.log is not None:
+            self.log(
+                f"ci fresh run: {ticket.repo}#{ticket.ticket_id} at {head[:12]} "
+                + (
+                    f"rerunning run {', '.join(run_ids)} in full ({stale})"
+                    if outcome == "requested"
+                    else f"fresh run refused ({stale}){why}; holding pending"
+                )
+            )
+        if outcome == "refused" and inserted:
+            self._flag_refused(
+                ticket, head, f"{ticket.repo}#{ticket.ticket_id} head {head[:12]}: "
+                f"fresh CI run for {stale} refused{why}"
+            )
+
+    def _flag_refused(self, ticket: TrackedTicket, head: str, text: str) -> None:
         self.flag_attention(ticket.repo, ticket.ticket_id, CI_RERUN_REFUSED, text)
         source = self._latest_trusted_comment(ticket)
         if source is not None:

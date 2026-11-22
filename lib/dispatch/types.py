@@ -97,6 +97,7 @@ class CheckRow:
     run_id: str | None = None
     job_id: str | None = None
     workflow: str = ""
+    first_started_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -132,6 +133,7 @@ class CIResult:
     pending: tuple[str, ...] = ()
     checks: tuple[CheckRow, ...] = field(default=(), compare=False)
     statuses: tuple[CheckRow, ...] = field(default=(), compare=False)
+    stale: tuple[CIChange, ...] = field(default=(), compare=False)
 
     def __post_init__(self) -> None:
         if self.status not in CI_STATUSES:
@@ -207,7 +209,7 @@ def pr_ci(result: CIResult, factory: FactoryConfig, pr_base: str | None) -> CIRe
     return ci_required(result, factory.ci_required_checks)
 
 
-CIChangeKind = Literal["head-workflow", "required-set"]
+CIChangeKind = Literal["head-workflow", "required-set", "base-workflow"]
 
 
 @dataclass(frozen=True)
@@ -215,6 +217,10 @@ class CIChange:
     kind: CIChangeKind
     at: float
     globs: tuple[str, ...] = ()
+
+    @property
+    def trigger(self) -> str:
+        return f"{self.kind}:{','.join(self.globs)}@{self.at:.0f}"
 
 
 def _named_units(rows: tuple[CheckRow, ...]) -> list[tuple[str, list[CheckRow]]]:
@@ -233,21 +239,41 @@ def _gate_units(
 
 
 def _fresh(row: CheckRow, change: CIChange) -> bool:
-    return row.conclusion == "success" and row.started_at is not None and row.started_at > change.at
+    # A same-SHA rerun of a pull_request run keeps its original merge ref,
+    # so only the first attempt can show a base workflow change was in it.
+    started = row.started_at
+    if change.kind == "base-workflow" and row.first_started_at is not None:
+        started = row.first_started_at
+    return row.conclusion == "success" and started is not None and started > change.at
+
+
+def stale_units(
+    result: CIResult, change: CIChange, required: tuple[str, ...]
+) -> list[tuple[str, list[CheckRow]]]:
+    return [
+        (unit, rows)
+        for unit, rows in _gate_units(result, change, required)
+        if not any(_fresh(row, change) for row in rows)
+    ]
 
 
 def ci_fresh(result: CIResult, changes: tuple[CIChange, ...], required: tuple[str, ...]) -> CIResult:
     if result.status != "success":
         return result
-    stale = dict.fromkeys(
-        f"{unit} (stale after {change.kind})"
+    stale = {
+        change: [f"{unit} (stale after {change.kind})" for unit, _rows in units]
         for change in changes
-        for unit, rows in _gate_units(result, change, required)
-        if not any(_fresh(row, change) for row in rows)
-    )
+        if (units := stale_units(result, change, required))
+    }
     if not stale:
         return result
-    return CIResult("pending", pending=tuple(stale), checks=result.checks, statuses=result.statuses)
+    return CIResult(
+        "pending",
+        pending=tuple(dict.fromkeys(name for names in stale.values() for name in names)),
+        checks=result.checks,
+        statuses=result.statuses,
+        stale=tuple(stale),
+    )
 
 
 # Where a Linear issue stands relative to the project's ready state (the

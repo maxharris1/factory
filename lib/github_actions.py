@@ -795,6 +795,25 @@ class GitHubReviewActions:
                 )
         return tuple(events)
 
+    def workflow_changed_at(
+        self, repo: str, branch: str, paths: Sequence[str]
+    ) -> float | None:
+        """When branch's newest commit touching a path in paths was
+        committed. A glob is read by its literal directory, so a narrower
+        glob can only report a change early, never miss one."""
+        dates: list[float] = []
+        for prefix in dict.fromkeys(filter(None, map(_literal_prefix, paths))):
+            commits = self._json(
+                f"{_repo_path(repo)}/commits?sha={quote(_branch(branch), safe='/')}"
+                f"&path={quote(prefix, safe='/')}&per_page=1"
+            )
+            if not isinstance(commits, list):
+                raise GitHubAdapterError("commits page is not a list")
+            for commit in map(_object, commits):
+                committer = _object(_object(commit.get("commit")).get("committer"))
+                dates.append(_created_at(committer.get("date")))
+        return max(dates, default=None)
+
     def committed_at(self, repo: str, sha: str) -> float:
         commit = _object(self._json(f"{_repo_path(repo)}/commits/{_sha(sha, 'commit')}"))
         committer = _object(_object(commit.get("commit")).get("committer"))
@@ -834,8 +853,9 @@ class GitHubReviewActions:
             return CIResult("pending")
         if not runs and not total:
             return CIResult("pending", reported=False)
+        first = _first_starts(runs)
         runs = _latest_attempts(runs)
-        checks = tuple(map(_check_row, runs))
+        checks = tuple(_check_row(run, first.get(_attempt_key(run))) for run in runs)
         statuses = _status_rows(combined)
         failed: list[FailedCheck] = []
         pending: list[str] = []
@@ -1031,6 +1051,12 @@ class GitHubReviewActions:
             number += 1
 
     def rerun_failed_jobs(self, repo: str, run_ids: Sequence[str]) -> RerunOutcome:
+        return self._rerun(repo, run_ids, "rerun-failed-jobs")
+
+    def rerun_workflow_runs(self, repo: str, run_ids: Sequence[str]) -> RerunOutcome:
+        return self._rerun(repo, run_ids, "rerun")
+
+    def _rerun(self, repo: str, run_ids: Sequence[str], verb: str) -> RerunOutcome:
         if not all(run_id.isdigit() for run_id in run_ids):
             raise GitHubAdapterError("Actions run id is not a number")
         if not all(self._run_completed(repo, run_id) for run_id in run_ids):
@@ -1038,9 +1064,7 @@ class GitHubReviewActions:
         requested = False
         for run_id in run_ids:
             try:
-                self._call(
-                    "-X", "POST", f"{_repo_path(repo)}/actions/runs/{run_id}/rerun-failed-jobs"
-                )
+                self._call("-X", "POST", f"{_repo_path(repo)}/actions/runs/{run_id}/{verb}")
             except GitHubAdapterError as exc:
                 already = exc.http_status == 403 and "already running" in (
                     exc.api_message or ""
@@ -1271,16 +1295,33 @@ def _latest_attempts(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     latest: dict[tuple[str, str, str], dict[str, Any]] = {}
     for run in runs:
-        app = _object(run.get("app")) if isinstance(run.get("app"), dict) else {}
-        key = (
-            str(app.get("id", app.get("slug", ""))),
-            _workflow_identity(run),
-            str(run.get("name")),
-        )
+        key = _attempt_key(run)
         current = latest.get(key)
         if current is None or _attempt_order(run) > _attempt_order(current):
             latest[key] = run
     return list(latest.values())
+
+
+def _attempt_key(run: dict[str, Any]) -> tuple[str, str, str]:
+    app = _object(run.get("app")) if isinstance(run.get("app"), dict) else {}
+    return (str(app.get("id", app.get("slug", ""))), _workflow_identity(run), str(run.get("name")))
+
+
+def _first_starts(runs: list[dict[str, Any]]) -> dict[tuple[str, str, str], float]:
+    first: dict[tuple[str, str, str], float] = {}
+    for run in runs:
+        started = _display_time(run.get("started_at"))
+        if started is not None:
+            key = _attempt_key(run)
+            first[key] = min(first.get(key, started), started)
+    return first
+
+
+def _literal_prefix(pattern: str) -> str:
+    cut = min((pattern.find(char) for char in "*?[" if char in pattern), default=-1)
+    if cut < 0:
+        return pattern.rstrip("/")
+    return pattern[:cut].rpartition("/")[0]
 
 
 _ACTIONS_RUN = re.compile(r"/actions/runs/([0-9]+)(?:/|$)")
@@ -1329,7 +1370,7 @@ def _failed_check(name: str, details: object, cause: Cause, signal: str | None) 
     )
 
 
-def _check_row(run: dict[str, Any]) -> CheckRow:
+def _check_row(run: dict[str, Any], first_started_at: float | None = None) -> CheckRow:
     conclusion = run.get("conclusion")
     status = _board_status(run.get("status"), conclusion)
     details = run.get("details_url")
@@ -1344,6 +1385,7 @@ def _check_row(run: dict[str, Any]) -> CheckRow:
         run_id=None if job is None else job.group(2),
         job_id=None if job is None else job.group(3),
         workflow=_workflow_identity(run),
+        first_started_at=first_started_at,
     )
 
 

@@ -2073,7 +2073,11 @@ class LivePollSource:
             factory=factory,
             comments=comments,
             current_head=head,
-            ci={head: self._gated_ci(project.repo, number, number, factory, pull, ci, hold_inputs)},
+            ci={
+                head: self._gated_ci(
+                    project.repo, number, number, factory, pull, ci, hold_inputs, fresh=fresh
+                )
+            },
             risk=self._intake_risk(project.repo, number, comments) or "high",
             job_timeout_minutes=resolve_job_timeout(self.config, project.repo),
             ticket_url=_optional_string(pull.get("html_url")),
@@ -2135,7 +2139,11 @@ class LivePollSource:
         pull: Mapping[str, Any],
         raw: CIResult,
         hold_inputs: Mapping[str, Any],
+        *,
+        fresh: bool = False,
     ) -> CIResult:
+        """fresh is a ship or merge read: only it reads the base branch for
+        a workflow change, so an ordinary poll costs no extra call."""
         ci = pr_ci(raw, factory, _pr_base(pull))
         changes = list(
             self.required_globs.observe(
@@ -2165,6 +2173,12 @@ class LivePollSource:
                     "committed", repo, number, pull, lambda: self.github.committed_at(repo, head)
                 )
                 changes.append(CIChange("head-workflow", at))
+            if fresh:
+                based = self.github.workflow_changed_at(
+                    repo, _pr_base(pull) or factory.base_branch, factory.ci_force_rerun_paths
+                )
+                if based is not None:
+                    changes.append(CIChange("base-workflow", based))
         except Exception as exc:
             self._record(repo, ticket_id, exc)
             return unread
@@ -2377,7 +2391,9 @@ class LivePollSource:
             head = _pr_head(pull, project.repo, pr_number)
             pr_title = _open_title(pull)
             raw = self.github.ci_status(project.repo, head)
-            ci[head] = self._gated_ci(project.repo, identifier, pr_number, factory, pull, raw, {})
+            ci[head] = self._gated_ci(
+                project.repo, identifier, pr_number, factory, pull, raw, {}, fresh=fresh
+            )
             github_comments = self.github.list_comments(project.repo, pr_number)
             comments = tuple(
                 sorted(

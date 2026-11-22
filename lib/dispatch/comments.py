@@ -107,6 +107,10 @@ class CommentsMixin:
         except Exception as exc:
             self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
         try:
+            self._request_fresh_ci(ticket)
+        except Exception as exc:
+            self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
+        try:
             self._clear_recovered_base_red(ticket)
         except Exception as exc:
             self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)

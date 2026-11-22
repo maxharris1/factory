@@ -76,6 +76,7 @@ class DispatcherBase:
         approvals: Approvals | None = None,
         ci_logs: Callable[[str, str], Mapping[str, str]] | None = None,
         ci_rerun: Callable[[str, Sequence[str]], RerunOutcome] | None = None,
+        ci_full_rerun: Callable[[str, Sequence[str]], RerunOutcome] | None = None,
         ci_base_checks: Callable[[str, str], Mapping[str, BaseCheck]] | None = None,
         ci_runs: Callable[[str, str], Sequence[RunJob]] | None = None,
         ci_job_log: Callable[[str, str], str] | None = None,
@@ -121,6 +122,7 @@ class DispatcherBase:
         self._ci_step_reads: dict[tuple[str, str, tuple[str, ...]], dict[str, int | None]] = {}
         self._ci_step_failures: set[tuple[str, str, tuple[str, ...]]] = set()
         self.ci_rerun = ci_rerun
+        self.ci_full_rerun = ci_full_rerun
         self.ci_base_checks = ci_base_checks
         self._base_checks: dict[tuple[str, str], Mapping[str, BaseCheck] | None] = {}
         self.ci_runs = ci_runs

@@ -1415,6 +1415,7 @@ def _runtime(
         approvals=approvals(config),
         ci_logs=source.github.failed_run_logs,
         ci_rerun=source.github.rerun_failed_jobs,
+        ci_full_rerun=source.github.rerun_workflow_runs,
         ci_base_checks=source.github.base_checks,
         ci_runs=source.github.run_jobs,
         ci_job_log=source.github.job_log,

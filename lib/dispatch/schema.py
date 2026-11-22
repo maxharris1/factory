@@ -635,6 +635,22 @@ class SchemaMixin:
                 )
                 """
             )
+            # #1287: the one fresh CI run asked for a stale green head.
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ci_fresh_runs (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    head TEXT NOT NULL,
+                    trigger TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    run_ids TEXT NOT NULL,
+                    requested_at REAL NOT NULL,
+                    detail TEXT,
+                    PRIMARY KEY (repo, ticket_id, head, trigger)
+                )
+                """
+            )
             # #615: tracked tickets whose PR base gets no CI (factory.md
             # ci.branches), for the dashboard's no-CI chip.
             connection.execute(
