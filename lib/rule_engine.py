@@ -1,13 +1,4 @@
-"""The pure core of the rule engine (issue #1319).
-
-Facts are typed observations a caller gathers before it decides: a review
-that stopped at its cap or on a repeat finding, or a head that moved after
-an ok. decide hands them to the first rule in a registry that applies and
-returns its Ruling, an Outcome plus the checks that led to it. No rule
-applies, which is every case while RULES is empty, escalates. Text enters
-only through finding_id, sha and git_path, so no fact holds free prose.
-This module does no I/O.
-"""
+"""The pure core of the rule engine (issue #1319)."""
 
 from __future__ import annotations
 
