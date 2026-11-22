@@ -29,13 +29,14 @@ class StopOption:
 
 
 _SPLIT = StopOption("Split", "Close this PR and file smaller tickets. No more rounds run here.")
+OVERRULE = StopOption(
+    "Overrule the finding",
+    "An approver's /go that names this option records the decision. No fix is queued and no round runs. "
+    "Later briefs quote the decision, so the reviewer does not block on it again.",
+)
 _CAPPED_OPTIONS = (
     StopOption("Another round", "An approver's /go adds one round and queues the fix."),
-    StopOption(
-        "Overrule the finding",
-        "An approver's /go that names this option adds the round too. "
-        "Later briefs quote the decision, so the reviewer does not block on it again.",
-    ),
+    OVERRULE,
     _SPLIT,
 )
 STOP_OPTIONS: dict[Stop, tuple[StopOption, ...]] = {
@@ -44,11 +45,7 @@ STOP_OPTIONS: dict[Stop, tuple[StopOption, ...]] = {
             "Another round",
             "An approver's /go resumes the paused fix on this finding. At the review cap it also adds one round.",
         ),
-        StopOption(
-            "Overrule the finding",
-            "An approver's /go that names this option resumes the fix. "
-            "Later briefs quote the decision, so the reviewer does not block on it again.",
-        ),
+        OVERRULE,
         _SPLIT,
     ),
     "capped": _CAPPED_OPTIONS,

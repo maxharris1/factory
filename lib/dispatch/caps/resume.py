@@ -9,11 +9,50 @@ from lib.dispatch.decisions import record_decisions
 from lib.dispatch.helpers import _comment_link, _scope, grant_open, red_checks
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, RoundGrant, TrackedTicket
+from lib.dispatch.verdict.repeat import OVERRULE
 from lib.dispatch.verdict.shipped import _approved_round
 from lib.queue import JobRequest
 
 
 class ResumeMixin:
+    def _overrule_stop(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+    ) -> tuple[bool, str] | None:
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        ticket = self._fresh_issue(ticket)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            replayed = connection.execute(
+                """
+                SELECT 1 FROM review_events
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                  AND outcome = 'overruled-finding'
+                """,
+                (*key, comment.id),
+            ).fetchone()
+            if replayed is None:
+                held = self._held_stop(ticket)
+                if held is None or held[0] == "unsat" or not self._may_lift_cap(comment.author):
+                    connection.commit()
+                    return None
+                stop, verdict = held
+                decision = self._stop_decision(ticket, verdict, stop, comment, "Another round")
+                if not decision.choice.lower().startswith(OVERRULE.name.lower()):
+                    connection.commit()
+                    return None
+                record_decisions(connection, ticket, verdict.id, [decision])
+                connection.execute(
+                    """
+                    INSERT INTO review_events (repo, ticket_id, comment_id, outcome)
+                    VALUES (?, ?, ?, 'overruled-finding')
+                    """,
+                    (*key, comment.id),
+                )
+            connection.commit()
+        return True, "overruled-finding"
+
     def _resume_after_cap(
         self,
         ticket: TrackedTicket,

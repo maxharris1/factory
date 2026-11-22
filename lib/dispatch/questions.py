@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
 from lib.dispatch.constants import FINISHED_STATES, HANDED_OFF_EXTERNALLY
-from lib.dispatch.decisions import Decision, answer_blocks, answer_text, record_decisions, unquoted
+from lib.dispatch.decisions import Decision, answer_blocks, answer_text, record_decisions
 from lib.dispatch.helpers import (
     _ANSWERS,
     _REGISTERING_ACTIONS,
@@ -64,7 +64,7 @@ def decisions_of(question: Comment | None, answer: Comment) -> list[Decision]:
     entries = (
         [(text, _options_for(offers, text), choice) for text, choice in pairs]
         if pairs
-        else [(asked.strip(), _every_option(offers), unquoted(body))]
+        else [(asked.strip(), _every_option(offers), body)]
     )
     return [
         Decision(text, options, choice, answer.author, answer.created_at, answer.url, answer.id, position)
