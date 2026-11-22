@@ -58,12 +58,14 @@ def close_split_parent(
     triggers: Sequence[IssueRecord],
     merged: Collection[int],
     label: str,
-) -> Literal["already-closed", "parts-open", "closed"]:
+) -> Literal["already-closed", "no-parts", "parts-open", "closed"]:
     if github.issue_state(repo, parent) == "closed":
         return "already-closed"
     # A trigger wins over a search hit: the search index can lag a close.
     siblings = {child.number: child for child in github.split_children(repo, parent)}
     siblings.update((child.number, child) for child in triggers)
+    if not siblings:
+        return "no-parts"
     if not all(_done(child, merged) for child in siblings.values()):
         return "parts-open"
     marker = f"<!-- orch-split-closed parent={parent} -->"
