@@ -565,7 +565,7 @@ def test_a_holder_releases_when_its_pr_merges_or_closes(tmp_path: Path, ended) -
     github.statuses[ref(501)] = ended
     assert fed_heads(github, feeder.feed_once()) == ["factory/issue-2"]
     assert rows(tmp_path / "orch.db")["1"]["released"] == 1
-    github.statuses[ref(501)] = OPEN_PULL  # reopened: released stays released
+    github.statuses[ref(501)] = OPEN_PULL
     feeder.feed_once()
     assert rows(tmp_path / "orch.db")["1"]["released"] == 1
     assert states(tmp_path)["2"][0] == "fed"

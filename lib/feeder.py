@@ -2001,7 +2001,7 @@ class Feeder:
         return blocker_waits(gated, statuses), critical, holds, capped_refs, ok, unblocks, tiers
 
     def _feeder_rows(self) -> dict[Ref, _Holder]:
-        """Tickets fed or feeding."""
+        """Tickets fed or feeding, and whether each one's PR status is still read."""
         with self.queue.connect() as connection:
             connection.row_factory = sqlite3.Row
             finished = "0"

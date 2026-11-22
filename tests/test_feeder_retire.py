@@ -1,6 +1,7 @@
 """Retire abandoned feeder rows (issue #1299): a fed or done row whose ticket
-was abandoned, or whose open PR carries orch:state/abandoned, leaves fed/done,
-stops holding its Touches paths and is never fed again."""
+was abandoned, or whose PR (open, closed or merged, released or not) carries
+orch:state/abandoned, leaves fed/done, stops holding its Touches paths and is
+never fed again."""
 
 from __future__ import annotations
 
