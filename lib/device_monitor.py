@@ -72,8 +72,10 @@ placed back on the same device carries a new tag and is never stopped by
 mistake.
 
 Sign-ins. After reconcile, `check_sign_ins` runs the account doctor
-(lib/account_doctor.py) on the first poll, every `INTERVAL_SECONDS` after,
-and once on the poll after reload adopts a changed machines.yml.
+(lib/account_doctor.py) on the first poll, at once on the poll after a new
+sign-in hold appears, every `HELD_INTERVAL_SECONDS` while any hold is
+open, every `INTERVAL_SECONDS` otherwise, and once on the poll after reload
+adopts a changed machines.yml.
 
 Memory. After reconcile and before `check_sign_ins`, `check_memory` reads
 /proc/meminfo and /proc/pressure/memory on each enabled device not
@@ -86,6 +88,7 @@ a device with no /proc (macOS), fails open.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import sys
@@ -283,13 +286,14 @@ class DeviceMonitor:
         self._stamp = stamp
 
     def check_sign_ins(self, now: float) -> bool:
-        """Run the account doctor when due; an error waits for the next interval."""
+        """Run the account doctor when due; an error waits for the next due time."""
         if self.sign_ins is None:
             return False
-        if self._signed is not None:
-            last, stamp = self._signed
-            if stamp == self._stamp and now - last < account_doctor.INTERVAL_SECONDS:
-                return False
+        last = self._signed[0] if self._signed is not None and self._signed[1] == self._stamp else None
+        with contextlib.closing(self.pool.queue.connect()) as connection:
+            newest = account_doctor.newest_hold(connection)
+        if not account_doctor.due(last, newest, now):
+            return False
         self._signed = (now, self._stamp)
         self.sign_ins(self.config, now)
         return True
