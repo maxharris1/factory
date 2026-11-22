@@ -37,8 +37,7 @@ runs as the owning bot's own user and login, starts the job itself:
 * it goes straight back to waiting, and reaps each `orch job run` it started;
 * on its first step and every CLEANUP_SWEEP_SECONDS after, it starts
   `orch cleanup run --bot <bot>` (lib/job_cleanup.py) in a new session,
-  output to `<state>/cleanup.log`, never while its last pass still runs
-  (#1349);
+  output to `<state>/cleanup.log`, never while its last pass still runs;
 * before each claim, whatever jobs it runs (#366), it brings its own box
   factory_root to the deployed box checkout's HEAD with lib/device_deploy.py's
   git steps, then its home's installed skills to that pin with the preflight's

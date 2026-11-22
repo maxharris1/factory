@@ -51,7 +51,7 @@ unknown.
 that bot's targets, after a default 10 minute grace. Its plan names every id
 the bot owns, so on a work root several bots share the device leaves the rest
 alone. It holds a flock on `cleanup-<bot>.lock` beside orch.db for the whole
-pass, and exits at once when another pass for that bot holds it (#1349).
+pass, and exits at once when another pass for that bot holds it.
 """
 
 from __future__ import annotations
