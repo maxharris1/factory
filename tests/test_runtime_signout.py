@@ -26,6 +26,16 @@ CODEX_REFRESH = (
     "Your access token could not be refreshed because your refresh token has expired. "
     "Please log out and sign in again."
 )
+CODEX_PERMANENT = (
+    "Your access token could not be refreshed because your refresh token was already used. "
+    "Please log out and sign in again.",
+    "Your access token could not be refreshed because your refresh token was revoked. "
+    "Please log out and sign in again.",
+    "Your access token could not be refreshed. Please log out and sign in again.",
+    "Your access token could not be refreshed because you have since logged out or signed in to "
+    "another account. Please sign in again.",
+)
+CODEX_TRANSIENT = {"type": "turn.failed", "error": {"message": "Failed to refresh token: 503 Service Unavailable"}}
 
 
 def _session(db: Path, tmp_path: Path, job_id: str, harness: str, now: list[float], **placed: str) -> Session:
@@ -107,8 +117,10 @@ def _no_retry_rows(db: Path) -> bool:
     ("codex", {"type": "error", "message": "Not logged in"}),
     ("codex", {"type": "error", "message": "unexpected status 401 Unauthorized: Missing bearer"}),
     ("codex", {"type": "turn.failed", "error": {"message": CODEX_REFRESH}}),
+    *(("codex", {"type": "turn.failed", "error": {"message": m}}) for m in CODEX_PERMANENT),
 ], ids=["claude-error-field", "claude-oauth-result", "claude-not-logged-in", "codex-not-logged-in",
-        "codex-401", "codex-refresh-token"])
+        "codex-401", "codex-refresh-token", "codex-refresh-reused", "codex-refresh-revoked",
+        "codex-refresh-unknown", "codex-refresh-account-changed"])
 def test_detect_signout_reads_each_harness_auth_failure(harness: str, event: dict) -> None:
     assert account_doctor.detect_signout(harness, event)
 
@@ -121,9 +133,11 @@ def test_detect_signout_reads_each_harness_auth_failure(harness: str, event: dic
     ("claude", {"type": "assistant", "message": {"content": [{"type": "text", "text": OAUTH_EXPIRED}]}}),
     ("codex", {"type": "error", "message": "stream disconnected before completion"}),
     ("codex", {"type": "item.completed", "item": {"text": "Not logged in"}}),
+    ("codex", CODEX_TRANSIENT),
+    ("codex", {"type": "error", "message": "Failed to refresh token: 500 Internal Server Error"}),
     ("cursor", {"type": "error", "message": "Not logged in"}),
 ], ids=["claude-usage-limit", "claude-not-error", "claude-500", "claude-other-error", "claude-plain-text",
-        "codex-disconnect", "codex-agent-text", "other-harness"])
+        "codex-disconnect", "codex-agent-text", "codex-refresh-503", "codex-refresh-500", "other-harness"])
 def test_detect_signout_ignores_other_failures_and_agent_text(harness: str, event: dict) -> None:
     assert not account_doctor.detect_signout(harness, event)
 
@@ -166,6 +180,20 @@ def test_a_run_that_never_signs_out_writes_no_hold(tmp_path: Path) -> None:
     assert _holds(db) == []
     with sqlite3.connect(db) as connection:
         assert signout_end(connection, job.id) is None
+
+
+def test_a_codex_run_whose_token_refresh_hits_a_transient_error_writes_no_hold(tmp_path: Path) -> None:
+    db = tmp_path / "d.db"
+    now = [START]
+    queue = SQLiteJobQueue(db, clock=lambda: now[0])
+    job = queue.enqueue(JobRequest("owner/repo", "7", "review", "codex", "c1", 3600, head="a" * 40), dedupe_key="r:7")
+    setup(tmp_path, now=now)
+    session = _session(db, tmp_path, job.id, "codex", now)
+    _feed(session, CODEX_TRANSIENT)
+    session.finish(1)
+    assert _holds(db) == []
+    with sqlite3.connect(db) as connection:
+        assert signout_end(connection, job.id) is None, "T6 sees an ordinary failure"
 
 
 def test_a_signed_out_build_requeues_as_itself_and_never_sticks(tmp_path: Path) -> None:

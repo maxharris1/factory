@@ -84,7 +84,7 @@ _BEGIN = b"ORCH-ACCOUNTS-BEGIN"
 _FRAME = re.compile(rb"ORCH-ACCOUNT (\d+) (\d+)")
 _SIGNED_OUT = {
     "claude": re.compile(r"OAuth session expired|not logged in|run /login", re.IGNORECASE),
-    "codex": re.compile(r"not logged in|401 Unauthorized|refresh token", re.IGNORECASE),
+    "codex": re.compile(r"not logged in|401 Unauthorized|Please (?:log out and )?sign in again", re.IGNORECASE),
 }
 
 _SUBSCRIPTION = re.compile(r"[a-z][a-z0-9_]{0,23}")
