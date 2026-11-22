@@ -63,6 +63,8 @@ RULE_MODULE = {
     "_red_ci_approval_covering": "pending",
     "_shipping_approval": "pending",
     "_shipped_approval": "shipped",
+    "_shipped_approval_at": "shipped",
+    "_shipped_approve": "shipped",
     "_previewed_head": "preview",
     "_latest_review_verdict": "latest",
 }
