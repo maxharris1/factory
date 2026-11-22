@@ -23,6 +23,7 @@ from lib.dispatch.helpers import (
     _round_number,
     _scope,
     _state_for_action,
+    grant_open,
     red_checks,
 )
 from lib.dispatch.plan import gap_of
@@ -355,6 +356,7 @@ class QuestionsMixin:
                 current is None
                 or current["workflow_state"] != "waiting-max"
                 or current["paused_question_id"] != paused["paused_question_id"]
+                or (grant is not None and not grant_open(connection, ticket, grant, current["paused_question_id"]))
             ):
                 connection.commit()
                 return None
@@ -403,6 +405,14 @@ class QuestionsMixin:
                     f"{comment.id if grant is None else grant.key}"
                 ),
             )
+            if grant is not None:
+                connection.execute(
+                    """
+                    INSERT INTO review_events (repo, ticket_id, comment_id, outcome)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (ticket.repo.lower(), ticket.ticket_id, grant.key, f"resumed-{action}"),
+                )
             write_workflow_state(
                 connection,
                 ticket.repo,

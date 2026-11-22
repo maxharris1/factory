@@ -6,10 +6,13 @@ from pathlib import Path
 from lib.dispatch.types import Comment, RoundGrant
 from lib.dispatch.verdict.repeat import StopRecord
 from lib.rule_engine import Grant, Ruling, finding_id, go_header
+from tests.qa_support import Harness
 from tests.test_approver_credential import MAX, AppFlow
 from tests.test_dispatcher import job_count
 from tests.test_repeat import capped_stop, decisions, repeat_stop
+from tests.test_qa_gate_table import blocking
 from tests.test_repeat_block import F1, F2, SizedFlow, next_review, repeat_wakes, rounds
+from tests.test_t3_convergence import _qa_round
 from tests.test_unsatisfiable_criterion import revise
 
 
@@ -122,4 +125,60 @@ def test_stop_history_counts_an_engine_cap_grant(tmp_path: Path) -> None:
 
     assert flow.dispatcher._stop_history(flow.snapshot()) == (
         StopRecord("revise-3", "capped", frozenset({"f-3"}), "engine"),
+    )
+
+
+def engine_released_repeat(flow: AppFlow) -> RoundGrant:
+    assert rounds(flow, F1, F1) == "waiting-max-repeat"
+    grant = RoundGrant.engine(verdict(flow, "revise-2"))
+    assert flow.dispatcher._resume_paused(flow.snapshot(), grant.trigger, grant=grant) == (True, "resumed-fix")
+    next_review(flow, 2)
+    return grant
+
+
+def pause(flow: AppFlow) -> tuple:
+    state = flow.state()
+    return job_count(flow.queue, "fix"), state["workflow_state"], state["cap_extra"], state["paused_question_id"]
+
+
+def test_a_consumed_engine_grant_does_not_release_a_later_repeat_stop(tmp_path: Path) -> None:
+    flow = SizedFlow(tmp_path, changed_lines=None)
+    flow.factory = replace(flow.factory, auto_extra_rounds=2)
+    grant = engine_released_repeat(flow)
+    assert revise(flow, "3/3", "revise-3", body=F1) == "waiting-max-repeat"
+    parked = pause(flow)
+
+    assert flow.dispatcher._resume_paused(flow.snapshot(), grant.trigger, grant=grant) is None
+    assert pause(flow) == parked
+
+
+def test_a_grant_consumed_on_a_repeat_stop_does_not_lift_a_later_cap(tmp_path: Path) -> None:
+    flow = AppFlow(tmp_path, enabled=True)
+    flow.factory = replace(flow.factory, auto_extra_rounds=0)
+    grant = engine_released_repeat(flow)
+    assert revise(flow, "3/3", "revise-3", body="- [blocking] f-3: the exit code is 0.\n") == "capped-review"
+    capped = pause(flow)
+
+    assert flow.dispatcher._apply_round_grant(flow.snapshot(), grant) == ("resumed-fix", False, False)
+    assert pause(flow) == capped
+
+
+def test_an_engine_grant_for_an_older_verdict_does_not_lift_the_cap(tmp_path: Path) -> None:
+    flow = capped_stop(tmp_path)
+    capped = pause(flow)
+
+    assert flow.dispatcher._apply_round_grant(flow.snapshot(), RoundGrant.engine(verdict(flow, "revise-2"))) is None
+    assert pause(flow) == capped
+
+
+def test_stop_history_keeps_a_capped_stops_qa_blockers(tmp_path: Path) -> None:
+    run = Harness(tmp_path, blocking())
+    run.thread.base = replace(run.thread.base, factory=replace(run.thread.base.factory, rounds_high=1))
+    _qa_round(run, 1, ["qa-1"], cap=1)
+    assert run.rows("SELECT comment_id, outcome, qa_failed FROM review_events") == [
+        ("v1", "capped-review", '["qa-1"]')
+    ]
+
+    assert run.dispatcher._stop_history(run.thread.snapshot()) == (
+        StopRecord("v1", "capped", frozenset({"qa-1"}), None),
     )

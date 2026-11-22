@@ -6,7 +6,7 @@ from typing import Literal
 
 from lib.dispatch.constants import UNANNOUNCED_AFTER_CAP
 from lib.dispatch.decisions import record_decisions
-from lib.dispatch.helpers import _comment_link, _scope, red_checks
+from lib.dispatch.helpers import _comment_link, _scope, grant_open, red_checks
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, RoundGrant, TrackedTicket
 from lib.dispatch.verdict.shipped import _approved_round
@@ -96,6 +96,11 @@ class ResumeMixin:
                 """,
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchone()
+            if grant.released_by == "engine" and (
+                handed_off or not grant_open(connection, ticket, grant, capping and capping["comment_id"])
+            ):
+                connection.commit()
+                return None
             verdict = _comment_link(grant.trigger) if handed_off else None
             if capping is not None and not handed_off:
                 stop = next((item for item in ticket.comments if item.id == capping["comment_id"]), None)
