@@ -50,6 +50,7 @@ from typing import Any, TypeVar
 from urllib.parse import quote
 
 from lib.branch_stack import OpenPull
+from lib.dispatch.constants import GITHUB_STATE_LABEL_PREFIX
 from lib.dispatcher import Comment
 from lib.feeder import IntakeIssue, IssueRecord
 from lib.feeder_gates import Progress, Ref, RefStatus
@@ -113,7 +114,7 @@ _LINKED_PULLS = (
 )
 REF_STATUS_FIELDS = (
     "__typename "
-    "... on PullRequest { state merged } "
+    "... on PullRequest { state merged labels(first: 30) { nodes { name } } } "
     "... on Issue { state stateReason " + _LINKED_PULLS.replace("{after}", "") + " }"
 )
 LINKED_PULLS_QUERY = (
@@ -739,12 +740,18 @@ def _ref_status(node: object, linked_merged: bool) -> RefStatus:
     kind = node.get("__typename")
     state = node.get("state")
     if kind == "PullRequest":
+        labels = node.get("labels")
+        nodes = labels.get("nodes") if isinstance(labels, dict) else None
+        abandoned = isinstance(nodes, list) and any(
+            isinstance(label, dict) and label.get("name") == GITHUB_STATE_LABEL_PREFIX + "abandoned"
+            for label in nodes
+        )
         if node.get("merged") is True or state == "MERGED":
-            return RefStatus(Progress.DONE, is_pull=True)
+            return RefStatus(Progress.DONE, is_pull=True, abandoned=abandoned)
         if state == "CLOSED":
-            return RefStatus(Progress.UNFINISHED, is_pull=True, detail="closed without merge")
+            return RefStatus(Progress.UNFINISHED, is_pull=True, detail="closed without merge", abandoned=abandoned)
         if state == "OPEN":
-            return RefStatus(Progress.OPEN, is_pull=True)
+            return RefStatus(Progress.OPEN, is_pull=True, abandoned=abandoned)
     elif kind == "Issue":
         if linked_merged:
             return RefStatus(Progress.DONE)

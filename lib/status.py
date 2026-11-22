@@ -804,6 +804,7 @@ def render(status: Status) -> str:
                 "done": "fed, job queued",
                 "closed": "PR closed, not fed",
                 "split-parent": "split into parts, not fed",
+                "abandoned": "abandoned, not fed",
             }.get(item.state, item.state)
             where = f" -> PR #{item.pr}" if item.pr else ""
             tier = "" if item.tier is None else f"tier {item.tier} "
