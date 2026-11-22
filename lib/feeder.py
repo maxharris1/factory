@@ -181,7 +181,7 @@ from lib.brief_comment import FACTORY_MD_HEADING
 from lib.device_pool import free_slots, placement_blocked, slots_in_use
 from lib.device_sync import Blocked
 from lib.dispatch.bookkeeping import LockLedger, bookkeeping_write, must_write
-from lib.dispatch.constants import FINISHED_STATES, TERMINAL_STATES
+from lib.dispatch.constants import TERMINAL_STATES
 from lib.dispatch.types import BaseCheck, FailedCheck
 from lib.dispatcher import Comment, TicketRef, TrackedTicket, safe_ship_error
 from lib.evidence.ci import CIEvidence, MainRed, ci_evidence, main_red
@@ -799,8 +799,8 @@ def _holding(lines: GateLines, capped: bool) -> GateLines:
 class _Holder:
     """A fed ticket's feeder row: its gate lines, PR, whether its PR ended
     (`released`), its dispatcher ticket, whether it last held as capped and
-    whether its PR's status is still read (`watch`: unreleased, or fed with a
-    ticket not yet merged or done, so a later abandoned label retires it)."""
+    whether its PR's status is still read (`watch`: unreleased, or fed or
+    done, so a later abandoned label retires it)."""
 
     lines: GateLines
     pull: Ref | None
@@ -2004,20 +2004,11 @@ class Feeder:
         """Tickets fed or feeding, and whether each one's PR status is still read."""
         with self.queue.connect() as connection:
             connection.row_factory = sqlite3.Row
-            finished = "0"
-            if _has_table(connection, "ticket_state"):
-                columns = {row[1] for row in connection.execute("PRAGMA table_info(ticket_state)")}
-                if {"repo", "ticket_id", "workflow_state"} <= columns:
-                    finished = f"""EXISTS (
-                        SELECT 1 FROM ticket_state AS ticket
-                        WHERE lower(ticket.repo) = feed.repo AND ticket.ticket_id = feed.ticket_id
-                          AND ticket.workflow_state IN ({",".join(f"'{state}'" for state in FINISHED_STATES)})
-                    )"""
             rows = connection.execute(
                 f"""
                 SELECT repo, issue, tracker, pr_number, ticket_id, touches, conflicts,
                        released, capped_release,
-                       NOT released OR (state IN ({",".join("?" * len(FED))}) AND NOT {finished}) AS watch
+                       NOT released OR state IN ({",".join("?" * len(FED))}) AS watch
                 FROM {FEEDER_TABLE} AS feed
                 WHERE state IN ({",".join("?" * len(HOLDING))})
                 """,

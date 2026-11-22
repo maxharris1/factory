@@ -223,17 +223,21 @@ def test_a_row_released_on_an_earlier_poll_is_retired_when_its_pr_is_labelled(tm
     assert rows(tmp_path / "orch.db")["1"]["state"] == "abandoned"
 
 
-def test_a_released_row_of_a_merged_ticket_is_not_read_again(tmp_path: Path) -> None:
+@pytest.mark.parametrize("workflow", ["merged", "done"])
+def test_a_released_row_of_a_finished_ticket_is_retired_when_its_pr_is_labelled(
+    tmp_path: Path, workflow: str
+) -> None:
     feeder, github, pull = _done_row(tmp_path)
     github.statuses = {pull: MERGED}
     feeder.feed_once()
-    _state(tmp_path, int(pull.key), "merged")
-    reads = len(github.status_reads)
+    _state(tmp_path, int(pull.key), workflow)
+    github.statuses = {pull: replace(MERGED, abandoned=True)}
 
     feeder.feed_once()
+    feeder.feed_once()
 
-    assert all(pull not in read for read in github.status_reads[reads:])
-    assert rows(tmp_path / "orch.db")["1"]["state"] == "done"
+    assert rows(tmp_path / "orch.db")["1"]["state"] == "abandoned"
+    assert "#1 fed, job queued" not in _status(tmp_path)
 
 
 def test_a_labelled_retirement_lost_to_a_lock_lands_on_the_next_poll(
