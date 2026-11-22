@@ -23,11 +23,12 @@ from lib.dispatch.helpers import (
     _round_number,
     _scope,
     _state_for_action,
+    grant_open,
     red_checks,
 )
 from lib.dispatch.plan import gap_of
 from lib.dispatch.transitions import write_workflow_state
-from lib.dispatch.types import Comment, Registration, TrackedTicket
+from lib.dispatch.types import Comment, Registration, RoundGrant, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import Job, JobRequest, _job
 from lib.queue import plan_round as _plan_round
@@ -274,6 +275,8 @@ class QuestionsMixin:
         self,
         ticket: TrackedTicket,
         comment: Comment,
+        *,
+        grant: RoundGrant | None = None,
     ) -> tuple[bool, str] | None:
         with self._connect() as connection:
             paused = connection.execute(
@@ -321,13 +324,12 @@ class QuestionsMixin:
             None,
         )
         stop = self._parked_for_max(ticket)
-        decisions = (
-            [self._stop_decision(ticket, question, stop, comment, _STOP_DEFAULTS[stop])]
-            if question is not None and stop in _STOP_DEFAULTS
-            else decisions_of(question, comment)
-        )
-        with self._connect() as connection:
-            record_decisions(connection, ticket, paused["paused_question_id"], decisions)
+        if grant is not None and grant.released_by == "engine":
+            decisions = []
+        elif question is not None and stop in _STOP_DEFAULTS:
+            decisions = [self._stop_decision(ticket, question, stop, comment, _STOP_DEFAULTS[stop])]
+        else:
+            decisions = decisions_of(question, comment)
         paused_plan = gap_of(question) if question is not None else None
         if action == "build" and paused["paused_plan_text"] is not None:
             plan_text = paused["paused_plan_text"]
@@ -338,49 +340,79 @@ class QuestionsMixin:
         else:
             plan_text = None
         unmapped = (prior or {}).get("unmapped") if action == "plan" else None
-        request = JobRequest(
-            repo=ticket.repo,
-            ticket_id=ticket.ticket_id,
-            action=action,
-            recipient=recipient,
-            source_comment_id=comment.id,
-            timeout_seconds=ticket.job_timeout_minutes * 60,
-            generation=generation,
-            head=head,
-            detail=self._job_detail(
-                ticket,
-                action=action,
-                head=head,
-                round_number=(
-                    None if action == "plan" else self._review_context(ticket)[1] + 1
-                ),
-                instruction=_comment_link(comment),
-                plan_text=plan_text if isinstance(plan_text, str) and plan_text else None,
-                resume=True,
-                update=UpdateScope.from_detail(prior or {}, head),
-                plan_round=(
-                    int(paused["plan_gap_count"]) + 1 if action == "plan" else None
-                ),
-                ci_failure=red_checks(ticket, head) if action == "fix" else (),
-                unmapped=unmapped if isinstance(unmapped, str) and unmapped else None,
-            ),
-        )
-        ticket = self._fresh_issue(ticket)
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            self._enqueue_step(
-                connection,
-                ticket,
-                comment,
-                request,
-                dedupe_key=(
-                    f"t5:{_scope(ticket.repo, ticket.ticket_id)}:"
-                    f"{paused['paused_question_id']}:{comment.id}"
-                ),
-            )
-            connection.commit()
+        round_number = None if action == "plan" else self._review_context(ticket)[1] + 1
+        fresh = self._fresh_issue(ticket)
         resumed_state = _state_for_action(action)
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                """
+                SELECT workflow_state, paused_question_id FROM ticket_state
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+            if (
+                current is None
+                or current["workflow_state"] != "waiting-max"
+                or current["paused_question_id"] != paused["paused_question_id"]
+                or (grant is not None and not grant_open(connection, ticket, grant, current["paused_question_id"]))
+            ):
+                connection.commit()
+                return None
+            record_decisions(connection, ticket, paused["paused_question_id"], decisions)
+            if grant is not None:
+                connection.execute(
+                    """
+                    UPDATE ticket_state SET cap_extra = cap_extra + 1
+                    WHERE repo = ? AND ticket_id = ? AND review_round >= ?
+                    """,
+                    (ticket.repo.lower(), ticket.ticket_id, self._effective_cap(ticket, connection)),
+                )
+            self._enqueue_step(
+                connection,
+                fresh,
+                comment,
+                JobRequest(
+                    repo=ticket.repo,
+                    ticket_id=ticket.ticket_id,
+                    action=action,
+                    recipient=recipient,
+                    source_comment_id=comment.id,
+                    timeout_seconds=ticket.job_timeout_minutes * 60,
+                    generation=generation,
+                    head=head,
+                    detail=self._job_detail(
+                        ticket,
+                        action=action,
+                        head=head,
+                        round_number=round_number,
+                        instruction=_comment_link(comment),
+                        plan_text=plan_text if isinstance(plan_text, str) and plan_text else None,
+                        resume=True,
+                        cap=self._effective_cap(ticket, connection),
+                        update=UpdateScope.from_detail(prior or {}, head),
+                        plan_round=(
+                            int(paused["plan_gap_count"]) + 1 if action == "plan" else None
+                        ),
+                        ci_failure=red_checks(ticket, head) if action == "fix" else (),
+                        unmapped=unmapped if isinstance(unmapped, str) and unmapped else None,
+                        connection=connection,
+                    ),
+                ),
+                dedupe_key=(
+                    f"t5:{_scope(ticket.repo, ticket.ticket_id)}:{paused['paused_question_id']}:"
+                    f"{comment.id if grant is None else grant.key}"
+                ),
+            )
+            if grant is not None:
+                connection.execute(
+                    """
+                    INSERT INTO review_events (repo, ticket_id, comment_id, outcome)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (ticket.repo.lower(), ticket.ticket_id, grant.key, f"resumed-{action}"),
+                )
             write_workflow_state(
                 connection,
                 ticket.repo,
@@ -397,7 +429,8 @@ class QuestionsMixin:
                     "paused_plan_text": None,
                 },
             )
-        self._write_state_label(ticket, resumed_state)
+            connection.commit()
+        self._write_state_label(fresh, resumed_state)
         return True, f"resumed-{action}"
 
     def _decisions(
