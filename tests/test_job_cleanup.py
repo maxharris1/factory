@@ -987,7 +987,7 @@ def test_cleanup_relocks_when_the_lock_was_replaced(tmp_path: Path, monkeypatch)
 
     def flock(fd, operation):
         if threading.current_thread() is waiter:
-            waits.append(os.fstat(fd if isinstance(fd, int) else fd.fileno()).st_ino)
+            waits.append(os.fstat(fd.fileno()).st_ino)
         real_flock(fd, operation)
 
     def wait_then_enter() -> None:
