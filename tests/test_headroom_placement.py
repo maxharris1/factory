@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from lib import usage_readings
 from lib.device_pool import DevicePool, free_slots, placement_blocks, used_slots
@@ -9,7 +12,7 @@ from lib.dispatcher import Dispatcher
 from lib.machines_yml import MachinesConfig, load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from tests.test_dispatcher import TRUSTED_LOGINS, FakeGrokDelivery, FakeReviewActions
-from tests.test_pair_placement import claims, local
+from tests.test_pair_placement import claims, local, remote
 
 NOW = 1_800_000_000.0
 
@@ -21,9 +24,21 @@ TWO_ON_BOX = (
 )
 
 
-def build(tmp_path: Path, now: list[float]) -> tuple[DevicePool, SQLiteJobQueue, MachinesConfig]:
+A_ON_FULL_BOX_B_ON_FAR = (
+    "accounts:\n"
+    "  - {id: claude-a, harness: claude}\n"
+    "  - {id: claude-b, harness: claude}\n"
+    "devices:\n"
+    + local(1, "{claude: {bot: claude-bot, account: claude-a}, codex: codex-bot}")
+    + remote("far", 8, "{claude: {bot: claude-bot, account: claude-b}, codex: codex-bot}")
+)
+
+
+def build(
+    tmp_path: Path, now: list[float], text: str = TWO_ON_BOX
+) -> tuple[DevicePool, SQLiteJobQueue, MachinesConfig]:
     path = tmp_path / "machines.yml"
-    path.write_text(TWO_ON_BOX, encoding="utf-8")
+    path.write_text(text, encoding="utf-8")
     config, findings = load_machines_yml(path)
     assert config is not None, findings
     queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: now[0])
@@ -154,3 +169,52 @@ def test_a_queued_job_keeps_its_timeout_through_a_floor_that_clears(tmp_path: Pa
     (job,) = [job for job in queue.outstanding() if job.id == job_id]
     assert job.state == "queued", "the floor's hold did not use up its timeout"
     assert pool.claim("claude") is not None
+
+
+def _capped(config: MachinesConfig) -> MachinesConfig:
+    return replace(
+        config, accounts=tuple(replace(a, max_jobs=1) if a.id == "claude-a" else a for a in config.accounts)
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "shape"),
+    [(TWO_ON_BOX, _capped), (A_ON_FULL_BOX_B_ON_FAR, lambda config: config)],
+    ids=["other-account-at-max-jobs", "other-account-device-full"],
+)
+def test_a_queued_job_keeps_its_timeout_while_a_floor_blocks_the_only_free_alternative(
+    tmp_path: Path, text: str, shape
+) -> None:
+    now = [NOW]
+    _, queue, config = build(tmp_path, now, text)
+    config = shape(config)
+    pool = DevicePool(queue, config)
+    read(queue, "claude-a", 0.30, NOW - 60)
+    read(queue, "claude-b", 0.96, NOW - 60)
+    with queue.connect() as connection:
+        connection.execute(f"UPDATE {usage_readings.ACCOUNT_READINGS} SET resets_at = ?", (int(NOW) + 590,))
+    busy = queue.enqueue(JobRequest("owner/repo", "busy", "build", "claude", "go-busy", 5400), dedupe_key="busy")
+    assert pool.claim("claude")[1].account == "claude-a"
+    waiting = queue.enqueue(
+        JobRequest("owner/repo", "wait", "build", "claude", "go-wait", 600), dedupe_key="wait"
+    ).id
+
+    dispatcher = Dispatcher(
+        queue.path,
+        queue,
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+        devices=SimpleNamespace(config=config, pool=pool, reconcile=lambda *_: None),
+    )
+    for seconds in range(60, 601, 60):
+        now[0] = NOW + seconds
+        queue.heartbeat(busy.id, owner="claude")
+        if seconds < 600:
+            assert pool.claim("claude") is None, "a is busy and b is under the floor"
+        dispatcher.reconcile_jobs()
+
+    with queue.connect() as connection:
+        (state,) = connection.execute("SELECT state FROM jobs WHERE id = ?", (waiting,)).fetchone()
+    assert state == "queued", "the floor's hold did not use up its timeout"
+    assert pool.claim("claude")[1].account == "claude-b"

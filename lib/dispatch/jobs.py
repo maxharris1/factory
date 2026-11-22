@@ -261,6 +261,8 @@ class JobsMixin:
             return lambda job: False
         with self.queue.connect() as connection:
             loads = account_loads(connection, config, self.queue.now())
+        used = used_slots(self.queue, config)
+        blocked = placement_blocks(self.queue, config, self._head())
         pins = self._pins()
 
         def held(job: Job) -> bool:
@@ -272,7 +274,7 @@ class JobsMixin:
                 if device.takes_new(harness) and (allowed is None or device.name in allowed)
                 for account in config.accounts_on(device.name, harness)
             }
-            return bool(accounts) and accounts <= loads.held
+            return bool(accounts & loads.held) and free_slots(config, harness, used, blocked, allowed=allowed) == 0
 
         return held
 
