@@ -384,7 +384,8 @@ def test_signout_is_refused_while_the_pair_holds_a_running_job(box: Box) -> None
     def busy():
         yield settings_apply.Held(running=lambda config: {"pc": 1},
                                   commit_version=lambda machines: None,
-                                  pairs=lambda config: [RunningPair("job-1", "claude-b", "pc", NOW)])
+                                  pairs=lambda config: [RunningPair("job-1", "claude-b", "pc", NOW)],
+                                  hold=lambda account, device, now: None)
 
     box.applier = replace(box.applier, claims=busy)
     rid = box.request("signout", account="claude-b")
@@ -414,7 +415,8 @@ def test_a_running_job_on_another_device_or_account_does_not_refuse_a_signout(bo
         yield settings_apply.Held(running=lambda config: {"pc": 1},
                                   commit_version=lambda machines: None,
                                   pairs=lambda config: [RunningPair("job-1", "claude-c", "pc", NOW),
-                                                        RunningPair("job-2", "claude-b", "lap", NOW)])
+                                                        RunningPair("job-2", "claude-b", "lap", NOW)],
+                                  hold=lambda account, device, now: None)
 
     box.applier = replace(box.applier, claims=busy)
     box.request("signout", account="claude-b")

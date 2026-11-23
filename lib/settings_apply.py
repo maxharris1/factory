@@ -99,6 +99,7 @@ PENDING = "pending"
 REFUSED = "refused"
 FAILED = "failed"
 SIGNED_OUT = "signed-out"
+SIGNING_OUT = "signing out"
 
 REQUEST_NAME = re.compile(r"^([A-Za-z0-9_-]{16,64})\.json$")
 REQUESTED_AT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
@@ -577,11 +578,12 @@ class Held:
     running: Callable[[MachinesConfig], Mapping[str, int]]
     commit_version: Callable[[Path], int | None]
     pairs: Callable[[MachinesConfig], list[RunningPair]]
+    hold: Callable[[str, str, float], None]
 
 
 ClaimLock = Callable[[], AbstractContextManager[Held]]
 NO_DATABASE = Held(running=lambda config: {}, commit_version=lambda machines: None,
-                   pairs=lambda config: [])
+                   pairs=lambda config: [], hold=lambda account, device, now: None)
 
 
 def claim_lock(db: Path) -> ClaimLock:
@@ -602,9 +604,14 @@ def claim_lock(db: Path) -> ClaimLock:
                     return None
                 return live.written
 
+            def hold_pair(account: str, device: str, now: float) -> None:
+                account_doctor.hold(connection, account, device, "doctor", SIGNING_OUT, now)
+                connection.execute("COMMIT")
+
             yield Held(running=lambda config: slots_in_use(connection, config),
                        commit_version=commit_version,
-                       pairs=lambda config: running_pairs(connection, config))
+                       pairs=lambda config: running_pairs(connection, config),
+                       hold=hold_pair)
         finally:
             connection.close()
 
@@ -645,7 +652,7 @@ class Applier:
         from lib.account_settings import PairRequest
 
         if isinstance(request, PairRequest):
-            return self._apply_pair(request)
+            return self._apply_signout(request) if request.op == "signout" else self._apply_pair(request)
         try:
             with self.claims() as held:
                 old_bytes, new_text, previous = self._plan(request, held)
@@ -693,8 +700,6 @@ class Applier:
         return old_bytes, new_text, previous
 
     def _apply_pair(self, request: PairRequest) -> AuditEntry:
-        if request.op == "signout":
-            return self._apply_signout(request)
         try:
             config, device, harness = self._pair(request)
         except Refused as refusal:
@@ -718,9 +723,9 @@ class Applier:
             config, device, harness = self._pair(request)
         except Refused as refusal:
             return self._entry(request, REFUSED, None, refusal.error)
-        home = config.account_home(device.name, harness, request.account)
-        if home is None:
+        if request.account == config.accounts_on(device.name, harness)[0]:
             return self._entry(request, REFUSED, None, "default-account")
+        blocked = account_doctor.no_ssh_path(device, harness)
         previous = None
         try:
             with closing(sqlite3.connect(self.db, timeout=30, isolation_level=None)) as connection:
@@ -730,11 +735,14 @@ class Applier:
                     with self.claims() as held:
                         busy = any(pair.account == request.account and pair.device == device.name
                                    for pair in held.pairs(config))
+                        if not busy and blocked is None:
+                            held.hold(request.account, device.name, self.clock())
                 except sqlite3.Error:
                     return self._entry(request, REFUSED, previous, "cannot read running jobs")
                 if busy:
                     return self._entry(request, REFUSED, previous, "running-job")
-                error = self._logout(device, harness, home)
+                error = blocked or self._logout(
+                    device, harness, config.account_home(device.name, harness, request.account))
                 account_doctor.run(connection, config, self.transport, self.clock(), self.repo)
                 new = _signin(connection, request)
         except sqlite3.Error:
@@ -745,8 +753,6 @@ class Applier:
         return replace(entry, new=_clip(new))
 
     def _logout(self, device: Device, harness: str, home: str) -> str | None:
-        if account_doctor.no_ssh_path(device, harness) is not None:
-            return "no-ssh-path"
         exchanged = self.transport.exchange(
             account_doctor.ssh_argv(device, harness, account_doctor.logout_script(harness, home)),
             timeout=PROBE_TIMEOUT_SECONDS)
