@@ -32,7 +32,13 @@ class ResumeMixin:
                 """,
                 (*key, comment.id),
             ).fetchone()
-            if replayed is None:
+            row = connection.execute(
+                "SELECT review_round, generation FROM ticket_state WHERE repo = ? AND ticket_id = ?",
+                key,
+            ).fetchone()
+            if replayed is not None:
+                stopped = int(row["review_round"]) + 1
+            else:
                 held = self._held_stop(ticket)
                 if held is None or held[0] == "unsat" or not self._may_lift_cap(comment.author):
                     connection.commit()
@@ -50,10 +56,6 @@ class ResumeMixin:
                     """,
                     (*key, comment.id),
                 )
-                row = connection.execute(
-                    "SELECT review_round, generation FROM ticket_state WHERE repo = ? AND ticket_id = ?",
-                    key,
-                ).fetchone()
                 stopped = int(row["review_round"])
                 self._enqueue_step(
                     connection,
@@ -96,9 +98,8 @@ class ResumeMixin:
                     },
                 )
             connection.commit()
-        if replayed is None:
-            self._write_state_label(ticket, "review")
-            self._queue_qa(ticket, comment, head=ticket.current_head, review_round=stopped)
+        self._write_state_label(ticket, "review")
+        self._queue_qa(ticket, comment, head=ticket.current_head, review_round=stopped)
         return True, "overruled-finding"
 
     def _resume_after_cap(

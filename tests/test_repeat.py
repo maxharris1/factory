@@ -9,6 +9,7 @@ import pytest
 from lib import job_detail
 from lib.brief.common import decided_section
 from lib.dispatch.verdict.repeat import STOP_OPTIONS, _quote
+from lib.dispatcher import RetryableStateError
 from lib.intake_risk import INTAKE_RISK_SCHEMA
 from lib.orchestrate import approver_go_post
 from tests.test_approver_credential import MAX, AppFlow, grok_wakes
@@ -489,6 +490,37 @@ def test_a_replayed_overrule_queues_one_review(tmp_path: Path) -> None:
 
     assert work(flow) == {**before, "review": before["review"] + 1, "review_round": 2}
     assert [decision["answer_id"] for decision in decisions(flow)] == ["go-overrule"]
+
+
+@pytest.mark.parametrize(
+    ("make", "stopped"),
+    [(repeat_stop, 2), (capped_stop, 3), (stalled_stop, 3)],
+    ids=["repeat", "capped", "stalled"],
+)
+def test_a_replayed_overrule_repairs_a_failed_review_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make, stopped: int
+) -> None:
+    flow = make(tmp_path)
+    before = work(flow)
+    actions = flow.dispatcher.review_actions
+    write = actions.set_state
+    failures = ["review"]
+
+    def set_state(ticket, state: str) -> None:
+        if state in failures:
+            failures.remove(state)
+            raise RuntimeError("transient label failure")
+        write(ticket, state)
+
+    monkeypatch.setattr(actions, "set_state", set_state)
+    with pytest.raises(RetryableStateError):
+        flow.post("go-overrule", OVERRULE, MAX)
+    for _ in range(3):
+        flow.dispatcher.process(flow.snapshot())
+
+    assert work(flow) == {**before, "review": before["review"] + 1, "review_round": stopped - 1}
+    assert flow.state()["workflow_state"] == "review"
+    assert actions.states[-1] == "review"
 
 
 def test_another_round_after_an_overrule_has_nothing_to_release(tmp_path: Path) -> None:
