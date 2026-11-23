@@ -801,6 +801,20 @@ def test_an_unread_carry_keeps_the_hold_and_is_read_again_next_poll(
     assert actions.merges == [(True, NEW_HEAD)]
 
 
+@pytest.mark.parametrize("error", [ValueError("no commit"), OSError("git unavailable")])
+def test_an_unread_carry_leaves_the_ok_unhandled_until_read(
+    tmp_path: Path, error: Exception
+) -> None:
+    dispatcher, queue, actions = held_at_new_head(tmp_path, FakeHoldCarry(error, MERGED_MAIN))
+
+    dispatcher.process(snapshot(approve(NEW_HEAD), ok(HEAD), head=NEW_HEAD, files=PR_FILES))
+    assert ok_outcome(queue) is None
+
+    dispatcher.process(snapshot(approve(NEW_HEAD), ok(HEAD), head=NEW_HEAD, files=PR_FILES))
+    assert ok_outcome(queue) == "hold-ok"
+    assert actions.merges == [(True, NEW_HEAD)]
+
+
 def test_a_new_head_with_its_own_commit_after_the_ok_still_needs_a_new_ok(
     tmp_path: Path,
 ) -> None:
@@ -966,6 +980,21 @@ def test_with_the_engine_on_an_unknown_probe_escalates(
     checks = json.loads(row["checks"])
     assert [check["name"] for check in checks] == CHECKS
     assert [check["passed"] for check in checks] == [None, None, None, None, True]
+
+
+@pytest.mark.parametrize("error", [ValueError("no commit"), OSError("git unavailable")])
+def test_with_the_engine_on_an_unread_probe_leaves_the_ok_unhandled_until_read(
+    tmp_path: Path, error: Exception
+) -> None:
+    dispatcher, queue, actions = engine_at_new_head(tmp_path, FakeProbe(error, PURE))
+
+    dispatcher.process(moved())
+    assert ok_outcome(queue) is None
+    assert_held(queue, actions, NEW_HEAD)
+
+    dispatcher.process(moved())
+    assert ok_outcome(queue) == "hold-ok"
+    assert actions.merges == [(True, NEW_HEAD)]
 
 
 def test_with_the_engine_on_pending_ci_waits_with_no_wake_and_lands_once_green(

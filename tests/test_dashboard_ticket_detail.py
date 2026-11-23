@@ -2822,3 +2822,27 @@ def test_each_ok_outcome_shows_on_its_ticket_page(tmp_path: Path) -> None:
         assert chips == ["ok: rejected-hold-ok-author", "ok: ok-no-hold", "ok: hold-ok"], render
     other = _both(tmp_path, snapshot, LIVE["queued"][0])
     assert all('class="chip muted ok"' not in view for view in other.values())
+
+
+@needs_node
+def test_tickets_whose_shown_repos_cut_alike_keep_their_own_ok_outcomes(tmp_path: Path) -> None:
+    from lib.dashboard import collect_snapshot
+    from tests.test_dashboard import add_ticket, seeded
+
+    db, log = seeded(tmp_path)
+    shared = "o" * 39 + "/" + "r" * 70
+    outcomes = {shared + "a": "hold-ok", shared + "b": "ok-no-hold"}
+    with sqlite3.connect(db) as connection:
+        for repo, outcome in outcomes.items():
+            add_ticket(connection, repo, "1", state="waiting-max")
+            connection.execute(
+                "INSERT INTO handled_comments (repo, ticket_id, comment_id, outcome) VALUES (?, ?, ?, ?)",
+                (repo, "1", "ok-1", outcome),
+            )
+    snapshot = collect_snapshot(db, log, now=NOW)
+    for index, (repo, outcome) in enumerate(outcomes.items()):
+        out = tmp_path / str(index)
+        out.mkdir()
+        for render, view in _both(out, snapshot, repo + "#1").items():
+            chips = re.findall(r'<span class="chip muted ok">([^<]*)</span>', view)
+            assert chips == ["ok: " + outcome], (render, repo)
