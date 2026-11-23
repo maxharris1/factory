@@ -2,13 +2,33 @@
 
 from __future__ import annotations
 
+import re
+from functools import cache
+
 
 def redact_output(text: str) -> str:
     from lib.dashboard import redact, redact_key_blocks
     from lib.dispatch.errors_text import _redact
 
-    blocks = _scrub_credential_blocks(redact_key_blocks(text.splitlines()))
+    spanned = _spanning_secret().sub(r"\1[redacted]", text)
+    blocks = _scrub_credential_blocks(redact_key_blocks(spanned.splitlines()))
     return _redact(redact("\n".join(blocks)))
+
+
+@cache
+def _spanning_secret() -> re.Pattern[str]:
+    """A secret's value as a shell or a parser reads it: a quoted string
+    through its closing quote, newlines included, or to the end when it
+    never closes, and a bare value through backslash-newline continuations."""
+    from lib.dashboard import SECRET_NAME
+
+    return re.compile(
+        rf"(?i)\b({SECRET_NAME}[\"']?\s*[:=]\s*)"
+        r"(\$?\"(?:[^\"\\]|\\.)*(?:\"|\Z)"
+        r"|\$?'(?:[^'\\]|\\.)*(?:'|\Z)"
+        r"|(?:[^\s\"'\\]|\\.)*\\\n(?:[^\s\\]|\\.)*)",
+        re.DOTALL,
+    )
 
 
 def _scrub_credential_blocks(lines: list[str]) -> list[str]:

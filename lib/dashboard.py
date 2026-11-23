@@ -333,11 +333,14 @@ _KNOWN_TOKEN = re.compile(
     r"|eyJ[A-Za-z0-9_\-]{8,}(?:\.[A-Za-z0-9_\-]+)*"
     r")"
 )
-_SECRET_ASSIGNMENT = re.compile(
-    r"(?i)\b([A-Za-z0-9_\-]*"
+SECRET_NAME = (
+    r"[A-Za-z0-9_\-]*"
     r"(?:token|secret|passw(?:or)?d|passphrase|pwd|api[_\-]?key|key|auth"
     r"|credential|session|cookie|signature)"
-    r"[A-Za-z0-9_\-]*)"
+    r"[A-Za-z0-9_\-]*"
+)
+_SECRET_ASSIGNMENT = re.compile(
+    rf"(?i)\b({SECRET_NAME})"
     r"([\"']?\s*[:=]\s*)"
     # A quoted string (escapes allowed, closing quote optional when cut short)
     # or a bare value.

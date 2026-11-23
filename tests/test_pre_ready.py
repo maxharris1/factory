@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -118,14 +119,16 @@ def test_orch_python_names_the_interpreter_orch_runs_under(tmp_path: Path) -> No
     repo, head = checkout(tmp_path)
     caller = {"PATH": "/usr/bin:/bin", "ORCH_PYTHON": "/elsewhere/python3"}
 
+    same = "import os, sys; print(os.path.abspath(sys.executable) == os.path.abspath(sys.argv[1]))"
+
     result = run(
-        CheckCommand('"$ORCH_PYTHON" -c "import sys; print(sys.executable)"', 10),
+        CheckCommand(f'"$ORCH_PYTHON" -c {shlex.quote(same)} {shlex.quote(sys.executable)}', 10),
         repo,
         head,
         check_environ(caller, None),
     )
 
-    assert (result.passed, os.path.abspath(result.tail)) == (True, os.path.abspath(sys.executable))
+    assert (result.passed, result.tail) == (True, "True")
 
 
 def test_long_output_is_cut_to_its_last_lines(tmp_path: Path) -> None:
@@ -195,7 +198,16 @@ QUOTED_SECRETS = (
     "secret: 'it\\'s SYNTHETIC_VALUE'",
     'GH_TOKEN="x y SYNTHETIC_VALUE" next',
     "password:\n  SYNTHETIC_VALUE",
+    'password="first\nSYNTHETIC_VALUE"',
+    "token='first\n\nSYNTHETIC_VALUE' after",
+    'export DB_PASSWORD="first\\"\nSYNTHETIC_VALUE"',
+    '{"api_key": "first\n  SYNTHETIC_VALUE"}',
+    'secret="first\nSYNTHETIC_VALUE',
 )
+
+
+def test_a_bare_secret_continued_by_a_backslash_newline_is_redacted_whole() -> None:
+    assert cut("PASSWORD=first\\\nSYNTHETIC_VALUE next") == "<secret> next"
 
 
 @pytest.mark.parametrize("line", QUOTED_SECRETS)
@@ -220,3 +232,19 @@ def test_a_failed_or_timed_out_check_redacts_quoted_secrets(tmp_path: Path, endi
 
     assert not result.passed
     assert "first" not in result.tail and "SYNTHETIC_VALUE" not in result.tail
+
+
+@pytest.mark.parametrize("ending", ["exit 1", "sleep 30"])
+def test_a_quoted_secret_longer_than_the_line_cut_is_redacted_whole(
+    tmp_path: Path, ending: str
+) -> None:
+    repo, head = checkout(tmp_path)
+    value = "\n".join(f"part{n}" for n in range(TAIL_LINES + 5)) + "\nSYNTHETIC_VALUE"
+    script = tmp_path / "secret.txt"
+    script.write_text(f'password="{value}"\ndone\n', encoding="utf-8")
+
+    result = run(CheckCommand(f"cat {script}; {ending}", 1), repo, head, dict(os.environ))
+
+    assert not result.passed
+    assert "SYNTHETIC_VALUE" not in result.tail and "part4" not in result.tail
+    assert result.tail.endswith("done")
