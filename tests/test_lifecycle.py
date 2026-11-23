@@ -56,9 +56,6 @@ REPO, TICKET = "owner/repo", "42"
 
 
 def lose(state: Path) -> None:
-    """Delete the state directory the way a lost disk would. Unclosed sqlite
-    connections sit in reference cycles; collect them first so closing the
-    last one cannot delete the WAL files while rmtree walks the directory."""
     gc.collect()
     shutil.rmtree(state)
 
