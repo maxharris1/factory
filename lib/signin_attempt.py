@@ -21,6 +21,8 @@ from typing import IO
 from lib import account_doctor, heal
 from lib.account_doctor import SignIn
 from lib.account_signin import (
+    GROUP_LINE_BYTES,
+    GROUP_MARKER,
     End,
     Outcome,
     disturbed,
@@ -54,7 +56,7 @@ def _popen(argv: list[str]) -> subprocess.Popen:
 class _Output:
     def __init__(self, stream: IO[bytes]):
         self._tail = bytearray()
-        self._head = bytearray()
+        self._marker = b""
         self._lock = threading.Lock()
         self.group: int | None = None
         self.grouped = threading.Event()
@@ -67,13 +69,21 @@ class _Output:
                     self._tail += chunk
                     del self._tail[:-OUTPUT_BYTES]
                 if not self.grouped.is_set():
-                    self._head += chunk[:OUTPUT_BYTES - len(self._head)]
-                    self.group = first_process_group(bytes(self._head))
-                    if self.group is not None or len(self._head) >= OUTPUT_BYTES:
-                        self.grouped.set()
+                    self._find_group(chunk)
         except (OSError, ValueError):
             pass
         self.grouped.set()
+
+    def _find_group(self, chunk: bytes) -> None:
+        window = self._marker + chunk
+        at = window.find(GROUP_MARKER)
+        if at < 0:
+            self._marker = window[1 - len(GROUP_MARKER):]
+            return
+        self._marker = window[at:at + GROUP_LINE_BYTES]
+        self.group = first_process_group(self._marker)
+        if self.group is not None or len(self._marker) >= GROUP_LINE_BYTES:
+            self.grouped.set()
 
     def bytes(self) -> bytes:
         with self._lock:

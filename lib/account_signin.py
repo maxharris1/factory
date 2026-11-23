@@ -18,7 +18,9 @@ class Prompt:
 
 
 End = Literal["exit", "expired", "cancelled", "unrecognized-output"]
-PGID = re.compile(rb"ORCH-SIGNIN-PGID ([0-9]{1,10})\r?\n")
+GROUP_MARKER = b"ORCH-SIGNIN-PGID "
+GROUP_LINE_BYTES = len(GROUP_MARKER) + 12
+PGID = re.compile(re.escape(GROUP_MARKER) + rb"([0-9]{1,10})\r?\n")
 KILL_GRACE_SECONDS = 3
 
 
@@ -107,7 +109,7 @@ def kill_script(pgid: int) -> str:
 
 
 def first_process_group(output: bytes) -> int | None:
-    at = output.find(b"ORCH-SIGNIN-PGID ")
+    at = output.find(GROUP_MARKER)
     found = None if at < 0 else PGID.match(output, at)
     return None if found is None or int(found[1]) < 2 else int(found[1])
 

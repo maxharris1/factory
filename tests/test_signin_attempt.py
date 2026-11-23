@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -562,3 +563,56 @@ def test_only_the_first_group_marker_counts() -> None:
     with pytest.raises(ValueError):
         kill_script(1)
     assert f"-lt {KILL_GRACE_SECONDS}" in kill_script(4242)
+
+
+@pytest.mark.parametrize("end", ["expired", "cancelled"])
+def test_a_login_profile_flooding_past_the_tail_before_the_marker_still_lets_the_end_kill_the_group(
+    attempts: Attempts, end: str,
+) -> None:
+    attempts.world.profile(f"export LOGNAME=claude-bot USER=claude-bot\nhead -c 90000 /dev/zero | tr '\\\\0' '.'\n")
+    attempts.runner.expiry_seconds = 2
+    attempts.mode("silent")
+
+    rid = attempts.start()
+    deadline = time.monotonic() + 20
+    while not (attempts.side / "claude.login-pid").exists():
+        assert time.monotonic() < deadline, "the fake CLI started"
+        time.sleep(0.05)
+    if end == "cancelled":
+        attempts.drop(rid, "cancel")
+    attempts.finish()
+
+    (line,) = attempts.lines(rid)
+    assert (line["result"], line["error"]) == (end, None)
+    pgid = attempts.login_pid("claude")
+    (kill,) = attempts.kill_calls()
+    assert f"kill -TERM -- -{pgid}" in kill["script"]
+    assert _group_gone(pgid)
+
+
+class _Reads(io.RawIOBase):
+    def __init__(self, reads: list[bytes]):
+        self._reads = reads
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer) -> int:
+        if not self._reads:
+            return 0
+        data = self._reads.pop(0)
+        buffer[:len(data)] = data
+        return len(data)
+
+
+@pytest.mark.parametrize("reads, group", [
+    ([b"." * 4096] * 22 + [b"\r\nORCH-SIG", b"NIN-PGID 42", b"424\r", b"\nlater ORCH-SIGNIN-PGID 77\n"], 42424),
+    ([b"." * 4096] * 22 + [b"ORCH-SIGNIN-PGID \r\nhostile ORCH-SIGNIN-PGID 77\n"], None),
+    ([b"." * 4096] * 22, None),
+])
+def test_the_group_marker_is_found_after_any_volume_and_only_the_first_counts(
+    reads: list[bytes], group: int | None,
+) -> None:
+    output = signin_attempt._Output(io.BufferedReader(_Reads(reads), buffer_size=4096))
+    assert output.grouped.wait(5)
+    assert output.group == group
