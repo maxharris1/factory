@@ -972,6 +972,17 @@ def test_main_grows_past_1600px_only_on_wide_screens_in_a_browser(base: dict) ->
     assert tiles[2560] > tiles[1600] and tiles[1920] > tiles[1600], tiles
 
 
+@needs_chrome
+@pytest.mark.timeout(30)
+def test_opening_a_page_that_settles_stale_fails_at_once_naming_the_link_state(base: dict) -> None:
+    browser = Browser()
+    try:
+        with pytest.raises(AssertionError, match="link stale"):
+            browser.open(_page_with_status_stub(_now(_phone_fit(base), 60), "index.html"), 1440)
+    finally:
+        browser.close()
+
+
 def test_topbar_markup_follows_the_artboard(base: dict) -> None:
     html = render_pages(base)["index.html"]
     top = html[html.index('<header class="topbar"') : html.index("</header>")]
