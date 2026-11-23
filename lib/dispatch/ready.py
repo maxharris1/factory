@@ -160,6 +160,8 @@ class ReadyMixin:
             return True, "rejected-unregistered-ready"
         if registration is Registration.PENDING:
             return False, "ready-awaiting-registration"
+        if self._superseded_by_rebase(ticket, comment):
+            return True, "ready-superseded-by-rebase"
         state, review_round = self._review_context(ticket)
         if state in ("planning", "plan-check"):
             return True, "rejected-ready-in-planning"

@@ -154,6 +154,7 @@ from lib.dispatch.questions import (
 from lib.dispatch.ready import (
     ReadyMixin,
 )
+from lib.dispatch.rebase import RebaseMixin
 from lib.dispatch.retry import (
     RetryMixin,
 )
@@ -244,6 +245,7 @@ class Dispatcher(
     QuestionsMixin,
     PlanMixin,
     RetryMixin,
+    RebaseMixin,
     JobsMixin,
     DetailMixin,
     InboxMixin,

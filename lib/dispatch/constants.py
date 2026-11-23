@@ -82,7 +82,7 @@ GROK_WAKE_REASONS = (
     CI_STALE_REASON,
 )
 GROK_WAKE_SKIP = frozenset({"done", "refused", "rejected", "unparsed", "stale"})
-CORE_KINDS = ("go", "plan", "ready", "retry")
+CORE_KINDS = ("go", "plan", "ready", "retry", "rebase")
 RETRY_REJECTION_NOTES = {
     "rejected-retry-author": (
         "a retry must come from grok-bot as orchestrator"
@@ -92,6 +92,20 @@ RETRY_REJECTION_NOTES = {
     "rejected-retry-not-stuck": "the ticket is not stuck; nothing to retry",
     "rejected-retry-job-active": (
         "a job is already queued or running for the ticket; nothing to retry"
+    ),
+}
+REBASE_REJECTION_NOTES = {
+    "rejected-rebase-author": (
+        "a rebase must come from grok-bot as orchestrator"
+        " (with the GitHub App switch on, from an approver)"
+    ),
+    "rejected-rebase-no-pr": "the ticket has no PR head to rebase",
+    "rejected-rebase-state": (
+        "the ticket is not in review, fixing, awaiting-ok, capped or handed-off;"
+        " nothing to rebase"
+    ),
+    "rejected-rebase-job-active": (
+        "a job is already queued or running for the ticket; nothing to rebase"
     ),
 }
 APPROVE_REJECTION_NOTES = {

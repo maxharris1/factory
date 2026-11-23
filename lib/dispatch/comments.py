@@ -230,6 +230,7 @@ class CommentsMixin:
                 "questions",
                 "answers",
                 "retry",
+                "rebase",
             ):
                 continue
             if kind != "retry" and self._is_stuck(ticket):
@@ -239,6 +240,8 @@ class CommentsMixin:
             try:
                 if kind == "retry":
                     handled, outcome = self._t_retry(ticket, comment, fields)
+                elif kind == "rebase":
+                    handled, outcome = self._t_rebase(ticket, comment, fields)
                 elif kind == "go":
                     handled, outcome = self._t1(ticket, comment, fields)
                 elif kind == "plan":

@@ -15,6 +15,7 @@ from lib.dispatch.constants import (
     APPROVE_REJECTION_NOTES,
     GROK_WAKE_REASONS,
     GROK_WAKE_SKIP,
+    REBASE_REJECTION_NOTES,
     RETRY_REJECTION_NOTES,
 )
 from lib.dispatch.helpers import (
@@ -38,6 +39,7 @@ from lib.update_check import RebaseScope, UpdateScope
 
 if TYPE_CHECKING:
     from lib.dispatch.qa import QaFix
+    from lib.dispatch.rebase import RebaseStep
     from lib.evidence.ci import CIEvidence
 
 DriverWakeStep = Literal["wait", "rewake", "flag"]
@@ -563,10 +565,10 @@ class DetailMixin:
                         scope,
                     )
                 ]
-                + [request.detail or "{}"]
+                + ([request.detail or "{}"] if request.action == "review" else [])
             ),
         )
-        rebase = detail.get("rebase")
+        rebase = detail.get("rebase") if request.action == "review" else None
         if rebase is not None and rebase["last_reviewed_head"] == findings.reviewed_head:
             findings = replace(findings, reviewed_base=rebase["reviewed_base"])
         result = ticket.ci.get(request.head or "")
@@ -659,6 +661,7 @@ class DetailMixin:
         kind: str | None = None,
         update: UpdateScope | None = None,
         rebase: RebaseScope | None = None,
+        rebase_step: RebaseStep | None = None,
         plan_round: int | None = None,
         ci_failure: tuple[str, ...] = (),
         unmapped: str | None = None,
@@ -731,6 +734,8 @@ class DetailMixin:
             )
         if rebase is not None:
             context["rebase"] = asdict(rebase)
+        if rebase_step is not None:
+            context.update(kind="rebase", rebase=asdict(rebase_step))
         if size_flag is not None:
             context["size_flag"] = size_flag
         if ci_failure:
@@ -777,7 +782,11 @@ class DetailMixin:
             "outcome": outcome,
             "comment": _comment_link(comment),
         }
-        note = RETRY_REJECTION_NOTES.get(outcome) or APPROVE_REJECTION_NOTES.get(outcome)
+        note = (
+            RETRY_REJECTION_NOTES.get(outcome)
+            or REBASE_REJECTION_NOTES.get(outcome)
+            or APPROVE_REJECTION_NOTES.get(outcome)
+        )
         if note is not None:
             detail["note"] = note
         self.wake_grok_once(

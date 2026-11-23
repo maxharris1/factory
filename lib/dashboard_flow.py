@@ -69,6 +69,7 @@ QUEUE_JOB_BEFORE_ROW = frozenset(
         "unsat-fix",
         "update-queued",
         "held-base-update",
+        "rebase-queued",
     }
 )
 # A transition that only an approval won in another state can take: fixing ->
