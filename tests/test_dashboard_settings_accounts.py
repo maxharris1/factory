@@ -1,6 +1,3 @@
-"""settings.html's Accounts panel (#1363): one read-only card per accounts[]
-entry under Devices, drawn the same by the server and the script."""
-
 from __future__ import annotations
 
 import json

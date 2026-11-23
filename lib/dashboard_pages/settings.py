@@ -3,14 +3,7 @@ enabled, slot_max, harnesses, held slots, drain state and its recent change
 results from the settings audit log. Signed in through the #563 flow
 (`ghAuth` in common.py), each card gets a toggle for enabled and drain and a
 slot_max input that POST /api/settings; the orch host applies the queued
-request (lib/settings_apply.py).
-
-Under Devices, the read-only Accounts panel (#1363) draws one card per
-status.json accounts[] entry (lib/dashboard_accounts.py): its settings, usage
-against the headroom floor, running jobs, each device it is signed in on with
-the account doctor's status, and its recent account change results. A device
-whose sign-in is not ok shows the manual sign-in command for that device's
-bot and harness."""
+request (lib/settings_apply.py)."""
 
 from __future__ import annotations
 
@@ -66,7 +59,6 @@ def account_results(snapshot: dict, account_id: str) -> list[dict]:
 
 
 def percent(value: float | None) -> str:
-    # Half up, as the script's Math.floor(v * 100 + 0.5), so both draw the same digit.
     return "—" if value is None else f"{math.floor(value * 100 + 0.5)}%"
 
 
@@ -374,7 +366,6 @@ _SCRIPT = r"""
     var grid = add(root, el('div', 'st-grid'));
     devices.forEach(function (x) { add(grid, stCard(d, x)); });
   }
-  // #1363's read-only Accounts panel, the twin of _accounts.
   function acPct(v) { return v === null || v === undefined ? '—' : Math.floor(v * 100 + 0.5) + '%'; }
   function acHeadroom(a) {
     var h = a.headroom;
