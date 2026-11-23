@@ -198,6 +198,7 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
         ),
         "update": _update_scope(detail) if job.request.action == "review" else None,
         "rebase": _rebase_scope(detail) if job.request.action == "review" else None,
+        "rebased": job.request.action == "review" and detail.get("source") == "rebase",
         "size_flag": _size_flag(detail) if job.request.action == "review" else None,
         "qa": context is not None and context.config.qa is not None,
     }

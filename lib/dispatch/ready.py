@@ -40,7 +40,9 @@ from lib.dispatch.helpers import (
     _scope,
     failed_checks,
 )
+from lib.dispatch.rebase import RebaseStep, newest_rebase
 from lib.dispatch.retry import _harness_job_active
+from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import (
     CHECK_FAILED,
     BaseCheck,
@@ -67,6 +69,7 @@ _AFTER_BUILD_STATES = frozenset({"review", "fixing", "awaiting-ok", "handed-off"
 _UNANNOUNCED_GREEN_STATES = frozenset({"building", "fixing", "review"})
 _UNANNOUNCED_GREEN_SOURCE = "unannounced-green-head"
 _CI_LOG_READS = 64
+_REENTERS_FROM = {"handoff": ("handed-off", "merge-queue"), "rebase": ("fixing",)}
 
 
 class ReadyMixin:
@@ -178,6 +181,7 @@ class ReadyMixin:
             return True, "rejected-ready-at-base"
         reported_head = fields["head"]
         reentry: int | None = None
+        rebase: RebaseStep | None = None
         rereview = False
         update: UpdateScope | None = None
         if state == "updating":
@@ -198,6 +202,8 @@ class ReadyMixin:
             if reentry + 1 > self._effective_cap(ticket):
                 self._flag_ready_after_cap(ticket, comment, reported_head)
                 return True, "ready-after-cap"
+        elif state == "fixing" and (rebase := self._reviewed_rebase(ticket)) is not None:
+            reentry = rebase.review_round - 1
         if state == "awaiting-ok" and ticket.current_head is not None:
             held = self._red_ci_approval_covering(ticket, reported_head)
             if held is not None:
@@ -226,6 +232,8 @@ class ReadyMixin:
                 return True, "rejected-ready-at-base"
             ticket = fresh
             self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
+        if rebase is not None and _matching_head(head, rebase.from_head) is not None:
+            return self._rebase_noop(ticket, rebase)
         answered = self._verdict_after(
             ticket,
             comment,
@@ -273,7 +281,9 @@ class ReadyMixin:
                 return False, settled
             result = settled
         if reentry is not None:
-            if not self._reenter_after_handoff(ticket, reentry):
+            if not self._reenter_after_handoff(
+                ticket, reentry, after="handoff" if rebase is None else "rebase"
+            ):
                 return True, "stale-ready"
             review_round = reentry
         recorded_status, count = (
@@ -284,7 +294,12 @@ class ReadyMixin:
         generation = self._generation(ticket.repo, ticket.ticket_id)
         if covering is None and recorded_status in ("pending", "success", "not-run"):
             queued, answered = self._queue_review(
-                ticket, comment, head=head, generation=generation, update=update
+                ticket,
+                comment,
+                head=head,
+                generation=generation,
+                update=update,
+                source=None if rebase is None else "rebase",
             )
             if not queued:
                 return True, "capped-ready"
@@ -1170,31 +1185,60 @@ class ReadyMixin:
             steps.update(self._ci_step_reads.get(key, {}))
         return steps
 
-    def _reenter_after_handoff(self, ticket: TrackedTicket, approved_round: int) -> bool:
+    def _reenter_after_handoff(
+        self, ticket: TrackedTicket, approved_round: int, *, after: str = "handoff"
+    ) -> bool:
         """#108: a trusted ready after handoff re-enters review. The approved
         round counts as completed, so the next review is approved_round + 1.
-        A merge-queue ticket (#130) leaves the queue the same way. False when
-        the ticket left handed-off or merge-queue meanwhile."""
+        A merge-queue ticket (#130) leaves the queue the same way, and a
+        rebased head (#1408) from fixing. False when the ticket left those
+        states meanwhile."""
+        states = _REENTERS_FROM[after]
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             changed = connection.execute(
-                """
+                f"""
                 UPDATE ticket_state
                 SET review_round = ?, approved_head = NULL, approved_at = NULL,
                     approve_comment_id = NULL, update_failures = 0,
                     update_from_head = NULL
                 WHERE repo = ? AND ticket_id = ?
-                  AND workflow_state IN ('handed-off', 'merge-queue')
+                  AND workflow_state IN ({", ".join("?" for _ in states)})
                 """,
-                (approved_round, ticket.repo.lower(), ticket.ticket_id),
+                (approved_round, ticket.repo.lower(), ticket.ticket_id, *states),
             ).rowcount
             connection.commit()
         if changed == 1 and self.log is not None:
             self.log(
-                f"re-entry: {ticket.repo}#{ticket.ticket_id} after handoff, "
+                f"re-entry: {ticket.repo}#{ticket.ticket_id} after {after}, "
                 f"next review round {approved_round + 1}"
             )
         return changed == 1
+
+    def _reviewed_rebase(self, ticket: TrackedTicket) -> RebaseStep | None:
+        with self._connect() as connection:
+            rebase = newest_rebase(connection, (ticket.repo.lower(), ticket.ticket_id))
+        if rebase is None:
+            return None
+        reviewed = self._latest_review_head(ticket)
+        if reviewed is None or _matching_head(rebase.from_head, reviewed) is None:
+            return None
+        return rebase
+
+    def _rebase_noop(self, ticket: TrackedTicket, rebase: RebaseStep) -> tuple[bool, str]:
+        self._write_state_label(ticket, rebase.from_state)
+        with self._connect() as connection:
+            write_workflow_state(
+                connection,
+                ticket.repo,
+                ticket.ticket_id,
+                rebase.from_state,
+                source="rebase-noop",
+                at=self.queue.now(),
+                also=rebase.approval(),
+            )
+            connection.commit()
+        return True, "rebase-noop"
 
     def _verdict_after(
         self,
@@ -1394,7 +1438,7 @@ class ReadyMixin:
         nothing queued, past the cap."""
         _state, completed_rounds = self._review_context(ticket)
         review_round = completed_rounds + 1
-        if review_round > self._effective_cap(ticket):
+        if source != "rebase" and review_round > self._effective_cap(ticket):
             self.flag_attention(
                 ticket.repo,
                 ticket.ticket_id,
@@ -1425,7 +1469,7 @@ class ReadyMixin:
                     source=source,
                     rebase=(
                         self._rebase_scope(ticket, comment, head, review_round)
-                        if review_round > 1 and update is None
+                        if (review_round > 1 or source == "rebase") and update is None
                         else None
                     ),
                     size_flag=self._size_flag(ticket),

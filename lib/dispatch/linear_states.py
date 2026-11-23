@@ -6,7 +6,7 @@ from collections.abc import Callable, Container
 from typing import Literal
 
 from lib.dispatch.constants import HANDED_OFF_EXTERNALLY, SETTLE_CLEARS, TERMINAL_STATES
-from lib.dispatch.rebase import rebase_fix_is_newest
+from lib.dispatch.rebase import newest_rebase
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import (
     LinearState,
@@ -164,7 +164,7 @@ class LinearStatesMixin:
                     """,
                     (repo, ticket_id),
                 ).fetchone()
-                rebasing = row is not None and rebase_fix_is_newest(connection, (repo, ticket_id))
+                rebasing = row is not None and newest_rebase(connection, (repo, ticket_id)) is not None
             if row is None:
                 continue
             state, stuck = row["workflow_state"], bool(row["stuck"])

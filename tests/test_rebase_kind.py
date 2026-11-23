@@ -307,9 +307,10 @@ def test_rebase_from_the_merge_queue_clears_the_approval_and_cancels_the_update(
     tmp_path: Path, ship: str, state: str
 ) -> None:
     board, pr = approved(tmp_path, ship)
-    assert board.state("42")["workflow_state"] == state
-    assert board.state("42")["approved_head"] == pr.head
-    spent = board.state("42")["review_round"]
+    row = board.state("42")
+    assert (row["workflow_state"], row["approved_head"]) == (state, pr.head)
+    spent = row["review_round"]
+    approval = {name: row[name] for name in ("approved_head", "approved_at", "approve_comment_id")}
     queue_update(board, pr)
 
     board.post(pr, "rebase-42", REBASE, "grok-login")
@@ -327,7 +328,12 @@ def test_rebase_from_the_merge_queue_clears_the_approval_and_cancels_the_update(
     assert (fix["state"], fix["head"]) == ("queued", pr.head)
     detail = json.loads(fix["detail"])
     assert detail["kind"] == "rebase"
-    assert detail["rebase"] == {"from_state": state, "from_head": pr.head, "round": spent}
+    assert detail["rebase"] == {
+        "from_state": state,
+        "from_head": pr.head,
+        "round": spent,
+        **approval,
+    }
     pr.mergeable, pr.mergeable_state = True, "clean"
     board.poll()
     assert board.actions.merges == []

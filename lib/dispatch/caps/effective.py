@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import sqlite3
 
+from lib.dispatch.rebase import answers_rebase_review
 from lib.dispatch.types import TrackedTicket
 from lib.intake_risk import stored_risk
 
 
 class EffectiveCapMixin:
     def _over_cap(self, ticket: TrackedTicket, reported_round: int | None) -> bool:
-        """A verdict round above the effective cap: no extra round covers it."""
-        return reported_round is not None and reported_round > self._effective_cap(ticket)
+        if reported_round is None:
+            return False
+        with self._connect() as connection:
+            return reported_round > self._effective_cap(ticket, connection) and not answers_rebase_review(
+                connection, ticket, reported_round
+            )
 
     def _config_cap(self, ticket: TrackedTicket, connection: sqlite3.Connection) -> int:
         stored = stored_risk(connection, ticket.repo, ticket.ticket_id)

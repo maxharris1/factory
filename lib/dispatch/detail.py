@@ -735,7 +735,7 @@ class DetailMixin:
         if rebase is not None:
             context["rebase"] = asdict(rebase)
         if rebase_step is not None:
-            context.update(kind="rebase", rebase=asdict(rebase_step))
+            context.update(kind="rebase", rebase=rebase_step.block())
         if size_flag is not None:
             context["size_flag"] = size_flag
         if ci_failure:

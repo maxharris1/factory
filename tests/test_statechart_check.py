@@ -125,9 +125,9 @@ breaks() {{
 }}
 case $cfg in
   Orchestrator.cfg)
-    printf '## Rules that hold\\nT1KindGo, T1PDecided, Phase1T9Off, HandoffCountsApprovedRound, ReopenHoldOnlyAtWork, ShipNeedsCoveredQa, QaResultFromRun, RebaseDecided, RebaseSpendsNoRound\\n' > "$out/report.md" ;;
+    printf '## Rules that hold\\nT1KindGo, T1PDecided, Phase1T9Off, HandoffCountsApprovedRound, ReopenHoldOnlyAtWork, ShipNeedsCoveredQa, QaResultFromRun, RebaseDecided, RebaseSpendsNoRound, RebaseKeepsExtra, RebaseReviewsAtR\\n' > "$out/report.md" ;;
   OrchestratorAll.cfg)
-    printf '## Rules that hold\\nT9Decided, RebaseDecided, RebaseSpendsNoRound\\n' > "$out/report.md" ;;
+    printf '## Rules that hold\\nT9Decided, RebaseDecided, RebaseSpendsNoRound, RebaseKeepsExtra, RebaseReviewsAtR\\n' > "$out/report.md" ;;
   chart.cfg) grep -v ': post-merge$' "$chart" > "$out/chart.mmd" ;;
   chart-all.cfg) cp "$chart" "$out/chart.mmd" ;;
   omit-t1.cfg) breaks T1KindGo '{t1_steps}' ;;

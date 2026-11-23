@@ -50,6 +50,7 @@ WRITERS = {
     "waiting-max-qa": "lib/dispatch/qa.py",
     "retry": "lib/dispatch/retry.py",
     "rebase-queued": "lib/dispatch/rebase.py",
+    "rebase-noop": "lib/dispatch/ready.py",
     "linear-handoff": "lib/dispatch/linear_states.py",
     "linear-resume": "lib/dispatch/linear_states.py",
     "linear-done": "lib/dispatch/linear_states.py",

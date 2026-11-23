@@ -184,6 +184,8 @@ grep -q 'ShipNeedsCoveredQa' "$RUN_OUT/report.md" || fail "phase 1 report did no
 grep -q 'QaResultFromRun' "$RUN_OUT/report.md" || fail "phase 1 report did not check QaResultFromRun"
 grep -q 'RebaseDecided' "$RUN_OUT/report.md" || fail "phase 1 report did not check RebaseDecided"
 grep -q 'RebaseSpendsNoRound' "$RUN_OUT/report.md" || fail "phase 1 report did not check RebaseSpendsNoRound"
+grep -q 'RebaseKeepsExtra' "$RUN_OUT/report.md" || fail "phase 1 report did not check RebaseKeepsExtra"
+grep -q 'RebaseReviewsAtR' "$RUN_OUT/report.md" || fail "phase 1 report did not check RebaseReviewsAtR"
 if grep -q ' breaks$' "$RUN_OUT/report.md"; then
   fail "phase 1 report contains a broken rule"
 fi
@@ -194,6 +196,8 @@ expect_clean "T9-enabled" 0
 grep -q 'T9Decided' "$RUN_OUT/report.md" || fail "T9-enabled report did not check T9Decided"
 grep -q 'RebaseDecided' "$RUN_OUT/report.md" || fail "T9-enabled report did not check RebaseDecided"
 grep -q 'RebaseSpendsNoRound' "$RUN_OUT/report.md" || fail "T9-enabled report did not check RebaseSpendsNoRound"
+grep -q 'RebaseKeepsExtra' "$RUN_OUT/report.md" || fail "T9-enabled report did not check RebaseKeepsExtra"
+grep -q 'RebaseReviewsAtR' "$RUN_OUT/report.md" || fail "T9-enabled report did not check RebaseReviewsAtR"
 if grep -q ' breaks$' "$RUN_OUT/report.md"; then
   fail "T9-enabled report contains a broken rule"
 fi

@@ -87,7 +87,7 @@ TypeOK ==
   /\ configOk \in BOOLEAN
   /\ flags \in [
        covered: BOOLEAN, planOk: BOOLEAN, questionsDone: BOOLEAN, byHand: BOOLEAN,
-       reopenHold: BOOLEAN
+       reopenHold: BOOLEAN, rebase: {"none", "capped", "other", "review"}
      ]
   /\ external \in {"none"} \cup HandoffFrom
   /\ counts \in [
@@ -109,7 +109,7 @@ Init ==
   /\ configOk \in BOOLEAN
   /\ flags = [
        covered |-> FALSE, planOk |-> FALSE, questionsDone |-> FALSE,
-       byHand |-> FALSE, reopenHold |-> FALSE
+       byHand |-> FALSE, reopenHold |-> FALSE, rebase |-> "none"
      ]
   /\ counts = [
        round |-> 0, acUnmet |-> 0, gate |-> 0,
@@ -196,7 +196,7 @@ T5Abandon ==
   /\ external' = external
   /\ cap' = cap
   /\ configOk' = configOk
-  /\ flags' = [flags EXCEPT !.reopenHold = FALSE]
+  /\ flags' = [flags EXCEPT !.reopenHold = FALSE, !.rebase = "none"]
   /\ counts' = counts
   /\ QaFollowsHead
 
@@ -311,6 +311,7 @@ keep ==
 T2ReadyGreen ==
   /\ "T2" \notin Omit
   /\ state \in {"building", "fixing"}
+  /\ flags.rebase = "none"
   /\ state' = "review"
   /\ paused' = "none"
   /\ external' = external
@@ -323,14 +324,17 @@ T2ReadyGreen ==
         /\ cap' = cap
   /\ QaFollowsHead
 
+RebaseRound ==
+  IF flags.rebase = "capped" /\ counts.round > 0 THEN counts.round - 1 ELSE counts.round
+
 T2CiRed ==
   /\ "T2" \notin Omit
   /\ state \in {"building", "fixing"}
   /\ counts.gate < 2
   /\ state' = state
   /\ keep
-  /\ flags' = flags
-  /\ counts' = [counts EXCEPT !.gate = @ + 1, !.deaths = 0]
+  /\ flags' = [flags EXCEPT !.rebase = "none"]
+  /\ counts' = [counts EXCEPT !.gate = @ + 1, !.deaths = 0, !.round = RebaseRound]
   /\ QaFollowsHead
 
 T2CiRedStuck ==
@@ -339,7 +343,7 @@ T2CiRedStuck ==
   /\ counts.gate = 2
   /\ state' = "stuck"
   /\ keep
-  /\ flags' = flags
+  /\ flags' = [flags EXCEPT !.rebase = "none"]
   /\ counts' = [counts EXCEPT !.gate = 3, !.deaths = 0]
   /\ QaFollowsHead
 
@@ -378,7 +382,7 @@ T6JobStuck ==
   /\ counts.deaths = 1
   /\ state' = "stuck"
   /\ keep
-  /\ flags' = flags
+  /\ flags' = [flags EXCEPT !.rebase = "none"]
   /\ counts' = [counts EXCEPT !.deaths = 2]
   /\ QaFollowsHead
 
@@ -389,7 +393,7 @@ T3Revise ==
   /\ "T3" \notin Omit
   /\ state \in {"review", "awaiting-ok"}
   /\ keep
-  /\ flags' = [flags EXCEPT !.covered = FALSE]
+  /\ flags' = [flags EXCEPT !.covered = FALSE, !.rebase = "none"]
   /\ \/ /\ counts.acUnmet = 1
         /\ state' = "capped"
         /\ counts' = [counts EXCEPT !.acUnmet = 2, !.deaths = 0]
@@ -417,7 +421,7 @@ T3Unsat ==
   /\ external' = external
   /\ cap' = cap
   /\ configOk' = configOk
-  /\ flags' = [flags EXCEPT !.covered = FALSE]
+  /\ flags' = [flags EXCEPT !.covered = FALSE, !.rebase = "none"]
   /\ counts' = counts
   /\ QaFollowsHead
 
@@ -427,7 +431,7 @@ T7Blocked ==
   /\ state = "review"
   /\ state' = "blocked"
   /\ keep
-  /\ flags' = flags
+  /\ flags' = [flags EXCEPT !.rebase = "none"]
   /\ counts' = [counts EXCEPT !.deaths = 0]
   /\ QaFollowsHead
 
@@ -437,7 +441,7 @@ T4Approve ==
   /\ state = "review"
   /\ state' = "ship"
   /\ keep
-  /\ flags' = [flags EXCEPT !.covered = TRUE, !.reopenHold = FALSE]
+  /\ flags' = [flags EXCEPT !.covered = TRUE, !.reopenHold = FALSE, !.rebase = "none"]
   /\ counts' = [counts EXCEPT !.deaths = 0]
   /\ QaFollowsHead
 
@@ -447,7 +451,7 @@ T4ApproveCiRed ==
   /\ counts.gate < 2
   /\ state' = "fixing"
   /\ keep
-  /\ flags' = [flags EXCEPT !.covered = TRUE]
+  /\ flags' = [flags EXCEPT !.covered = TRUE, !.rebase = "none"]
   /\ counts' = [counts EXCEPT !.gate = @ + 1, !.deaths = 0]
   /\ QaFollowsHead
 
@@ -749,8 +753,19 @@ RebaseQueued ==
   /\ state' = "fixing"
   /\ cap' \in HandoffCaps
   /\ configOk' = configOk /\ paused' = "none" /\ external' = external
-  /\ flags' = [flags EXCEPT !.covered = FALSE, !.byHand = FALSE]
+  /\ flags' = [flags EXCEPT !.covered = FALSE, !.byHand = FALSE,
+       !.rebase = IF state = "capped" THEN "capped" ELSE "other"]
   /\ counts' = [counts EXCEPT !.deaths = 0, !.gate = 0]
+  /\ QaFollowsHead
+
+RebaseReady ==
+  /\ "TRB" \notin Omit
+  /\ state = "fixing"
+  /\ flags.rebase \in {"capped", "other"}
+  /\ state' = "review"
+  /\ keep
+  /\ flags' = [flags EXCEPT !.covered = FALSE, !.rebase = "review"]
+  /\ counts' = [counts EXCEPT !.gate = 0, !.deaths = 0, !.round = RebaseRound]
   /\ QaFollowsHead
 
 \* #108. The poll sees the PR merged, by the factory or by hand: merged, with
@@ -762,7 +777,7 @@ MergeObserved ==
   /\ keep
   /\ flags' = [flags EXCEPT !.byHand = ~flags.covered \/ ~QaCovers \/ state \notin
        {"ship", "awaiting-ok", "waiting-external", "handed-off", "merge-queue",
-        "updating"}, !.reopenHold = FALSE]
+        "updating"}, !.reopenHold = FALSE, !.rebase = "none"]
   /\ counts' = [counts EXCEPT !.gate = 0, !.deaths = 0, !.declines = 0,
        !.planGaps = 0, !.updates = 0]
   /\ QaFollowsHead
@@ -945,12 +960,12 @@ LinearSettle ==
 LinearDone ==
   /\ LinearSettle
   /\ state' \in {"merged", "done"}
-  /\ flags' = [flags EXCEPT !.byHand = TRUE, !.reopenHold = FALSE]
+  /\ flags' = [flags EXCEPT !.byHand = TRUE, !.reopenHold = FALSE, !.rebase = "none"]
 
 LinearCanceled ==
   /\ LinearSettle
   /\ state' = "abandoned"
-  /\ flags' = [flags EXCEPT !.reopenHold = FALSE]
+  /\ flags' = [flags EXCEPT !.reopenHold = FALSE, !.rebase = "none"]
 
 \* #891. Max hands off a ticket that waits on him (answers state=handed-off,
 \* approver only). A ticket with a running job is not a source: that job's
@@ -964,7 +979,7 @@ T5Handoff ==
      \/ state = "waiting-max" /\ PastGo
   /\ state' = "handed-off"
   /\ keep
-  /\ flags' = [flags EXCEPT !.byHand = TRUE, !.reopenHold = FALSE]
+  /\ flags' = [flags EXCEPT !.byHand = TRUE, !.reopenHold = FALSE, !.rebase = "none"]
   /\ counts' = [counts EXCEPT !.gate = 0, !.deaths = 0, !.declines = 0,
        !.planGaps = 0, !.updates = 0]
   /\ qa' = QaReset
@@ -991,7 +1006,7 @@ Factory ==
   \/ T4ShipQueue \/ QueueMerge \/ QueueConflict \/ QueueClosed
   \/ QueueGoPlan \/ QueueGoBuild
   \/ UpdateTrivial \/ UpdateNonTrivial \/ UpdateRetry \/ UpdateStuck
-  \/ RebaseQueued
+  \/ RebaseQueued \/ RebaseReady
   \/ QaStart \/ QaPass \/ QaFail \/ QaNotRequired \/ QaEnvFail \/ QaEnvFailPark
   \/ End
 
@@ -1072,7 +1087,7 @@ T1PDecided ==
        /\ ENABLED T1PPlanAutoSplit
 
 T2Decided ==
-  /\ state \in {"building", "fixing"} => ENABLED T2ReadyGreen
+  /\ state = "building" \/ (state = "fixing" /\ flags.rebase = "none") => ENABLED T2ReadyGreen
   /\ state \in {"building", "fixing"} /\ counts.gate < 2 => ENABLED T2CiRed
   /\ state \in {"building", "fixing"} /\ counts.gate = 2 => ENABLED T2CiRedStuck
   /\ state = "fixing" /\ flags.covered => ENABLED T2ReadyCovered
@@ -1136,10 +1151,25 @@ HandoffCountsApprovedRound ==
        => counts'.round = counts.round + 1]_vars
 
 RebaseDecided ==
-  state \in RebaseFrom => ENABLED RebaseQueued
+  /\ state \in RebaseFrom => ENABLED RebaseQueued
+  /\ state = "fixing" /\ flags.rebase \in {"capped", "other"} => ENABLED RebaseReady
 
 RebaseSpendsNoRound ==
   [][RebaseQueued => counts'.round = counts.round /\ counts'.extra = counts.extra]_vars
+
+RebaseInFlight ==
+  /\ flags.rebase \in {"capped", "other"} =>
+       Prior = "fixing" \/ (Prior = "waiting-max" /\ paused = "fixing")
+  /\ flags.rebase = "review" => Prior = "review"
+
+RebaseKeepsExtra ==
+  [][flags.rebase # "none" => counts'.extra = counts.extra]_vars
+
+RebaseReviewsAtR ==
+  [][(/\ flags.rebase \in {"capped", "other"}
+      /\ flags'.rebase \notin {"capped", "other"}
+      /\ state' \in {"review", "fixing"})
+     => counts'.round = RebaseRound]_vars
 
 ReopenHoldOnlyAtWork ==
   flags.reopenHold => state \in HandoffFrom
@@ -1250,15 +1280,17 @@ ChartAbandoned ==
 \* only rebases after a REVISE are drawn, to stay under statechart's
 \* 500-state drawing limit. The rebase in fixing is a self-loop the chart
 \* does not draw. Naming RebaseQueued here bounds nothing under TLC 1.7.4, so
-\* the constraint names the step's effect.
+\* the constraint names the step's effect. A rebase is drawn up to the fixing
+\* it starts. Its ready is the fixing to review arrow every ready draws.
 ChartRebase ==
-  (/\ state' = "fixing"
-   /\ state \in RebaseFrom
-   /\ ~flags'.covered
-   /\ counts'.round = counts.round
-   /\ counts'.extra = counts.extra
-   /\ counts'.gate = 0
-   /\ counts'.deaths = 0)
-  => state # "fixing" /\ counts.round >= 1
+  /\ (/\ state' = "fixing"
+      /\ state \in RebaseFrom
+      /\ ~flags'.covered
+      /\ counts'.round = counts.round
+      /\ counts'.extra = counts.extra
+      /\ counts'.gate = 0
+      /\ counts'.deaths = 0)
+     => state # "fixing" /\ counts.round >= 1
+  /\ flags.rebase = "none"
 
 ====

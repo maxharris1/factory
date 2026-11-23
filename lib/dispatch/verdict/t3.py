@@ -9,6 +9,7 @@ from lib import job_detail
 from lib.dispatch.constants import APPROVE_ROUND_STATES, REVISE_ROUND_STATES
 from lib.dispatch.helpers import _comment_link, _matching_head, _round_number, _scope, red_checks
 from lib.dispatch.qa import QaFix, ReviewFix, Wait, failed_column
+from lib.dispatch.rebase import answers_rebase_review
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, Registration, TrackedTicket
 from lib.dispatch.verdict.convergence import Continue, Repeated, Stalled
@@ -147,7 +148,7 @@ class T3Mixin:
                 return "stale-revise", None
             granted = (
                 self._auto_granted_cap_extra(ticket, state, convergence)
-                if round_number >= cap
+                if round_number >= cap and not answers_rebase_review(connection, ticket, round_number)
                 else None
             )
             if granted is not None:
