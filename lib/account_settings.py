@@ -3,11 +3,13 @@
 A spool body `{id, actor, requested_at, target: "account", op: "set",
 account, field, expect, value}` sets `max_jobs` or `paused` on one declared
 account through lib/settings_apply.py's lock, backup, replace, restart and
-audit. Pause writes `paused: true`; resume deletes the line.
+audit. Pause writes `paused: true`; resume deletes the line, keeping its
+comment.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, fields
 from pathlib import Path
@@ -90,7 +92,13 @@ def edit_account_field(text: str, account: str, key: str, value: object) -> str 
         keys = _key_lines(lines, block, key)
         if len(keys) != 1 or keys[0][0] == block[0]:
             return None
-        del lines[keys[0][0]]
+        line, column = keys[0]
+        body = lines[line].rstrip("\r\n")
+        comment = re.search(r"[ \t](#.*)$", body)
+        if comment is None:
+            del lines[line]
+        else:
+            lines[line] = " " * column + comment[1] + lines[line][len(body):]
         return "".join(lines)
     return _set_key(lines, block, after, key, value)
 

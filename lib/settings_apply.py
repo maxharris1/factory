@@ -478,6 +478,11 @@ def edit_device_field(text: str, device: str, key: str, value: object) -> str | 
     return None if found is None else _set_key(lines, *found, key, value)
 
 
+def _comments(text: str) -> list[str]:
+    return [found[1] for line in text.splitlines()
+            if (found := re.search(r"(?:^|[ \t])(#.*)$", line)) is not None]
+
+
 def _changes(old: MachinesConfig, new: MachinesConfig) -> list[tuple[str, str, object]] | None:
     if old.orch_host != new.orch_host or [d.name for d in old.devices] != [
         d.name for d in new.devices
@@ -649,6 +654,8 @@ class Applier:
                                                        self._parse)
         else:
             new_text, previous = self._plan_device(request, old, text, held)
+        if _comments(new_text) != _comments(text):
+            raise Refused("the edit changed a comment", previous)
         return old_bytes, new_text, previous
 
     def _plan_device(self, request: SettingsRequest, old: MachinesConfig, text: str,

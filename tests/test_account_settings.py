@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from lib import account_settings, heal, live_settings, settings_apply
+from lib import account_settings, dashboard, heal, live_settings, settings_apply
 from lib.live_settings import AccountSwitch
 from lib.queue import SQLiteJobQueue
 from lib.settings_apply import Applier, LocalSpool, run_pass
@@ -169,6 +170,82 @@ def test_resuming_deletes_the_paused_line(tmp_path: Path) -> None:
     assert backup.read_bytes() == box.original
 
 
+@pytest.mark.parametrize("eol", ["\n", "\r\n"])
+def test_resuming_keeps_the_paused_lines_comment(tmp_path: Path, eol: str) -> None:
+    box = Box(tmp_path)
+    text = MACHINES.replace("    paused: true\n", "    paused: true  # operator note\n")
+    box.machines.write_bytes(text.replace("\n", eol).encode())
+    box.request(account="spare", field="paused", expect=True, value=False)
+
+    (entry,) = box.run()
+
+    assert entry.result == "pending", entry
+    after = box.machines.read_bytes().decode()
+    assert after == text.replace("    paused: true  # operator note\n",
+                                 "    # operator note\n").replace("\n", eol)
+
+
+def _audit_result(box: Box, db: Path) -> str:
+    connection = sqlite3.connect(db)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        live, _ = live_settings.adopted(connection, box.machines)
+        for harness in ("claude", "codex", "cursor"):
+            live_settings.record_seen(connection, harness, live.adopted)
+        connection.commit()
+        live = live_settings.peek(connection)
+    finally:
+        connection.close()
+    (row,) = dashboard._settings_results(box.applier.audit_path, live)
+    return row["result"]
+
+
+@pytest.mark.parametrize("request_args", [
+    {"value": 1},
+    {"field": "paused", "expect": False, "value": True},
+    {"account": "spare", "field": "paused", "expect": True, "value": False},
+], ids=["max_jobs", "pause", "resume"])
+def test_an_adopted_account_edit_reads_applied_on_the_dashboard(
+    tmp_path: Path, request_args: dict
+) -> None:
+    db = tmp_path / "orch.db"
+    box = Box(tmp_path, claims=settings_apply.claim_lock(db))
+    poller_adopts(SQLiteJobQueue(db, clock=lambda: 100.0), box.machines)
+    box.request(**request_args)
+    (entry,) = box.run()
+    assert entry.result == "pending", entry
+
+    assert _audit_result(box, db) == "applied"
+
+
+def test_an_account_edit_recorded_applied_stays_applied_once_adopted(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    box = Box(tmp_path, claims=settings_apply.claim_lock(db))
+    box.applier = replace(box.applier, pending=())
+    poller_adopts(SQLiteJobQueue(db, clock=lambda: 100.0), box.machines)
+    box.request(value=1)
+    (entry,) = box.run()
+    assert entry.result == "applied", entry
+
+    assert _audit_result(box, db) == "applied"
+
+
+def test_an_account_edit_the_poller_has_not_adopted_reads_pending(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    box = Box(tmp_path, claims=settings_apply.claim_lock(db))
+    poller_adopts(SQLiteJobQueue(db, clock=lambda: 100.0), box.machines)
+    box.request(value=1)
+    box.run()
+    connection = sqlite3.connect(db)
+    try:
+        live = live_settings.peek(connection)
+    finally:
+        connection.close()
+
+    (row,) = dashboard._settings_results(box.applier.audit_path, live)
+    assert row["result"] == "pending"
+
+
 def test_a_pause_reaches_the_live_row_under_the_claim_lock(tmp_path: Path) -> None:
     db = tmp_path / "orch.db"
     queue = SQLiteJobQueue(db, clock=lambda: 100.0)
@@ -297,6 +374,32 @@ def test_an_edit_whose_parse_changes_more_than_the_field_is_refused(
     (entry,) = box.run()
 
     assert (entry.result, entry.error) == ("refused", "the edit changed more than that field")
+    box.unchanged()
+
+
+@pytest.mark.parametrize(("module", "editor", "send"), [
+    (account_settings, "edit_account_field", lambda box: box.request()),
+    (settings_apply, "edit_device_field", lambda box: box.write(
+        {"actor": "maxharris1", "requested_at": "2026-11-22T10:00:00Z", "device": "pc",
+         "field": "slot_max", "expect": 3, "value": 2})),
+], ids=["account", "device"])
+@pytest.mark.parametrize("comment", ["# leave headroom", "# Max's second Claude seat."])
+def test_an_edit_that_drops_a_comment_is_refused(
+    tmp_path: Path, monkeypatch, module, editor: str, send, comment: str
+) -> None:
+    box = Box(tmp_path)
+    real = getattr(module, editor)
+
+    def sloppy(text: str, *args: object) -> str | None:
+        edited = real(text, *args)
+        return None if edited is None else edited.replace(comment, "")
+
+    monkeypatch.setattr(module, editor, sloppy)
+    send(box)
+
+    (entry,) = box.run()
+
+    assert (entry.result, entry.error) == ("refused", "the edit changed a comment")
     box.unchanged()
 
 
