@@ -2382,8 +2382,9 @@ cannot reach the orch host, and the orch host's credentials stay there:
    `target: "account"` instead names an `op` (`add`, `set`, `remove`,
    `prepare` or `doctor`) and an `account`. It is refused before anything
    is written for a bad op, keys or value (400), an account or device not
-   in `status.json` (404), a read-only default or external account (403),
-   or a stale `expect` or existing id (409). Without the
+   in `status.json` (404), a `<harness>-default` account (declared or not)
+   or an external account (403), or a stale `expect` or existing id (409).
+   A `max_jobs` value must be 1-64; its `expect` may be any declared value. Without the
    variable, `/api/settings` is 404; setting it without
    `DASHBOARD_GITHUB_CLIENT_ID` is a configuration error. At most 20
    requests wait at once.

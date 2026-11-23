@@ -696,8 +696,8 @@ def _is_devices(value: object) -> bool:
             and len(set(value)) == len(value))
 
 
-def _is_max_jobs(value: object) -> bool:
-    return value is None or _is_slot_max(value)
+def _is_max_jobs_expect(value: object) -> bool:
+    return value is None or (isinstance(value, int) and not isinstance(value, bool))
 
 
 ACCOUNT_ID = re.compile(r"^(?!\.\.?$)[A-Za-z0-9._-]{1,64}$")
@@ -714,7 +714,7 @@ ACCOUNT_OPS = {
     "doctor": frozenset({"device"}),
 }
 ACCOUNT_FIELDS = {
-    "max_jobs": (_is_slot_max, _is_max_jobs),
+    "max_jobs": (_is_slot_max, _is_max_jobs_expect),
     "paused": (_is_bool, _is_bool),
     "signed_in_on": (_is_devices, _is_devices),
 }
@@ -1218,9 +1218,9 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         view = account_view(row) if row is not None else {}
         if "device" in payload and payload["device"] not in view["signed_in_on"]:
             raise ApiError(404, "not-in-snapshot")
-        if (row or {}).get("read_only") is not None or (op == "add" and (
-            payload["harness"] == "external" or name in DEFAULT_ACCOUNT_IDS
-        )):
+        if name in DEFAULT_ACCOUNT_IDS or (row or {}).get("read_only") is not None or (
+            op == "add" and payload["harness"] == "external"
+        ):
             raise ApiError(403, "read-only")
         if op == "add" and row is not None:
             raise ApiError(409, "exists")

@@ -1432,7 +1432,7 @@ def test_served_run_ids_are_exactly_the_ids_qa_storage_accepts(site: Path, get, 
     assert status == (200 if accepted else 404)
 
 
-from lib import account_requests, machines_yml, settings_apply
+from lib import account_requests, account_settings, machines_yml, schema, settings_apply
 
 ACCOUNTS = [
     {"id": "claude-max", "harness": "claude", "max_jobs": 2, "paused": False, "read_only": None,
@@ -1547,6 +1547,57 @@ REFUSED = [
 ]
 
 
+BIG = {"id": "claude-big", "harness": "claude", "max_jobs": 100, "paused": False,
+       "read_only": None, "signed_in_on": [{"device": "box", "status": "ok"}]}
+BIG_VIEW = {"harness": "claude", "max_jobs": 100, "paused": False, "signed_in_on": ["box"]}
+
+
+@pytest.mark.parametrize("op,fields", [
+    ("set", {"field": "max_jobs", "expect": 100, "value": 1}),
+    ("set", {"field": "max_jobs", "expect": 100, "value": 64}),
+    ("remove", {"expect": BIG_VIEW}),
+])
+def test_a_max_jobs_above_64_is_a_valid_expectation(
+    account_client: Client, actions_site: Path, spool: Path, op, fields
+) -> None:
+    (actions_site / "status.json").write_text(json.dumps({**SNAPSHOT, "accounts": [BIG]}))
+    status, answer = account(account_client, op, "claude-big", **fields)
+    assert status == 202 and set(answer) == {"id"}
+    assert [path.name for path in spool.iterdir()] == [f"{answer['id']}.json"]
+
+
+def test_a_max_jobs_above_64_is_still_not_a_valid_value(
+    account_client: Client, actions_site: Path, spool: Path
+) -> None:
+    (actions_site / "status.json").write_text(json.dumps({**SNAPSHOT, "accounts": [BIG]}))
+    assert account(account_client, "set", "claude-big", field="max_jobs", expect=100,
+                   value=100) == (400, {"error": "bad-value"})
+    assert list(spool.iterdir()) == []
+
+
+DECLARED_DEFAULT = {"id": "claude-default", "harness": "claude", "max_jobs": 2, "paused": False,
+                    "read_only": None, "signed_in_on": [{"device": "box", "status": "ok"}]}
+DECLARED_DEFAULT_VIEW = {"harness": "claude", "max_jobs": 2, "paused": False,
+                         "signed_in_on": ["box"]}
+
+
+@pytest.mark.parametrize("op,fields", [
+    ("set", {"field": "max_jobs", "expect": 2, "value": 3}),
+    ("set", {"field": "paused", "expect": False, "value": True}),
+    ("set", {"field": "signed_in_on", "expect": ["box"], "value": []}),
+    ("remove", {"expect": DECLARED_DEFAULT_VIEW}),
+    ("prepare", {"device": "box"}),
+    ("doctor", {"device": "box"}),
+])
+def test_a_declared_default_account_is_refused_and_writes_nothing(
+    account_client: Client, actions_site: Path, spool: Path, op, fields
+) -> None:
+    snapshot = {**SNAPSHOT, "accounts": [DECLARED_DEFAULT]}
+    (actions_site / "status.json").write_text(json.dumps(snapshot))
+    assert account(account_client, op, "claude-default", **fields) == (403, {"error": "read-only"})
+    assert list(spool.iterdir()) == []
+
+
 @pytest.mark.parametrize("op,name,fields,status,code", REFUSED)
 def test_a_bad_or_stale_account_request_is_refused_and_writes_nothing(
     account_client: Client, spool: Path, op, name, fields, status, code
@@ -1608,3 +1659,9 @@ def test_the_server_account_rules_match_lib() -> None:
     accepted = [value for value in candidates if server_module._is_slot_max(value)]
     assert accepted == [v for v in candidates if settings_apply.FIELDS["slot_max"](v)]
     assert accepted == list(range(1, settings_apply.SLOT_MAX_LIMIT + 1))
+    value_ok, expect_ok = server_module.ACCOUNT_FIELDS["max_jobs"]
+    lib_value_ok, lib_expect_ok = account_settings.FIELDS["max_jobs"]
+    assert [v for v in candidates if value_ok(v)] == [v for v in candidates if lib_value_ok(v)]
+    assert [v for v in candidates if expect_ok(v)] == [v for v in candidates if lib_expect_ok(v)]
+    assert server_module.DEFAULT_ACCOUNT_IDS == {
+        machines_yml.default_account(harness) for harness in schema.HARNESSES}
