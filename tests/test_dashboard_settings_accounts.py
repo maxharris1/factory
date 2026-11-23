@@ -10,10 +10,10 @@ from tests.test_dashboard_accounts import NOW, world
 from tests.test_dashboard_layout import BAR, HARNESS, _no_script, _section, _text, needs_node
 
 CHECKED = "2027-01-15T07:55:00Z"
-CLAUDE_B_PC = "CLAUDE_CONFIG_DIR=/home/claude-bot/.factory-accounts/claude-b claude auth login"
-CLAUDE_B_MAC = "CLAUDE_CONFIG_DIR=/Users/claude-bot/.factory-accounts/claude-b claude auth login"
-DEFAULT_MAC = "env -u CLAUDE_CONFIG_DIR claude auth login"
-CODEX_PC = "env -u CODEX_HOME codex login"
+CLAUDE_B_PC = "env -u CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR=/home/claude-bot/.factory-accounts/claude-b claude auth login"
+CLAUDE_B_MAC = "env -u CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR=/Users/claude-bot/.factory-accounts/claude-b claude auth login"
+DEFAULT_MAC = "env -u CLAUDE_CODE_OAUTH_TOKEN -u CLAUDE_CONFIG_DIR claude auth login"
+CODEX_PC = "env -u CODEX_HOME codex login --device-auth"
 NOT_DOCUMENTED = ("--with-api-key", "--with-access-token", "setup-token")
 
 

@@ -82,3 +82,21 @@ def test_the_token_status_fix_points_to_the_mac_token_steps() -> None:
     row = next(line for line in doc().splitlines() if f"`{account_doctor.TOKEN_AUTH}`" in line)
 
     assert "Move the Mac's profile token off the default account" in row
+
+
+DOC_HOME = "~/.factory-accounts/<id>"
+
+
+@pytest.mark.parametrize("harness, documented", [("claude", COMMANDS[1]), ("codex", COMMANDS[2])])
+def test_the_printed_sign_in_command_is_the_documented_one(harness: str, documented: str) -> None:
+    assert documented in doc()
+    home = "/home/claude-bot/.factory-accounts/claude-b"
+    assert account_doctor.login_command(harness, home) == documented.replace(DOC_HOME, home)
+
+
+@pytest.mark.parametrize("harness, expected", [
+    ("claude", "env -u CLAUDE_CODE_OAUTH_TOKEN -u CLAUDE_CONFIG_DIR claude auth login"),
+    ("codex", "env -u CODEX_HOME codex login --device-auth"),
+])
+def test_the_device_login_runs_the_documented_command_without_a_folder(harness: str, expected: str) -> None:
+    assert account_doctor.login_command(harness, None) == expected

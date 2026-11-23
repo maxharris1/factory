@@ -133,7 +133,7 @@ def test_each_signed_in_device_carries_the_doctor_status_and_a_sign_in_command_w
             "subscription_type": "max",
             "checked_at": NOW - 300,
             "same_login_as": ["claude-default"],
-            "command": f"CLAUDE_CONFIG_DIR={CLAUDE_B_PC} claude auth login",
+            "command": f"env -u CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR={CLAUDE_B_PC} claude auth login",
             "login": "claude-bot",
         },
         {
@@ -143,7 +143,7 @@ def test_each_signed_in_device_carries_the_doctor_status_and_a_sign_in_command_w
             "subscription_type": None,
             "checked_at": NOW - 300,
             "same_login_as": [],
-            "command": f"CLAUDE_CONFIG_DIR={CLAUDE_B_MAC} claude auth login",
+            "command": f"env -u CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR={CLAUDE_B_MAC} claude auth login",
             "login": "claude-bot",
         },
     ]
@@ -151,12 +151,12 @@ def test_each_signed_in_device_carries_the_doctor_status_and_a_sign_in_command_w
     assert [(d["device"], d["status"], d["command"]) for d in default] == [
         ("box", "ok", None),
         ("pc", "ok", None),
-        ("mac", "unreachable", "env -u CLAUDE_CONFIG_DIR claude auth login"),
+        ("mac", "unreachable", "env -u CLAUDE_CODE_OAUTH_TOKEN -u CLAUDE_CONFIG_DIR claude auth login"),
     ]
     codex = accounts["codex-default"]["signed_in_on"]
     assert [(d["device"], d["status"], d["auth_method"], d["command"]) for d in codex] == [
         ("box", "ok", "chatgpt", None),
-        ("pc", None, None, "env -u CODEX_HOME codex login"),
+        ("pc", None, None, "env -u CODEX_HOME codex login --device-auth"),
     ]
 
 
@@ -180,7 +180,7 @@ def test_the_operator_step_and_the_dashboard_share_one_login_command(tmp_path: P
         [sign_in("claude-b", "pc", "signed-out", account_doctor.NOT_LOGGED_IN)], {}, config, "o/r"
     ).values()
     assert account_doctor.login_command("claude", CLAUDE_B_PC) in flag
-    assert account_doctor.login_command("codex", None) == "env -u CODEX_HOME codex login"
+    assert account_doctor.login_command("codex", None) == "env -u CODEX_HOME codex login --device-auth"
 
 
 def config_of_machines(tmp_path: Path):
@@ -278,7 +278,7 @@ def test_a_device_that_stops_taking_work_keeps_its_account_sign_in_and_running_j
     assert [(a["id"], a["signed_in_on"], a["running"]) for a in accounts] == [(
         "claude-default",
         [{"device": "box", "status": "signed-out", "auth_method": "none", "subscription_type": None,
-          "checked_at": NOW - 300, "same_login_as": [], "command": "env -u CLAUDE_CONFIG_DIR claude auth login",
+          "checked_at": NOW - 300, "same_login_as": [], "command": "env -u CLAUDE_CODE_OAUTH_TOKEN -u CLAUDE_CONFIG_DIR claude auth login",
           "login": "claude-bot"}],
         [{"ticket": "17", "kind": "build", "device": "box"}],
     )]

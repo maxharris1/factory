@@ -849,17 +849,17 @@ def sign_in(account: str, status: str, detail: str, device: str = "pc") -> SignI
 
 @pytest.mark.parametrize("row, expected", [
     (sign_in("claude-b", "signed-out", account_doctor.NOT_LOGGED_IN),
-     f"signed-out; run: sign in as claude-bot on pc: CLAUDE_CONFIG_DIR={CLAUDE_B_HOME} "
+     f"signed-out; run: sign in as claude-bot on pc: env -u CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR={CLAUDE_B_HOME} "
      "claude auth login, then orch accounts doctor; not logged in"),
     (sign_in("codex-default", "signed-out", account_doctor.NOT_LOGGED_IN),
-     "signed-out; run: sign in as codex-bot on pc: env -u CODEX_HOME codex login, "
+     "signed-out; run: sign in as codex-bot on pc: env -u CODEX_HOME codex login --device-auth, "
      "then orch accounts doctor; not logged in"),
     (sign_in("claude-default", "signed-out", account_doctor.TOKEN_AUTH),
      "signed-out; run: remove the token export from claude-bot's login profile on pc, "
      f"then orch accounts doctor; {account_doctor.TOKEN_AUTH}"),
     (sign_in("claude-b", "mismatch", "same sign-in as account claude-default"),
      "mismatch; run: sign claude-b in to its own account as claude-bot on pc: "
-     f"CLAUDE_CONFIG_DIR={CLAUDE_B_HOME} claude auth login, then orch accounts doctor; "
+     f"env -u CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR={CLAUDE_B_HOME} claude auth login, then orch accounts doctor; "
      "same sign-in as account claude-default"),
     (sign_in("codex-default", "unreachable", account_doctor.SSH_DOWN),
      "unreachable; run: fix ssh to pc for codex, then orch accounts doctor; device unreachable over ssh"),
@@ -984,7 +984,8 @@ def test_the_dashboard_lists_an_account_signin_flag_by_its_reason(tmp_path: Path
         account_doctor.write(connection, rows, flag_config(tmp_path), "owner/factory", DASHBOARD_NOW)
     items = collect_snapshot(db, log, now=DASHBOARD_NOW)["attention"]["items"]
     assert [item["detail"] for item in items if item.get("ticket_id") == "claude-b@pc"] == [
-        f"account-signin: signed-out; run: sign in as claude-bot on pc: CLAUDE_CONFIG_DIR={CLAUDE_B_HOME} "
+        f"account-signin: signed-out; run: sign in as claude-bot on pc: "
+        f"env -u CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR={CLAUDE_B_HOME} "
         "claude auth login, then orch accounts doctor; not logged in"]
 
 
