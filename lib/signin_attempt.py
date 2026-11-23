@@ -104,6 +104,7 @@ class Runner:
     unrecognized_seconds: float = UNRECOGNIZED_SECONDS
     tick_seconds: float = TICK_SECONDS
     startup_grace_seconds: float = STARTUP_GRACE_SECONDS
+    stop: threading.Event = field(default_factory=threading.Event)
 
     def run(self, attempt: Attempt, finish: Finish) -> None:
         config, _ = load_machines_yml(self.machines)
@@ -131,7 +132,7 @@ class Runner:
                 now = self.monotonic()
                 if now - started >= self.expiry_seconds:
                     return "expired"
-                if self._take(rid, "cancel") is not None:
+                if self.stop.is_set() or self._take(rid, "cancel") is not None:
                     return "cancelled"
                 seen = output.bytes()
                 if prompt is None:
@@ -148,7 +149,7 @@ class Runner:
                     code = self._take(rid, "code")
                     if code is not None and not typed:
                         typed = _type(process, code)
-                time.sleep(self.tick_seconds)
+                self.stop.wait(self.tick_seconds)
         finally:
             if process.poll() is None:
                 self._stop(process, attempt, output)

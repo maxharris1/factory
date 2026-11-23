@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import functools
 import json
 import os
 import signal
@@ -10,18 +11,20 @@ import subprocess
 import sys
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager, suppress
 from pathlib import Path
 
 import pytest
 import yaml
 
 from lib import account_doctor, cli, health, settings_apply, signin_broker, signin_relay
-from lib.device_pool import RunningPair
+from lib.device_pool import DevicePool, RunningPair
 from lib.machines_yml import load_machines_yml
+from lib.queue import SQLiteJobQueue
 from lib.remote import SshTransport
 from tests.test_account_doctor import World
 from tests.test_account_pair_requests import Box
+from tests.test_pair_placement import enqueue
 from tests.test_settings_apply import NOW, OWNER, ROOT
 from tests.test_signin_attempt import Attempts
 
@@ -813,3 +816,98 @@ def test_orch_accounts_signin_broker_serves_and_beats_until_sigterm(tmp_path: Pa
     assert broker.returncode == 0, err
     (beat,) = _brokers(db)
     assert beat.stopped_at is not None
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _holds(db: Path, now: float) -> frozenset[tuple[str, str]]:
+    with closing(sqlite3.connect(db)) as connection:
+        return account_doctor.signing_out(connection, now)
+
+
+def _reap_logins(attempts: Attempts, group: int | None) -> None:
+    if group is not None:
+        with suppress(ProcessLookupError):
+            os.killpg(group, signal.SIGKILL)
+    for call in attempts.world.ssh.calls():
+        if "orch-accounts-login" in call["script"]:
+            with suppress(ProcessLookupError):
+                os.kill(call["pid"], signal.SIGKILL)
+
+
+def test_sigterm_ends_a_live_signin_with_its_line_and_releases_the_pair(tmp_path: Path,
+                                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    attempts = Attempts(tmp_path, monkeypatch)
+    attempts.mode("ok", codex_b=b"Logged in using ChatGPT\n")
+    rid = attempts.box.request("signin", account="codex-b")
+    argv = [sys.executable, str(ROOT / "bin" / "orch"), "accounts", "signin-broker", "--state", str(tmp_path),
+            "--orch", str(_orch_yml(tmp_path, attempts.box.spool, attempts.relay)),
+            "--machines", str(attempts.world.machines), "--db", str(attempts.world.db)]
+    group = None
+    with (tmp_path / "broker.log").open("w") as log:
+        broker = subprocess.Popen(argv, stdout=log, stderr=log)
+        try:
+            attempts.wait(rid, lambda view: view.get("state") == "awaiting-approval")
+            login = attempts.login_pid("codex")
+            group = os.getpgid(login)
+            broker.send_signal(signal.SIGTERM)
+            broker.wait(timeout=30)
+        finally:
+            if broker.poll() is None:
+                broker.kill()
+                broker.wait()
+            _reap_logins(attempts, group)
+    assert broker.returncode == 0, (tmp_path / "broker.log").read_text()
+    (line,) = attempts.lines(rid)
+    assert (line["field"], line["account"], line["result"]) == ("signin", "codex-b", "cancelled")
+    assert attempts.view(rid) == {"result": "cancelled", "error": None}
+    assert _holds(attempts.world.db, time.time()) == frozenset()
+    assert not _alive(login)
+    assert attempts.kill_calls()
+
+
+def test_once_keeps_the_pair_held_past_the_lease_while_the_login_waits(tmp_path: Path,
+                                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    attempts = Attempts(tmp_path, monkeypatch)
+    attempts.mode("ok", codex_b=b"Logged in using ChatGPT\n")
+    rid = attempts.box.request("signin", account="codex-b")
+    now = [time.time()]
+    monkeypatch.setattr(signin_broker, "POLL_SECONDS", 0.05)
+    monkeypatch.setattr(signin_broker, "Broker", functools.partial(signin_broker.Broker, clock=lambda: now[0]))
+    queue = SQLiteJobQueue(attempts.world.db, clock=lambda: now[0])
+    config, _ = load_machines_yml(attempts.world.machines)
+    pool = DevicePool(queue, config, pins=lambda: {"owner/repo": frozenset({"pc"})})
+    with queue.connect() as connection:
+        connection.execute("UPDATE account_signins SET status='ok' WHERE account='codex-b'")
+        connection.execute("UPDATE account_signins SET status='signed-out' WHERE account='codex-default'")
+        connection.execute("DELETE FROM signin_holds WHERE account='codex-b'")
+        account_doctor.hold(connection, "codex-default", "pc", "preflight", "signed-out", now[0])
+    enqueue(queue, "job-during-once", "codex")
+    codes: list[int] = []
+    once = threading.Thread(target=lambda: codes.append(signin_broker.main([
+        "--once", "--state", str(tmp_path), "--orch", str(_orch_yml(tmp_path, attempts.box.spool, attempts.relay)),
+        "--machines", str(attempts.world.machines), "--db", str(attempts.world.db)])))
+    once.start()
+    try:
+        attempts.wait(rid, lambda view: view.get("state") == "awaiting-approval")
+        assert pool.claim("codex", token_hash="synthetic-hash") is None
+        now[0] += account_doctor.SIGNOUT_LEASE_SECONDS + 1
+        deadline = time.monotonic() + 10
+        while ("codex-b", "pc") not in _holds(attempts.world.db, now[0]) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert ("codex-b", "pc") in _holds(attempts.world.db, now[0]), "the waiting --once renewed its hold"
+        assert pool.claim("codex", token_hash="synthetic-hash") is None
+    finally:
+        (attempts.side / "approved").touch()
+        once.join(60)
+    assert not once.is_alive()
+    assert codes == [0]
+    (line,) = attempts.lines(rid)
+    assert line["result"] == "ok"
+    assert ("codex-b", "pc") not in _holds(attempts.world.db, now[0])

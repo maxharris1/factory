@@ -599,7 +599,8 @@ accounts signin-broker [--state DIR] [--db PATH] [--machines PATH] [--orch PATH]
   dashboard.settings.relay and run each admitted attempt to one audit
   line. Prints "dashboard sign-in is off" and exits 0 when orch.yml sets
   no relay. Beats as the signin-broker health component until SIGTERM or
-  SIGINT; --once makes one pass, running admitted attempts to the end.
+  SIGINT, which cancel live attempts and wait for their audit lines; --once
+  makes one pass, running admitted attempts to the end.
   --state defaults to $ORCH_STATE_DIR or ~/.local/state/factory, --db to
   $ORCH_DB or orch.db in the state dir. Exits 1 on an invalid orch.yml, a
   relay host ssh -G names no user for, or a --once pass that cannot read

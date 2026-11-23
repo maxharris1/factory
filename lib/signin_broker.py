@@ -91,6 +91,10 @@ class Broker:
     spawn: Callable[[Callable[[], None]], object] = _thread
     _attempts: dict[tuple[str, str], Attempt] = field(default_factory=dict, init=False, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _running: int = field(default=0, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._idle = threading.Condition(self._lock)
 
     @property
     def audit_path(self) -> Path:
@@ -125,6 +129,16 @@ class Broker:
                 print(f"signin broker: {detail}", file=sys.stderr)
             stop.wait(POLL_SECONDS)
 
+    def drain(self) -> None:
+        while True:
+            with self._idle:
+                if self._idle.wait_for(lambda: self._running == 0, POLL_SECONDS):
+                    return
+            try:
+                self._refresh_holds()
+            except sqlite3.Error as exc:
+                print(f"signin broker: {type(exc).__name__}", file=sys.stderr)
+
     def _intake(self, listing: SpoolListing, item: SpoolFile, stem: str) -> AuditEntry | None:
         reason = untrusted(listing, item, self.owner)
         if reason is None:
@@ -141,10 +155,20 @@ class Broker:
             attempt = self._admit(request, previous)
         except Refused as refusal:
             return self._close(self._entry(request, REFUSED, previous, refusal.error))
+        with self._lock:
+            self._running += 1
         self.spawn(lambda: self._run(attempt))
         return None
 
     def _run(self, attempt: Attempt) -> None:
+        try:
+            self._attempt(attempt)
+        finally:
+            with self._idle:
+                self._running -= 1
+                self._idle.notify_all()
+
+    def _attempt(self, attempt: Attempt) -> None:
         try:
             error = self._prepare(attempt)
         except Refused as refusal:
@@ -302,28 +326,29 @@ def main(argv: list[str]) -> int:
                                    or Path.home() / ".local/state/factory")
     state_dir.mkdir(parents=True, exist_ok=True)
     db = args.db or Path(os.environ.get("ORCH_DB") or state_dir / "orch.db")
+    stop = threading.Event()
     runner = signin_attempt.Runner(relay=relay, machines=args.machines, db=db,
-                                   repo=self_deploy.own_repo(ROOT))
+                                   repo=self_deploy.own_repo(ROOT), stop=stop)
     broker = Broker(relay, args.machines, db, state_dir, approver=settings.approver,
                     owner=settings.spool_owner, launch=runner.run,
-                    claims=settings_apply.claim_lock(db),
-                    spawn=(lambda work: work()) if args.once else _thread)
+                    claims=settings_apply.claim_lock(db))
     machines_config = health.load_machines(args.machines)
     beater = health.Beater(db, health.SIGNIN_BROKER, devices=[orch_host(machines_config)],
                            store=health.HealthStore(db, devices=health.known_devices(machines_config)))
-    if args.once:
-        with beater:
+    if threading.current_thread() is threading.main_thread():
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(signum, lambda *_: stop.set())
+    code = 0
+    with beater:
+        if args.once:
             beater.beat_now()
             try:
                 broker.tick()
             except (SpoolError, OSError) as exc:
                 print(f"signin broker: {exc if isinstance(exc, SpoolError) else type(exc).__name__}",
                       file=sys.stderr)
-                return 1
-        return 0
-    stop = threading.Event()
-    for signum in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(signum, lambda *_: stop.set())
-    with beater:
-        broker.serve(stop)
-    return 0
+                code = 1
+        else:
+            broker.serve(stop)
+        broker.drain()
+    return code
