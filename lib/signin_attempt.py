@@ -14,13 +14,23 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from contextlib import closing
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import IO
 
 from lib import account_doctor, heal
 from lib.account_doctor import SignIn
-from lib.account_signin import End, Outcome, first_process_group, judge, kill_script, login_script, parse_output, settle
+from lib.account_signin import (
+    End,
+    Outcome,
+    disturbed,
+    first_process_group,
+    judge,
+    kill_script,
+    login_script,
+    parse_output,
+    settle,
+)
 from lib.machines_yml import MachinesConfig, load_machines_yml
 from lib.remote import PROBE_TIMEOUT_SECONDS, ByteTransport, SshTransport
 from lib.settings_apply import AuditEntry, SpoolError
@@ -31,6 +41,7 @@ EXPIRY_SECONDS = 15 * 60
 UNRECOGNIZED_SECONDS = 30
 TICK_SECONDS = 0.5
 OUTPUT_BYTES = 64 * 1024
+STARTUP_GRACE_SECONDS = 5
 CODE = re.compile(rb"[!-~]{1,512}")
 
 Finish = Callable[[Attempt, str, str | None, object], AuditEntry]
@@ -40,24 +51,33 @@ def _popen(argv: list[str]) -> subprocess.Popen:
     return subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
 
-class _MemoryTail:
+class _Output:
     def __init__(self, stream: IO[bytes]):
-        self._data = bytearray()
+        self._tail = bytearray()
+        self._head = bytearray()
         self._lock = threading.Lock()
+        self.group: int | None = None
+        self.grouped = threading.Event()
         threading.Thread(target=self._read, args=(stream,), daemon=True).start()
 
     def _read(self, stream: IO[bytes]) -> None:
         try:
             for chunk in iter(lambda: stream.read1(4096), b""):
                 with self._lock:
-                    self._data += chunk
-                    del self._data[:-OUTPUT_BYTES]
+                    self._tail += chunk
+                    del self._tail[:-OUTPUT_BYTES]
+                if not self.grouped.is_set():
+                    self._head += chunk[:OUTPUT_BYTES - len(self._head)]
+                    self.group = first_process_group(bytes(self._head))
+                    if self.group is not None or len(self._head) >= OUTPUT_BYTES:
+                        self.grouped.set()
         except (OSError, ValueError):
-            return
+            pass
+        self.grouped.set()
 
     def bytes(self) -> bytes:
         with self._lock:
-            return bytes(self._data)
+            return bytes(self._tail)
 
 
 @dataclass
@@ -73,13 +93,13 @@ class Runner:
     expiry_seconds: float = EXPIRY_SECONDS
     unrecognized_seconds: float = UNRECOGNIZED_SECONDS
     tick_seconds: float = TICK_SECONDS
+    startup_grace_seconds: float = STARTUP_GRACE_SECONDS
 
     def run(self, attempt: Attempt, finish: Finish) -> None:
         config, _ = load_machines_yml(self.machines)
         if config is None:
             raise ValueError("machines.yml is invalid")
-        before = self._others(config, attempt, account_doctor.judge(
-            account_doctor.probe(self.transport, config, attempt.device, attempt.harness), self.clock()))
+        before = self._others(config, attempt, account_doctor.observe(config, self.transport, self.clock()))
         end = self._session(attempt)
         self._publish(attempt.request.id, {"state": "verifying"})
         outcome, new = self._verdict(config, attempt, before, end)
@@ -89,9 +109,9 @@ class Runner:
         rid, harness = attempt.request.id, attempt.harness
         process = self.start(account_doctor.ssh_argv(
             attempt.device, harness, login_script(harness, attempt.home), tty=True))
-        output = _MemoryTail(process.stdout)
+        output = _Output(process.stdout)
         started = self.monotonic()
-        prompt = group = None
+        prompt = None
         shown = typed = False
         self._publish(rid, {"state": "awaiting-url"})
         try:
@@ -104,7 +124,6 @@ class Runner:
                 if self._take(rid, "cancel") is not None:
                     return "cancelled"
                 seen = output.bytes()
-                group = group or first_process_group(seen)
                 if prompt is None:
                     prompt = parse_output(harness, seen)
                     if prompt is None and now - started >= self.unrecognized_seconds:
@@ -122,17 +141,19 @@ class Runner:
                 time.sleep(self.tick_seconds)
         finally:
             if process.poll() is None:
-                self._stop(process, attempt, group)
+                self._stop(process, attempt, output)
             for stream in (process.stdin, process.stdout):
                 stream.close()
 
-    def _stop(self, process: subprocess.Popen, attempt: Attempt, group: int | None) -> None:
+    def _stop(self, process: subprocess.Popen, attempt: Attempt, output: _Output) -> None:
+        output.grouped.wait(self.startup_grace_seconds)
         process.terminate()
         try:
             process.wait(5)
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
+        group = output.group
         if group is None:
             return
         exchanged = self.transport.exchange(
@@ -143,16 +164,24 @@ class Runner:
 
     def _verdict(self, config: MachinesConfig, attempt: Attempt, before: Mapping[str, SignIn],
                  end: End) -> tuple[Outcome, str | None]:
+        now = self.clock()
+        rows = account_doctor.observe(config, self.transport, now)
+        after = self._others(config, attempt, rows)
+        at = next((index for index, row in enumerate(rows) if (row.account, row.device) ==
+                   (attempt.request.account, attempt.device.name)), None)
+        outcome = None if at is None else judge(rows[at], before, after)
+        changed = disturbed(before, after)
+        if outcome is not None and changed and rows[at].status != "mismatch":
+            rows[at] = replace(rows[at], status="mismatch",
+                               detail=account_doctor.DISTURBED_ACCOUNT.format(", ".join(changed)))
         try:
             with closing(sqlite3.connect(self.db, timeout=30, isolation_level=None)) as connection:
-                rows = account_doctor.run(connection, config, self.transport, self.clock(), self.repo)
+                account_doctor.write(connection, rows, config, self.repo, now)
         except sqlite3.Error:
             return settle(end, Outcome("failed", "doctor-db", None)), None
-        new = next((row for row in rows if (row.account, row.device) ==
-                    (attempt.request.account, attempt.device.name)), None)
-        if new is None:
+        if outcome is None:
             return settle(end, Outcome("failed", "no-doctor-row", None)), None
-        return settle(end, judge(new, before, self._others(config, attempt, rows))), new.status
+        return settle(end, outcome), rows[at].status
 
     @staticmethod
     def _others(config: MachinesConfig, attempt: Attempt, rows: list[SignIn]) -> dict[str, SignIn]:

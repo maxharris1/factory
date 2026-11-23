@@ -56,7 +56,7 @@ def judge(new: SignIn, before: Mapping[str, SignIn], after: Mapping[str, SignIn]
     shared = new.fingerprint is not None and any(row.fingerprint == new.fingerprint for row in after.values())
     if shared or new.status == "mismatch":
         return Outcome("mismatch", "shared-identity", new.status)
-    if any(row.status == "ok" and not _unchanged(row, after.get(account)) for account, row in before.items()):
+    if disturbed(before, after):
         return Outcome("mismatch", "disturbed-account", new.status)
     if new.status == "ok" and new.auth_method != "oauth_token":
         return Outcome("ok", None, new.status)
@@ -71,6 +71,11 @@ def settle(end: End, outcome: Outcome) -> Outcome:
     if end in ("expired", "cancelled"):
         return Outcome(end, None, outcome.doctor)
     return Outcome("failed", end, outcome.doctor)
+
+
+def disturbed(before: Mapping[str, SignIn], after: Mapping[str, SignIn]) -> list[str]:
+    return sorted(account for account, row in before.items()
+                  if row.status == "ok" and not _unchanged(row, after.get(account)))
 
 
 def _unchanged(row: SignIn, later: SignIn | None) -> bool:

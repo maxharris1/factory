@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -68,7 +69,9 @@ def signed_in():
 
 
 say(*noise)
-if mode == "silent":
+if mode == "flood":
+    say(*["." * 79] * 1024)
+if mode in ("silent", "flood"):
     time.sleep(600)
     sys.exit(0)
 if name == "codex":
@@ -398,6 +401,69 @@ def test_a_cancel_file_ends_the_attempt_and_kills_the_remote_group(attempts: Att
     assert not (attempts.relay / f"{rid}.cancel").exists()
 
 
+def test_a_cancel_waiting_before_the_session_reads_the_marker_still_kills_the_remote_group(
+    attempts: Attempts,
+) -> None:
+    attempts.mode("silent")
+    rid = attempts.box.request("signin", account="claude-c")
+    attempts.drop(rid, "cancel")
+    assert attempts.broker.tick() == []
+    attempts.finish()
+
+    (line,) = attempts.lines(rid)
+    assert (line["result"], line["error"]) == ("cancelled", None)
+    (kill,) = attempts.kill_calls()
+    pgid = int(re.search(r"kill -TERM -- -([0-9]+)", kill["script"])[1])
+    assert _group_gone(pgid)
+
+
+def test_output_flooding_past_the_tail_after_the_marker_still_lets_expiry_kill_the_group(attempts: Attempts) -> None:
+    attempts.runner.expiry_seconds = 2
+    attempts.runner.tick_seconds = 1.5
+    attempts.mode("flood")
+
+    rid = attempts.start()
+    attempts.finish()
+
+    (line,) = attempts.lines(rid)
+    assert (line["result"], line["error"]) == ("expired", None)
+    pgid = attempts.login_pid("claude")
+    (kill,) = attempts.kill_calls()
+    assert f"kill -TERM -- -{pgid}" in kill["script"]
+    assert _group_gone(pgid)
+
+
+def _split_claude_b_across_pc_and_lap(attempts: Attempts) -> None:
+    world, lap_home, status = attempts.world, attempts.tmp / "lap-home", attempts.tmp / "status-bin"
+    text = world.machines.read_text(encoding="utf-8")
+    text = text.replace("{id: claude-b, harness: claude, signed_in_on: [pc]}",
+                        "{id: claude-b, harness: claude, signed_in_on: [pc, lap]}")
+    before, _, after = text.rpartition(f"home: {world.device_home}")
+    world.machines.write_text(f"{before}home: {lap_home}{after}", encoding="utf-8")
+    world.ssh.offline("lap-claude-bot").unlink()
+    (status / "claude").rename(status / "claude-real")
+    (status / "claude").write_text(
+        f'#!/bin/sh\ncase "$CLAUDE_CONFIG_DIR" in {lap_home}/*) CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR-lap";; esac\n'
+        f'exec {status}/claude-real "$@"\n', encoding="utf-8")
+    (status / "claude").chmod(0o755)
+    replies = attempts.tmp / "replies" / "claude"
+    (replies / "claude-b-lap").write_bytes(claude_reply(org="a-lap-only-org", email="lap@example.invalid"))
+    (replies / "claude-b-lap.code").write_text("0", encoding="utf-8")
+
+
+def test_an_unchanged_split_identity_on_another_account_does_not_blame_the_signin(attempts: Attempts) -> None:
+    _split_claude_b_across_pc_and_lap(attempts)
+    assert attempts.world.doctor() == 0
+    assert attempts.world.statuses()[("claude-b", "pc")] == "mismatch"
+    attempts.mode("ok", claude_c=CLAUDE_OK)
+
+    rid = attempts.start()
+    _sign_in_claude(attempts, rid)
+
+    (line,) = attempts.lines(rid)
+    assert (line["result"], line["error"], line["new"]) == ("ok", None, "ok")
+
+
 def test_a_login_the_profile_token_answers_is_not_ok(attempts: Attempts) -> None:
     attempts.mode("ok", claude_c=claude_reply(method="oauth_token"))
 
@@ -418,12 +484,30 @@ def test_a_claude_signin_that_disturbs_another_account_is_mismatch_and_the_card_
 
     (line,) = attempts.lines(rid)
     assert (line["result"], line["error"], line["new"]) == ("mismatch", "shared-identity", "mismatch")
+    _assert_the_pc_card_shows_the_cli(attempts, "claude-c")
+
+
+def test_a_claude_signin_that_changes_another_accounts_identity_is_mismatch_and_the_card_shows_the_cli(
+    attempts: Attempts,
+) -> None:
+    attempts.mode("swap", claude_c=CLAUDE_OK,
+                  claude_b=claude_reply(org="a-distinct-changed-org", email="changed@example.invalid"))
+
+    rid = attempts.start()
+    _sign_in_claude(attempts, rid)
+
+    (line,) = attempts.lines(rid)
+    assert (line["result"], line["error"], line["new"]) == ("mismatch", "disturbed-account", "mismatch")
+    _assert_the_pc_card_shows_the_cli(attempts, "claude-c")
+
+
+def _assert_the_pc_card_shows_the_cli(attempts: Attempts, account: str) -> None:
     config, _ = load_machines_yml(attempts.world.machines)
     with sqlite3.connect(attempts.world.db) as connection:
         cards = {card["id"]: card for card in dashboard_accounts.read_accounts(connection, NOW, config)}
-    (pc,) = [entry for entry in cards["claude-c"]["signed_in_on"] if entry["device"] == "pc"]
+    (pc,) = [entry for entry in cards[account]["signed_in_on"] if entry["device"] == "pc"]
     assert pc["status"] == "mismatch"
-    assert pc["command"] == account_doctor.login_command("claude", config.account_home("pc", "claude", "claude-c"))
+    assert pc["command"] == account_doctor.login_command("claude", config.account_home("pc", "claude", account))
 
 
 @pytest.mark.parametrize(("mode", "expected"), [

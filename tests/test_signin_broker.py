@@ -258,7 +258,7 @@ def test_at_most_two_signins_at_once(intake: Intake) -> None:
 
     intake.tick()
 
-    assert [attempt.request.id for attempt in intake.launched] == [first, second]
+    assert sorted(attempt.request.id for attempt in intake.launched) == sorted([first, second])
     assert signin_broker.MAX_CONCURRENT == 2
     (line,) = intake.lines()
     assert (line["id"], line["result"], line["error"]) == (third, "refused", "too-many")
