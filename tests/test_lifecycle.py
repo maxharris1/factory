@@ -9,7 +9,10 @@ Dispatcher over a temp database with test_dispatcher's fakes.
 
 from __future__ import annotations
 
+import contextlib
+import gc
 import json
+import os
 import shutil
 import sqlite3
 from dataclasses import replace
@@ -50,6 +53,30 @@ APPROVE = (
     "round={round} head={head} ac=met verdict=APPROVE risk=high -->\nApproved.\n"
 )
 REPO, TICKET = "owner/repo", "42"
+
+
+def lose(state: Path) -> None:
+    gc.collect()
+    shutil.rmtree(state)
+
+
+def test_losing_the_state_directory_survives_a_collection_mid_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = tmp_path / "state"
+    Flow(state).go()
+    scandir = os.scandir
+
+    def list_then_collect(path):
+        with scandir(path) as entries:
+            listed = list(entries)
+        gc.collect()
+        return contextlib.nullcontext(listed)
+
+    monkeypatch.setattr(os, "scandir", list_then_collect)
+    lose(state)
+
+    assert not state.exists()
 
 
 class Flow:
@@ -769,7 +796,7 @@ def test_a_restored_job_answered_after_the_backup_is_cancelled(tmp_path: Path) -
     build = queue.claim("claude")
     assert build is not None
     queue.finish(build.id, owner="claude", handoff_comment_id=ready.id)
-    shutil.rmtree(state)
+    lose(state)
     restore(saved, state / "d.db")
 
     dispatcher, queue = setup(state)
@@ -953,7 +980,7 @@ def _restored(tmp_path: Path) -> Flow:
     saved = tmp_path / "backup" / "orch.db"
     backup(flow.queue.path, saved)
     flow.finish("claude")
-    shutil.rmtree(state)
+    lose(state)
     restore(saved, state / "d.db")
     flow.dispatcher, flow.queue = setup(
         state, flow.now, review_actions=flow.actions, grok_delivery=flow.grok
@@ -1078,7 +1105,7 @@ def test_a_restored_review_paused_by_questions_resumes_once_after_answers(
         "codex-login",
     )
     flow.add("answers-1", ANSWERS, "grok-login")
-    shutil.rmtree(state)
+    lose(state)
     restore(saved, state / "d.db")
     flow.dispatcher, flow.queue = setup(
         state, flow.now, review_actions=flow.actions, grok_delivery=flow.grok
@@ -1106,7 +1133,7 @@ def _restored_claim(tmp_path: Path, release: str):
     saved = tmp_path / "backup" / "orch.db"
     backup(flow.queue.path, saved)
     flow.queue.finish(build.id, owner="claude", handoff_comment_id="ready-1")
-    shutil.rmtree(state)
+    lose(state)
     restore(saved, state / "d.db")
     flow.now[0] += 400
     flow.dispatcher, flow.queue = setup(
@@ -1176,7 +1203,7 @@ def _restored_dead(tmp_path: Path, action: str):
     saved = tmp_path / "backup" / "orch.db"
     backup(flow.queue.path, saved)
     flow.queue.finish(job.id, owner="claude", handoff_comment_id="answer-1")
-    shutil.rmtree(state)
+    lose(state)
     restore(saved, state / "d.db")
     flow.now[0] += 400
     flow.dispatcher, flow.queue = setup(
@@ -1250,7 +1277,7 @@ def _restored_failed(tmp_path: Path, action: str, attempt: int):
     flow.queue.finish(job.id, owner="claude", handoff_comment_id=None)
     saved = tmp_path / "backup" / "orch.db"
     backup(flow.queue.path, saved)
-    shutil.rmtree(state)
+    lose(state)
     restore(saved, state / "d.db")
     flow.dispatcher, flow.queue = setup(
         state, flow.now, review_actions=flow.actions, grok_delivery=flow.grok
@@ -1346,7 +1373,7 @@ def test_a_restore_before_the_last_round_repeats_no_work(
         if index == saved_after:
             backup(flow.queue.path, saved)
     assert flow.state()["workflow_state"] == "handed-off"
-    shutil.rmtree(state)
+    lose(state)
     restore(saved, state / "d.db")
     flow.dispatcher, flow.queue = setup(
         state, flow.now, review_actions=flow.actions, grok_delivery=flow.grok
@@ -1395,7 +1422,7 @@ def test_a_restored_review_paused_by_questions_resumes_once_over_separate_polls(
         "state=waiting-max -->\nWhich head should I review?\n",
         "codex-login",
     )
-    shutil.rmtree(state)
+    lose(state)
     restore(saved, state / "d.db")
     flow.dispatcher, flow.queue = setup(
         state, flow.now, review_actions=flow.actions, grok_delivery=flow.grok
@@ -1411,7 +1438,7 @@ def test_a_restored_review_paused_by_questions_resumes_once_over_separate_polls(
 
 
 def _restore_into(flow: Flow, state: Path, saved: Path) -> None:
-    shutil.rmtree(state)
+    lose(state)
     restore(saved, state / "d.db")
     flow.dispatcher, flow.queue = setup(
         state, flow.now, review_actions=flow.actions, grok_delivery=flow.grok
