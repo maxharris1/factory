@@ -243,8 +243,8 @@ _SCRIPT = r"""
   // ST.accountCards, ST.addForm), so typed values and the last answer survive
   // each redraw.
   var ST = __ST__;
-  ST.cards = {};
-  ST.accountCards = {};
+  ST.cards = Object.create(null);
+  ST.accountCards = Object.create(null);
   ST.addForm = null;
   function stDrain(x) {
     if (!x.drain) return ['off', ''];

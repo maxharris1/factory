@@ -233,8 +233,9 @@ def _session_harness(session: dict, reply: dict | None = None) -> str:
     return harness.replace(marker, SET_ACTION + marker).replace(*SCOPED_PICK)
 
 
-def _signed_in(tmp_path: Path, actions: list | None = None, reply: dict | None = None) -> dict:
-    snapshot = _snapshot(tmp_path)
+def _signed_in(tmp_path: Path, actions: list | None = None, reply: dict | None = None,
+               snapshot: dict | None = None) -> dict:
+    snapshot = snapshot or _snapshot(tmp_path)
     html = render_pages(snapshot)["settings.html"]
     (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
     return layout.run_harness(tmp_path / "run", _session_harness(SIGNED_IN, reply), script, snapshot, "settings",
@@ -393,3 +394,22 @@ def test_a_bad_max_jobs_shows_bad_value_without_posting(tmp_path: Path, value: s
                                 _click(CLAUDE_B, "max_jobs")], ACCEPTED)
     assert _posts(out) == []
     assert '<div class="st-out bad" role="status">error: bad-value</div>' in _card(out["html"]["accounts"], "claude-b")
+
+
+INHERITED = ["constructor", "__proto__", "toString", "hasOwnProperty"]
+
+
+@needs_node
+@pytest.mark.parametrize("name", INHERITED)
+def test_an_account_named_like_an_object_property_gets_its_controls(tmp_path: Path, name: str) -> None:
+    snapshot = _snapshot(tmp_path)
+    next(a for a in snapshot["accounts"] if a["id"] == "claude-b")["id"] = name
+    card = {"attr": {"data-account": name}}
+    out = _signed_in(tmp_path, [_click(card, "paused")], ACCEPTED, snapshot)
+    accounts = out["html"]["accounts"]
+    ids = re.findall(r'<article class="ac-card" data-account="([^"]+)">', accounts)
+    assert ids == ["claude-default", "codex-default", name, "ext-grok"]
+    assert 'data-op="remove"' in _card(accounts, name)
+    assert _posts(out) == [{"target": "account", "op": "set", "account": name, "field": "paused",
+                            "expect": True, "value": False}]
+    assert f'<div class="st-out ok" role="status">{QUEUED}</div>' in _card(accounts, name)
