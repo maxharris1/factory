@@ -37,6 +37,7 @@ KINDS = (
     "stuck",
     "retry",
     "qa",
+    "rebase",
 )
 
 
@@ -118,6 +119,7 @@ REQUIRED_BY_KIND = {
     "stuck": frozenset(),
     "retry": frozenset(),
     "qa": frozenset({"head", "result", "scope", "runner", "arm"}),
+    "rebase": frozenset(),
 }
 
 _HTML_LINE = re.compile(r"^<!--\s*orch:v1\b\s*(.*?)\s*-->$")

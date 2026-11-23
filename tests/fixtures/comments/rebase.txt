@@ -1,0 +1,2 @@
+<!-- orch:v1 kind=rebase from=grok-bot role=orchestrator -->
+Rebase requested: the PR is behind main and its merge commits block a linear history.

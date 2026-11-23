@@ -315,6 +315,12 @@ def test_decline_without_a_head_parses() -> None:
     assert parsed == {"kind": "decline", "from": "tracy-site"}
 
 
+def test_rebase_parses_with_no_required_keys() -> None:
+    parsed = parse_header_line("<!-- orch:v1 kind=rebase from=grok-bot role=orchestrator -->")
+    assert parsed == {"kind": "rebase", "from": "grok-bot", "role": "orchestrator"}
+    assert REQUIRED_BY_KIND["rebase"] == frozenset()
+
+
 def test_kind_go_round_trips() -> None:
     text = (FIXTURES / "go.txt").read_text(encoding="utf-8")
     parsed = parse_comment(text)
