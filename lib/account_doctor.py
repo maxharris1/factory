@@ -284,6 +284,18 @@ def _unreached(account: str, device: str, harness: Harness, detail: str) -> Prob
     return Probe(account, device, harness, False, False, None, None, None, detail)
 
 
+def no_ssh_path(device: Device, harness: str) -> str | None:
+    if device.placeholder:
+        return PLACEHOLDER_DEVICE
+    if device.ssh_alias_for(harness) is None:
+        return NO_SSH_ALIAS.format(harness, device.name)
+    return None
+
+
+def ssh_argv(device: Device, harness: str, script: str) -> list[str]:
+    return [SSH_BINARY, *SSH_OPTIONS, "-l", device.login_for(harness), "--", device.ssh_alias_for(harness), script]
+
+
 def probe(transport: ByteTransport, config: MachinesConfig, device: Device, harness: Harness) -> list[Probe]:
     return _probe_accounts(transport, config, device, harness, config.accounts_on(device.name, harness))
 
@@ -299,17 +311,13 @@ def _probe_accounts(
 ) -> list[Probe]:
     if not accounts:
         return []
-    alias = device.ssh_alias_for(harness)
-    if device.placeholder or alias is None:
-        detail = PLACEHOLDER_DEVICE if device.placeholder else NO_SSH_ALIAS.format(harness, device.name)
+    detail = no_ssh_path(device, harness)
+    if detail is not None:
         return [_unreached(account, device.name, harness, detail) for account in accounts]
     script = status_script(
         harness, [config.account_home(device.name, harness, account) for account in accounts], drop_profile_login=drop_profile_login
     )
-    exchanged = transport.exchange(
-        [SSH_BINARY, *SSH_OPTIONS, "-l", device.login_for(harness), "--", alias, script],
-        timeout=PROBE_TIMEOUT_SECONDS,
-    )
+    exchanged = transport.exchange(ssh_argv(device, harness, script), timeout=PROBE_TIMEOUT_SECONDS)
     if exchanged.timed_out or exchanged.code == SSH_UNREACHABLE:
         return [_unreached(account, device.name, harness, SSH_DOWN) for account in accounts]
     replies = _replies(exchanged.stdout, len(accounts))
