@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import replace
+from typing import Literal
 
-from lib.dispatch.constants import _NOT_FINISHED
+from lib.dispatch.constants import _NOT_FINISHED, OK_UNREAD, OkReading
 from lib.dispatch.helpers import _base_update_key, _is_full_sha, _matching_head, ship_mode
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, ShipError, TrackedTicket
 from lib.hold import HoldDecision, decide, ok_carries
-from lib.rule_engine import Land, Wait
+from lib.rule_engine import Escalate, Land, Wait
 
 _HELD_BASE_UPDATE = "held-base-update"
 
@@ -195,20 +196,31 @@ class HoldsMixin:
         return True, _HELD_BASE_UPDATE
 
     def _hold_decision(self, ticket: TrackedTicket, head: str) -> HoldDecision:
+        return self._read_hold(ticket, head)[0]
+
+    def _read_hold(self, ticket: TrackedTicket, head: str) -> tuple[HoldDecision, bool]:
         hold = ticket.factory.hold
         assert hold is not None
         waited = False
+        coverage_unread = False
 
         def covers(ok_head: str) -> bool:
-            nonlocal waited
+            nonlocal waited, coverage_unread
             if ticket.factory.rule_engine != "on":
-                return self._approval_covers(ticket, ok_head, head) or self._ok_carries(
-                    ticket, ok_head, head
-                )
+                if self._approval_covers(ticket, ok_head, head):
+                    return True
+                carries = self._ok_carries(ticket, ok_head, head)
+                coverage_unread = coverage_unread or carries is None
+                return carries is True
             if _matching_head(ok_head, head) is not None:
                 return True
             outcome = self._rule_on_moved_head(ticket, ok_head, head)
             waited = waited or isinstance(outcome, Wait)
+            coverage_unread = coverage_unread or (
+                outcome == Escalate("probe-unknown")
+                and self.moved_head is not None
+                and self._moved_head(ticket, ok_head, head) is None
+            )
             return isinstance(outcome, Land)
 
         decision = decide(
@@ -222,10 +234,10 @@ class HoldsMixin:
             covers=covers,
         )
         if waited and decision.blocks and decision.unread is None:
-            return replace(decision, unread="moved-head ci")
-        return decision
+            decision = replace(decision, unread="moved-head ci")
+        return decision, coverage_unread
 
-    def _ok_carries(self, ticket: TrackedTicket, ok_head: str, head: str) -> bool:
+    def _ok_carries(self, ticket: TrackedTicket, ok_head: str, head: str) -> bool | None:
         hold = ticket.factory.hold
         assert hold is not None
         if self.hold_carry is None:
@@ -243,7 +255,7 @@ class HoldsMixin:
                     f"hold ok carry unread: {ticket.repo}#{ticket.ticket_id}: "
                     f"{type(exc).__name__}"
                 )
-            return False
+            return None
         self._hold_carries[key] = carries
         return carries
 
@@ -259,15 +271,22 @@ class HoldsMixin:
         decision = self._hold_decision(ticket, head)
         return decision.unread is not None or bool(decision.reasons)
 
-    def _hold_ok_outcome(self, ticket: TrackedTicket, comment: Comment) -> str:
+    def _read_ok(
+        self, ticket: TrackedTicket, comment: Comment
+    ) -> OkReading | Literal["unread"]:
         hold = ticket.factory.hold
         assert hold is not None
-        if (
+        if not (
             comment.author.casefold() == hold.approver.casefold()
             and self._may_approve(hold.approver)
         ):
-            return "hold-ok"
-        return "rejected-hold-ok-author"
+            return "rejected-hold-ok-author"
+        if ticket.current_head is None:
+            return OK_UNREAD
+        decision, coverage_unread = self._read_hold(ticket, ticket.current_head)
+        if decision.unread is not None or coverage_unread:
+            return OK_UNREAD
+        return "hold-ok" if decision.reasons else "ok-no-hold"
 
     def _may_approve(self, login: str) -> bool:
         """A Max-only approval (#122): a trusted_logins key while the

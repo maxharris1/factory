@@ -36,6 +36,7 @@ from tests.test_dispatcher import (
     VERDICT,
     FakeGrokDelivery,
     FakeReviewActions,
+    FakeSource,
     comment,
     seed_review_job,
 )
@@ -572,6 +573,69 @@ def test_an_ok_posted_before_the_approve_at_the_same_head_also_clears(
     assert outcome == "hold-ok"
 
 
+def ok_outcome(queue: SQLiteJobQueue, comment_id: str = "ok-1") -> str | None:
+    with queue.connect() as connection:
+        row = connection.execute(
+            "SELECT outcome FROM handled_comments WHERE comment_id = ?", (comment_id,)
+        ).fetchone()
+    return None if row is None else str(row[0])
+
+
+@pytest.mark.parametrize("ship", ["merge", "handoff"])
+def test_an_ok_on_an_unheld_pr_is_ok_no_hold(tmp_path: Path, ship: str) -> None:
+    dispatcher, queue, actions = setup(tmp_path)
+    ready(dispatcher, queue)
+
+    dispatcher.process(snapshot(ok(HEAD), factory=hold_factory(ship=ship)))
+
+    assert ok_outcome(queue) == "ok-no-hold"
+    assert actions.merges == []
+
+
+@pytest.mark.parametrize(
+    "held",
+    [{"labels": ("factory:hold",)}, {"files": ("src/view/Board.tsx",)}],
+    ids=["label", "paths"],
+)
+def test_an_ok_on_a_held_pr_is_hold_ok(tmp_path: Path, held: dict) -> None:
+    dispatcher, queue, actions = setup(tmp_path)
+    ready(dispatcher, queue)
+
+    dispatcher.process(snapshot(ok(HEAD), **held))
+
+    assert ok_outcome(queue) == "hold-ok"
+    assert actions.merges == []
+
+
+@pytest.mark.parametrize(
+    "unread",
+    [{"labels": None}, {"files": None}, {"events": None}],
+    ids=["labels", "files", "events"],
+)
+def test_an_ok_with_an_unread_hold_input_stays_unhandled(
+    tmp_path: Path, unread: dict
+) -> None:
+    dispatcher, queue, actions = setup(tmp_path)
+    ready(dispatcher, queue)
+
+    dispatcher.process(snapshot(ok(HEAD), **unread))
+    assert ok_outcome(queue) is None
+
+    dispatcher.process(snapshot(ok(HEAD)))
+    assert ok_outcome(queue) == "ok-no-hold"
+
+
+def test_an_ok_from_another_login_is_still_rejected_without_reading_the_hold(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue, actions = setup(tmp_path)
+    ready(dispatcher, queue)
+
+    dispatcher.process(snapshot(ok(HEAD, author="claude-login"), labels=None))
+
+    assert ok_outcome(queue) == "rejected-hold-ok-author"
+
+
 def test_an_ok_at_a_stale_head_does_not_merge(tmp_path: Path) -> None:
     actions = FakeReviewActions({HEAD: "1" * 40, NEW_HEAD: "2" * 40})
     dispatcher, queue, actions = setup(tmp_path, actions)
@@ -736,6 +800,22 @@ def test_an_unread_carry_keeps_the_hold_and_is_read_again_next_poll(
         snapshot(approve(NEW_HEAD), ok(HEAD), head=NEW_HEAD, files=PR_FILES)
     )
     assert actions.merges == [(True, NEW_HEAD)]
+
+
+@pytest.mark.parametrize("error", [ValueError("no commit"), OSError("git unavailable")])
+def test_an_unread_carry_leaves_the_ok_unhandled_until_read(
+    tmp_path: Path, error: Exception
+) -> None:
+    carry = FakeHoldCarry(error)
+    dispatcher, queue, actions = held_at_new_head(tmp_path, carry)
+
+    dispatcher.process(snapshot(approve(NEW_HEAD), ok(HEAD), head=NEW_HEAD, files=PR_FILES))
+    assert ok_outcome(queue) is None
+    assert_held(queue, actions, NEW_HEAD)
+
+    carry.outcomes = [MERGED_MAIN]
+    dispatcher.process(snapshot(ok(HEAD), head=NEW_HEAD, files=PR_FILES))
+    assert ok_outcome(queue) == "hold-ok"
 
 
 def test_a_new_head_with_its_own_commit_after_the_ok_still_needs_a_new_ok(
@@ -903,6 +983,24 @@ def test_with_the_engine_on_an_unknown_probe_escalates(
     checks = json.loads(row["checks"])
     assert [check["name"] for check in checks] == CHECKS
     assert [check["passed"] for check in checks] == [None, None, None, None, True]
+
+
+@pytest.mark.parametrize("error", [ValueError("no commit"), OSError("git unavailable")])
+def test_with_the_engine_on_an_unread_probe_leaves_the_ok_unhandled_until_read(
+    tmp_path: Path, error: Exception
+) -> None:
+    probe = FakeProbe(error)
+    dispatcher, queue, actions = engine_at_new_head(tmp_path, probe)
+
+    dispatcher.process(moved())
+    assert ok_outcome(queue) is None
+    assert_held(queue, actions, NEW_HEAD)
+    assert len(probe.calls) == 1
+
+    probe.outcomes = [PURE]
+    dispatcher.poll_once(FakeSource())
+    dispatcher.process(snapshot(ok(HEAD), head=NEW_HEAD, files=PR_FILES, factory=ENGINE))
+    assert ok_outcome(queue) == "hold-ok"
 
 
 def test_with_the_engine_on_pending_ci_waits_with_no_wake_and_lands_once_green(

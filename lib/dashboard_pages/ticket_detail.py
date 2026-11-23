@@ -601,6 +601,10 @@ def _ticket_tracker(row: dict, tail: str) -> str:
     return _span("tracker", text) if text else ""
 
 
+def _ok_chips(ticket: dict | None) -> str:
+    return "".join(_chip(f"ok: {outcome}", "muted ok") for outcome in (ticket or {}).get("ok_outcomes", ()))
+
+
 def _ticket_hero(found: dict, model: dict, spec: dict) -> str:
     row = found["row"]
     motion = _motion(row, model)
@@ -614,6 +618,7 @@ def _ticket_hero(found: dict, model: dict, spec: dict) -> str:
         + HERO_LINES[line]["chip"](model)
         + _ticket_tracker(row, spec["tail"])
         + _trouble(row)
+        + _ok_chips(found["ticket"])
     )
     return _hero(row, model, motion, strip, title, spec["tiles"], line)
 
@@ -1127,7 +1132,10 @@ _PICK = {
 }
 
 
-def _ticket_of(snapshot: dict, row: dict) -> dict | None:
+def _ticket_of(snapshot: dict, row: dict, record: str | None = None) -> dict | None:
+    record = record or row.get("record")
+    if record is not None:
+        return next((t for t in snapshot["tickets"] if t.get("record") == record), None)
     key = _thread_key(row)
     return next((t for t in snapshot["tickets"] if _thread_key(t) == key), None)
 
@@ -1162,7 +1170,7 @@ def resolve_ticket(snapshot: dict, address: str, records: dict | None = None) ->
     if key is None:
         return None
     record = records[key]
-    ticket = _ticket_of(snapshot, record)
+    ticket = _ticket_of(snapshot, record, key)
     kind = next((flag for flag in RECORD_FLAGS if record.get(flag)), "idle")
     return {"kind": kind, "address": key, "row": record_row(record, ticket), "ticket": ticket}
 
@@ -2165,8 +2173,11 @@ _SCRIPT = r"""
     PX.onFrame(journeyFrame);
   }
 
-  function ticketRow(d, r) {
-    return (d.tickets || []).filter(function (t) { return threadKey(t) === threadKey(r); })[0] || null;
+  function ticketRow(d, r, record) {
+    record = record || r.record;
+    var same = record != null ? function (t) { return t.record === record; }
+      : function (t) { return threadKey(t) === threadKey(r); };
+    return (d.tickets || []).filter(same)[0] || null;
   }
   var PICK = {
     running: function (rows) { return rows.reduce(function (a, b) { return (b.elapsed_seconds || 0) < (a.elapsed_seconds || 0) ? b : a; }); },
@@ -2199,7 +2210,7 @@ _SCRIPT = r"""
     var key = keyed ? address
       : Object.keys(records).sort().filter(function (k) { return anyCase(records[k]); })[0];
     if (key === undefined) return null;
-    var rec = records[key], t = ticketRow(d, rec);
+    var rec = records[key], t = ticketRow(d, rec, key);
     var flag = DETAIL.recordFlags.filter(function (f) { return rec[f]; })[0];
     return {kind: flag || 'idle', address: key, row: recordRow(rec, t), ticket: t};
   }
@@ -2218,6 +2229,7 @@ _SCRIPT = r"""
     add(art, hero(c, strip, tileLabel(r), function (title) {
       trackerSpan(title, r, spec.tail);
       troubleChips(title, r);
+      ((found.ticket || {}).ok_outcomes || []).forEach(function (o) { add(title, chip('ok: ' + o, 'muted ok')); });
     }, found.ticket, spec.tiles, line));
     (spec.lead || []).forEach(function (name) { add(art, SECTIONS[name](c)); });
     detailCols(art, c, spec.sections);
