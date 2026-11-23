@@ -725,9 +725,7 @@ class Applier:
             timeout=PROBE_TIMEOUT_SECONDS, input=self.machines.read_bytes())
         if exchanged.code == 0:
             return None
-        # Only orch's own lines: the login profile's stderr may carry anything, a token included.
-        said = [line for line in exchanged.stderr.splitlines()
-                if line.startswith(f"{PREPARE_PROG}:")]
+        said = _orch_lines_only(exchanged.stderr)
         return f"prepare exited {exchanged.code}" + (f": {_clip(said[-1])}" if said else "")
 
     def _plan_device(self, request: SettingsRequest, old: MachinesConfig, text: str,
@@ -834,6 +832,10 @@ class Applier:
                 if stop_on_failure:
                     break
         return tuple(done), "; ".join(failures) or None
+
+
+def _orch_lines_only(stderr: str) -> list[str]:
+    return [line for line in stderr.splitlines() if line.startswith(f"{PREPARE_PROG}:")]
 
 
 def _signin(connection: sqlite3.Connection, request: PairRequest) -> str | None:
