@@ -34,9 +34,13 @@ A refusal writes no decision row and queues no job. Like every `rejected-*` outc
 
 `model/Orchestrator.tla` encodes the accepted path. `RebaseQueued` goes from any state in `RebaseFrom` to `fixing` with `counts.round` and `counts.extra` unchanged. The `RebaseDecided` invariant says it is enabled from every state in `RebaseFrom`, and the `RebaseSpendsNoRound` property says it never moves the round or the extra. `model/fixtures/omit-trb.cfg` shows `RebaseDecided` breaks without it. The chart gains one new pair, `merge-queue → fixing`.
 
+## A conflict parked on Max (#1409)
+
+The rebase brief's conflict path posts a builder `questions` that lists the files, with the branch still at the PR head. T5 parks it as any question: `waiting-max`, `paused_action="fix"`, `paused_head` the unchanged head, and Grok woken. When the ticket's newest harness job is the rebase fix, the pause also records one decision in the same transaction: `answer_id` and `question_id` are the questions comment, the question is `rebase-conflict:<id>`, and the choice is `Conflict: waiting on Max; files: <a>, <b>`. The files are the comment's list items, each item's first backticked span or its text when that has no space. An answer resumes the paused step through `_resume_step`, which reads the paused job's detail: a `kind="rebase"` detail queues the same rebase fix, with the original `rebase` block and no `ci_failure`, so a red head does not turn it into a CI fix.
+
 ## Not changed
 
 - The under-cap handed-off `kind=go` still reopens with `kind=reopen`, `reopen_hold` and the merge-only brief. `lib/dispatch/caps/t1.py`, `caps/resume.py` and `lib/brief/fix.py` are untouched.
 - A rebase on a stuck ticket is still `ticket-stuck`. `retry` is the way out of stuck.
-- `waiting-max`, `handed-off-externally`, `building` and `planning` refuse a rebase. A `waiting-max` paused on a rebase is #1409's call.
-- The ready after a rebase and its re-review at round `R` are #1408. A conflict parked on Max is #1409.
+- `waiting-max`, `handed-off-externally`, `building` and `planning` refuse a rebase. A `waiting-max` paused on a rebase conflict goes on through Max's answer, not a new rebase (#1409).
+- The ready after a rebase and its re-review at round `R` are #1408.

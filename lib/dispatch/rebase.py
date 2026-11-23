@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from lib.dispatch.helpers import _comment_link, _comment_order, _scope
 from lib.dispatch.retry import _harness_job_active, _newest_harness_job
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
+from lib.handoff import parse_comment
 from lib.job_detail import as_object
 from lib.queue import JobRequest
 
@@ -18,6 +20,21 @@ LEAVES_MERGE_QUEUE = frozenset({"merge-queue", "waiting-external"})
 REBASE_FROM = (
     frozenset({"review", "fixing", "awaiting-ok", "capped", "handed-off"}) | LEAVES_MERGE_QUEUE
 )
+_LIST_ITEM = re.compile(r"^\s*(?:[-*]|\d+\.)\s+(.+?)\s*$")
+_BACKTICKED = re.compile(r"`([^`]+)`")
+
+
+def conflict_files(body: str) -> tuple[str, ...]:
+    files = []
+    for line in body.splitlines():
+        item = _LIST_ITEM.match(line)
+        if item is None:
+            continue
+        span = _BACKTICKED.search(item[1])
+        path = span[1] if span else item[1]
+        if not any(character.isspace() for character in path):
+            files.append(path)
+    return tuple(dict.fromkeys(files))
 
 
 def rebase_fix_is_newest(connection: sqlite3.Connection, key: tuple[str, str]) -> bool:
@@ -37,6 +54,33 @@ class RebaseStep:
 
 
 class RebaseMixin:
+    def _rebase_conflicted(
+        self,
+        connection: sqlite3.Connection,
+        ticket: TrackedTicket,
+        comment: Comment,
+    ) -> None:
+        if not rebase_fix_is_newest(connection, (ticket.repo.lower(), ticket.ticket_id)):
+            return
+        files = ", ".join(conflict_files(parse_comment(comment.body).body))
+        record_decisions(
+            connection,
+            ticket,
+            comment.id,
+            [
+                Decision(
+                    question=f"rebase-conflict:{comment.id}",
+                    options=(),
+                    choice=f"Conflict: waiting on Max; files: {files}",
+                    answerer=comment.author,
+                    answered_at=comment.created_at,
+                    url=_comment_link(comment),
+                    answer_id=comment.id,
+                    position=0,
+                )
+            ],
+        )
+
     def _superseded_by_rebase(self, ticket: TrackedTicket, comment: Comment) -> bool:
         with self._connect() as connection:
             sources = {

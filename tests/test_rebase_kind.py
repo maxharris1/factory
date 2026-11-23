@@ -8,8 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from lib.brief import brief_kind
+from lib.brief import brief_kind, render_brief
 from lib.brief.common import detail_of
+from lib.dispatch.types import CIResult
 from lib.orch_yml import Approvals
 from lib.queue import JobRequest
 from tests.merge_queue_support import PR, READY, Board, sha
@@ -385,3 +386,84 @@ def test_a_rebase_on_a_pr_with_no_head_is_refused_with_no_job(tmp_path: Path) ->
 
 def harness_jobs(flow: Flow) -> list:
     return [row for row in jobs(flow.queue) if row["recipient"] != "grok"]
+
+
+CONFLICT = (
+    "<!-- orch:v1 kind=questions from=claude-bot role=builder -->\n"
+    "The rebase onto origin/main stopped on conflicts I cannot resolve without changing behavior:\n"
+    "\n"
+    "- `lib/dispatch/questions.py`\n"
+    "- `tests/test_rebase_kind.py`\n"
+    "\n"
+    "HEAD is back at the PR head and nothing was pushed. Which side should win?\n"
+)
+ANSWERS = "<!-- orch:v1 kind=answers from=grok-bot role=orchestrator -->\nKeep main's side.\n"
+
+
+def conflicted(tmp_path: Path) -> tuple[Flow, dict]:
+    flow = in_review(tmp_path)
+    assert flow.post("rebase-42", REBASE, "grok-login") == "queued-rebase"
+    rebase = detail_of(flow.finish("claude", "conflict-1"))["rebase"]
+    assert flow.post("conflict-1", CONFLICT, "claude-login") == "waiting-max"
+    return flow, rebase
+
+
+def test_a_rebase_conflict_parks_on_max_at_the_unchanged_head(tmp_path: Path) -> None:
+    flow, _ = conflicted(tmp_path)
+
+    row = flow.state()
+    assert (row["workflow_state"], row["paused_action"], row["paused_question_id"]) == (
+        "waiting-max",
+        "fix",
+        "conflict-1",
+    )
+    assert row["paused_head"] == HEADS[1] == flow.head
+    assert flow.actions.states[-1] == "waiting-max"
+    [wake] = [job for job in jobs(flow.queue, "clarify") if job["source_comment_id"] == "conflict-1"]
+    assert wake["head"] == HEADS[1]
+
+
+def test_a_rebase_conflict_records_the_outcome_with_its_files(tmp_path: Path) -> None:
+    flow, _ = conflicted(tmp_path)
+
+    assert decisions(flow)[-1] == (
+        "conflict-1",
+        "conflict-1",
+        "rebase-conflict:conflict-1",
+        "Conflict: waiting on Max; files: lib/dispatch/questions.py, tests/test_rebase_kind.py",
+        "claude-login",
+    )
+
+
+def test_a_question_after_an_ordinary_fix_records_no_conflict(tmp_path: Path) -> None:
+    flow = Flow(tmp_path)
+    assert flow.go() == "queued-build"
+    flow.finish("claude", f"ready-{HEADS[1][:6]}")
+    assert flow.ready(HEADS[1]) == "queued-review"
+    flow.finish("codex", "revise-1/3")
+    assert flow.revise("1/3") == "queued-review-fix"
+    flow.finish("claude", "conflict-1")
+
+    assert flow.post("conflict-1", CONFLICT, "claude-login") == "waiting-max"
+
+    assert [row for row in decisions(flow) if row[2].startswith("rebase-conflict:")] == []
+
+
+def test_maxs_answer_resumes_the_rebase_not_a_ci_fix(tmp_path: Path) -> None:
+    flow, rebase = conflicted(tmp_path)
+    red = CIResult("failure", log="failed: pytest")
+    snapshot = flow.snapshot
+    flow.snapshot = lambda: replace(snapshot(), ci={HEADS[1]: red})
+    before = len(fixes(flow))
+
+    assert flow.post("answers-1", ANSWERS, "grok-login") == "resumed-fix"
+
+    [fix] = fixes(flow)[before:]
+    detail = detail_of_row(fix)
+    assert (fix["head"], detail["kind"], detail["rebase"]) == (HEADS[1], "rebase", rebase)
+    assert "ci_failure" not in detail
+    assert flow.state()["workflow_state"] == "fixing"
+    resumed = flow.finish("claude")
+    assert brief_kind(resumed) == "rebase"
+    brief = render_brief(resumed, bot="claude-bot", context=None)
+    assert "git rebase --abort" in brief and "resumes a paused step" in brief
