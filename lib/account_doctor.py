@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
 from lib import attention, lane_limit
-from lib.harness_env import ACCOUNT_ISOLATION, account_tokens, harness_env
+from lib.harness_env import account_tokens, harness_env
 from lib.machines_yml import Device, MachinesConfig
 from lib.remote import (
     _UNTRACE,
@@ -443,7 +443,6 @@ _LOGIN: dict[Harness, tuple[tuple[str, ...], str]] = {
     "claude": (("CLAUDE_CODE_OAUTH_TOKEN",), "claude auth login"),
     "codex": ((), "codex login --device-auth"),
 }
-_LOGOUT: dict[Harness, str] = {"claude": "claude auth logout", "codex": "codex logout"}
 _THEN = ", then orch accounts doctor"
 _STEP: dict[Status, str] = {
     "signed-out": "sign in as {login} on {device}: {command}" + _THEN,
@@ -463,13 +462,6 @@ def login_command(harness: Harness, home: str | None) -> str:
         assign = f"{variable}={shlex.quote(home)} "
     env = "".join(f" -u {name}" for name in unset)
     return (f"env{env} " if env else "") + assign + login
-
-
-def logout_script(harness: Harness, home: str) -> str:
-    tokens = " ".join(name for isolation in ACCOUNT_ISOLATION.values() for name in isolation.tokens)
-    inner = (f"{_UNTRACE}unset {tokens} CLAUDE_SECURESTORAGE_CONFIG_DIR; exec env "
-             f"{_STATUS[harness].home_variable}={shlex.quote(home)} {_LOGOUT[harness]} </dev/null >/dev/null 2>&1")
-    return _login(inner, "orch-accounts-logout", ())
 
 
 def _step(row: SignIn, config: MachinesConfig) -> str:
