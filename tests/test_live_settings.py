@@ -459,9 +459,13 @@ def accounts_text(**max_1: object) -> str:
         (AccountSwitch(False, None), AccountSwitch(False, 4), AccountSwitch(False, 4)),
         (AccountSwitch(False, None), AccountSwitch(False, None), AccountSwitch(False, None)),
         (AccountSwitch(False, 4), ACCOUNT_CLOSED, ACCOUNT_CLOSED),
+        (AccountSwitch(False, None, frozenset({"box", "pc"})),
+         AccountSwitch(False, None, frozenset({"pc"})), AccountSwitch(False, None, frozenset({"pc"}))),
+        (AccountSwitch(False, None, frozenset({"pc"})), AccountSwitch(False, None),
+         AccountSwitch(False, None, frozenset({"pc"}))),
     ],
 )
-def test_account_meet_is_paused_if_either_side_is_and_keeps_the_lower_cap(
+def test_account_meet_is_paused_if_either_side_is_with_the_lower_cap_and_common_devices(
     first: AccountSwitch, second: AccountSwitch, met: AccountSwitch
 ) -> None:
     assert first.meet(second) == met
@@ -477,12 +481,13 @@ def test_placement_config_takes_paused_and_max_jobs_from_the_row(tmp_path: Path,
     account = live.placement_config(loaded).account("max-1")
 
     assert account is not None and (account.paused, account.max_jobs) == (True, 2)
-    assert dict(live.accounts) == {"max-1": AccountSwitch(True, 2)}
+    assert dict(live.accounts) == {"max-1": AccountSwitch(True, 2, frozenset())}
 
 
 @pytest.mark.parametrize(
     ("narrower", "expected"),
-    [({"paused": True}, AccountSwitch(True, 3)), ({"max_jobs": 1}, AccountSwitch(False, 1))],
+    [({"paused": True}, AccountSwitch(True, 3, frozenset())),
+     ({"max_jobs": 1}, AccountSwitch(False, 1, frozenset()))],
     ids=["pause", "lower-max-jobs"],
 )
 def test_recorded_applies_an_account_narrowing_at_once(
@@ -519,7 +524,7 @@ def test_an_account_widening_waits_for_the_pollers_adopt(
     assert after.accounts == before.accounts, "a widening waits for the poller's adopt"
     adopted, _ = adopt(db, machines)
     assert dict(adopted.accounts) == {
-        "max-1": AccountSwitch(False, wider.get("max_jobs"))
+        "max-1": AccountSwitch(False, wider.get("max_jobs"), frozenset())
     }
 
 
@@ -568,7 +573,7 @@ def test_the_requested_files_pause_holds_through_another_checkouts_adopt(
 
     live, _ = adopt(db, stale)
 
-    assert live.accounts["max-1"] == AccountSwitch(True, 6), "the Settings pause holds"
+    assert live.accounts["max-1"] == AccountSwitch(True, 6, frozenset()), "the Settings pause holds"
 
 
 def test_the_shipped_config_keeps_its_digest() -> None:
@@ -586,3 +591,16 @@ def test_the_shipped_config_keeps_its_digest() -> None:
 
     assert live.adopted_digest == before, "the digest #852 shipped, for a file with no accounts"
     assert live.places_by_adopted()
+
+
+def test_an_adopted_signed_in_on_holds_only_the_devices_the_poller_adopted(
+    tmp_path: Path, db
+) -> None:
+    machines = tmp_path / "machines.yml"
+    write(machines, accounts_text().replace("local: true", "local: true\n    home: /home/{bot}")
+          + "  - {id: work, harness: claude, signed_in_on: [box]}\n")
+
+    live, _ = adopt(db, machines)
+
+    assert live.adopted_account_holds("work", "signed_in_on", ["box"])
+    assert not live.adopted_account_holds("work", "signed_in_on", ["box", "pc"])

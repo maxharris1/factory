@@ -23,10 +23,11 @@ own transaction. Slots are generic: any free slot on an eligible device takes
 any harness. Inside that transaction a pool given `machines_path` reads
 the shared settings row (lib/live_settings.py, #852) with machines.yml as
 it is now written into it, and places by the row's enabled, drain and
-slot_max, and each account's paused and max_jobs, not by the config the
-process loaded. A settings change written under the same lock
+slot_max, and each account's paused, max_jobs and signed_in_on, not by the
+config the process loaded. A settings change written under the same lock
 (lib/settings_apply.py) that disables, drains or lowers slot_max, or pauses
-an account or lowers its max_jobs, stops the next claim in every process
+an account, lowers its max_jobs or drops a device from its signed_in_on,
+stops the next claim in every process
 (#777). An enable, an undrain, a resume or a higher cap reaches placement
 once the poller's DeviceMonitor adopts the file and every machines.yml the
 row holds allows it, with no restart. Until the poller first adopts, every

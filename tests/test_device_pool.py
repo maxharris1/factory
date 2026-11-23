@@ -543,6 +543,56 @@ def test_a_settings_pin_written_before_account_switches_leaves_accounts_open_aft
     )
 
 
+TWO_DEVICES = """\
+orch_host: box
+devices:
+  - name: box
+    local: true
+    slot_max: 4
+    home: /home/{{bot}}
+    harnesses: {{claude: {{bot: claude-bot, account: max-1}}}}
+  - name: pc
+    tailscale_name: pc.example.ts.net
+    slot_max: 4
+    harnesses: {{claude: claude-bot}}
+    workdir_root: /home/{{bot}}/work
+    ssh_alias: pc-{{bot}}
+    factory_root: /srv/factory
+    home: /home/{{bot}}
+accounts:
+  - {{id: max-1, harness: claude, paused: true}}
+  - {{id: claude-default, harness: claude, paused: true}}
+  - {{id: work, harness: claude, signed_in_on: [{work_on}]}}
+"""
+
+
+@pytest.mark.parametrize("settings_file", ["same", "another-checkout"])
+def test_a_device_dropped_from_signed_in_on_takes_no_claim_from_a_running_pool(
+    tmp_path: Path, settings_file: str
+) -> None:
+    machines = tmp_path / "machines.yml"
+    machines.write_text(TWO_DEVICES.format(work_on="box, pc"), encoding="utf-8")
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 100.0)
+    for n in range(6):
+        enqueue(queue, "claude", str(n))
+    poller_adopts(queue, machines)
+    pool = restarted(queue, machines)
+    assert pool.claim("claude")[1].account == "work"
+    settings = machines
+    if settings_file == "another-checkout":
+        settings = tmp_path / "settings" / "machines.yml"
+        settings.parent.mkdir()
+
+    settings_writes(queue, settings, TWO_DEVICES.format(work_on="pc"), at=1)
+    claimed = [pool.claim("claude") for _ in range(2)]
+    poller_adopts(queue, machines)
+    claimed += [pool.claim("claude") for _ in range(2)]
+
+    pairs = [(placement.account, placement.device) for _, placement in filter(None, claimed)]
+    assert ("work", "box") not in pairs, pairs
+    assert ("work", "pc") in pairs, "the pair the file keeps still takes work"
+
+
 def test_concurrent_claims_never_take_the_same_last_slot(tmp_path: Path) -> None:
     devices = (device("box", 2, "claude", "codex"),)
     pool, queue = make_pool(tmp_path, *devices)

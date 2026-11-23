@@ -263,8 +263,8 @@ def test_a_pause_reaches_the_live_row_under_the_claim_lock(tmp_path: Path) -> No
     finally:
         connection.close()
     assert live.written == entry.version
-    assert live.accounts["work"] == AccountSwitch(paused=True, max_jobs=2)
-    assert live.accounts["spare"] == AccountSwitch(paused=True, max_jobs=None)
+    assert live.accounts["work"] == AccountSwitch(paused=True, max_jobs=2, signed_in_on=frozenset({"box"}))
+    assert live.accounts["spare"] == AccountSwitch(paused=True, max_jobs=None, signed_in_on=frozenset({"pc"}))
 
 
 @pytest.mark.parametrize("actor", ["claude-bot", "grok", "x[bot]", "maxharris1[bot]", "someone-else"])
@@ -307,7 +307,6 @@ def test_max_jobs_64_is_the_highest_accepted(tmp_path: Path) -> None:
         ({"field": "paused", "expect": True, "value": False}, "changed"),
         ({"value": 2}, "no-change"),
         ({"field": "paused", "expect": False, "value": "true"}, "bad-value"),
-        ({"field": "signed_in_on", "expect": ["box"], "value": ["pc"]}, "bad-field"),
         ({"field": "harness", "expect": "claude", "value": "codex"}, "bad-field"),
     ],
 )
