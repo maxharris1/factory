@@ -8,7 +8,7 @@ import shlex
 import sqlite3
 import subprocess
 from collections import defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
@@ -40,7 +40,7 @@ INTERVAL_SECONDS = 30 * 60
 HELD_INTERVAL_SECONDS = 2 * 60
 SIGNOUTS = "signout_locks"
 SIGNOUT_LEASE_SECONDS = 10 * 60
-FENCES = "signin_fences"
+FENCE_OWNER = "broker-restart"
 
 _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS {TABLE} (
@@ -73,12 +73,6 @@ CREATE TABLE IF NOT EXISTS {SIGNOUTS} (
     since REAL NOT NULL,
     owner TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (account, device)
-)
-"""
-_FENCES_SCHEMA = f"""
-CREATE TABLE IF NOT EXISTS {FENCES} (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    since REAL NOT NULL
 )
 """
 _HOLD = (f"INSERT INTO {HOLDS} (account, device, since, seen, source, reason) VALUES (?1, ?2, ?3, ?3, ?4, ?5) "
@@ -573,25 +567,22 @@ def signing_out(connection: sqlite3.Connection, now: float) -> frozenset[tuple[s
             f"SELECT account, device FROM {SIGNOUTS} WHERE since > ?", (now - SIGNOUT_LEASE_SECONDS,)))
 
 
-def fence_signins(connection: sqlite3.Connection, now: float) -> bool:
-    """Stop the broker admitting sign-ins, unless a sign-in or sign-out already
-    holds a pair. The caller supplies the transaction."""
+def fence_signins(connection: sqlite3.Connection, pairs: Collection[tuple[str, str]], now: float) -> bool:
+    """Reserve every pair a sign-in could take, unless a sign-in or sign-out
+    already holds one. Any broker's admission then refuses the pair as
+    signing out. The caller supplies the transaction."""
     if signing_out(connection, now):
         return False
-    connection.execute(_FENCES_SCHEMA)
-    connection.execute(f"INSERT OR REPLACE INTO {FENCES} (id, since) VALUES (1, ?)", (now,))
+    _signouts(connection)
+    connection.executemany(
+        f"INSERT OR REPLACE INTO {SIGNOUTS} (account, device, since, owner) VALUES (?, ?, ?, ?)",
+        [(account, device, now, FENCE_OWNER) for account, device in sorted(pairs)])
     return True
 
 
 def unfence_signins(connection: sqlite3.Connection) -> None:
-    connection.execute(_FENCES_SCHEMA)
-    connection.execute(f"DELETE FROM {FENCES}")
-
-
-def signins_fenced(connection: sqlite3.Connection, now: float) -> bool:
-    connection.execute(_FENCES_SCHEMA)
-    return connection.execute(f"SELECT 1 FROM {FENCES} WHERE since > ?",
-                              (now - SIGNOUT_LEASE_SECONDS,)).fetchone() is not None
+    _signouts(connection)
+    connection.execute(f"DELETE FROM {SIGNOUTS} WHERE owner = ?", (FENCE_OWNER,))
 
 
 def newest_hold(connection: sqlite3.Connection) -> float | None:

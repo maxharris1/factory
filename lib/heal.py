@@ -36,7 +36,8 @@ Per component (its health label), in order:
    checkout): restart once idle. The Linear listener is busy while a
    delivery is under REQUEST_DEADLINE_SECONDS old, and the sign-in broker
    while a signout_locks row is under its lease (rechecked as it restarts,
-   under a signin_fences row that stops it admitting sign-ins meanwhile);
+   when heal reserves every machines.yml sign-in pair so that no broker,
+   old code or new, admits a sign-in meanwhile);
    the poller (at its cycle boundary) and a waiter (outside a claim) stop
    at a safe point themselves.
 5. Backoff: a successful stale-code restart is a version update. It does
@@ -135,7 +136,8 @@ Poster = Callable[[str, str, bytes, float], WebhookResult]
 class Facts:
     """This host: its device, the services this account owns and holds
     stopped, whether the Linear listener is mid-delivery, whether a
-    sign-in or sign-out holds an account pair, and the orch DB that says so."""
+    sign-in or sign-out holds an account pair, and the orch DB and
+    machines.yml that say so."""
 
     device: str
     owned: frozenset[str] = frozenset()
@@ -143,6 +145,7 @@ class Facts:
     listener_busy: bool = False
     signin_busy: bool = False
     db: Path | None = None
+    machines: Path | None = None
     # When each bot's drain marker was written (its mtime).
     drain_since: Mapping[str, float] = field(default_factory=dict)
     # The commit each bot's waiter acknowledged draining for, when its ack
@@ -540,7 +543,8 @@ def heal(
             if action.service == POLLER_SERVICE:
                 env["ORCH_POLL_STOP_WAIT"] = POLLER_STOP_WAIT
             fenced = action.service == SIGNIN_BROKER_SERVICE and action.state != health.DOWN
-            with _signin_fence(facts.db, now + clock() - begun) if fenced else nullcontext(True) as admitted:
+            with (_signin_fence(facts.db, facts.machines, now + clock() - begun) if fenced
+                  else nullcontext(True)) as admitted:
                 if not admitted:
                     actions[index] = replace(action, kind=DEFER, reason=SIGNIN_HELD)
                     note(actions[index], key)
@@ -586,16 +590,18 @@ def heal(
 
 
 @contextmanager
-def _signin_fence(db: Path | None, now: float) -> Iterator[bool]:
+def _signin_fence(db: Path | None, machines: Path | None, now: float) -> Iterator[bool]:
     """Whether the stale broker may restart: no sign-in or sign-out holds a
     pair, and the broker admits none until the restart ends. Fails closed."""
     if db is None or not db.is_file():
         yield True
         return
+    config = health.load_machines(machines)
+    pairs = () if config is None else [(a.id, d) for a in config.accounts for d in a.signed_in_on]
     try:
         with closing(sqlite3.connect(db, timeout=30, isolation_level=None)) as connection:
             connection.execute("BEGIN IMMEDIATE")
-            fenced = account_doctor.fence_signins(connection, now)
+            fenced = account_doctor.fence_signins(connection, pairs, now)
             connection.execute("COMMIT")
     except sqlite3.Error:
         fenced = False
@@ -621,7 +627,7 @@ orch heal devices [--state DIR] [--db PATH] [--checkout DIR] [--machines PATH]
 
 
 def facts_for(device: str, config_dir: Path, state_dir: Path, db: Path | None,
-              now: float) -> Facts:
+              now: float, machines: Path | None = None) -> Facts:
     owned = {service for service in HOST_SERVICES if (config_dir / f"{service}-autostart").is_file()}
     held = {service for service in HOST_SERVICES if (state_dir / f"{service}.stopped").exists()}
     drains: dict[str, float] = {}
@@ -647,6 +653,7 @@ def facts_for(device: str, config_dir: Path, state_dir: Path, db: Path | None,
                            and now - float(delivery[0]) < REQUEST_DEADLINE_SECONDS),
         signin_busy=pair is not None,
         db=db,
+        machines=machines,
         drain_since=drains, drain_acked=acked,
     )
 
@@ -726,8 +733,8 @@ def main(argv: list[str], *, stdin: TextIO | None = None,
     db_path = Path(db) if db else None
     heal(
         report,
-        facts=facts_for(device, config_dir, state_dir, db_path, now),
-        refresh=lambda: facts_for(device, config_dir, state_dir, db_path, now),
+        facts=facts_for(device, config_dir, state_dir, db_path, now, args.machines),
+        refresh=lambda: facts_for(device, config_dir, state_dir, db_path, now, args.machines),
         state_dir=state_dir,
         deploy=args.deploy,
         webhook=_webhook(args.orch),

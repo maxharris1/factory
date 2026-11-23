@@ -17,13 +17,14 @@ from pathlib import Path
 import pytest
 import yaml
 
-from lib import account_doctor, cli, health, settings_apply, signin_broker, signin_relay
+from lib import account_doctor, cli, heal, health, settings_apply, signin_broker, signin_relay
 from lib.device_pool import DevicePool, RunningPair
 from lib.machines_yml import load_machines_yml
 from lib.queue import SQLiteJobQueue
 from lib.remote import SshTransport
 from tests.test_account_doctor import World
 from tests.test_account_pair_requests import Box
+from tests.test_heal import component, report
 from tests.test_pair_placement import enqueue
 from tests.test_settings_apply import NOW, OWNER, ROOT
 from tests.test_signin_attempt import Attempts
@@ -235,16 +236,25 @@ def test_a_pair_signing_out_is_refused(intake: Intake) -> None:
     assert (line["id"], line["result"], line["error"]) == (rid, "refused", "signing-out")
 
 
-def test_a_signin_is_refused_while_heal_restarts_the_broker(intake: Intake) -> None:
+def test_a_broker_that_knows_no_fence_admits_nothing_while_heal_restarts_it(intake: Intake) -> None:
     intake.made("claude-c")
-    with closing(sqlite3.connect(intake.box.world.db, isolation_level=None)) as connection:
-        assert account_doctor.fence_signins(connection, NOW)
     rid = intake.box.request("signin")
 
-    intake.tick()
+    def restart(argv, env, log):
+        intake.tick()
+        return 0
 
+    actions = heal.heal(
+        report(component("signin-broker", bot="", device="pc", version="old")),
+        facts=heal.Facts("pc", owned=frozenset({"signin-broker"}), db=intake.box.world.db,
+                         machines=intake.box.machines),
+        state_dir=intake.box.state, deploy=Path("/deploy"), webhook=heal.Webhook(),
+        environ={}, now=NOW, run=restart, clock=lambda: 0.0,
+    )
+
+    assert [action.kind for action in actions] == [heal.RESTART]
     (line,) = intake.lines()
-    assert (line["id"], line["result"], line["error"]) == (rid, "refused", "broker-restarting")
+    assert (line["id"], line["result"], line["error"]) == (rid, "refused", "signing-out")
     assert intake.launched == []
     with closing(sqlite3.connect(intake.box.world.db, isolation_level=None)) as connection:
         assert account_doctor.signing_out(connection, NOW) == frozenset()

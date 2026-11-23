@@ -422,6 +422,29 @@ def test_a_lapsed_or_missing_signout_lock_is_not_busy(tmp_path: Path) -> None:
 
 
 STALE_BROKER = component("signin-broker", bot="", version="0123456789ab")
+MACHINES_WITH_ACCOUNTS = """\
+orch_host: box
+accounts:
+  - {id: claude-b, harness: claude, signed_in_on: [pc, box]}
+  - {id: codex-b, harness: codex, signed_in_on: [pc]}
+devices:
+  - name: box
+    tailscale_name: box.example.ts.net
+    slot_max: 1
+    harnesses: {claude: claude-bot}
+    workdir_root: /home/{bot}/work
+    ssh_alias: box-{bot}
+    factory_root: /srv/factory
+    home: /home/{bot}
+  - name: pc
+    tailscale_name: pc.example.ts.net
+    slot_max: 2
+    harnesses: {claude: claude-bot, codex: codex-bot}
+    workdir_root: /home/{bot}/work
+    ssh_alias: pc-{bot}
+    factory_root: /srv/factory
+    home: /home/{bot}
+"""
 
 
 def test_a_signin_admitted_during_an_earlier_restart_defers_the_stale_broker(tmp_path: Path) -> None:
@@ -455,24 +478,24 @@ def test_a_signin_admitted_during_an_earlier_restart_defers_the_stale_broker(tmp
         "defer signin-broker @ box (stale code, a sign-in or sign-out holds a pair)")
 
 
-def test_signins_are_fenced_while_a_stale_broker_restarts(tmp_path: Path) -> None:
+def test_every_signin_pair_is_reserved_while_a_stale_broker_restarts(tmp_path: Path) -> None:
     db = tmp_path / "orch.db"
     sqlite3.connect(db).close()
-    fenced = []
+    machines = tmp_path / "machines.yml"
+    machines.write_text(MACHINES_WITH_ACCOUNTS, encoding="utf-8")
+    reserved = []
 
     def run(argv, env, log_path):
         with closing(sqlite3.connect(db, isolation_level=None)) as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            fenced.append(account_doctor.signins_fenced(connection, NOW))
-            connection.execute("ROLLBACK")
+            reserved.append(account_doctor.signing_out(connection, NOW))
         return 0
 
-    actions, _, _ = run_heal(tmp_path, report(STALE_BROKER), runs=run, host=facts(db=db))
+    actions, _, _ = run_heal(tmp_path, report(STALE_BROKER), runs=run, host=facts(db=db, machines=machines))
 
-    assert fenced == [True]
+    assert reserved == [{("claude-b", "box"), ("claude-b", "pc"), ("codex-b", "pc")}]
     assert kinds(actions) == [(RESTART, "signin-broker @ box")]
     with closing(sqlite3.connect(db)) as connection:
-        assert account_doctor.signins_fenced(connection, NOW) is False
+        assert account_doctor.signing_out(connection, NOW) == frozenset()
 
 
 def test_a_down_broker_restarts_while_a_pair_is_held(tmp_path: Path) -> None:

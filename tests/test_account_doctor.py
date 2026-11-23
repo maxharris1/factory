@@ -1197,22 +1197,23 @@ def test_due(last: float | None, newest: float | None, now: float, expected: boo
 
 
 def test_a_signin_fence_is_refused_while_a_pair_is_held_and_unfence_clears_it(tmp_path: Path) -> None:
+    pairs = [("claude-b", "pc"), ("claude-c", "pc")]
     with contextlib.closing(sqlite3.connect(tmp_path / "orch.db", isolation_level=None)) as connection:
-        assert account_doctor.signins_fenced(connection, NOW) is False
         assert account_doctor.reserve_pair(connection, "claude-c", "pc", "signin-1", NOW)
-        assert account_doctor.fence_signins(connection, NOW + 1) is False
-        assert account_doctor.signins_fenced(connection, NOW + 1) is False
+        assert account_doctor.fence_signins(connection, pairs, NOW + 1) is False
+        assert account_doctor.signing_out(connection, NOW + 1) == {("claude-c", "pc")}
         account_doctor.release_pair(connection, "claude-c", "pc", "signin-1")
-        assert account_doctor.fence_signins(connection, NOW + 1) is True
-        assert account_doctor.signins_fenced(connection, NOW + 1) is True
+        assert account_doctor.fence_signins(connection, pairs, NOW + 1) is True
+        assert account_doctor.signing_out(connection, NOW + 1) == set(pairs)
+        assert not account_doctor.reserve_pair(connection, "claude-b", "pc", "signin-2", NOW + 2)
         account_doctor.unfence_signins(connection)
-        assert account_doctor.signins_fenced(connection, NOW + 1) is False
+        assert account_doctor.signing_out(connection, NOW + 1) == frozenset()
 
 
 def test_a_signin_fence_expires_after_the_lease(tmp_path: Path) -> None:
     lease = account_doctor.SIGNOUT_LEASE_SECONDS
     with contextlib.closing(sqlite3.connect(tmp_path / "orch.db", isolation_level=None)) as connection:
         assert account_doctor.reserve_pair(connection, "claude-c", "pc", "signin-1", NOW)
-        assert account_doctor.fence_signins(connection, NOW + lease) is True
-        assert account_doctor.signins_fenced(connection, NOW + 2 * lease - 1) is True
-        assert account_doctor.signins_fenced(connection, NOW + 2 * lease) is False
+        assert account_doctor.fence_signins(connection, [("claude-c", "pc")], NOW + lease) is True
+        assert account_doctor.signing_out(connection, NOW + 2 * lease - 1) == {("claude-c", "pc")}
+        assert account_doctor.reserve_pair(connection, "claude-c", "pc", "signin-2", NOW + 2 * lease)

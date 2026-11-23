@@ -247,9 +247,7 @@ class Broker:
         try:
             with self.claims() as held:
                 busy = _pair(request) in {(pair.account, pair.device) for pair in held.pairs(config)}
-                now = self.clock()
-                fenced = not busy and held.fenced(now)
-                taken = not busy and not fenced and held.hold(*_pair(request), request.id, now)
+                taken = not busy and held.hold(*_pair(request), request.id, self.clock())
                 if taken:
                     with self._lock:
                         self._attempts[_pair(request)] = attempt
@@ -257,8 +255,6 @@ class Broker:
             raise Refused("cannot read running jobs") from None
         if busy:
             raise Refused("running-job")
-        if fenced:
-            raise Refused("broker-restarting")
         if not taken:
             raise Refused("signing-out")
         return attempt
