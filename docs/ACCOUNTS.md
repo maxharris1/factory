@@ -135,14 +135,15 @@ flag for each row that is not `ok`. It goes in the factory's own repo, the
 its reason is `account-signin`. Its detail is `<status>; run: <step>;
 <detail>`, cut to 500 characters. The step is one of these:
 
-- `sign in as <login> on <device>: <home><login command>, then orch accounts doctor`
-- `sign <account> in to its own account as <login> on <device>: <home><login command>, then orch accounts doctor`
+- `sign in as <login> on <device>: <sign-in command>, then orch accounts doctor`
+- `sign <account> in to its own account as <login> on <device>: <sign-in command>, then orch accounts doctor`
 - `remove the token export from <login>'s login profile on <device>, then orch accounts doctor`
 - `fix ssh to <device> for <harness>, then orch accounts doctor`
 
-`<home>` is `CLAUDE_CONFIG_DIR=<folder> ` or `CODEX_HOME=<folder> `, or
-`env -u CLAUDE_CONFIG_DIR ` (or `env -u CODEX_HOME `) for the device's own
-login. `<login command>` is `claude auth login` or `codex login`.
+`<sign-in command>` is the step 2 command for the account's folder, with
+`<folder>` in place of `~/.factory-accounts/<id>`. For the device's own
+login it is `env -u CLAUDE_CODE_OAUTH_TOKEN -u CLAUDE_CONFIG_DIR claude auth login`
+or `env -u CODEX_HOME codex login --device-auth`.
 
 The next pass that finds the row `ok` clears the flag. So does the pass
 after the account leaves the device's `signed_in_on`. A flag still raised

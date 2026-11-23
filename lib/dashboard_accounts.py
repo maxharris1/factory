@@ -101,6 +101,7 @@ def _signed_in_on(
             "checked_at": _checked_at(checked_at),
             "same_login_as": _same_login(detail, account.id, listed),
             "command": None if status == "ok" else _command(machines, device.name, account),
+            "login": device.login_for(account.harness),
         })
     return entries
 

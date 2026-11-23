@@ -417,7 +417,7 @@ SCRIPT_TAIL = r"""
     efficiency: [renderHeadroom, renderTokens, renderRounds, renderSavings, renderJobsLifetime],
     health: [renderBroken, renderComponents, renderDrift, renderHealth, renderLog, renderRules, renderNoWaiter],
     ticket: [renderTicketView],
-    settings: [renderSettings]
+    settings: [renderSettings, renderAccounts]
   };
   var RENDERERS = [renderBand, renderAttentionStrip, renderStatusLine].concat(PAGES[PAGE] || []);
 
