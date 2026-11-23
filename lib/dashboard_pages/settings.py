@@ -25,6 +25,7 @@ UNCHECKED = "unchecked"
 ACCOUNT_READ_ONLY = {"default": "read-only: default account", "external": "read-only: external account"}
 NOT_SIGNED_IN = "not signed in on any device"
 NO_ACCOUNTS = "no accounts: machines.yml lists none"
+ADD_HARNESSES = ("claude", "codex", "cursor")
 
 
 def drain_state(row: dict) -> tuple[str, str]:
@@ -216,14 +217,19 @@ CSS = """\
 .st-auth{margin:0 0 12px}
 .st-auth .gh-row,.st-ctl .gh-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .st-auth,.st-auth .gh-row{flex-direction:row;flex-wrap:wrap;align-items:center}
-:is(.st-auth,.st-ctl) :is(button,input){min-height:32px;padding:0 12px;font:12px var(--mono);color:var(--text);background:var(--field);border:1px solid var(--line-hi)}
+:is(.st-auth,.st-ctl) :is(button,input,select){min-height:32px;padding:0 12px;font:12px var(--mono);color:var(--text);background:var(--field);border:1px solid var(--line-hi)}
 :is(.st-auth,.st-ctl) button{cursor:pointer}
 :is(.st-auth,.st-ctl) button[aria-pressed=true]{border-color:var(--warn);color:var(--warn)}
 .st-ctl input{width:7ch}
-:is(.st-auth,.st-ctl) :is(button,input):focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+.st-ctl input[data-field=id]{width:16ch}
+.st-ctl input[type=checkbox]{width:auto;min-height:0;padding:0;accent-color:var(--brand)}
+.st-ctl label{display:inline-flex;align-items:center;gap:4px}
+:is(.st-auth,.st-ctl) :is(button,input,select):focus-visible{outline:2px solid var(--brand);outline-offset:2px}
 .st-auth code{font:600 16px var(--mono);letter-spacing:.1em;color:var(--accent)}
 .st-auth a{color:var(--accent)}
 #accounts{grid-column:1/-1}
+#accounts>.st-ctl{margin:0 0 12px}
+.ac-list{display:contents}
 .ac-devs{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none;font:12px/1.5 var(--mono);color:var(--text-2)}
 .ac-dev{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}
 .ac-name{color:var(--text)}.ac-when{color:var(--muted)}
@@ -233,10 +239,13 @@ CSS = """\
 
 
 _SCRIPT = r"""
-  // settings.html (#777). A card's controls are kept nodes (ST.cards), so a
-  // typed slot_max and the last answer survive each redraw.
+  // settings.html (#777). A card's controls are kept nodes (ST.cards,
+  // ST.accountCards, ST.addForm), so typed values and the last answer survive
+  // each redraw.
   var ST = __ST__;
-  ST.cards = {};
+  ST.cards = Object.create(null);
+  ST.accountCards = Object.create(null);
+  ST.addForm = null;
   function stDrain(x) {
     if (!x.drain) return ['off', ''];
     var held = x.held || 0;
@@ -295,15 +304,19 @@ _SCRIPT = r"""
       stSync(c);
     });
   }
-  function stApply(c) {
-    var text = String(c.slot.value || '').trim();
+  function stCount(value) {
+    var text = String(value || '').trim();
     var n = Number(text);
-    if (!/^[0-9]+$/.test(text) || n < 1 || n > 64) {
-      c.out.className = 'st-out bad';
-      c.out.textContent = 'error: bad-value';
-      return;
-    }
-    stSend(c, 'slot_max', c.x.slot_max, n);
+    return /^[0-9]+$/.test(text) && n >= 1 && n <= 64 ? n : null;
+  }
+  function stBad(c) {
+    c.out.className = 'st-out bad';
+    c.out.textContent = 'error: bad-value';
+  }
+  function stApply(c) {
+    var n = stCount(c.slot.value);
+    if (n === null) stBad(c);
+    else stSend(c, 'slot_max', c.x.slot_max, n);
   }
   function stBuild() {
     var c = {root: el('div', 'st-ctl'), busy: false, shown: undefined, x: null};
@@ -399,6 +412,149 @@ _SCRIPT = r"""
       add(add(li, el('span', 'ac-sign', label)), el('code', 'ac-cmd', x.command));
     }
   }
+  function acDevices(a) { return (a.signed_in_on || []).map(function (x) { return x.device; }); }
+  function acCandidates(d, harness) {
+    return ((d.slots || {}).devices || []).filter(function (x) { return (x.harnesses || []).indexOf(harness) >= 0; })
+      .map(function (x) { return x.name; });
+  }
+  function acChecked(c) {
+    return c.boxes.filter(function (b) { return b.checked; }).map(function (b) { return b.getAttribute('data-device'); });
+  }
+  function acSet(c, field, expect, value) { return {op: 'set', account: c.a.id, field: field, expect: expect, value: value}; }
+  var AC_OPS = {
+    add: function (c) {
+      var n = stCount(c.max.value);
+      return n === null ? null : {op: 'add', account: String(c.id.value || '').trim(), harness: c.harness.value,
+                                  max_jobs: n, signed_in_on: acChecked(c)};
+    },
+    max_jobs: function (c) {
+      var n = stCount(c.max.value);
+      return n === null ? null : acSet(c, 'max_jobs', c.a.max_jobs, n);
+    },
+    signed_in_on: function (c) { return acSet(c, 'signed_in_on', acDevices(c.a), acChecked(c)); },
+    paused: function (c) { return acSet(c, 'paused', c.a.paused, !c.a.paused); },
+    remove: function (c) {
+      var a = c.a;
+      return {op: 'remove', account: a.id,
+              expect: {harness: a.harness, max_jobs: a.max_jobs, paused: a.paused, signed_in_on: acDevices(a)}};
+    },
+    prepare: function (c, device) { return {op: 'prepare', account: c.a.id, device: device}; },
+    doctor: function (c, device) { return {op: 'doctor', account: c.a.id, device: device}; }
+  };
+  function acDisable(c) { c.buttons.concat(c.pairButtons).forEach(function (b) { b.disabled = c.busy; }); }
+  function acSend(c, body) {
+    if (c.busy) return;
+    c.busy = true;
+    c.out.className = 'st-out';
+    c.out.textContent = 'sending…';
+    acDisable(c);
+    ghPost('/api/settings', Object.assign({target: 'account'}, body), true).then(function (res) {
+      c.busy = false;
+      c.out.className = 'st-out ' + (res.status === 202 ? 'ok' : 'bad');
+      c.out.textContent = res.status === 202 ? ST.queued : 'error: ' + res.error;
+      acDisable(c);
+    });
+  }
+  function acRun(c, op, device) {
+    var body = AC_OPS[op](c, device);
+    if (body) acSend(c, body);
+    else stBad(c);
+  }
+  function acAttrs(node, attrs) {
+    Object.keys(attrs).forEach(function (k) { node.setAttribute(k, attrs[k]); });
+    return node;
+  }
+  function acButton(c, list, row, text, op, device) {
+    var b = acAttrs(ghButton(row, text, function () { acRun(c, op, device); }), {'data-op': op});
+    if (device) b.setAttribute('data-pair', device);
+    list.push(b);
+    return b;
+  }
+  function acBase(label, op) {
+    var c = {root: el('div', 'st-ctl'), busy: false, boxes: [], boxKey: undefined, buttons: [], pairButtons: []};
+    c.fields = add(c.root, el('div', 'gh-row'));
+    c.max = acAttrs(el('input'), {type: 'number', min: '1', max: '64', 'data-field': 'max_jobs'});
+    var row = add(c.root, el('div', 'gh-row'));
+    c.boxRow = add(row, el('span', 'ac-list'));
+    acButton(c, c.buttons, row, label, op);
+    return c;
+  }
+  function acOut(c) {
+    c.out = add(c.root, el('div', 'st-out'));
+    c.out.setAttribute('role', 'status');
+  }
+  function acBoxes(c, key, names, checked) {
+    if (c.boxKey === key) return;
+    c.boxKey = key;
+    c.boxRow.replaceChildren();
+    c.boxes = names.map(function (name) {
+      var label = add(c.boxRow, el('label'));
+      var box = add(label, acAttrs(el('input'), {type: 'checkbox', 'data-device': name}));
+      box.checked = checked.indexOf(name) >= 0;
+      add(label, document.createTextNode(name));
+      return box;
+    });
+  }
+  function acAddSync(c) {
+    var names = acCandidates(c.d, c.harness.value);
+    acBoxes(c, JSON.stringify(names), names, acChecked(c));
+    acDisable(c);
+  }
+  function acAddBuild() {
+    var c = acBase('Add account', 'add');
+    c.root.setAttribute('data-form', 'add');
+    c.id = add(c.fields, acAttrs(el('input'), {'data-field': 'id', placeholder: 'account id'}));
+    c.harness = add(c.fields, acAttrs(el('select'), {'data-field': 'harness', 'aria-label': 'harness'}));
+    ST.harnesses.forEach(function (h) { add(c.harness, el('option', null, h)); });
+    c.harness.value = ST.harnesses[0];
+    c.harness.addEventListener('change', function () { acAddSync(c); });
+    add(c.fields, c.max).setAttribute('placeholder', 'max_jobs');
+    acOut(c);
+    return c;
+  }
+  function acAddForm(d) {
+    var c = ST.addForm || (ST.addForm = acAddBuild());
+    c.d = d;
+    acAddSync(c);
+    return c.root;
+  }
+  function acCardBuild(a) {
+    var c = acBase('Apply devices', 'signed_in_on');
+    add(c.fields, c.max).setAttribute('aria-label', 'max_jobs for ' + a.id);
+    acButton(c, c.buttons, c.fields, 'Apply max_jobs', 'max_jobs');
+    var row = add(c.root, el('div', 'gh-row'));
+    c.paused = acButton(c, c.buttons, row, '', 'paused');
+    acButton(c, c.buttons, row, 'Remove', 'remove');
+    c.pairs = add(c.root, el('div', 'ac-list'));
+    acOut(c);
+    return c;
+  }
+  function acControls(d, a) {
+    var c = ST.accountCards[a.id] || (ST.accountCards[a.id] = acCardBuild(a));
+    c.a = a;
+    c.paused.textContent = a.paused ? 'Resume' : 'Pause';
+    c.paused.setAttribute('aria-pressed', String(!!a.paused));
+    if (c.shown !== a.max_jobs) {
+      c.shown = a.max_jobs;
+      c.max.value = a.max_jobs === null || a.max_jobs === undefined ? '' : String(a.max_jobs);
+    }
+    var on = acDevices(a);
+    var names = acCandidates(d, a.harness);
+    acBoxes(c, JSON.stringify([names, on]), names, on);
+    if (c.pairKey !== JSON.stringify(on)) {
+      c.pairKey = JSON.stringify(on);
+      c.pairs.replaceChildren();
+      c.pairButtons = [];
+      on.forEach(function (device) {
+        var row = add(c.pairs, el('div', 'gh-row'));
+        add(row, el('span', 'ac-name', device));
+        acButton(c, c.pairButtons, row, 'Prepare', 'prepare', device);
+        acButton(c, c.pairButtons, row, 'Run doctor', 'doctor', device);
+      });
+    }
+    acDisable(c);
+    return c.root;
+  }
   function acCard(d, a) {
     var card = el('article', 'ac-card');
     card.setAttribute('data-account', a.id);
@@ -406,6 +562,7 @@ _SCRIPT = r"""
     add(h, el('span', 'st-name', a.id));
     if (ST.accountReadOnly[a.read_only]) add(h, chip(ST.accountReadOnly[a.read_only]));
     stFactsList(card, acFacts(a));
+    if (GH.on && GH.login && !a.read_only) add(card, acControls(d, a));
     var on = a.signed_in_on || [];
     if (on.length) {
       var ul = add(card, el('ul', 'ac-devs'));
@@ -420,6 +577,7 @@ _SCRIPT = r"""
     var accounts = d.accounts || [];
     var root = panel('accounts', 'Accounts', accounts.length + ' accounts');
     if (!root) return;
+    if (GH.on && GH.login) add(root, acAddForm(d));
     if (!accounts.length) { add(root, el('p', 'empty', ST.noAccounts)); return; }
     var grid = add(root, el('div', 'st-grid'));
     accounts.forEach(function (a) { add(grid, acCard(d, a)); });
@@ -428,5 +586,6 @@ _SCRIPT = r"""
 SCRIPT = _SCRIPT.replace("__ST__", json.dumps(
     {"tone": RESULT_TONE, "perCard": RESULTS_PER_CARD, "queued": QUEUED, "readOnly": READ_ONLY,
      "waiting": WAITING, "noChanges": NO_CHANGES, "signIn": SIGN_IN_TONE, "unchecked": UNCHECKED,
-     "accountReadOnly": ACCOUNT_READ_ONLY, "notSignedIn": NOT_SIGNED_IN, "noAccounts": NO_ACCOUNTS}
+     "accountReadOnly": ACCOUNT_READ_ONLY, "notSignedIn": NOT_SIGNED_IN, "noAccounts": NO_ACCOUNTS,
+     "harnesses": ADD_HARNESSES}
 ))

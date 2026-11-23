@@ -298,6 +298,17 @@ def test_signed_in_each_card_has_its_controls(tmp_path: Path) -> None:
 
 
 @needs_node
+@pytest.mark.parametrize("name", ["constructor", "__proto__", "toString", "hasOwnProperty"])
+def test_a_device_named_like_an_object_property_gets_its_controls(tmp_path: Path, name: str) -> None:
+    snapshot = _snapshot(tmp_path)
+    next(x for x in snapshot["slots"]["devices"] if x["name"] == "pc")["name"] = name
+    html = _run(tmp_path, snapshot, _harness(SIGNED_IN))["html"]["settings"]
+    assert re.findall(r'<article class="st-card" data-device="([^"]+)">', html) == ["box", name, "mac"]
+    assert f'aria-label="slot_max for {name}"' in _card(html, name)
+    assert html.count('<div class="st-ctl">') == 3
+
+
+@needs_node
 def test_a_toggle_posts_the_shown_value_and_shows_queued(tmp_path: Path) -> None:
     harness = _harness(SIGNED_IN, {"status": 202, "body": {"id": "x" * 22}})
     out = _run(tmp_path, _snapshot(tmp_path), harness, [["click", {"attr": {"data-field": "drain"}}]])
