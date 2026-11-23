@@ -458,12 +458,13 @@ def test_feeder_reads_statuses_once_per_poll_for_a_long_chain(tmp_path: Path) ->
     assert sum(1 for state, _ in states(tmp_path).values() if state == "waiting-blocked") == 14
 
 
-def test_no_gate_lines_means_no_status_read(tmp_path: Path) -> None:
+def test_no_gate_lines_reads_only_the_fed_pr(tmp_path: Path) -> None:
     feeder, _, github, _ = make_feeder(tmp_path, box=1)
     github.issues[HOME] = [issue(1, created_at=1.0), issue(2, created_at=2.0)]
     feeder.feed_once()
-    feeder.feed_once()
     assert github.status_reads == []
+    feeder.feed_once()
+    assert github.status_reads == [frozenset({ref(501)})]
     assert states(tmp_path)["2"] == ("waiting-capacity", None)
 
 
@@ -564,10 +565,10 @@ def test_a_holder_releases_when_its_pr_merges_or_closes(tmp_path: Path, ended) -
     github.statuses[ref(501)] = ended
     assert fed_heads(github, feeder.feed_once()) == ["factory/issue-2"]
     assert rows(tmp_path / "orch.db")["1"]["released"] == 1
-    reads = len(github.status_reads)
-    github.statuses[ref(501)] = OPEN_PULL  # reopened: released stays released
+    github.statuses[ref(501)] = OPEN_PULL
     feeder.feed_once()
-    assert all(ref(501) not in read for read in github.status_reads[reads:])
+    assert rows(tmp_path / "orch.db")["1"]["released"] == 1
+    assert states(tmp_path)["2"][0] == "fed"
 
 
 def test_conflicts_with_is_symmetric_and_matches_issue_or_pr_number(tmp_path: Path) -> None:

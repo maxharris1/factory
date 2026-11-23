@@ -2396,9 +2396,12 @@ def leave_child_command(child_pid: Path, *, stubborn: bool) -> list[str]:
 # F1.1: removing the pid file is not evidence the worker's group is empty.
 
 
-def test_r1_f11_remote_child_left_in_the_group_is_stopped_before_the_slot_is_released(
-    tmp_path: Path,
+@pytest.mark.parametrize("stubborn", [False, True], ids=["plain", "sigterm-proof"])
+def test_r1_f11_remote_child_left_in_the_group_is_gone_before_the_slot_is_released(
+    tmp_path: Path, stubborn: bool
 ) -> None:
+    """#1210: the device's wrapper kills a child the harness left, one that
+    ignores SIGTERM included, before it writes `exit`; the slot goes then."""
     machines, queue, pool, job_id, ssh = remote_setup(tmp_path, "codex")
     child_pid = tmp_path / "child.pid"
     child: int | None = None
@@ -2406,53 +2409,14 @@ def test_r1_f11_remote_child_left_in_the_group_is_stopped_before_the_slot_is_rel
         proc = orch(
             "job", "run", "codex-bot", job_id, "--db", str(tmp_path / "orch.db"),
             "--machines", str(machines), "--",
-            *leave_child_command(child_pid, stubborn=False),
-            env=ssh.env(),
-        )
-        _, err = proc.communicate(timeout=60)
-        child = int(wait_file(child_pid))
-        assert proc.returncode == 0, err
-        assert "stopping it" in err, err  # the leftover child was found running
-        assert wait_gone(child)
-        assert pool.placement(job_id) is None
-    finally:
-        kill_quietly(child)
-
-
-def test_r1_f11_remote_child_that_will_not_stop_keeps_the_slot_until_it_is_gone(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    machines, queue, pool, job_id, ssh = remote_setup(tmp_path, "codex")
-    child_pid = tmp_path / "child.pid"
-    child: int | None = None
-    try:
-        proc = orch(
-            "job", "run", "codex-bot", job_id, "--db", str(tmp_path / "orch.db"),
-            "--machines", str(machines), "--",
-            *leave_child_command(child_pid, stubborn=True),
+            *leave_child_command(child_pid, stubborn=stubborn),
             env=ssh.env(),
         )
         _, err = proc.communicate(timeout=90)
         child = int(wait_file(child_pid))
         assert proc.returncode == 0, err
-        assert "not confirmed gone (running); slot held" in err, err
-        assert not gone(child)
-        assert pool.placement(job_id) is not None
-
-        # The poller, with the runner gone, finds it still running too.
-        use_fake_ssh(monkeypatch, ssh)
-        queue.finish(job_id, owner="codex", handoff_comment_id="c1")
-        monitor = DeviceMonitor(pool, config_of(machines), remote.SshTransport())
-        result = monitor.reconcile(time.time(), 600.0, lambda *_: None)
-        assert result.released == ()
-        assert pool.placement(job_id) is not None
-
-        kill_quietly(child)
-        assert wait_gone(child)
-        deadline = time.monotonic() + 5
-        while monitor.reconcile(time.time(), 600.0, lambda *_: None).released != (job_id,):
-            assert time.monotonic() < deadline, "the slot is released once the run's keeper left"
-            time.sleep(0.1)
+        assert gone(child), "the leftover child died before orch job run returned"
+        assert pool.placement(job_id) is None
     finally:
         kill_quietly(child)
 
@@ -2560,8 +2524,9 @@ def test_r1_f12_malformed_or_unsafe_pid_records_are_unknown_and_never_stopped(
 # F1.3: a new runner must not start while an earlier runner's worker lives.
 
 
+@pytest.mark.parametrize("sigkill", ["prompt", "late"])
 def test_r1_f13_box_takeover_is_refused_while_the_dead_runners_worker_lives(
-    tmp_path: Path,
+    tmp_path: Path, sigkill: str
 ) -> None:
     machines = machines_file(tmp_path, pc=False)
     queue = SQLiteJobQueue(tmp_path / "orch.db", clock=time.time)
@@ -2593,12 +2558,27 @@ def test_r1_f13_box_takeover_is_refused_while_the_dead_runners_worker_lives(
         assert pool.placement(job_id).worker_pid == worker  # identity kept
 
         queue.finish(job_id, owner="claude", handoff_comment_id="c1")
-        monitor = DeviceMonitor(pool, config_of(machines), FakeTransport())
-        assert monitor.reconcile(time.time(), 600.0, lambda *_: None).released == ()
-        assert pool.placement(job_id) is not None
-        kill_quietly(worker)
+        late: list[int] = []
+
+        def kill(pid: int, sig: int) -> None:
+            if sigkill == "late" and sig == signal.SIGKILL:
+                late.append(pid)
+            else:
+                os.kill(pid, sig)
+
+        monitor = DeviceMonitor(pool, config_of(machines), FakeTransport(), kill=kill)
+        first_look = monitor.reconcile(time.time(), 600.0, lambda *_: None)
+        assert first_look.stopped == (job_id,)
+        if sigkill == "late":
+            assert first_look.released == () and late == [worker]
+            assert pool.placement(job_id) is not None
+            os.kill(worker, signal.SIGKILL)
         assert wait_gone(worker)
-        assert monitor.reconcile(time.time(), 600.0, lambda *_: None).released == (job_id,)
+        released = first_look.released or monitor.reconcile(
+            time.time(), 600.0, lambda *_: None
+        ).released
+        assert released == (job_id,)
+        assert pool.placement(job_id) is None
     finally:
         kill_quietly(worker)
         if first.poll() is None:

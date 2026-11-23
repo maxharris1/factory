@@ -56,6 +56,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from lib import account_doctor
 from lib.device_pool import LINK_DROP_TAG, UNREACHABLE_BACKOFF_SECONDS, Placement, back_off
 from lib.device_sync import SYNC_GRACE_SECONDS
 from lib.queue import SLOTS_TABLE, retire_requeued
@@ -483,6 +484,38 @@ def requeue_unreachable(
     return REQUEUED_UNREACHABLE, detail
 
 
+REQUEUED_SIGNED_OUT = "requeued-signed-out"
+
+
+def requeue_signed_out(
+    connection: sqlite3.Connection,
+    job_id: str,
+    *,
+    account: str,
+    device: str,
+    now: float,
+    reason: str,
+    slot_guard: str,
+    slot_params: tuple[object, ...],
+) -> tuple[str, str] | None:
+    """Hold account@device for the doctor and requeue a running job whose
+    login preflight read not logged in (#1334), in the caller's write
+    transaction. Guarded as requeue_unstarted, but charges no free requeue,
+    round or attempt."""
+    account_doctor.hold(connection, account, device, "preflight", account_doctor.NOT_LOGGED_IN, now)
+    if not _free_unstarted_slot(connection, job_id, slot_guard, slot_params):
+        return None
+    connection.execute(
+        "UPDATE jobs SET state = 'queued', last_activity_at = ? WHERE id = ?", (now, job_id)
+    )
+    retired = retire_requeued(connection, job_id, reason, now=now)
+    if retired is not None:
+        return "cancelled", retired
+    detail = f"{reason}; requeued, no round or attempt charged"
+    record_job_event(connection, job_id, REQUEUED_SIGNED_OUT, detail, now)
+    return REQUEUED_SIGNED_OUT, detail
+
+
 LINK_DROP = "link-drop"
 DEVICE_LOST = "device-lost"
 REQUEUED_LINK_DROP = "requeued-link-drop"
@@ -500,12 +533,12 @@ def link_drop_end(connection: sqlite3.Connection, job_id: str) -> tuple[str, flo
     row = connection.execute(
         f"""
         SELECT event, detail, recorded_at FROM {JOB_EVENTS_TABLE}
-        WHERE job_id = ? AND event IN (?, ?, ?, ?, ?, ?)
+        WHERE job_id = ? AND event IN (?, ?, ?, ?, ?, ?, ?)
         ORDER BY id DESC LIMIT 1
         """,
         (
             job_id, RUN_DIED, RUN_EXITED, LINK_DROP, DEVICE_LOST, REQUEUED_LINK_DROP,
-            REQUEUED_USAGE_LIMIT,
+            REQUEUED_USAGE_LIMIT, REQUEUED_SIGNED_OUT,
         ),
     ).fetchone()
     if row is None or row[0] not in (LINK_DROP, DEVICE_LOST):
@@ -697,7 +730,7 @@ def _lag_since_run(
     if not has_job_events(connection):
         return None
     ends = (PREFLIGHT_LAGGING, LAG_BLOCKED, REQUEUED_LAGGING, RUN_DIED, RUN_EXITED, LINK_DROP,
-            DEVICE_LOST, REQUEUED_LINK_DROP, REQUEUED_USAGE_LIMIT)
+            DEVICE_LOST, REQUEUED_LINK_DROP, REQUEUED_USAGE_LIMIT, REQUEUED_SIGNED_OUT)
     marks = ", ".join("?" for _ in ends)
     rows = connection.execute(
         f"""
@@ -729,8 +762,11 @@ def _lag_since_run(
 
 USAGE_LIMIT = "usage-limit"
 REQUEUED_USAGE_LIMIT = "requeued-usage-limit"
-_USAGE_LIMIT_RESETS = (
+SIGNED_OUT = "signed-out"
+REQUEUED_SIGNED_OUT = "requeued-signed-out"
+_RUN_RESETS = (
     REQUEUED_USAGE_LIMIT,
+    REQUEUED_SIGNED_OUT,
     REQUEUED_LAGGING,
     REQUEUED_LINK_DROP,
     REQUEUED_EARLY_EXIT,
@@ -743,9 +779,19 @@ _USAGE_LIMIT_RESETS = (
 def usage_limit_end(connection: sqlite3.Connection, job_id: str) -> str | None:
     """The usage-limit detail when the row's latest run reported its
     account's usage limit, or None."""
+    return _latest_end(connection, job_id, USAGE_LIMIT)
+
+
+def signout_end(connection: sqlite3.Connection, job_id: str) -> str | None:
+    """The signed-out detail when the row's latest run died signed out,
+    or None."""
+    return _latest_end(connection, job_id, SIGNED_OUT)
+
+
+def _latest_end(connection: sqlite3.Connection, job_id: str, end: str) -> str | None:
     if not has_job_events(connection):
         return None
-    events = (USAGE_LIMIT, *_USAGE_LIMIT_RESETS)
+    events = (end, *_RUN_RESETS)
     marks = ", ".join("?" for _ in events)
     row = connection.execute(
         f"""
@@ -754,7 +800,7 @@ def usage_limit_end(connection: sqlite3.Connection, job_id: str) -> str | None:
         """,
         (job_id, *events),
     ).fetchone()
-    if row is None or row[0] != USAGE_LIMIT:
+    if row is None or row[0] != end:
         return None
     return str(row[1])
 
@@ -771,5 +817,20 @@ def requeue_usage_limited(
         now=now,
         reason=reason,
         event=REQUEUED_USAGE_LIMIT,
+        detail=f"{reason}; requeued, no round or attempt charged",
+    )
+
+
+def requeue_signed_out_run(
+    connection: sqlite3.Connection, job_id: str, *, now: float, reason: str
+) -> tuple[str, str] | None:
+    """Requeue a failed, unhandled signed-out row as itself in the caller's
+    write transaction: no round, attempt or free requeue charged."""
+    return _requeue_failed(
+        connection,
+        job_id,
+        now=now,
+        reason=reason,
+        event=REQUEUED_SIGNED_OUT,
         detail=f"{reason}; requeued, no round or attempt charged",
     )

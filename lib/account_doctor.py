@@ -6,13 +6,15 @@ import json
 import re
 import shlex
 import sqlite3
+import subprocess
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
-from lib import attention
+from lib import attention, lane_limit
+from lib.harness_env import account_tokens, harness_env
 from lib.machines_yml import Device, MachinesConfig
 from lib.remote import (
     _UNTRACE,
@@ -29,10 +31,15 @@ if TYPE_CHECKING:
 
 Status = Literal["ok", "signed-out", "mismatch", "unreachable"]
 Harness = Literal["claude", "codex"]
+Source = Literal["preflight", "runtime", "doctor"]
 
 TABLE = "account_signins"
+HOLDS = "signin_holds"
 REASON = "account-signin"
 INTERVAL_SECONDS = 30 * 60
+HELD_INTERVAL_SECONDS = 2 * 60
+SIGNOUTS = "signout_locks"
+SIGNOUT_LEASE_SECONDS = 10 * 60
 
 _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS {TABLE} (
@@ -47,25 +54,54 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     PRIMARY KEY (account, device)
 )
 """
+_HOLDS_SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS {HOLDS} (
+    account TEXT NOT NULL,
+    device TEXT NOT NULL,
+    since REAL NOT NULL,
+    seen REAL NOT NULL,
+    source TEXT NOT NULL CHECK (source IN ('preflight','runtime','doctor')),
+    reason TEXT NOT NULL,
+    PRIMARY KEY (account, device)
+)
+"""
+_SIGNOUTS_SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS {SIGNOUTS} (
+    account TEXT NOT NULL,
+    device TEXT NOT NULL,
+    since REAL NOT NULL,
+    owner TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (account, device)
+)
+"""
+_HOLD = (f"INSERT INTO {HOLDS} (account, device, since, seen, source, reason) VALUES (?1, ?2, ?3, ?3, ?4, ?5) "
+         "ON CONFLICT(account, device) DO UPDATE SET seen = MAX(seen, excluded.seen)")
 
 NOT_LOGGED_IN = "not logged in"
 NOT_UNDERSTOOD = "status reply not understood"
 EXIT_NONZERO = "status command exited nonzero"
+_INCONCLUSIVE = frozenset({NOT_UNDERSTOOD, EXIT_NONZERO})
 NO_IDENTITY = "sign-in names no org and email"
 TOKEN_AUTH = "auth from a token variable, not the account folder"
 CODEX_API_KEY = "api key, not a ChatGPT sign-in"
 METHOD_NOT_UNDERSTOOD = "auth method not understood"
 SHARED_IDENTITY = "same sign-in as account {}"
 SPLIT_IDENTITY = "another sign-in on device {}"
+DISTURBED_ACCOUNT = "signing in changed account {}"
 PLACEHOLDER_DEVICE = "device has install placeholders"
 NO_SSH_ALIAS = "no ssh_alias for {} on {}"
 SSH_DOWN = "device unreachable over ssh"
 NO_REPLY = "no status reply"
+AUTHENTICATION_FAILED = "authentication_failed"
 
 _BEGIN = b"ORCH-ACCOUNTS-BEGIN"
 _FRAME = re.compile(rb"ORCH-ACCOUNT (\d+) (\d+)")
+_SIGNED_OUT = {
+    "claude": re.compile(r"OAuth session expired|not logged in|run /login", re.IGNORECASE),
+    "codex": re.compile(r"not logged in|401 Unauthorized|Please (?:log out and )?sign in again", re.IGNORECASE),
+}
 
-_SUBSCRIPTION = re.compile(r"[a-z][a-z0-9_]{0,23}")
+SUBSCRIPTION = re.compile(r"[a-z][a-z0-9_]{0,23}")
 _CODEX_LINES = (
     ("Logged in using ChatGPT", "chatgpt", True),
     ("Logged in using an API key", "api_key", True),
@@ -99,6 +135,16 @@ class SignIn:
 
 
 @dataclass(frozen=True)
+class Hold:
+    account: str
+    device: str
+    since: float
+    seen: float
+    source: Source
+    reason: str
+
+
+@dataclass(frozen=True)
 class _Rule:
     status: Status
     detail: str = ""
@@ -123,6 +169,10 @@ _RULES: dict[Harness, dict[str | None, _Rule]] = {
 
 
 _CLAUDE_METHODS = frozenset(_RULES["claude"]) | {"none"}
+AUTH_METHODS: dict[Harness, frozenset[str]] = {
+    "claude": _CLAUDE_METHODS | {"unknown"},
+    "codex": frozenset(method for _, method, _ in _CODEX_LINES if method is not None),
+}
 
 
 def _text(data: dict[str, object], key: str) -> str | None:
@@ -137,7 +187,7 @@ def _claude_method(value: object) -> str | None:
 
 
 def _subscription(value: object) -> str | None:
-    return value if isinstance(value, str) and _SUBSCRIPTION.fullmatch(value) else None
+    return value if isinstance(value, str) and SUBSCRIPTION.fullmatch(value) else None
 
 
 def _fingerprint(org: str | None, email: str | None) -> str | None:
@@ -193,29 +243,31 @@ def parse_codex(account: str, device: str, code: int, reply: bytes) -> Probe:
 @dataclass(frozen=True)
 class _Status:
     command: str
-    streams: str
+    merged_stderr: bool
     home_variable: str
     token_variables: tuple[str, ...]
     parse: Callable[[str, str, int, bytes], Probe]
 
 
 _STATUS: dict[Harness, _Status] = {
-    "claude": _Status("claude auth status", "2>/dev/null", "CLAUDE_CONFIG_DIR",
+    "claude": _Status("claude auth status", False, "CLAUDE_CONFIG_DIR",
                       ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"), parse_claude),
-    "codex": _Status("codex login status", "2>&1", "CODEX_HOME", ("OPENAI_API_KEY", "CODEX_API_KEY"), parse_codex),
+    "codex": _Status("codex login status", True, "CODEX_HOME", ("OPENAI_API_KEY", "CODEX_API_KEY"), parse_codex),
 }
 _TOKEN_VARIABLES = tuple(name for status in _STATUS.values() for name in status.token_variables)
 
 
-def status_script(harness: Harness, homes: Sequence[str | None]) -> str:
+def status_script(harness: Harness, homes: Sequence[str | None], *, drop_profile_login: bool = True) -> str:
     status = _STATUS[harness]
+    streams = "2>&1" if status.merged_stderr else "2>/dev/null"
     calls = [
         "code=0; (" + ("" if home is None else f"{status.home_variable}={shlex.quote(home)} ")
-        + f"{status.command} </dev/null {status.streams}) || code=$?; printf '\\nORCH-ACCOUNT %d %d\\n' {index} \"$code\";"
+        + f"{status.command} </dev/null {streams}) || code=$?; printf '\\nORCH-ACCOUNT %d %d\\n' {index} \"$code\";"
         for index, home in enumerate(homes)
     ]
     inner = " ".join([
-        f"{_UNTRACE}set +e; unset {' '.join(_TOKEN_VARIABLES)} {status.home_variable};",
+        f"{_UNTRACE}set +e;",
+        *([f"unset {' '.join(_TOKEN_VARIABLES)} {status.home_variable};"] if drop_profile_login else []),
         f"printf '\\n%s\\n' {_BEGIN.decode()};",
         *calls,
     ])
@@ -244,19 +296,41 @@ def _unreached(account: str, device: str, harness: Harness, detail: str) -> Prob
     return Probe(account, device, harness, False, False, None, None, None, detail)
 
 
+def no_ssh_path(device: Device, harness: str) -> str | None:
+    if device.placeholder:
+        return PLACEHOLDER_DEVICE
+    if device.ssh_alias_for(harness) is None:
+        return NO_SSH_ALIAS.format(harness, device.name)
+    return None
+
+
+def ssh_argv(device: Device, harness: str, script: str, *, tty: bool = False) -> list[str]:
+    return [SSH_BINARY, *SSH_OPTIONS, *(["-tt"] if tty else []), "-l", device.login_for(harness), "--",
+            device.ssh_alias_for(harness), script]
+
+
 def probe(transport: ByteTransport, config: MachinesConfig, device: Device, harness: Harness) -> list[Probe]:
-    accounts = config.accounts_on(device.name, harness)
+    return _probe_accounts(transport, config, device, harness, config.accounts_on(device.name, harness))
+
+
+def _probe_accounts(
+    transport: ByteTransport,
+    config: MachinesConfig,
+    device: Device,
+    harness: Harness,
+    accounts: Sequence[str],
+    *,
+    drop_profile_login: bool = True,
+) -> list[Probe]:
     if not accounts:
         return []
-    alias = device.ssh_alias_for(harness)
-    if device.placeholder or alias is None:
-        detail = PLACEHOLDER_DEVICE if device.placeholder else NO_SSH_ALIAS.format(harness, device.name)
+    detail = no_ssh_path(device, harness)
+    if detail is not None:
         return [_unreached(account, device.name, harness, detail) for account in accounts]
-    script = status_script(harness, [config.account_home(device.name, harness, account) for account in accounts])
-    exchanged = transport.exchange(
-        [SSH_BINARY, *SSH_OPTIONS, "-l", device.login_for(harness), "--", alias, script],
-        timeout=PROBE_TIMEOUT_SECONDS,
+    script = status_script(
+        harness, [config.account_home(device.name, harness, account) for account in accounts], drop_profile_login=drop_profile_login
     )
+    exchanged = transport.exchange(ssh_argv(device, harness, script), timeout=PROBE_TIMEOUT_SECONDS)
     if exchanged.timed_out or exchanged.code == SSH_UNREACHABLE:
         return [_unreached(account, device.name, harness, SSH_DOWN) for account in accounts]
     replies = _replies(exchanged.stdout, len(accounts))
@@ -265,6 +339,54 @@ def probe(transport: ByteTransport, config: MachinesConfig, device: Device, harn
         else _unreached(account, device.name, harness, NO_REPLY)
         for index, account in enumerate(accounts)
     ]
+
+
+class SignedOut(Exception):
+    def __init__(self, account: str, device: str, harness: Harness, detail: str) -> None:
+        super().__init__(f"preflight-signed-out: {account}@{device} ({harness}): {detail}")
+        self.account = account
+        self.device = device
+        self.harness = harness
+        self.detail = detail
+
+
+def _probe_local(
+    device: Device, harness: Harness, account: str, home: str | None, environ: Mapping[str, str]
+) -> Probe:
+    status = _STATUS[harness]
+    try:
+        done = subprocess.run(
+            shlex.split(status.command),
+            env={k: v for k, v in environ.items() if k not in account_tokens(harness, home)}
+            | harness_env(harness, home),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT if status.merged_stderr else subprocess.DEVNULL,
+            timeout=PROBE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return _unreached(account, device.name, harness, NO_REPLY)
+    return status.parse(account, device.name, done.returncode, done.stdout)
+
+
+def check_login(
+    transport: ByteTransport,
+    config: MachinesConfig,
+    device: Device,
+    harness: str,
+    account: str,
+    environ: Mapping[str, str],
+) -> None:
+    if harness not in _STATUS:
+        return
+    home = config.account_home(device.name, harness, account)
+    if device.local:
+        reading = _probe_local(device, harness, account, home, environ)
+    else:
+        [reading] = _probe_accounts(transport, config, device, harness, (account,), drop_profile_login=home is not None)
+    if reading.detail == NOT_LOGGED_IN:
+        raise SignedOut(account, device.name, harness, reading.detail)
 
 
 def _rule(probe: Probe) -> _Rule:
@@ -320,18 +442,29 @@ def judge(probes: Sequence[Probe], now: float) -> list[SignIn]:
     ]
 
 
-_LOGIN: dict[Harness, str] = {"claude": "claude auth login", "codex": "codex login"}
+_LOGIN: dict[Harness, tuple[tuple[str, ...], str]] = {
+    "claude": (("CLAUDE_CODE_OAUTH_TOKEN",), "claude auth login"),
+    "codex": ((), "codex login --device-auth"),
+}
 _THEN = ", then orch accounts doctor"
 _STEP: dict[Status, str] = {
-    "signed-out": "sign in as {login} on {device}: {home}{command}" + _THEN,
-    "mismatch": "sign {account} in to its own account as {login} on {device}: {home}{command}" + _THEN,
+    "signed-out": "sign in as {login} on {device}: {command}" + _THEN,
+    "mismatch": "sign {account} in to its own account as {login} on {device}: {command}" + _THEN,
     "unreachable": "fix ssh to {device} for {harness}" + _THEN,
 }
 _TOKEN_STEP = "remove the token export from {login}'s login profile on {device}" + _THEN
 
 
-def _home(variable: str, path: str | None) -> str:
-    return f"env -u {variable} " if path is None else f"{variable}={shlex.quote(path)} "
+def login_command(harness: Harness, home: str | None) -> str:
+    unset, login = _LOGIN[harness]
+    variable = _STATUS[harness].home_variable
+    assign = ""
+    if home is None:
+        unset = (*unset, variable)
+    else:
+        assign = f"{variable}={shlex.quote(home)} "
+    env = "".join(f" -u {name}" for name in unset)
+    return (f"env{env} " if env else "") + assign + login
 
 
 def _step(row: SignIn, config: MachinesConfig) -> str:
@@ -343,16 +476,26 @@ def _step(row: SignIn, config: MachinesConfig) -> str:
         device=row.device,
         harness=harness,
         login=config.device(row.device).login_for(harness),
-        home=_home(_STATUS[harness].home_variable, path),
-        command=_LOGIN[harness],
+        command=login_command(harness, path),
     )
 
 
-def flags(rows: Sequence[SignIn], config: MachinesConfig, repo: str) -> dict[tuple[str, str, str], str]:
+def _definite(row: SignIn) -> bool:
+    return row.status == "mismatch" or (row.status == "signed-out" and row.detail not in _INCONCLUSIVE)
+
+
+def flags(
+    rows: Sequence[SignIn], holds: Mapping[tuple[str, str], Hold], config: MachinesConfig, repo: str
+) -> dict[tuple[str, str, str], str]:
+    shown = [
+        replace(row, status="signed-out", detail=holds[row.account, row.device].reason)
+        if (row.account, row.device) in holds and not _definite(row) else row
+        for row in rows
+    ]
     return {
         (repo.lower(), f"{row.account}@{row.device}", REASON):
             f"{row.status}; run: {_step(row, config)}; {row.detail}"
-        for row in rows
+        for row in shown
         if row.status != "ok"
     }
 
@@ -361,14 +504,97 @@ def ensure_table(connection: sqlite3.Connection) -> None:
     connection.execute(_SCHEMA)
 
 
+def hold(connection: sqlite3.Connection, account: str, device: str, source: Source, reason: str, now: float) -> None:
+    connection.execute(_HOLDS_SCHEMA)
+    connection.execute(_HOLD, (account, device, now, source, reason))
+
+
+def detect_signout(harness: str, event: dict) -> bool:
+    if harness == "claude" and event.get("error") == AUTHENTICATION_FAILED:
+        return True
+    pattern = _SIGNED_OUT.get(harness)
+    text = lane_limit.error_text(harness, event)
+    return pattern is not None and text is not None and pattern.search(text) is not None
+
+
+def _holds(connection: sqlite3.Connection) -> dict[tuple[str, str], Hold]:
+    connection.execute(_HOLDS_SCHEMA)
+    return {
+        (account, device): Hold(account, device, since, seen, source, reason)
+        for account, device, since, seen, source, reason in connection.execute(
+            f"SELECT account, device, since, seen, source, reason FROM {HOLDS}")
+    }
+
+
+def held(connection: sqlite3.Connection) -> frozenset[tuple[str, str]]:
+    return frozenset(_holds(connection))
+
+
+def _signouts(connection: sqlite3.Connection) -> None:
+    connection.execute(_SIGNOUTS_SCHEMA)
+    if "owner" not in {row[1] for row in connection.execute(f"PRAGMA table_info({SIGNOUTS})")}:
+        connection.execute(f"ALTER TABLE {SIGNOUTS} ADD COLUMN owner TEXT NOT NULL DEFAULT ''")
+
+
+def reserve_pair(connection: sqlite3.Connection, account: str, device: str, owner: str, now: float) -> bool:
+    _signouts(connection)
+    taken = connection.execute(
+        f"INSERT INTO {SIGNOUTS} (account, device, since, owner) VALUES (?1, ?2, ?3, ?4) "
+        "ON CONFLICT(account, device) DO UPDATE SET since = excluded.since, owner = excluded.owner "
+        "WHERE owner = excluded.owner OR since <= ?5",
+        (account, device, now, owner, now - SIGNOUT_LEASE_SECONDS))
+    return taken.rowcount == 1
+
+
+def renew_pair(connection: sqlite3.Connection, account: str, device: str, owner: str, now: float) -> None:
+    _signouts(connection)
+    connection.execute(f"UPDATE {SIGNOUTS} SET since = ? WHERE account = ? AND device = ? AND owner = ?",
+                       (now, account, device, owner))
+
+
+def release_pair(connection: sqlite3.Connection, account: str, device: str, owner: str) -> None:
+    _signouts(connection)
+    connection.execute(f"DELETE FROM {SIGNOUTS} WHERE account = ? AND device = ? AND owner = ?",
+                       (account, device, owner))
+
+
+def signing_out(connection: sqlite3.Connection, now: float) -> frozenset[tuple[str, str]]:
+    connection.execute(_SIGNOUTS_SCHEMA)
+    return frozenset(
+        (str(account), str(device))
+        for account, device in connection.execute(
+            f"SELECT account, device FROM {SIGNOUTS} WHERE since > ?", (now - SIGNOUT_LEASE_SECONDS,)))
+
+
+def newest_hold(connection: sqlite3.Connection) -> float | None:
+    connection.execute(_HOLDS_SCHEMA)
+    (newest,) = connection.execute(f"SELECT MAX(since) FROM {HOLDS}").fetchone()
+    return newest
+
+
+def due(last: float | None, newest: float | None, now: float) -> bool:
+    if last is None or (newest is not None and newest > last):
+        return True
+    return now - last >= (INTERVAL_SECONDS if newest is None else HELD_INTERVAL_SECONDS)
+
+
+def _drop_unlisted_holds(connection: sqlite3.Connection, rows: Sequence[SignIn]) -> None:
+    listed = {(row.account, row.device) for row in rows}
+    connection.executemany(
+        f"DELETE FROM {HOLDS} WHERE account = ? AND device = ?",
+        [pair for pair in _holds(connection) if pair not in listed],
+    )
+
+
 def write(
     connection: sqlite3.Connection,
     rows: Sequence[SignIn],
+    config: MachinesConfig,
     repo: str | None,
-    flagged: Mapping[tuple[str, str, str], str],
-    now: float,
+    probed_at: float,
 ) -> None:
     ensure_table(connection)
+    connection.execute(_HOLDS_SCHEMA)
     attention.ensure_table(connection)
     connection.execute("BEGIN IMMEDIATE")
     try:
@@ -379,12 +605,28 @@ def write(
             [(row.account, row.device, row.status, row.auth_method, row.subscription_type,
               row.fingerprint, row.checked_at, row.detail) for row in rows],
         )
+        connection.executemany(_HOLD, [
+            (row.account, row.device, probed_at, "doctor", row.detail)
+            for row in rows if row.status == "signed-out" and row.detail == NOT_LOGGED_IN
+        ])
+        connection.executemany(
+            f"DELETE FROM {HOLDS} WHERE account = ? AND device = ? AND seen < ?",
+            [(row.account, row.device, probed_at) for row in rows if row.status == "ok"],
+        )
+        _drop_unlisted_holds(connection, rows)
         if repo is not None:
-            attention.sync(connection, (REASON,), (repo,), flagged, now)
+            attention.sync(connection, (REASON,), (repo,), flags(rows, _holds(connection), config, repo), probed_at)
         connection.execute("COMMIT")
     except BaseException:
         connection.execute("ROLLBACK")
         raise
+
+
+def observe(config: MachinesConfig, transport: ByteTransport, now: float) -> list[SignIn]:
+    pairs = [(device, harness) for device in config.devices for harness in _STATUS]
+    with ThreadPoolExecutor(max_workers=max(len(pairs), 1)) as pool:
+        probed = list(pool.map(lambda pair: probe(transport, config, *pair), pairs))
+    return judge([item for items in probed for item in items], now)
 
 
 def run(
@@ -394,11 +636,8 @@ def run(
     now: float,
     repo: str | None,
 ) -> list[SignIn]:
-    pairs = [(device, harness) for device in config.devices for harness in _STATUS]
-    with ThreadPoolExecutor(max_workers=max(len(pairs), 1)) as pool:
-        probed = list(pool.map(lambda pair: probe(transport, config, *pair), pairs))
-    rows = judge([item for items in probed for item in items], now)
-    write(connection, rows, repo, {} if repo is None else flags(rows, config, repo), now)
+    rows = observe(config, transport, now)
+    write(connection, rows, config, repo, now)
     return rows
 
 

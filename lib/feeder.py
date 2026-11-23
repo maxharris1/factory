@@ -210,7 +210,7 @@ from lib.feeder_gates import (
     path_matches,
     paths_collide,
 )
-from lib.followups import has_marker
+from lib.followups import has_marker, split_parent
 from lib.github_actions import TIMEOUT_SECONDS
 from lib.handoff import Handoff, HandoffError, format_comment, parse_comment
 from lib.journeys import (
@@ -255,15 +255,22 @@ from lib.queue import (
     rank,
     set_ticket_priority,
 )
+from lib.split_parent import close_split_parent, split_evidence
 from lib.ticket_type import TICKET_TYPES
 
 FEEDER_TABLE = "feeder_items"
 POLL_TABLE = "feeder_poll"  # one row: when the feeder last read intake
 IDLE_TABLE = "feeder_idle_stalls"  # one row per project in an idle-blocked-ready stall
+SPLIT_CURSOR_TABLE = "feeder_split_cursor"
+SPLIT_UNSETTLED_TABLE = "feeder_split_unsettled"
+SPLIT_CURSOR_OVERLAP_SECONDS = 120  # clock skew between orch and GitHub
+SPLIT_RECHECK_SECONDS = 120  # GitHub search allows 30 reads a minute
 # eligible: seen this poll, not fed yet; waiting-capacity: no room for its
 # harness this poll; feeding: some steps done; error: a step failed (retried
 # next poll); fed: brief and go posted; done: fed and its job is queued;
 # closed: its recorded PR was closed or merged before the feed finished;
+# abandoned: its ticket was abandoned or its PR labelled orch:state/abandoned;
+# it holds nothing and is never fed again;
 # waiting-blocked: a blocker is not done or an in-flight ticket holds one of
 # its paths or a conflicts-with edge (waiting_reason says which);
 # refused-intake: its body fails the intake template (waiting_reason says how).
@@ -272,17 +279,20 @@ STATES = (
     "waiting-capacity",
     "waiting-blocked",
     "refused-intake",
+    "split-parent",
     "feeding",
     "error",
     "fed",
     "done",
     "closed",
+    "abandoned",
 )
 FEED_NOT_BEGUN = "branch IS NULL"
-UNSTARTED = ("eligible", "waiting-capacity", "waiting-blocked", "refused-intake")
+UNSTARTED = ("eligible", "waiting-capacity", "waiting-blocked", "refused-intake", "split-parent")
 IN_FLIGHT = ("feeding", "error")
 FED = ("fed", "done")
-FINAL = (*FED, "closed")
+FINAL = (*FED, "closed", "abandoned")
+_FINAL_SQL = ",".join(f"'{state}'" for state in FINAL)
 HOLDING = (*IN_FLIGHT, *FED)
 _COLUMNS = (
     ("waiting_reason", "TEXT"),
@@ -294,6 +304,7 @@ _COLUMNS = (
     ("unblocks", "INTEGER NOT NULL DEFAULT 0"),
     ("base_branch", "TEXT"),
     ("own_tier", "INTEGER"),
+    ("split_noted", "INTEGER NOT NULL DEFAULT 0"),
 )
 ORCHESTRATOR = "grok-bot"
 FACTORY_LABEL = "factory"
@@ -630,6 +641,8 @@ class GitHubIntake(Protocol):
 
     def find_pull(self, repo: str, branch: str) -> int | None: ...
 
+    def branch_pulls(self, repo: str, branch: str) -> Sequence[int]: ...
+
     def ahead_commits(self, repo: str, base: str, tip: str) -> Sequence[str]: ...
 
     def open_pull_commits(self, repo: str) -> Mapping[int, OpenPull]: ...
@@ -672,7 +685,17 @@ class GitHubIntake(Protocol):
 
     def marked_issues(self, repo: str, marker: str, since: float) -> tuple[int, ...]: ...
 
-    def close_issue(self, repo: str, number: int, comment: str | None) -> None: ...
+    def close_issue(
+        self, repo: str, number: int, comment: str | None, *, completed: bool = False
+    ) -> None: ...
+
+    def remove_issue_label(self, repo: str, number: int, label: str) -> None: ...
+
+    def closed_issues_since(self, repo: str, since: float) -> Sequence[IssueRecord]: ...
+
+    def split_children(self, repo: str, parent: int) -> Sequence[IssueRecord]: ...
+
+    def issue_record(self, repo: str, number: int) -> IssueRecord: ...
 
     def post_issue_comment_once(self, repo: str, number: int, body: str, marker: str) -> str: ...
 
@@ -775,13 +798,16 @@ def _holding(lines: GateLines, capped: bool) -> GateLines:
 @dataclass(frozen=True)
 class _Holder:
     """A fed ticket's feeder row: its gate lines, PR, whether its PR ended
-    (`released`), its dispatcher ticket and whether it last held as capped."""
+    (`released`), its dispatcher ticket, whether it last held as capped and
+    whether its PR's status is still read (`watch`: unreleased, or fed or
+    done, so a later abandoned label retires it)."""
 
     lines: GateLines
     pull: Ref | None
     released: bool
     ticket: tuple[str, str] | None
     capped_release: bool
+    watch: bool
 
 
 class _StateWrite(NamedTuple):
@@ -803,6 +829,12 @@ class _Held(Exception):
     def __init__(self, wait: Wait):
         super().__init__(wait.reason)
         self.wait = wait
+
+
+class _SplitParent(Exception):
+    def __init__(self, evidence: str):
+        super().__init__(evidence)
+        self.evidence = evidence
 
 
 def _key_order(key: str) -> tuple[int, int, str]:
@@ -888,10 +920,30 @@ def ensure_tables(connection: sqlite3.Connection) -> None:
     for name, kind in _COLUMNS:
         if name not in present:
             connection.execute(f"ALTER TABLE {FEEDER_TABLE} ADD COLUMN {name} {kind}")
+    if "split_noted" not in present and _has_merge_states(connection):
+        connection.execute(
+            f"""
+            UPDATE {FEEDER_TABLE} SET split_noted = 1
+            WHERE tracker = 'github' AND EXISTS (
+                SELECT 1 FROM ticket_state AS ticket
+                WHERE lower(ticket.repo) = {FEEDER_TABLE}.repo
+                  AND ticket.ticket_id = {FEEDER_TABLE}.ticket_id
+                  AND ticket.workflow_state = 'merged'
+            )
+            """
+        )
     attention.ensure_table(connection)
     connection.execute(
         f"CREATE TABLE IF NOT EXISTS {POLL_TABLE} "
         "(id INTEGER PRIMARY KEY CHECK (id = 1), at REAL NOT NULL)"
+    )
+    connection.execute(
+        f"CREATE TABLE IF NOT EXISTS {SPLIT_CURSOR_TABLE} (repo TEXT PRIMARY KEY, at REAL NOT NULL)"
+    )
+    connection.execute(
+        f"CREATE TABLE IF NOT EXISTS {SPLIT_UNSETTLED_TABLE} "
+        "(repo TEXT NOT NULL, parent INTEGER NOT NULL, checked_at REAL NOT NULL, "
+        "PRIMARY KEY (repo, parent))"
     )
     ensure_priority_table(connection)
     connection.execute(
@@ -941,6 +993,31 @@ def last_feeder_poll(connection: sqlite3.Connection) -> float | None:
         return None
     row = connection.execute(f"SELECT at FROM {POLL_TABLE}").fetchone()
     return None if row is None else float(row[0])
+
+
+def _has_merge_states(connection: sqlite3.Connection) -> bool:
+    if not _has_table(connection, "ticket_state"):
+        return False
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(ticket_state)")}
+    return {"repo", "ticket_id", "workflow_state"} <= columns
+
+
+def _merged_issues(
+    connection: sqlite3.Connection, repo: str, *, unnoted: bool = False
+) -> frozenset[int]:
+    if not _has_merge_states(connection):
+        return frozenset()
+    rows = connection.execute(
+        f"""
+        SELECT feed.issue FROM {FEEDER_TABLE} AS feed
+        JOIN ticket_state AS ticket
+          ON lower(ticket.repo) = feed.repo AND ticket.ticket_id = feed.ticket_id
+        WHERE feed.repo = ? AND feed.tracker = 'github'
+          AND ticket.workflow_state = 'merged'
+        """ + (" AND feed.split_noted = 0" if unnoted else ""),
+        (repo.lower(),),
+    ).fetchall()
+    return frozenset(int(issue) for (issue,) in rows if str(issue).isdigit())
 
 
 def feeder_items(connection: sqlite3.Connection) -> list[dict[str, object]]:
@@ -1007,7 +1084,10 @@ class Feeder:
 
     def feed_once(self) -> FeedReport:
         now = self.queue.now()
+        if not self._retire_abandoned():
+            self.log("feeder: abandoned rows not retired, orch.db is locked; retrying next poll")
         contexts, context_errors = self._contexts()
+        context_errors += self._close_split_parents(contexts, now)
         mains, main_errors = self._main_reads(contexts)
         main_errors += self._file_main_fixes(mains, now)
         candidates, read_repos, read_errors = self._candidates(contexts)
@@ -1018,21 +1098,25 @@ class Feeder:
         self._mark_done()
         states = {candidate.ref: self._state(candidate) for candidate in candidates}
         begun = {c.ref for c in candidates if self._row(c)["branch"] is not None}
+        split = {c.ref for c in candidates if states[c.ref] == "split-parent"}
         unread, map_errors = self._add_map_defects(candidates, states)
         refused = {
             candidate.ref
             for candidate in candidates
-            if states[candidate.ref] in UNSTARTED and candidate.template.defects
+            if states[candidate.ref] in UNSTARTED
+            and candidate.template.defects
+            and candidate.ref not in split
         }
+        skip = refused | split
         writes = [self._refuse(candidate) for candidate in candidates if candidate.ref in refused]
-        writes += [_state_write(c, "eligible") for c in candidates if c.ref in unread - refused]
+        writes += [_state_write(c, "eligible") for c in candidates if c.ref in unread - skip]
         self._sync_intake_attention(
             [c for c in candidates if c.ref in refused], read_repos, now
         )
         waits, critical, holds, capped, gate_read, unblocks, tiers = self._gates(
-            candidates, states, refused
+            candidates, states, skip
         )
-        stops, stop_errors = self._line_stops(candidates, begun, refused, mains)
+        stops, stop_errors = self._line_stops(candidates, begun, skip, mains)
         for candidate in candidates:
             candidate.unblocks = unblocks[candidate.ref]
             candidate.effective_tier = tiers[candidate.ref]
@@ -1054,7 +1138,7 @@ class Feeder:
                 order[0],
             )
             order.remove(candidate)
-            if candidate.ref in refused or candidate.ref in unread:
+            if candidate.ref in skip or candidate.ref in unread:
                 continue
             state = self._state(candidate)
             if state in FINAL:
@@ -1086,6 +1170,13 @@ class Feeder:
                 room[candidate.harness] += 1
                 writes.append(_state_write(candidate, "waiting-blocked", reason=held.wait.reason))
                 blocked += 1
+                continue
+            except _SplitParent as refusal:
+                holds.drop(candidate.ref)
+                room[candidate.harness] += 1
+                reason = f"already split into parts ({refusal.evidence})"
+                writes.append(_state_write(candidate, "split-parent", reason=reason))
+                self.log(f"feeder: {candidate.issue.repo}#{candidate.issue.key} refused: {reason}")
                 continue
             except Exception as exc:  # one ticket's failure never stops the poll
                 errors += 1
@@ -1126,6 +1217,57 @@ class Feeder:
             refused=len(refused),
         )
 
+    def _retire_abandoned(self) -> bool:
+        """A fed or done row whose ticket the dispatcher abandoned is abandoned, or split-parent if auto-split."""
+        with self.queue.connect() as connection:
+            if not _has_table(connection, "ticket_state"):
+                return True
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(ticket_state)")}
+            if not {"repo", "ticket_id", "workflow_state"} <= columns:
+                return True
+            split = "0"
+            if _has_table(connection, "ticket_transitions"):
+                split = """EXISTS (
+                    SELECT 1 FROM ticket_transitions AS transition
+                    WHERE lower(transition.repo) = feed.repo AND transition.ticket_id = feed.ticket_id
+                      AND transition.to_state = 'abandoned' AND transition.source = 'plan-auto-split'
+                )"""
+            found = connection.execute(
+                f"""
+                SELECT feed.repo, feed.issue, feed.pr_number, {split}
+                FROM {FEEDER_TABLE} AS feed
+                WHERE feed.state IN ({",".join("?" * len(FED))}) AND feed.ticket_id IS NOT NULL
+                  AND EXISTS (
+                    SELECT 1 FROM ticket_state AS ticket
+                    WHERE lower(ticket.repo) = feed.repo AND ticket.ticket_id = feed.ticket_id
+                      AND ticket.workflow_state = 'abandoned'
+                  )
+                """,
+                FED,
+            ).fetchall()
+        if not found:
+            return True
+        retired = [
+            (repo, issue, "split-parent", f"split into parts on PR #{pull}") if is_split
+            else (repo, issue, "abandoned", "ticket abandoned")
+            for repo, issue, pull, is_split in found
+        ]
+
+        def work(connection: sqlite3.Connection) -> None:
+            connection.executemany(
+                f"UPDATE {FEEDER_TABLE} SET state = ?, waiting_reason = ?, released = 1, error = NULL "
+                f"WHERE repo = ? AND issue = ? AND state IN ({','.join('?' * len(FED))})",
+                [(state, reason, repo, issue, *FED) for repo, issue, state, reason in retired],
+            )
+
+        if not bookkeeping_write(
+            self.queue.connect, work, site="_retire_abandoned", ledger=self.ledger
+        ):
+            return False
+        for repo, issue, _, reason in retired:
+            self.log(f"feeder: retired {repo}#{issue}: {reason}")
+        return True
+
     def _contexts(self) -> tuple[list[tuple[Project, FactoryContext]], int]:
         found: list[tuple[Project, FactoryContext]] = []
         errors = 0
@@ -1136,6 +1278,107 @@ class Feeder:
                 errors += 1
                 self.log(f"feeder: cannot read intake for {project.repo}: {safe_ship_error(exc)}")
         return found, errors
+
+    def _close_split_parents(
+        self, contexts: Sequence[tuple[Project, FactoryContext]], now: float
+    ) -> int:
+        errors = 0
+        for project, context in contexts:
+            intake = project.intake
+            assert intake is not None
+            if project.linear_project_ids or intake.label is None or context.config.tickets != "github":
+                continue
+            errors += self._close_repo_split_parents(project.repo, intake.label, now)
+        return errors
+
+    def _close_repo_split_parents(self, repo: str, label: str, now: float) -> int:
+        key = repo.lower()
+        with self.queue.connect() as connection:
+            row = connection.execute(
+                f"SELECT at FROM {SPLIT_CURSOR_TABLE} WHERE repo = ?", (key,)
+            ).fetchone()
+            pending = dict(connection.execute(
+                f"SELECT parent, checked_at FROM {SPLIT_UNSETTLED_TABLE} WHERE repo = ?", (key,)
+            ).fetchall())
+            fresh = {
+                int(issue) for (issue,) in connection.execute(
+                    f"SELECT issue FROM {FEEDER_TABLE} WHERE repo = ? AND tracker = 'github' "
+                    "AND state = 'split-parent' AND split_noted = 0",
+                    (key,),
+                ) if str(issue).isdigit()
+            }
+            if row is not None:
+                cursor = float(row[0])
+            else:
+                last = last_feeder_poll(connection)
+                cursor = now if last is None else last - SPLIT_CURSOR_OVERLAP_SECONDS
+        try:
+            closed = self.github.closed_issues_since(repo, cursor)
+        except Exception as exc:
+            self.log(f"feeder: cannot read closed issues for {repo}: {safe_ship_error(exc)}")
+            return 1
+        errors = 0
+        triggers: dict[int, list[IssueRecord]] = {}
+        for record in closed:
+            parent = split_parent(record.body)
+            if record.reason == "completed" and parent is not None:
+                triggers.setdefault(parent, []).append(record)
+        noted: list[int] = []
+        merged_parents: set[int] = set()
+        for issue in sorted(self._merged_issues(repo, unnoted=True)):
+            try:
+                record = self.github.issue_record(repo, issue)
+            except Exception as exc:
+                errors += 1
+                self.log(f"feeder: cannot read merged part {repo}#{issue}: {safe_ship_error(exc)}")
+                continue
+            noted.append(issue)
+            parent = split_parent(record.body)
+            if parent is not None:
+                merged_parents.add(parent)
+        due = {parent for parent, at in pending.items() if now - at >= SPLIT_RECHECK_SECONDS}
+        check = merged_parents | due | fresh | (triggers.keys() - pending.keys())
+        merged = self._merged_issues(repo) if check else frozenset()
+        unsettled = {parent: at for parent, at in pending.items() if parent not in check}
+        for parent in sorted(check):
+            try:
+                outcome = close_split_parent(
+                    self.github, repo, parent, triggers.get(parent, ()), merged, label
+                )
+            except Exception as exc:
+                errors += 1
+                unsettled[parent] = now
+                self.log(f"feeder: cannot close split parent {repo}#{parent}: {safe_ship_error(exc)}")
+                continue
+            if outcome == "parts-open":
+                unsettled[parent] = now
+            elif outcome == "closed":
+                self.log(f"feeder: closed split parent {repo}#{parent} (all parts merged)")
+        if not closed and not check and not noted:
+            return errors
+
+        def work(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                f"INSERT INTO {SPLIT_CURSOR_TABLE} (repo, at) VALUES (?, ?) "
+                "ON CONFLICT(repo) DO UPDATE SET at = excluded.at",
+                (key, now - SPLIT_CURSOR_OVERLAP_SECONDS),
+            )
+            connection.execute(f"DELETE FROM {SPLIT_UNSETTLED_TABLE} WHERE repo = ?", (key,))
+            connection.executemany(
+                f"INSERT INTO {SPLIT_UNSETTLED_TABLE} (repo, parent, checked_at) VALUES (?, ?, ?)",
+                [(key, parent, at) for parent, at in sorted(unsettled.items())],
+            )
+            connection.executemany(
+                f"UPDATE {FEEDER_TABLE} SET split_noted = 1 WHERE repo = ? AND issue = ?",
+                [(key, str(issue)) for issue in sorted({*noted, *fresh})],
+            )
+
+        bookkeeping_write(self.queue.connect, work, site="_close_split_parents", ledger=self.ledger)
+        return errors
+
+    def _merged_issues(self, repo: str, *, unnoted: bool = False) -> frozenset[int]:
+        with self.queue.connect() as connection:
+            return _merged_issues(connection, repo, unnoted=unnoted)
 
     def _candidates(
         self, contexts: Sequence[tuple[Project, FactoryContext]]
@@ -1676,6 +1919,7 @@ class Feeder:
             for ref, row in rows.items()
             if not row.released and (row.lines or ref in conflicts or row.pull in conflicts)
         }
+        watched = {ref: row.pull for ref, row in rows.items() if row.watch and row.pull is not None}
         tracked = {project.repo.lower() for project in self.config.projects}
         blockers = {ref for lines in gated.values() for ref in lines.blocked_by}
         flaggable = {ref: lines for ref, lines in lines_of.items() if ref not in refused}
@@ -1694,7 +1938,7 @@ class Feeder:
         external = {ref for ref in conflicts if ref not in known}
         needed = {ref for ref in blockers | outside if ref.tracker == "github"}
         needed |= set(via.values()) | external
-        needed |= {row.pull for row in holders.values() if row.pull is not None}
+        needed |= set(watched.values())
         statuses: dict[Ref, RefStatus] = {}
         ok = True
         if needed:
@@ -1716,14 +1960,20 @@ class Feeder:
             for c in candidates
         })
         released: list[Ref] = []
+        labelled: list[Ref] = []
+        for ref, pull in sorted(watched.items()):
+            if (status := statuses.get(pull)) is not None and status.abandoned:
+                labelled.append(ref)
+            elif not rows[ref].released and _progress(statuses, pull) in (Progress.DONE, Progress.UNFINISHED):
+                released.append(ref)
+        ended = {*released, *labelled}
         capped = self._capped({row.ticket for row in holders.values() if row.ticket})
         flips: list[tuple[Ref, bool]] = []
         capped_refs: set[Ref] = set()
         for ref, row in sorted(holders.items()):
-            pull = row.pull
-            if pull is not None and _progress(statuses, pull) in (Progress.DONE, Progress.UNFINISHED):
-                released.append(ref)
+            if ref in ended:
                 continue
+            pull = row.pull
             is_capped = row.ticket in capped
             if is_capped:
                 capped_refs.add(ref)
@@ -1736,7 +1986,7 @@ class Feeder:
                 holds.take(ref, (), GateLines(), "status unreadable")
             elif status.is_pull and status.progress is Progress.OPEN:
                 holds.take(ref, (), GateLines())
-        self._release(released)
+        self._end_holds(released, labelled)
         self._flip_capped(flips)
         shared = {repo: policy.shared for repo, policy in holds.policies.items()}
         blocks = _dependents_by_blocker(candidates, gated, pull_of)
@@ -1758,17 +2008,18 @@ class Feeder:
         return blocker_waits(gated, statuses), critical, holds, capped_refs, ok, unblocks, tiers
 
     def _feeder_rows(self) -> dict[Ref, _Holder]:
-        """Tickets fed or feeding."""
+        """Tickets fed or feeding, and whether each one's PR status is still read."""
         with self.queue.connect() as connection:
             connection.row_factory = sqlite3.Row
             rows = connection.execute(
                 f"""
                 SELECT repo, issue, tracker, pr_number, ticket_id, touches, conflicts,
-                       released, capped_release
-                FROM {FEEDER_TABLE}
+                       released, capped_release,
+                       NOT released OR state IN ({",".join("?" * len(FED))}) AS watch
+                FROM {FEEDER_TABLE} AS feed
                 WHERE state IN ({",".join("?" * len(HOLDING))})
                 """,
-                HOLDING,
+                (*FED, *HOLDING),
             ).fetchall()
         found: dict[Ref, _Holder] = {}
         for row in rows:
@@ -1783,6 +2034,7 @@ class Feeder:
                 released=bool(row["released"]),
                 ticket=(row["repo"], row["ticket_id"]) if row["ticket_id"] else None,
                 capped_release=bool(row["capped_release"]),
+                watch=bool(row["watch"]),
             )
         return found
 
@@ -1847,15 +2099,34 @@ class Feeder:
                 else f"feeder: re-held locks of {name}"
             )
 
-    def _release(self, refs: Sequence[Ref]) -> None:
-        """A holder whose PR merged or closed stops holding, for good."""
-        if not refs:
+    def _end_holds(self, released: Sequence[Ref], labelled: Sequence[Ref]) -> None:
+        """A holder whose PR merged or closed stops holding, for good; a fed or
+        done row whose PR carries orch:state/abandoned is abandoned too."""
+        if not released and not labelled:
             return
-        with self.queue.connect() as connection:
+        retired: list[Ref] = []
+
+        def work(connection: sqlite3.Connection) -> None:
+            retired.clear()
             connection.executemany(
                 f"UPDATE {FEEDER_TABLE} SET released = 1 WHERE repo = ? AND issue = ?",
-                [(ref.repo, ref.key) for ref in refs],
+                [(ref.repo, ref.key) for ref in (*released, *labelled)],
             )
+            for ref in labelled:
+                cursor = connection.execute(
+                    f"UPDATE {FEEDER_TABLE} SET state = 'abandoned', "
+                    "waiting_reason = 'PR labelled orch:state/abandoned' "
+                    f"WHERE repo = ? AND issue = ? AND state IN ({','.join('?' * len(FED))})",
+                    (ref.repo, ref.key, *FED),
+                )
+                if cursor.rowcount:
+                    retired.append(ref)
+
+        if not bookkeeping_write(self.queue.connect, work, site="_end_holds", ledger=self.ledger):
+            self.log("feeder: ended holds not recorded, orch.db is locked; retrying next poll")
+            return
+        for ref in retired:
+            self.log(f"feeder: retired {ref.repo}#{ref.key}: PR labelled orch:state/abandoned")
 
     def _sync_attention(
         self,
@@ -2077,7 +2348,7 @@ class Feeder:
                                     ELSE risk END,
                         base_branch = CASE WHEN {FEED_NOT_BEGUN} THEN excluded.base_branch
                                            ELSE base_branch END,
-                        harness = CASE WHEN state IN ('fed', 'done', 'closed') THEN harness
+                        harness = CASE WHEN state IN ({_FINAL_SQL}) THEN harness
                                        ELSE excluded.harness END,
                         seen_at = excluded.seen_at
                     """,
@@ -2191,7 +2462,7 @@ class Feeder:
             lambda connection: connection.executemany(
                 f"""
                 UPDATE {FEEDER_TABLE} SET state = ?, error = ?, waiting_reason = ?
-                WHERE repo = ? AND issue = ? AND state NOT IN ('fed', 'done', 'closed')
+                WHERE repo = ? AND issue = ? AND state NOT IN ({_FINAL_SQL})
                 """,
                 writes,
             ),
@@ -2206,7 +2477,7 @@ class Feeder:
         def work(connection: sqlite3.Connection) -> None:
             connection.execute(
                 f"UPDATE {FEEDER_TABLE} SET state = ?, error = ?, waiting_reason = ? "
-                "WHERE repo = ? AND issue = ? AND state NOT IN ('fed', 'done', 'closed') "
+                f"WHERE repo = ? AND issue = ? AND state NOT IN ({_FINAL_SQL}) "
                 f"AND NOT EXISTS ({_CLOSED_ON_GREEN})",
                 (*write, write.repo, write.issue),
             )
@@ -2238,6 +2509,9 @@ class Feeder:
         issue = candidate.issue
         config = candidate.context.config
         row = self._row(candidate)
+        evidence = self._split_evidence(candidate, row)
+        if evidence is not None:
+            raise _SplitParent(evidence)
         branch = row["branch"] or self._branch_for(issue)
         if not _BRANCH.fullmatch(branch) or ".." in branch:
             raise ValueError(f"branch name {branch!r} is not safe")
@@ -2449,6 +2723,22 @@ class Feeder:
         )
         self.log(f"feeder: {repo}#{ticket_id} held: {wait.reason}")
         return wait
+
+    def _split_evidence(self, candidate: _Candidate, row: sqlite3.Row) -> str | None:
+        issue = candidate.issue
+        if issue.tracker != "github":
+            return None
+        repo = candidate.project.repo
+        number = int(issue.key)
+        children = self.github.split_children(repo, number)
+        pulls = set(self.github.branch_pulls(repo, row["branch"] or self._branch_for(issue)))
+        if row["pr_number"]:
+            pulls.add(int(row["pr_number"]))
+        comments = list(self.github.comments(repo, number))
+        for pull in sorted(pulls):
+            comments += self.github.comments(repo, pull)
+        trusted = intake_trusted(self.config, candidate.project) | self._orchestrator_authors("github")
+        return split_evidence(issue.body, comments, trusted, children)
 
     def _orchestrator_authors(self, tracker: str) -> frozenset[str]:
         """Who may have posted the orchestrator's own brief or go (#87 F1.3).

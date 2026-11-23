@@ -1,9 +1,9 @@
 """Subscription headroom on the dashboard (issue #151, SPEC 3.5 item 5).
 
-`read_usage` reads `usage_readings` (written by `orch job run` and `orch
-usage record`, lib/usage_readings.py) inside the dashboard's read-only
-transaction. Only allowlisted columns are read and every value is checked
-again. The snapshot is then walked by lib/dashboard.py's `_scrub`.
+`read_usage` reads the stored readings (written by `orch job run` and `orch
+usage record`) inside the dashboard's read-only transaction. Only
+allowlisted columns are read and every value is checked again. The
+snapshot is then walked by lib/dashboard.py's `_scrub`.
 
 There is one entry per account: a subscription, named in machines.yml
 (lib/machines_yml.py). A row with no account belongs to its harness's
@@ -21,7 +21,10 @@ NOT_ON_PLAN_READINGS fresh readings in a row that report other limits) or
 declares no Cursor account), `no reading` (no row yet), `no telemetry` (no
 table: an older database, or telemetry never on), `stale` or `ok`. Its
 limit is its own lane pause, else an older recipient-wide pause on its
-harness. No value is guessed: a missing utilization stays null.
+harness. No value is guessed: a missing utilization stays null. Each entry
+also carries what placement reads (lib/device_pool.py account_loads): its
+`running` jobs, `max_jobs`, the devices it is `signed_in` on and those it is
+`running_on` now.
 """
 
 from __future__ import annotations
@@ -30,17 +33,15 @@ import re
 import sqlite3
 from dataclasses import dataclass, field
 
-from lib import lane_limit
+from lib import device_pool, lane_limit
 from lib.machines_yml import EXTERNAL, MachinesConfig
 from lib.usage_readings import (
-    ACCOUNT_SQL,
     NOT_TRACKED,
     SOURCES,
-    TABLE,
     WINDOWS,
     Reading,
-    from_row,
     headroom,
+    stored,
     window_state,
 )
 
@@ -92,29 +93,25 @@ def _configured(machines: MachinesConfig | None) -> dict[str, _Account]:
 
 def _rows(connection: sqlite3.Connection) -> dict[str, _Account] | None:
     try:
-        columns = {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}
-        account = ACCOUNT_SQL if "account" in columns else "harness || '-default'"
-        absent = "absent" if "absent" in columns else "0"
-        rows = connection.execute(
-            f"SELECT {account}, device, harness, bot, window, used, resets_at, observed_at, {absent}"
-            f" FROM {TABLE} ORDER BY 1, device, harness, bot LIMIT {ROW_LIMIT}"
-        ).fetchall()
+        rows = stored(connection, limit=ROW_LIMIT)
     except sqlite3.OperationalError:
         return None
-    stored: dict[str, _Account] = {}
-    for account_id, device, harness, bot, *values in rows:
-        if harness not in ROW_HARNESSES or not _names(account_id, device, bot):
+    if rows is None:
+        return None
+    found: dict[str, _Account] = {}
+    for row in rows:
+        if row.harness not in ROW_HARNESSES or not _names(row.account, row.device, row.bot):
             continue
-        reading = from_row(*values)
+        reading = row.reading()
         if reading is None:
             continue
-        account = stored.setdefault(account_id, _Account(harness))
-        if harness != EXTERNAL:
-            account.used_by(device, bot)
+        account = found.setdefault(str(row.account), _Account(str(row.harness)))
+        if row.harness != EXTERNAL:
+            account.used_by(str(row.device), str(row.bot))
         kept = account.windows.get(reading.window)
         if kept is None or reading.observed_at > kept.observed_at:
             account.windows[reading.window] = reading
-    return stored
+    return found
 
 
 def _window(reading: Reading | None, now: float, harness: str) -> dict:
@@ -135,6 +132,8 @@ def _entry(
     readings: dict[str, Reading] | None,
     now: float,
     machines: MachinesConfig | None,
+    loads: device_pool.AccountLoads,
+    signed_in: dict[str, list[str]],
 ) -> dict:
     harness = account.harness
     windows = readings or {}
@@ -153,6 +152,10 @@ def _entry(
         "headroom": headroom(list(windows.values()), now),
         "observed_at": observed,
         "age_seconds": None if observed is None else int(max(0.0, now - observed)),
+        "running": loads.running.get(account_id, 0),
+        "max_jobs": None if declared is None else declared.max_jobs,
+        "signed_in": signed_in.get(account_id, []),
+        "running_on": [device for device in loads.running_on.get(account_id, ()) if _names(device)],
     }
     states = {entry[window]["state"] for window in WINDOWS}
     tracked = machines is not None and any(item.harness == harness for item in machines.accounts)
@@ -178,6 +181,8 @@ def read_usage(
     for account_id in sorted(stored or {}):
         accounts.setdefault(account_id, stored[account_id])
     limits = lane_limit.account_limits(connection, now)
+    loads = device_pool.account_loads(connection, machines, now)
+    signed_in = {} if machines is None else loads.signed_in_devices(machines)
     legacy: dict[str, lane_limit.LaneLimit] = {}
     for limit in lane_limit.all_active(connection, now):
         legacy.setdefault(limit.harness, limit)
@@ -189,6 +194,8 @@ def read_usage(
                 None if stored is None else stored.get(account_id, _Account(account.harness)).windows,
                 now,
                 machines,
+                loads,
+                signed_in,
             ),
             limits.get(account_id) or legacy.get(account.harness),
         )

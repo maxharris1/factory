@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -442,6 +443,19 @@ def test_missing_file_and_non_mapping(tmp_path: Path) -> None:
     ]
 
 
+def test_a_pipe_loads_and_a_directory_is_not_found(tmp_path: Path) -> None:
+    read, written = os.pipe()
+    os.write(written, f"orch_host: box\ndevices:{BOX}".encode())
+    os.close(written)
+    try:
+        config, findings = load_machines_yml(Path(f"/dev/fd/{read}"))
+    finally:
+        os.close(read)
+    assert errors(findings) == []
+    assert [device.name for device in config.devices] == ["box"]
+    assert errors(load_machines_yml(tmp_path)[1]) == ["file not found"]
+
+
 @pytest.mark.parametrize(
     "second",
     ["pc.example.ts.net", "PC.Example.TS.net"],
@@ -868,6 +882,13 @@ def signed_in(account: str, **device: str) -> str:
         ),
         *(
             (
+                signed_in(f"signed_in_on: [pc], paused: {value}"),
+                "accounts[0].paused must be true or false",
+            )
+            for value in ("null", "1", '"true"', "yes-please")
+        ),
+        *(
+            (
                 signed_in(f"signed_in_on: {value}"),
                 "accounts[0].signed_in_on must list device names",
             )
@@ -964,6 +985,21 @@ def test_signed_in_on_baseline_loads_clean(tmp_path: Path) -> None:
     assert findings == []
     assert config is not None
     assert config.accounts_on("pc", "claude") == ("claude-default", "claude-a")
+
+
+def test_an_account_is_unpaused_unless_its_entry_says_paused(tmp_path: Path) -> None:
+    config, findings = load_machines_yml(
+        write(tmp_path, signed_in("signed_in_on: [pc], paused: true").replace(
+            "devices:", "  - {id: claude-b, harness: claude, signed_in_on: [pc], paused: false}\n"
+            "  - {id: claude-c, harness: claude, signed_in_on: [pc]}\ndevices:", 1))
+    )
+
+    assert findings == []
+    assert config is not None
+    assert [(item.id, item.paused) for item in config.accounts] == [
+        ("claude-a", True), ("claude-b", False), ("claude-c", False)
+    ]
+    assert config.account("claude-default").paused is False
 
 
 @pytest.mark.parametrize("doc", ["README.md", "docs/SPEC.md"])

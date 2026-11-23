@@ -95,11 +95,16 @@ def test_a_hung_gh_read_is_abandoned_and_the_cycle_goes_on(tmp_path: Path) -> No
     dispatcher.reconcile_jobs.assert_called_once_with()
 
 
+NO_RERUN_PATHS = FACTORY.format(tickets="github", ship="merge").replace(
+    "skills: []\n", "skills: []\nci:\n  force_rerun_paths: []\n"
+)
+
+
 def test_a_source_over_its_tracked_read_budget_is_deferred_and_the_cycle_goes_on(
     tmp_path: Path,
 ) -> None:
     now = [0.0]
-    gh = FakeGh(FACTORY.format(tickets="github", ship="merge"))
+    gh = FakeGh(NO_RERUN_PATHS)
 
     def runner(argv, timeout):
         if any(part.startswith("repos/acme/widgets/pulls/") for part in argv):
@@ -234,7 +239,7 @@ def test_a_ticket_whose_reads_outlast_the_source_budget_is_cut_off_and_deferred(
 
 def test_tickets_deferred_by_the_budget_are_read_in_a_later_cycle(tmp_path: Path) -> None:
     now = [0.0]
-    gh = FakeGh(FACTORY.format(tickets="github", ship="merge"))
+    gh = FakeGh(NO_RERUN_PATHS)
 
     def runner(argv, timeout):
         if any(part.startswith("repos/acme/widgets/") for part in argv):

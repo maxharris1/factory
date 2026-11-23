@@ -17,7 +17,11 @@ appends one JSON line per call to $FAKE_SSH_LOG, and then plays the device:
   HOME is $FAKE_SSH_HOME, else an empty `fake-ssh-home` beside the log,
   never the real HOME: a `bash -lc` on the device reads that HOME's
   ~/.bash_profile, so a test can tell a login shell's PATH from a bare one.
-  Standard input is passed through, as ssh forwards it.
+  Standard input is passed through, as ssh forwards it. With `-t` or
+  `-tt` the script runs on a pseudo-terminal, as sshd gives a forced tty:
+  the terminal echoes what is typed and turns a typed `\r` into `\n`. The
+  pty is not the script's controlling terminal, so killing the client
+  still leaves the "remote" worker running.
 
 Link faults (#106), each a file in $FAKE_SSH_HOSTS holding seconds, read
 when the call starts (create or remove one mid-test to toggle it):
@@ -62,6 +66,7 @@ understood. Control calls are logged to $FAKE_SSH_CONTROL_LOG (default
 
 import json
 import os
+import pty
 import socket
 import subprocess
 import sys
@@ -86,6 +91,34 @@ def _relay(source, sink) -> None:
     for chunk in iter(lambda: source.read1(65536), b""):
         sink.write(chunk)
         sink.flush()
+
+
+def _pty_session(argv: list[str], env: dict[str, str]) -> int:
+    master, slave = pty.openpty()
+    child = subprocess.Popen(argv, start_new_session=True, env=env, stdin=slave, stdout=slave, stderr=slave)
+    os.close(slave)
+
+    def typed() -> None:
+        for chunk in iter(lambda: sys.stdin.buffer.read1(65536), b""):
+            os.write(master, chunk)
+
+    def shown() -> None:
+        while True:
+            try:
+                chunk = os.read(master, 65536)
+            except OSError:
+                return
+            if not chunk:
+                return
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+
+    threading.Thread(target=typed, daemon=True).start()
+    output = threading.Thread(target=shown, daemon=True)
+    output.start()
+    code = child.wait()
+    output.join(2)
+    return code
 
 
 def _option(options: list[str], name: str) -> str | None:
@@ -176,7 +209,7 @@ def main(argv: list[str]) -> int:
     options: list[str] = []
     user = None
     op = None
-    background = no_command = False
+    background = no_command = tty = False
     index = 0
     while index < len(argv):
         part = argv[index]
@@ -191,6 +224,9 @@ def main(argv: list[str]) -> int:
             index += 1
         elif part == "-f":
             background = True
+            index += 1
+        elif part in ("-t", "-tt"):
+            tty = True
             index += 1
         elif part == "-l":
             user = argv[index + 1]
@@ -226,7 +262,7 @@ def main(argv: list[str]) -> int:
         log.write(
             json.dumps(
                 {"options": options, "user": user, "alias": alias, "script": script,
-                 "words": len(rest) - 1, "pid": os.getpid(), "via": via}
+                 "words": len(rest) - 1, "pid": os.getpid(), "via": via, "tty": tty}
             )
             + "\n"
         )
@@ -255,14 +291,17 @@ def main(argv: list[str]) -> int:
     argv = ["sh", "-c", script]
     if detached:
         argv = ["sh", "-c", 'sleep "$0" && exec sh -c "$1"', str(detached), script]
+    env = {
+        "PATH": os.environ.get("FAKE_SSH_PATH") or os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": home,
+        **_test_tag(),
+    }
+    if tty and drop is None:
+        return _pty_session(argv, env)
     child = subprocess.Popen(
         argv,
         start_new_session=True,
-        env={
-            "PATH": os.environ.get("FAKE_SSH_PATH") or os.environ.get("PATH", "/usr/bin:/bin"),
-            "HOME": home,
-            **_test_tag(),
-        },
+        env=env,
         stdout=subprocess.PIPE if drop is not None else None,
         stderr=subprocess.PIPE if drop is not None else None,
     )

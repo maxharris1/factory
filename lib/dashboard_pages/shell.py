@@ -18,7 +18,7 @@ from lib.dashboard_pages.activity import _ATTENTION, _attention, _attention_key,
 from lib.dashboard_pages.common import _chip, duration, _e, _span, _ticket, ticket_page_href
 from lib.dashboard_pages.efficiency import _jobs_lifetime, middle_row, top_row
 from lib.dashboard_pages.lanes import _just_happened_and_intake, lane_devices, _lanes
-from lib.dashboard_pages.settings import _settings
+from lib.dashboard_pages.settings import _accounts, _settings
 from lib.dashboard_pages.system import (
     _BUDGET_STATE, _broken, _components, _log_row, _no_waiter, _POLL_STATE, _rules, _versions,
     version_drift,
@@ -1452,7 +1452,7 @@ _PANELS = {
     "efficiency.html": (top_row, middle_row, _jobs_lifetime),
     "health.html": (_broken, _components, _versions, _log_row, _rules, _no_waiter),
     "job.html": (_board, _tickets),
-    "settings.html": (_settings,),
+    "settings.html": (_settings, _accounts),
     "ticket.html": (_ticketview,),
 }
 

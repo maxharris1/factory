@@ -32,6 +32,7 @@ RULE_MODULE = {
     "_convergence": "repeat",
     "_accepted_revises": "repeat",
     "_repeat_stops": "repeat",
+    "_stop_history": "repeat",
     "_repeat_detail": "repeat",
     "_t3_repeat": "repeat",
     "_stop_question": "repeat",
@@ -62,6 +63,8 @@ RULE_MODULE = {
     "_red_ci_approval_covering": "pending",
     "_shipping_approval": "pending",
     "_shipped_approval": "shipped",
+    "_shipped_approval_at": "shipped",
+    "_shipped_approve": "shipped",
     "_previewed_head": "preview",
     "_latest_review_verdict": "latest",
 }

@@ -135,6 +135,8 @@ class FakeGh:
             value = self.issues
         elif endpoint.endswith("/files?per_page=100"):
             value = self.files
+        elif "/commits?sha=" in endpoint:
+            value = []
         elif endpoint.endswith("/labels?per_page=100"):
             number = int(endpoint.split("/")[-2])
             value = next(
@@ -145,6 +147,8 @@ class FakeGh:
             value = self.label_events
         elif endpoint.endswith("/pulls"):
             value = self.branch_pulls
+        elif endpoint.endswith("/reviews?per_page=100"):
+            value = []
         elif "/pulls/" in endpoint:
             value = {**self.pull, "head": {"sha": self.head, **self.pull.get("head", {})}}
         elif endpoint.endswith("/comments?per_page=100"):
@@ -942,14 +946,14 @@ def test_github_ticket_is_fetched_once_per_cycle() -> None:
     )
 
     assert len(candidates) == len(tracked) == 3
-    assert len(gh.calls) == 2 + 4 * 3
+    assert len(gh.calls) == 2 + 5 * 3
     cached = [
         call
         for call in gh.calls
         if not any(
             marker in part
             for call_part in call
-            for marker in ("/comments?", "/check-runs?", "/status")
+            for marker in ("/comments?", "/check-runs?", "/status", "/files?")
             for part in (call_part,)
         )
     ]
@@ -960,7 +964,7 @@ def test_github_ticket_is_fetched_once_per_cycle() -> None:
         if any(
             marker in part
             for part in call
-            for marker in ("/comments?", "/check-runs?", "/status")
+            for marker in ("/comments?", "/check-runs?", "/status", "/files?")
         )
     )
 

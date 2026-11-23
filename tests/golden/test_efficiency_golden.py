@@ -9,15 +9,15 @@ from tests.golden.pages import page_digests, page_name, record, substitutions
 NAME = page_name(__file__)
 
 GOLDEN = {
-    "efficiency.CSS": "ce4eed82f3e1d4c1d1839c86272555cec9c592d9838d862e96d134a8ede4b900",
-    "efficiency.SCRIPT": "19c5769bf2a2b4a2bd0cdcc4bc08aba552182ba5679b3f2d7d132b037d54dd64",
+    "efficiency.CSS": "762a0788079508265018ff8b8e0544dcd15c5d79d438793f7e6174229410937a",
+    "efficiency.SCRIPT": "eea1c24079540f0e15d564883f8d656ec166760c9281c116852d10e76b094a36",
     "TELEMETRY_CSS": "649dcbbee7a9591b4dac5c5d49a14247192fb5baffe024921698d935b8437071",
     "__TELEMETRY__": "a36660b73d6a3ff62efe3db3e1e644deb2aa93f51ddf1021c50b9c150f96e114",
-    "seeded/main": "c02e4090643b4717c2de5a6182714c4df79a2958934a2f22e50148a7831be5e8",
+    "seeded/main": "2da26301d0862980ebee0d08b8250a2caa63fab7ab228fefa24c56ba7f0d9351",
     "seeded/chrome": "b32a0b8c4ef59de66fb3443c12618828f4582b42d5764764a54d683143aceae9",
-    "hostile/main": "c02e4090643b4717c2de5a6182714c4df79a2958934a2f22e50148a7831be5e8",
+    "hostile/main": "2da26301d0862980ebee0d08b8250a2caa63fab7ab228fefa24c56ba7f0d9351",
     "hostile/chrome": "514a40b58dd78ac318dcf00495187640e01f0499a3f1c27d96087649f2441e21",
-    "empty/main": "1914d40bf4dde079c2baaec1ef82c8980f56b8deb9d13605adad3528204b32c2",
+    "empty/main": "144ee7728324301e2b449e1bc72c99c3c312f88f88c9f9a08b55c6515ede68a1",
     "empty/chrome": "5f809518044a7ff1f5e4a19a9a8e829477c13b27b444fa89a37c7b09af0fa2b7",
 }
 

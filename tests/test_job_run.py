@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import exposure, job_run, process_tree
+from lib import exposure, job_run, process_tree, usage_readings
 from lib.brief.skills import Router, resolve, section
 from lib.harness_env import CPU_CAP, cpu_cap_env
 from lib.job_state import JobStateConfig
@@ -533,6 +533,90 @@ def test_macos_run_kills_a_setsid_grandchild_whose_parent_exited_and_the_anchor(
         )
     finally:
         _kill_if_alive(grandchild)
+
+
+KILLS_ITSELF_AFTER_A_SETSID_CHILD = """\
+import os, signal, subprocess, sys, time
+subprocess.Popen([sys.executable, "-c", sys.argv[1], sys.argv[2]], start_new_session=True)
+while not os.path.exists(sys.argv[2]):
+    time.sleep(0.02)
+os.kill(os.getpid(), signal.SIGKILL)
+"""
+
+
+def test_a_setsid_child_of_a_command_killed_by_sigkill_is_gone_once_run_returns(
+    tmp_path: Path,
+) -> None:
+    """#1210: a vite-like child keeps the run's tag, leaves the session and
+    ignores SIGTERM; the command that started it dies by SIGKILL."""
+    child = tmp_path / "child.pid"
+    try:
+        code = job_run.run(
+            [sys.executable, "-c", KILLS_ITSELF_AFTER_A_SETSID_CHILD, SETSID_GRANDCHILD, str(child)],
+            beat=lambda: None,
+            interval=1,
+            log=lambda _m: None,
+            started=lambda _pid: None,
+        )
+        assert code == 128 + signal.SIGKILL
+        assert child.exists(), "the child started before the command was killed"
+        assert _gone_within(int(child.read_text()), 2), "the child died with the run"
+    finally:
+        _kill_if_alive(child)
+
+
+SCOPE_SLICE = "/user.slice/user-1000.slice/user@1000.service/app.slice"
+
+
+@pytest.mark.parametrize(
+    "cgroup", ["writable", "absent", "unwritable", "unreachable"],
+    ids=["cgroup-kill", "no-cgroup-kill", "unwritable-cgroup-kill", "unreachable-cgroup-kill"],
+)
+def test_a_scoped_trees_kill_round_writes_cgroup_kill_then_kills_each_member(
+    tmp_path: Path, cgroup: str
+) -> None:
+    """#1210: cgroup.kill of the run's scope comes first; the SIGSTOP/SIGKILL
+    rounds follow, and stand alone where cgroup.kill is absent, refuses the
+    write, or sits under a directory this user cannot search."""
+    unit = process_tree.scope_unit("a" * 32)
+    slice_dir = tmp_path / "cgroup" / SCOPE_SLICE.lstrip("/")
+    scope_dir = slice_dir / unit
+    scope_dir.mkdir(parents=True)
+    kill_file = scope_dir / "cgroup.kill"
+    if cgroup != "absent":
+        kill_file.write_text("")
+    if cgroup == "unwritable":
+        kill_file.chmod(0o444)
+    if cgroup == "unreachable":
+        slice_dir.chmod(0)
+    live = {
+        41: process_tree.Process(41, 1, "s41", False, 41, unit, f"{SCOPE_SLICE}/{unit}"),
+        42: process_tree.Process(42, 41, "s42", False, 41, unit, f"{SCOPE_SLICE}/{unit}"),
+        43: process_tree.Process(43, 1, "s43", False, 43, "session-4.scope", "/user.slice/session-4.scope"),
+    }
+    signals: list[tuple[int, int]] = []
+
+    def signal_pid(pid: int, signum: int) -> None:
+        signals.append((pid, signum))
+        if signum == signal.SIGKILL:
+            live.pop(pid, None)
+
+    tree = process_tree.Tree(
+        41, None, scan=lambda _tag: dict(live), signal_pid=signal_pid, known={},
+        scope=unit, cgroup_root=tmp_path / "cgroup",
+    )
+    try:
+        tree.end(lambda _m: None)
+    finally:
+        slice_dir.chmod(0o755)
+    if cgroup == "writable":
+        assert kill_file.read_text() == "1", "the scope's cgroup.kill was written"
+    elif cgroup == "absent":
+        assert not kill_file.exists(), "no cgroup.kill is made where the kernel has none"
+    else:
+        assert kill_file.read_text() == "", "cgroup.kill could not be written"
+    assert sorted(pid for pid, signum in signals if signum == signal.SIGKILL) == [41, 42]
+    assert 43 in live, "a process outside the scope is never signalled"
 
 
 @MACOS_ANCHOR
@@ -1387,7 +1471,8 @@ ACCOUNT_HARNESS = f"""#!{sys.executable}
 import json, os, sys
 here = os.path.dirname(os.path.abspath(__file__))
 probe = "--input-format" in sys.argv
-json.dump(dict(os.environ), open(os.path.join(here, "probe-env.json" if probe else "env.json"), "w"))
+account = os.path.basename(os.environ.get("CLAUDE_CONFIG_DIR", "login"))
+json.dump(dict(os.environ), open(os.path.join(here, f"probe-env-{{account}}.json" if probe else "env.json"), "w"))
 if probe:
     sys.stdout.write(open({str(USAGE / "claude-2.1.322-get_usage.jsonl")!r}).read())
 elif os.path.basename(__file__) == "codex":
@@ -1406,8 +1491,9 @@ def _plant_rollout(home: Path, lines: int | None = None) -> None:
 
 @pytest.mark.parametrize("account", ["placed", "default"])
 @pytest.mark.parametrize("owner", ["claude", "codex"])
-def test_cli_job_run_runs_a_box_job_as_its_slots_account(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner: str, account: str
+def test_cli_job_run_runs_a_box_job_as_its_slots_account_and_reads_every_account_on_the_box(
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch, owner: str,
+    account: str,
 ) -> None:
     bot = f"{owner}-bot"
     placed = f"{owner}-max-2"
@@ -1425,14 +1511,15 @@ def test_cli_job_run_runs_a_box_job_as_its_slots_account(
     account_home = tmp_path / "homes" / bot / ".factory-accounts" / placed
     login = tmp_path / "login"
     queue = _queue(tmp_path)
+    assert usage_readings.migrate(
+        queue.path, lambda: sqlite3.connect(queue.path), directory=tmp_path_factory.mktemp("manual")
+    )
     job = _running_job(queue, recipient=owner, machines=machines)
     if account == "placed":
         with queue.connect() as connection:
             connection.execute("UPDATE device_slots SET account = ? WHERE job_id = ?", (placed, job.id))
-        _plant_rollout(account_home)
-        _plant_rollout(login / ".codex", lines=3)
-    else:
-        _plant_rollout(login / ".codex")
+    _plant_rollout(account_home)
+    _plant_rollout(login / ".codex", lines=3)
     harness = tmp_path / "bin" / owner
     harness.parent.mkdir()
     harness.write_text(ACCOUNT_HARNESS, encoding="utf-8")
@@ -1450,24 +1537,32 @@ def test_cli_job_run_runs_a_box_job_as_its_slots_account(
     _, stderr = proc.communicate(timeout=30)
 
     assert proc.returncode == 0, stderr
-    seen = [json.loads((harness.parent / "env.json").read_text())]
+    as_side = [json.loads((harness.parent / "env.json").read_text())] if account == "placed" else []
+    as_login = [] if account == "placed" else [json.loads((harness.parent / "env.json").read_text())]
     if owner == "claude":
-        seen.append(json.loads((harness.parent / "probe-env.json").read_text()))
-    for env in seen:
-        if account == "placed":
-            assert env[ACCOUNT_HOME[owner]] == str(account_home)
-            assert not set(ACCOUNT_TOKENS[owner]) & set(env)
-        else:
-            assert ACCOUNT_HOME[owner] not in env
-            assert {name: env[name] for name in ACCOUNT_TOKENS[owner]} == {
-                name: planted[name] for name in ACCOUNT_TOKENS[owner]
-            }
+        as_side.append(json.loads((harness.parent / f"probe-env-{placed}.json").read_text()))
+        as_login.append(json.loads((harness.parent / "probe-env-login.json").read_text()))
+    for env in as_side:
+        assert env[ACCOUNT_HOME[owner]] == str(account_home)
+        assert not set(ACCOUNT_TOKENS[owner]) & set(env)
+    for env in as_login:
+        assert ACCOUNT_HOME[owner] not in env
+        assert {name: env[name] for name in ACCOUNT_TOKENS[owner]} == {
+            name: planted[name] for name in ACCOUNT_TOKENS[owner]
+        }
     with sqlite3.connect(tmp_path / "orch.db") as connection:
         rows = connection.execute(
+            "SELECT account, window, used FROM usage_account_readings ORDER BY account, window"
+        ).fetchall()
+        login_rows = connection.execute(
             "SELECT account, window, used FROM usage_readings ORDER BY window"
         ).fetchall()
-    expected = placed if account == "placed" else f"{owner}-default"
-    assert rows == [(expected, "five_hour", 0.125), (expected, "seven_day", 0.345)]
+    login_used = (0.125, 0.345) if owner == "claude" else (0.05, 0.2)
+    assert rows == [
+        (f"{owner}-default", "five_hour", login_used[0]), (f"{owner}-default", "seven_day", login_used[1]),
+        (placed, "five_hour", 0.125), (placed, "seven_day", 0.345),
+    ]
+    assert login_rows == rows[:2], "only the device's login writes the old row"
 
 
 CAPPED_ENV = {

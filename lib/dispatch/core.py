@@ -36,6 +36,7 @@ from lib.dispatch.types import (
     GrokDelivery,
     Hook,
     HoldCarry,
+    MovedHeadProbe,
     PoolRunner,
     QaDiff,
     RebaseClassifier,
@@ -54,6 +55,7 @@ from lib.handoff import HandoffError, parse_comment
 from lib.job_state import JobStateConfig
 from lib.orch_yml import Approvals, Project
 from lib.queue import QueueError, SQLiteJobQueue
+from lib.update_check import MovedHead
 
 
 class DispatcherBase:
@@ -76,12 +78,14 @@ class DispatcherBase:
         approvals: Approvals | None = None,
         ci_logs: Callable[[str, str], Mapping[str, str]] | None = None,
         ci_rerun: Callable[[str, Sequence[str]], RerunOutcome] | None = None,
+        ci_full_rerun: Callable[[str, Sequence[str]], RerunOutcome] | None = None,
         ci_base_checks: Callable[[str, str], Mapping[str, BaseCheck]] | None = None,
         ci_runs: Callable[[str, str], Sequence[RunJob]] | None = None,
         ci_job_log: Callable[[str, str], str] | None = None,
         ci_pool: Callable[[str], Sequence[PoolRunner]] | None = None,
         hold_carry: HoldCarry | None = None,
         qa_diff: QaDiff | None = None,
+        moved_head: MovedHeadProbe | None = None,
     ):
         if state_path.resolve() != queue.path.resolve():
             raise QueueError("dispatcher state and queue must use one database")
@@ -114,6 +118,8 @@ class DispatcherBase:
         self.hold_carry = hold_carry
         self.qa_diff = qa_diff
         self._hold_carries: dict[tuple[str, str, str, str, tuple[str, ...]], bool] = {}
+        self.moved_head = moved_head
+        self._moved_heads: dict[tuple[str, str, str, str], MovedHead | None] = {}
         self.approvals = approvals if approvals is not None else Approvals()
         self.ci_logs = ci_logs
         self._ci_log_reads: dict[tuple[str, str, tuple[str | None, ...]], Mapping[str, str]] = {}
@@ -121,6 +127,7 @@ class DispatcherBase:
         self._ci_step_reads: dict[tuple[str, str, tuple[str, ...]], dict[str, int | None]] = {}
         self._ci_step_failures: set[tuple[str, str, tuple[str, ...]]] = set()
         self.ci_rerun = ci_rerun
+        self.ci_full_rerun = ci_full_rerun
         self.ci_base_checks = ci_base_checks
         self._base_checks: dict[tuple[str, str], Mapping[str, BaseCheck] | None] = {}
         self.ci_runs = ci_runs
@@ -328,6 +335,22 @@ class DispatcherBase:
         elif ticket.pr_base is not None:
             self.clear_attention(ticket.repo, ticket.ticket_id, "base-mismatch")
         return mismatch
+
+    def _moved_head(self, ticket: TrackedTicket, ok: str, head: str) -> MovedHead | None:
+        base = ticket.factory.base_branch
+        key = (ticket.repo.lower(), base, ok, head)
+        if key not in self._moved_heads:
+            self._moved_heads[key] = None
+            if self.moved_head is not None:
+                try:
+                    self._moved_heads[key] = self.moved_head(ticket.repo, base, ok, head)
+                except Exception as exc:
+                    if self.log is not None:
+                        self.log(
+                            f"moved head unread: {ticket.repo}#{ticket.ticket_id}: "
+                            f"{type(exc).__name__}"
+                        )
+        return self._moved_heads[key]
 
     def _tracker(self, repo: str, ticket_id: str) -> str | None:
         with self._connect() as connection:

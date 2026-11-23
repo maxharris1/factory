@@ -862,3 +862,49 @@ def test_status_lists_each_running_qa_run_before_devices(tmp_path: Path) -> None
         "\n"
         "Devices ("
     ) in stdout.getvalue()
+
+
+TWO_CLAUDE_ACCOUNTS = (
+    "accounts:\n"
+    "  - {id: claude-a, harness: claude}\n"
+    "  - {id: claude-b, harness: claude, signed_in_on: [box, pc]}\n"
+    "devices:\n"
+    "  - name: box\n    local: true\n    slot_max: 3\n    home: /home/{bot}\n    harnesses:\n"
+    "      claude: {bot: claude-bot, account: claude-a}\n      codex: codex-bot\n"
+    "  - name: pc\n    slot_max: 2\n    tailscale_name: pc\n    workdir_root: /w\n    factory_root: /f\n"
+    "    ssh_alias: pc-{bot}\n    home: /home/{bot}\n    harnesses:\n      claude: {bot: claude-bot, account: claude-a}\n"
+)
+
+
+def test_status_names_each_placed_jobs_account_next_to_its_device(tmp_path: Path) -> None:
+    path = tmp_path / "queue.sqlite3"
+    create_database(path)
+    machines = tmp_path / "machines.yml"
+    machines.write_text(TWO_CLAUDE_ACCOUNTS, encoding="utf-8")
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE device_slots (
+                job_id TEXT PRIMARY KEY, device TEXT NOT NULL,
+                harness TEXT NOT NULL, os_user TEXT NOT NULL,
+                placed_at REAL NOT NULL, account TEXT
+            );
+            INSERT INTO jobs VALUES ('b-on-box', 'owner/repo', '44', 'build', 'claude', 'running', 20, 30);
+            INSERT INTO jobs VALUES ('legacy-on-pc', 'owner/repo', '45', 'build', 'claude', 'running', 20, 30);
+            INSERT INTO device_slots VALUES ('b-on-box', 'box', 'claude', 'claude-bot', 40, 'claude-b');
+            INSERT INTO device_slots VALUES ('legacy-on-pc', 'pc', 'claude', 'claude-bot', 40, NULL);
+            INSERT INTO device_slots VALUES ('running', 'box', 'codex', 'codex-bot', 40, NULL);
+            """
+        )
+    stdout = io.StringIO()
+
+    assert status_main(["--db", str(path), "--machines", str(machines)], stdout=stdout, clock=lambda: 100) == 0
+
+    devices = stdout.getvalue().split("Devices (2)\n")[1].split("\n\n")[0].splitlines()
+    assert [line.split(" -> ")[0] for line in devices] == [
+        "  box [claude,codex] 2/3 slots", "    owner/repo#44 build", "    owner/repo#43 review",
+        "  pc [claude] 1/2 slots", "    owner/repo#45 build",
+    ]
+    assert [line.rsplit(") ", 1)[1] for line in devices if " -> " in line] == [
+        "account claude-b", "account codex-default", "account claude-a",
+    ]

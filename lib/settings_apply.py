@@ -37,6 +37,15 @@ not seen:
   backup under the same lock and writes it into the shared settings row (not
   when that would disable a device now holding a job), restarts them again
   and records `failed`.
+* A body with `target: "account"` is an account request (lib/account_settings.py)
+  and takes this same path, with its own checks and line edit. A prepare or
+  doctor request for one account on one device takes none of it: it runs
+  `orch accounts prepare` over the doctor's ssh path with this machines.yml
+  on stdin, then the doctor, and records the pair's
+  account_signins status before and after. A signout request runs the
+  harness's logout there instead, refused while the pair holds a running job.
+  A signin request is the sign-in broker's (lib/signin_broker.py): the
+  applier skips it, untrusted or malformed ones too, and writes no line.
 * Every outcome is one AuditEntry line in `<state>/settings-audit.jsonl`. An
   id already there is never applied again, so a pass is safe to repeat.
 """
@@ -51,6 +60,7 @@ import json
 import os
 import pwd
 import re
+import shlex
 import shutil
 import sqlite3
 import stat
@@ -59,20 +69,32 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import AbstractContextManager, contextmanager
-from dataclasses import asdict, dataclass, fields
+from contextlib import AbstractContextManager, closing, contextmanager
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import Protocol
+from typing import TYPE_CHECKING, ClassVar, Protocol
 
-from lib import dashboard_push, heal, live_settings
+from lib import (
+    account_doctor,
+    account_requests,
+    account_signin,
+    dashboard_push,
+    heal,
+    live_settings,
+    self_deploy,
+)
 from lib.config_overlay import overlay_path, read_overlay
 from lib.dashboard_config import SettingsConfig, is_bot_login
-from lib.device_pool import slots_in_use
-from lib.load import is_strict_int
+from lib.device_pool import RunningPair, running_pairs, slots_in_use
+from lib.load import is_strict_int, load_yaml
 from lib.machines_yml import Device, MachinesConfig, load_machines_yml
 from lib.orch_yml import load_orch_yml
+from lib.remote import _UNTRACE, PROBE_TIMEOUT_SECONDS, SSH_UNREACHABLE, ByteTransport, SshTransport, _login
 from lib.wait import OWNING_BOTS
+
+if TYPE_CHECKING:
+    from lib.account_settings import AccountRequest, PairRequest
 
 ROOT = Path(__file__).resolve().parent.parent
 AUDIT_NAME = "settings-audit.jsonl"
@@ -86,10 +108,12 @@ APPLIED = "applied"
 PENDING = "pending"
 REFUSED = "refused"
 FAILED = "failed"
+SIGNED_OUT = "signed-out"
 
 REQUEST_NAME = re.compile(r"^([A-Za-z0-9_-]{16,64})\.json$")
 REQUESTED_AT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 REQUEST_KEYS = frozenset({"id", "actor", "requested_at", "device", "field", "expect", "value"})
+PREPARE_PROG = "orch accounts prepare"
 
 
 def _is_bool(value: object) -> bool:
@@ -107,6 +131,8 @@ FIELDS: Mapping[str, Callable[[object], bool]] = MappingProxyType(
 
 @dataclass(frozen=True)
 class SettingsRequest:
+    target: ClassVar[str | None] = None
+    account: ClassVar[str | None] = None
     id: str
     actor: str
     requested_at: str
@@ -120,14 +146,22 @@ class BadRequest(ValueError):
     pass
 
 
-def parse_request(body: bytes, stem: str) -> SettingsRequest:
+def parse_request(body: bytes, stem: str) -> SettingsRequest | AccountRequest | PairRequest:
     """The request in a spool file named `<stem>.json`; values are checked
     against FIELDS later, so a bad value is refused with its device named."""
     try:
         data = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
         raise BadRequest("not-json") from None
-    if not isinstance(data, dict) or set(data) != REQUEST_KEYS:
+    if not isinstance(data, dict):
+        raise BadRequest("bad-keys")
+    if "target" in data:
+        if data["target"] != "account":
+            raise BadRequest("bad-target")
+        from lib import account_settings
+
+        return account_settings.parse(data, stem)
+    if set(data) != REQUEST_KEYS:
         raise BadRequest("bad-keys")
     for key in ("id", "actor", "requested_at", "device", "field"):
         if not isinstance(data[key], str):
@@ -155,6 +189,8 @@ class AuditEntry:
     restarted: tuple[str, ...] = ()
     pending: tuple[str, ...] = ()
     version: int | None = None
+    target: str | None = None
+    account: str | None = None
 
     def line(self) -> str:
         data = asdict(self)
@@ -168,6 +204,8 @@ def _clip(value: object) -> object:
         return value
     if isinstance(value, str):
         return value[:CLIP]
+    if isinstance(value, list):
+        return [_clip(item) for item in value]
     return None
 
 
@@ -189,9 +227,19 @@ def audited_ids(path: Path) -> set[str]:
 
 def append_audit(path: Path, entry: AuditEntry) -> None:
     with open(path, "a", encoding="utf-8") as out:
+        fcntl.flock(out, fcntl.LOCK_EX)
         out.write(entry.line() + "\n")
         out.flush()
         os.fsync(out.fileno())
+
+
+def is_broker_request(body: bytes) -> bool:
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return False
+    return (isinstance(data, dict) and data.get("target") == "account"
+            and isinstance(data.get("op"), str) and data["op"] in account_requests.BROKER_OPS)
 
 
 
@@ -364,7 +412,6 @@ def parse_listing(text: str) -> SpoolListing:
 
 
 
-_DEVICES = re.compile(r"^devices:[ \t]*(#.*)?$")
 _ITEM = re.compile(r"^(?P<dash>[ ]*-[ ]+)(?P<rest>\S.*)$")
 
 
@@ -375,9 +422,10 @@ def _scalar(text: str) -> str:
     return value
 
 
-def _blocks(lines: Sequence[str]) -> list[tuple[int, int, int]]:
-    """(first line, last content line, key indent) of each devices item."""
-    top = next((i for i, line in enumerate(lines) if _DEVICES.match(line.rstrip("\r\n"))), None)
+def _blocks(lines: Sequence[str], section: str) -> list[tuple[int, int, int]]:
+    """(first line, last content line, key indent) of each `section` item."""
+    head = re.compile(rf"^{section}:[ \t]*(#.*)?$")
+    top = next((i for i, line in enumerate(lines) if head.match(line.rstrip("\r\n"))), None)
     if top is None:
         return []
     blocks: list[list[int]] = []
@@ -413,42 +461,67 @@ def _key_lines(lines: Sequence[str], block: tuple[int, int, int], key: str) -> l
     return found
 
 
+def _yaml_str(text: str) -> str:
+    # PyYAML reads 1e3 as text but YAML 1.2 tools read it as a number, so any
+    # string not starting with a letter is quoted too.
+    if text[:1].isalpha() and load_yaml(text) == text:
+        return text
+    return json.dumps(text)
+
+
 def _render(value: object) -> str:
+    if isinstance(value, list):
+        return f"[{', '.join(map(_yaml_str, value))}]"
     return ("true" if value else "false") if isinstance(value, bool) else str(value)
+
+
+def _item(lines: Sequence[str], section: str, id_key: str,
+          ident: str) -> tuple[tuple[int, int, int], int] | None:
+    for block in _blocks(lines, section):
+        found = _key_lines(lines, block, id_key)
+        if len(found) != 1:
+            continue
+        index, column = found[0]
+        if _scalar(lines[index].rstrip("\r\n")[column + len(id_key) + 1:]) == ident:
+            return block, index
+    return None
+
+
+def _set_key(lines: list[str], block: tuple[int, int, int], after: int, key: str,
+             value: object) -> str | None:
+    found = _key_lines(lines, block, key)
+    if len(found) > 1:
+        return None
+    if found:
+        line, column = found[0]
+        raw = lines[line]
+        eol = raw[len(raw.rstrip("\r\n")):]
+        body = raw.rstrip("\r\n")
+        match = re.match(r"(?P<gap>[ \t]*)(?P<value>[^#]*?)(?P<trail>[ \t]+#.*)?$",
+                         body[column + len(key) + 1:])
+        if match is None or not match["value"]:
+            return None
+        lines[line] = (body[:column] + f"{key}: {_render(value)}"
+                       + (match["trail"] or "") + eol)
+    else:
+        if not lines[after].endswith("\n"):
+            lines[after] += "\n"
+        eol = "\r\n" if lines[after].endswith("\r\n") else "\n"
+        lines.insert(after + 1, " " * block[2] + f"{key}: {_render(value)}{eol}")
+    return "".join(lines)
 
 
 def edit_device_field(text: str, device: str, key: str, value: object) -> str | None:
     """text with `key: value` set in the device's block, or None when the
     block cannot be found or edited by line."""
     lines = text.splitlines(keepends=True)
-    for block in _blocks(lines):
-        names = _key_lines(lines, block, "name")
-        if len(names) != 1:
-            continue
-        index, column = names[0]
-        if _scalar(lines[index].rstrip("\r\n")[column + len("name:"):]) != device:
-            continue
-        found = _key_lines(lines, block, key)
-        if len(found) > 1:
-            return None
-        if found:
-            line, column = found[0]
-            raw = lines[line]
-            eol = raw[len(raw.rstrip("\r\n")):]
-            body = raw.rstrip("\r\n")
-            match = re.match(r"(?P<gap>[ \t]*)(?P<value>[^#]*?)(?P<trail>[ \t]+#.*)?$",
-                             body[column + len(key) + 1:])
-            if match is None or not match["value"]:
-                return None
-            lines[line] = (body[:column] + f"{key}: {_render(value)}"
-                           + (match["trail"] or "") + eol)
-        else:
-            if not lines[index].endswith("\n"):
-                lines[index] += "\n"
-            eol = "\r\n" if lines[index].endswith("\r\n") else "\n"
-            lines.insert(index + 1, " " * block[2] + f"{key}: {_render(value)}{eol}")
-        return "".join(lines)
-    return None
+    found = _item(lines, "devices", "name", device)
+    return None if found is None else _set_key(lines, *found, key, value)
+
+
+def _comments(text: str) -> list[str]:
+    return [found[1] for line in text.splitlines()
+            if (found := re.search(r"(?:^|[ \t])(#.*)$", line)) is not None]
 
 
 def _changes(old: MachinesConfig, new: MachinesConfig) -> list[tuple[str, str, object]] | None:
@@ -464,11 +537,11 @@ def _changes(old: MachinesConfig, new: MachinesConfig) -> list[tuple[str, str, o
     ]
 
 
-def _overlay_sets(machines: Path, device: str, key: str) -> bool:
+def _overlay_sets(machines: Path, section: str, id_key: str, ident: str, key: str) -> bool:
     data, _ = read_overlay(machines)
-    entries = (data or {}).get("devices") or ()
+    entries = (data or {}).get(section) or ()
     return any(
-        isinstance(entry, dict) and entry.get("name") == device and key in entry
+        isinstance(entry, dict) and entry.get(id_key) == ident and key in entry
         for entry in entries
     )
 
@@ -523,10 +596,57 @@ def services(config_dir: Path, state_dir: Path) -> tuple[tuple[str, ...], tuple[
 class Held:
     running: Callable[[MachinesConfig], Mapping[str, int]]
     commit_version: Callable[[Path], int | None]
+    pairs: Callable[[MachinesConfig], list[RunningPair]]
+    hold: Callable[[str, str, str, float], bool]
+
+
+def approve(request: SettingsRequest | AccountRequest | PairRequest, approver: str) -> None:
+    if request.actor.casefold() != approver.casefold() or is_bot_login(request.actor):
+        raise Refused("not-approver")
+
+
+def resolve_pair(request: PairRequest, machines: Path, approver: str,
+                 db: Path | None) -> tuple[MachinesConfig, Device, str]:
+    """The pair's (config, device, harness), or Refused naming why it may not run."""
+    approve(request, approver)
+    config, _ = load_machines_yml(machines)
+    if config is None:
+        raise Refused("machines.yml is invalid")
+    account = config.account(request.account)
+    if account is None:
+        raise Refused("unknown-account")
+    device = config.device(request.device)
+    if device is None:
+        raise Refused("unknown-device")
+    if request.account not in config.accounts_on(device.name, account.harness):
+        raise Refused(f"{request.account} is not signed in on {device.name}")
+    if db is None or not db.is_file():
+        raise Refused("no orch.db to record the doctor in")
+    return config, device, account.harness
+
+
+def prepare_pair(transport: ByteTransport, machines: Path, device: Device, harness: str,
+                 account: str) -> str | None:
+    """Run `orch accounts prepare` for the pair on its device; the error, or None."""
+    unreachable = account_doctor.no_ssh_path(device, harness)
+    if unreachable is not None:
+        return unreachable
+    command = shlex.join([f"{device.factory_root_for(harness)}/bin/orch", "accounts", "prepare",
+                          "--device", device.name, "--account", account,
+                          "--machines", "/dev/stdin"])
+    exchanged = transport.exchange(
+        account_doctor.ssh_argv(device, harness,
+                                _login(f"{_UNTRACE}exec {command}", "orch-accounts-prepare", ())),
+        timeout=PROBE_TIMEOUT_SECONDS, input=machines.read_bytes())
+    if exchanged.code == 0:
+        return None
+    said = _orch_lines_only(exchanged.stderr)
+    return f"prepare exited {exchanged.code}" + (f": {_clip(said[-1])}" if said else "")
 
 
 ClaimLock = Callable[[], AbstractContextManager[Held]]
-NO_DATABASE = Held(running=lambda config: {}, commit_version=lambda machines: None)
+NO_DATABASE = Held(running=lambda config: {}, commit_version=lambda machines: None,
+                   pairs=lambda config: [], hold=lambda account, device, owner, now: True)
 
 
 def claim_lock(db: Path) -> ClaimLock:
@@ -547,8 +667,15 @@ def claim_lock(db: Path) -> ClaimLock:
                     return None
                 return live.written
 
+            def hold_pair(account: str, device: str, owner: str, now: float) -> bool:
+                taken = account_doctor.reserve_pair(connection, account, device, owner, now)
+                connection.execute("COMMIT")
+                return taken
+
             yield Held(running=lambda config: slots_in_use(connection, config),
-                       commit_version=commit_version)
+                       commit_version=commit_version,
+                       pairs=lambda config: running_pairs(connection, config),
+                       hold=hold_pair)
         finally:
             connection.close()
 
@@ -577,12 +704,19 @@ class Applier:
     claims: ClaimLock
     run: heal.Runner = heal.run_service
     clock: Callable[[], float] = time.time
+    db: Path | None = None
+    transport: ByteTransport = field(default_factory=SshTransport)
+    repo: str | None = None
 
     @property
     def audit_path(self) -> Path:
         return self.state_dir / AUDIT_NAME
 
-    def apply(self, request: SettingsRequest) -> AuditEntry:
+    def apply(self, request: SettingsRequest | AccountRequest | PairRequest) -> AuditEntry:
+        from lib.account_settings import PairRequest
+
+        if isinstance(request, PairRequest):
+            return self._apply_signout(request) if request.op == "signout" else self._apply_pair(request)
         try:
             with self.claims() as held:
                 old_bytes, new_text, previous = self._plan(request, held)
@@ -596,23 +730,105 @@ class Applier:
             return self._entry(request, REFUSED, None, "cannot read running jobs")
         return self._restart_all(request, old_bytes, mode, backup, previous, version)
 
-    def _entry(self, request: SettingsRequest, result: str, previous: object,
-               error: str | None = None, **extra: object) -> AuditEntry:
+    def _entry(self, request: SettingsRequest | AccountRequest | PairRequest, result: str,
+               previous: object, error: str | None = None, **extra: object) -> AuditEntry:
         return AuditEntry(
             id=request.id, actor=_clip(request.actor), requested_at=request.requested_at,
             applied_at=heal.stamp(self.clock()), device=_clip(request.device),
             field=_clip(request.field), previous=_clip(previous), new=_clip(request.value),
-            result=result, error=error, **extra,
+            result=result, error=error, target=request.target,
+            account=_clip(request.account), **extra,
         )
 
-    def _plan(self, request: SettingsRequest,
+    def _plan(self, request: SettingsRequest | AccountRequest,
               held: Held) -> tuple[bytes, str, object]:
-        if request.actor.casefold() != self.approver.casefold() or is_bot_login(request.actor):
-            raise Refused("not-approver")
+        approve(request, self.approver)
         old_bytes = self.machines.read_bytes()
         old, _ = load_machines_yml(self.machines)
         if old is None:
             raise Refused("machines.yml is invalid")
+        text = old_bytes.decode("utf-8")
+        if request.target == "account":
+            from lib import account_settings
+
+            new_text, previous = account_settings.plan(request, old, text, self.machines,
+                                                       self._parse, held.pairs)
+        else:
+            new_text, previous = self._plan_device(request, old, text, held)
+        if _comments(new_text) != _comments(text):
+            raise Refused("the edit changed a comment", previous)
+        return old_bytes, new_text, previous
+
+    def _apply_pair(self, request: PairRequest) -> AuditEntry:
+        try:
+            config, device, harness = resolve_pair(request, self.machines, self.approver, self.db)
+        except Refused as refusal:
+            return self._entry(request, REFUSED, None, refusal.error)
+        previous = error = None
+        try:
+            with closing(sqlite3.connect(self.db, timeout=30, isolation_level=None)) as connection:
+                account_doctor.ensure_table(connection)
+                previous = _signin(connection, request)
+                error = prepare_pair(self.transport, self.machines, device, harness, request.account)
+                account_doctor.run(connection, config, self.transport, self.clock(), self.repo)
+                new = _signin(connection, request)
+        except sqlite3.Error as exc:
+            error = "; ".join(filter(None, (error, f"doctor: {type(exc).__name__}")))
+            return self._entry(request, FAILED, previous, error)
+        entry = self._entry(request, FAILED if error else APPLIED, previous, error)
+        return replace(entry, new=_clip(new))
+
+    def _apply_signout(self, request: PairRequest) -> AuditEntry:
+        try:
+            config, device, harness = resolve_pair(request, self.machines, self.approver, self.db)
+        except Refused as refusal:
+            return self._entry(request, REFUSED, None, refusal.error)
+        if request.account == config.accounts_on(device.name, harness)[0]:
+            return self._entry(request, REFUSED, None, "default-account")
+        blocked = account_doctor.no_ssh_path(device, harness)
+        previous = None
+        try:
+            with closing(sqlite3.connect(self.db, timeout=30, isolation_level=None)) as connection:
+                account_doctor.ensure_table(connection)
+                previous = _signin(connection, request)
+                try:
+                    with self.claims() as held:
+                        busy = any(pair.account == request.account and pair.device == device.name
+                                   for pair in held.pairs(config))
+                        taken = busy or blocked is not None or held.hold(
+                            request.account, device.name, request.id, self.clock())
+                except sqlite3.Error:
+                    return self._entry(request, REFUSED, previous, "cannot read running jobs")
+                if busy:
+                    return self._entry(request, REFUSED, previous, "running-job")
+                if not taken:
+                    return self._entry(request, REFUSED, previous, "signing-in")
+                try:
+                    error = blocked or self._logout(
+                        device, harness, config.account_home(device.name, harness, request.account))
+                    account_doctor.run(connection, config, self.transport, self.clock(), self.repo)
+                    new = _signin(connection, request)
+                finally:
+                    account_doctor.release_pair(connection, request.account, device.name, request.id)
+        except sqlite3.Error:
+            return self._entry(request, FAILED, previous, "doctor-db")
+        if error is None and new != "signed-out":
+            error = "unreachable" if new == "unreachable" else "still-signed-in"
+        entry = self._entry(request, FAILED if error else SIGNED_OUT, previous, error)
+        return replace(entry, new=_clip(new))
+
+    def _logout(self, device: Device, harness: str, home: str) -> str | None:
+        exchanged = self.transport.exchange(
+            account_doctor.ssh_argv(device, harness, account_signin.logout_script(harness, home)),
+            timeout=PROBE_TIMEOUT_SECONDS)
+        if exchanged.timed_out:
+            return "logout-timeout"
+        if exchanged.code == SSH_UNREACHABLE:
+            return "unreachable"
+        return None if exchanged.code == 0 else "logout-exit"
+
+    def _plan_device(self, request: SettingsRequest, old: MachinesConfig, text: str,
+                     held: Held) -> tuple[str, object]:
         device = old.device(request.device)
         if device is None:
             raise Refused("unknown-device")
@@ -622,7 +838,7 @@ class Applier:
         previous = getattr(device, request.field)
         if not check(request.value) or not check(request.expect):
             raise Refused("bad-value", previous)
-        if _overlay_sets(self.machines, request.device, request.field):
+        if _overlay_sets(self.machines, "devices", "name", request.device, request.field):
             raise Refused(f"{request.field} is set in machines.local.yml", previous)
         if request.expect != previous:
             raise Refused("changed", previous)
@@ -636,28 +852,28 @@ class Applier:
             if running:
                 raise Refused(f"{request.device} holds {running} running job(s); drain it first",
                               previous)
-        new_text = edit_device_field(old_bytes.decode("utf-8"), request.device,
-                                     request.field, request.value)
+        new_text = edit_device_field(text, request.device, request.field, request.value)
         if new_text is None:
             raise Refused("cannot edit the device's block", previous)
-        new, findings = self._parse(new_text)
-        if new is None:
-            error = next((f.message for f in findings if f.severity == "error"), "invalid")
-            raise Refused(f"invalid after the edit: {error}"[:200], previous)
+        new = self._parse(new_text, previous)
         if _changes(old, new) != [(request.device, request.field, request.value)]:
             raise Refused("the edit changed more than that field", previous)
-        return old_bytes, new_text, previous
+        return new_text, previous
 
-    def _parse(self, text: str):
+    def _parse(self, text: str, previous: object) -> MachinesConfig:
         with tempfile.TemporaryDirectory() as tmp:
             probe = Path(tmp) / self.machines.name
             probe.write_text(text, encoding="utf-8")
             local = overlay_path(self.machines)
             if local.is_file():
                 shutil.copyfile(local, overlay_path(probe))
-            return load_machines_yml(probe)
+            new, findings = load_machines_yml(probe)
+        if new is None:
+            error = next((f.message for f in findings if f.severity == "error"), "invalid")
+            raise Refused(f"invalid after the edit: {error}"[:200], previous)
+        return new
 
-    def _restart_all(self, request: SettingsRequest, old_bytes: bytes, mode: int,
+    def _restart_all(self, request: SettingsRequest | AccountRequest, old_bytes: bytes, mode: int,
                      backup: Path, previous: object, version: int | None) -> AuditEntry:
         restarted, failure = self._restart(stop_on_failure=True)
         if failure is None:
@@ -673,18 +889,29 @@ class Applier:
                            restarted=tuple(dict.fromkeys(restarted + again)),
                            pending=self.pending)
 
-    def _restore(self, request: SettingsRequest, old_bytes: bytes, mode: int) -> str | None:
+    def _restore(self, request: SettingsRequest | AccountRequest, old_bytes: bytes,
+                 mode: int) -> str | None:
         try:
             with self.claims() as held:
+                now, _ = load_machines_yml(self.machines)
                 if request.field == "enabled" and request.value is True:
-                    now, _ = load_machines_yml(self.machines)
                     running = 0 if now is None else held.running(now).get(request.device, 0)
                     if running:
                         return f"not restored: {request.device} holds {running} running job(s)"
+                if now is not None:
+                    from lib import account_settings
+
+                    before = self._parse(old_bytes.decode("utf-8"), None)
+                    reason = account_settings.running_job_blocker(now.accounts, before.accounts,
+                                                              held.pairs(now))
+                    if reason is not None:
+                        return f"not restored: {reason}"
                 _replace(self.machines, old_bytes, mode)
                 held.commit_version(self.machines)
         except sqlite3.Error:
             return "not restored: cannot read running jobs"
+        except Refused as refusal:
+            return f"not restored: {refusal.error}"
         return None
 
     def _backup(self, data: bytes, mode: int) -> Path:
@@ -716,6 +943,17 @@ class Applier:
         return tuple(done), "; ".join(failures) or None
 
 
+def _orch_lines_only(stderr: str) -> list[str]:
+    return [line for line in stderr.splitlines() if line.startswith(f"{PREPARE_PROG}:")]
+
+
+def _signin(connection: sqlite3.Connection, request: PairRequest) -> str | None:
+    row = connection.execute(
+        f"SELECT status FROM {account_doctor.TABLE} WHERE account = ? AND device = ?",
+        (request.account, request.device)).fetchone()
+    return None if row is None else row[0]
+
+
 def run_pass(applier: Applier, spool: Spool, owner: str) -> list[AuditEntry]:
     """Apply each request in the spool whose id is not in the audit log."""
     done = audited_ids(applier.audit_path)
@@ -723,7 +961,7 @@ def run_pass(applier: Applier, spool: Spool, owner: str) -> list[AuditEntry]:
     entries = []
     for item in listing.files:
         stem = item.name[: -len(".json")]
-        if stem in done:
+        if stem in done or is_broker_request(item.body):
             continue
         reason = untrusted(listing, item, owner)
         if reason is None:
@@ -741,7 +979,10 @@ def run_pass(applier: Applier, spool: Spool, owner: str) -> list[AuditEntry]:
 
 
 def describe(entry: AuditEntry) -> str:
-    text = (f"settings: {entry.id} {entry.result} {entry.device}.{entry.field} "
+    subject = entry.device
+    if entry.target == "account":
+        subject = f"account {entry.account}" + (f"@{entry.device}" if entry.device else "")
+    text = (f"settings: {entry.id} {entry.result} {subject}.{entry.field} "
             f"{json.dumps(entry.previous)} -> {json.dumps(entry.new)}")
     if entry.error:
         text += f" ({entry.error})"
@@ -803,6 +1044,7 @@ def main(argv: list[str], *, environ: Mapping[str, str] | None = None,
             machines=args.machines, state_dir=state_dir, deploy=args.deploy,
             approver=settings.approver, environ=scrubbed_env(environ, orch_config),
             restart=restart, pending=pending, claims=claim_lock(db), clock=clock,
+            db=db, repo=self_deploy.own_repo(ROOT),
         )
         try:
             entries = run_pass(applier, spool_for(settings, orch_config.dashboard.push),

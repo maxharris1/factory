@@ -310,13 +310,14 @@ SCRIPT_GITHUB = r"""
   // The #563 GitHub sign-in every page with actions shares (ticket page, board,
   // settings): present only when the server answers /api/session. The session
   // is an HttpOnly cookie; the page only ever holds the CSRF value.
-  var GH = {started: false, on: false, login: null, csrf: null, flow: null, note: '', panels: {}};
+  var GH = {started: false, on: false, login: null, csrf: null, flow: null, note: '', panels: {},
+            accountSignin: false};
 
-  function ghPost(path, body, csrf) {
-    var headers = {'Content-Type': 'application/json'};
+  function ghFetch(path, method, body, csrf) {
+    var headers = body === null ? {} : {'Content-Type': 'application/json'};
     if (csrf) headers['X-Factory-CSRF'] = GH.csrf || '';
-    return fetch(path, {method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: headers,
-                        body: JSON.stringify(body)})
+    return fetch(path, {method: method, credentials: 'same-origin', cache: 'no-store', headers: headers,
+                        body: body === null ? undefined : JSON.stringify(body)})
       .then(function (res) {
         return res.json().then(function (data) { return data; }, function () { return null; }).then(function (data) {
           data = data && typeof data === 'object' ? data : {};
@@ -324,6 +325,8 @@ SCRIPT_GITHUB = r"""
         });
       }, function () { return {status: 0, ok: false, data: {}, error: 'network'}; });
   }
+  function ghPost(path, body, csrf) { return ghFetch(path, 'POST', body, csrf); }
+  function ghGet(path) { return ghFetch(path, 'GET', null, true); }
   function ghSet(signedIn, data) {
     GH.login = signedIn ? String(data.login || '') : null;
     GH.csrf = signedIn ? String(data.csrf || '') : null;
@@ -350,6 +353,7 @@ SCRIPT_GITHUB = r"""
     }).then(function (data) {
       if (!data || typeof data.signed_in !== 'boolean') return;
       GH.on = true;
+      GH.accountSignin = data.account_signin === true;
       ghSet(data.signed_in, data);
     }, function () {});
   }
@@ -417,7 +421,7 @@ SCRIPT_TAIL = r"""
     efficiency: [renderHeadroom, renderTokens, renderRounds, renderSavings, renderJobsLifetime],
     health: [renderBroken, renderComponents, renderDrift, renderHealth, renderLog, renderRules, renderNoWaiter],
     ticket: [renderTicketView],
-    settings: [renderSettings]
+    settings: [renderSettings, renderAccounts]
   };
   var RENDERERS = [renderBand, renderAttentionStrip, renderStatusLine].concat(PAGES[PAGE] || []);
 

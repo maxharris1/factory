@@ -228,10 +228,43 @@ and `slot_max`) and runs those restarts itself; see "Device settings" under
 moves the first queued job for that harness, in claim order (a priority tier
 first, then a ticket marked urgent, then a job resuming a paused step, then a
 ticket marked bug, then the ticket that unblocks more, then the oldest; issues
-#85, #258), to running and holds a slot on the least-loaded device
-(the lowest utilization, slots held over `slot_max`; a tie goes to a remote
-device before the local box, remotes in `machines.yml` order; issue #223) that is enabled, is not draining, has no placeholder and lists the harness. Slots are generic: any
-free slot on an eligible device takes any harness. The job update and the
+#85, #258), to running and holds a slot for it on an (account, device)
+pair (issues #1315, #1316 and #1317). Slots are generic: any free slot on an
+eligible device takes any harness.
+
+A device is free for the harness when it is enabled, is not draining, has
+no placeholder, lists the harness, has a free slot, and is not held back by
+its checkout, a backoff or a memory hold. A job of a project with
+`projects[].devices` sees only its listed devices. Free devices rank by
+utilization (slots held over `slot_max`; a tie goes to a remote device
+before the local box, remotes in `machines.yml` order; issue #223). The
+candidate accounts on a device are its own login, then each account whose
+`signed_in_on` names it. An account takes no job while it is paused or
+usage-limited, while it runs `max_jobs` jobs across every device, or while
+its fresh headroom is under the floor, 0.05. Fresh headroom is the least `1 - used`
+over the fresh windows of the account's newest readings. Each open account
+gets a score. The score is its fresh headroom (0.5 when it has no fresh
+reading) less a pending charge of 0.02 for each running job placed on it
+since its newest reading. The charge covers jobs that reading has not seen
+yet, so a burst of claims spreads across accounts. The claim compares open
+accounts by these keys, in order, and the winner takes its best-ranked free
+device:
+
+1. A best free device that the job need not avoid (issue #218).
+2. The higher score.
+3. Fewer running jobs.
+4. The better rank of its best free device.
+5. The account id, in sort order.
+
+After `orch accounts doctor` has written the `account_signins` table, an
+account other than the device's own login places on a device only when its
+row for that device is `ok`. The device's own login needs no row. Before the
+table exists, placement does not check sign-ins. `placement_blocks` applies
+the same rules, so a device and harness where no account can take a job
+counts as blocked. A queued job whose candidate account is limited or under
+the floor, and that has no free placement, restarts its queue wait instead
+of timing out. [docs/decisions/1064-account-placement.md](docs/decisions/1064-account-placement.md)
+records why the defaults are what they are. The job update and the
 `device_slots` row commit in one `BEGIN IMMEDIATE` transaction in the
 dispatcher database, so two claims cannot take the same last slot. With no
 eligible free slot the job stays queued. Grok jobs never hold a slot.
@@ -1480,8 +1513,9 @@ section shows the last delivery (or `never` and the listener's age, or
 else a `note:` after more than an hour with no delivery while any tracked
 Linear ticket is not merged, handed off, done or abandoned (see "Linear
 webhook"). A running job's age counts from its claim (its device slot's
-`placed_at`, else when it was queued), followed by its last heartbeat:
-`aut0-code/aut0#12 build -> claude running 42m (beat 12s ago)`.
+`placed_at`, else when it was queued), followed by its last heartbeat and,
+for a job that holds a slot, the account it runs on (issue #1251):
+`aut0-code/aut0#12 build -> claude running 42m (beat 12s ago) account claude-max-1`.
 The last section is `Health` (next section), and a queued job that no live
 waiter can take ends with `[no waiter for <harness>]`.
 
@@ -1829,6 +1863,10 @@ A newer `no reading` replaces older numbers. A window that has reset, or a
 reading older than 24 hours, is `stale` and its `used` is null. Cursor shows `not tracked` while no Cursor account is declared, and a database without the
 table shows `no telemetry`.
 
+Each row also shows the account's jobs (`2 running · max 3`, or `no max`)
+and its devices (`signed in on pc, box · running on pc`), from the same read
+placement uses (`account_loads` in `lib/device_pool.py`, issue #1251).
+
 ### Usage accounts
 
 Each subscription is its own usage account (issue #772), with its own
@@ -1869,8 +1907,11 @@ in as that one user). The account's folder on that device is
 Codex account no device lists, `signed_in_on` on an `external` or Cursor
 account, and a device named twice for one account (twice in `signed_in_on`,
 or there and as the device's own login). `max_jobs`, a positive
-integer, caps the account's running jobs once account choice lands
-(#1064); today it is only checked.
+integer, caps the account's running jobs across every device. Placement
+(see "Device pool") gives an account at its cap no new job.
+`paused` (true or false, default false) gives the account no new job while
+its running jobs finish. A pause or a lower `max_jobs` reaches placement at
+once, and a resume or a higher `max_jobs` once the poller adopts the file.
 
 Account homes (issues #1183 and #1184). One bot user on one device can run
 several accounts of its harness, each from its own folder. A job placed on
@@ -1886,6 +1927,15 @@ the run's transcript from that folder. A job on the device's own login runs
 unchanged. `lib/harness_env.py` `ACCOUNT_ISOLATION` is the one table that
 names these variables.
 To sign an account in on each device, follow [docs/ACCOUNTS.md](docs/ACCOUNTS.md).
+
+The Accounts panel on the Settings page (issue #1066) adds and removes
+accounts, pauses and resumes them, and sets `max_jobs` and `signed_in_on`,
+with no hand edit of `machines.yml`. It also runs `orch accounts prepare`
+and the doctor for one account on one device. Remove needs the account
+paused with no running job, and keeps its folder. Default and external
+accounts are read-only. "Manage accounts from Settings" in
+[docs/ACCOUNTS.md](docs/ACCOUNTS.md) has the requests, the refusals and when
+each change takes effect.
 
 The older device value `{bot: <bot user>, account: <id>}` still loads and
 means that account is the device's own login. `orch check-config` reports
@@ -1905,16 +1955,18 @@ bin/orch usage migrate --db ~/.local/share/factory/orch.db
 
 The migration takes a labelled backup (`usage-accounts`) before any write,
 adds an `account` column to `usage_readings` (filled with
-`<harness>-default`) and three account-keyed tables, and does nothing on a
+`<harness>-default`) and four account-keyed tables, and does nothing on a
 second run. Rollback: deploy the older code, which ignores the column and
 tables. To remove them too, run `ALTER TABLE usage_readings DROP COLUMN
-account` and drop `usage_account_observations`, `lane_account_evidence` and
-`lane_account_limits`. As a last resort, `orch restore-db` from the
-labelled backup loses the readings taken since.
+account` and drop `usage_account_readings`, `usage_account_observations`,
+`lane_account_evidence` and `lane_account_limits`. As a last resort,
+`orch restore-db` from the labelled backup loses the readings taken since.
 
 A usage limit pauses only the account that hit it. The other accounts of
 that harness keep taking jobs, and the recipient's queue pauses only when
-every account serving it is limited.
+every account serving it is limited. Readings also rank accounts for
+placement through the score and the floor (see "Device pool"). They do not
+change which harness builds or reviews a job.
 
 Grok and Cursor usage is visible only to Grok Bot, so an `external` account
 takes readings from a command:
@@ -2086,7 +2138,9 @@ by script. `scripted_in_flight` counts such jobs still running.
 `bot_to_bot` counts jobs routed to `grok`: each wakes Grok Bot to hand off
 by hand. `scripted_share` is `scripted / (scripted + bot_to_bot)`. Bot
 messages outside the factory are not in the database, so Grok wakes stand
-in for bot-to-bot handoffs.
+in for bot-to-bot handoffs. `engine_handled` counts granted plus landed
+rulings in the `engine_decisions` log, and `engine_escalated` counts its
+escalated rulings.
 
 **Redaction.** Only allowlisted columns are read: never heads, comment
 bodies or other free-form job data. `jobs.detail` is read only for its
@@ -2320,10 +2374,11 @@ on or off and set `slot_max` (1 to 64). Drain is the safe way to take a
 device out of placement; turning `enabled` off on a device that holds a
 running job is refused with "drain it first". That check and the file write
 hold orch.db's write lock, and every claim reads the file under the same
-lock, so no job lands in between. The file only narrows a running process
-live (disable, drain, a lower `slot_max`); enabling, clearing drain or a
-higher `slot_max` takes effect when the poller or waiter restarts on the new
-file (fast live enable is #852).
+lock, so no job lands in between. Placement reads these switches from the
+shared settings row (#852). A disable, a drain or a lower `slot_max` reaches
+every claim at once. An enable, a cleared drain or a higher `slot_max` waits
+until the poller adopts the new file. The same page's Accounts panel manages
+usage accounts ("Usage accounts" above).
 
 The dashboard server never edits `machines.yml` or runs a script. It
 cannot reach the orch host, and the orch host's credentials stay there:
@@ -2333,7 +2388,15 @@ cannot reach the orch host, and the orch host's credentials stay there:
    CSRF and approver login, the field and value, that the device is in the
    served `status.json` and that `expect` is still its value there. It then
    writes one request file, `<id>.json` (id, actor, time, device, field,
-   expect, value; no token or session), and answers 202. Without the
+   expect, value; no token or session), and answers 202. A body with
+   `target: "account"` instead names an `op` (`add`, `set`, `remove`,
+   `prepare` or `doctor`) and an `account`. It is refused before anything
+   is written for a bad op, keys or value (400), an account or device not
+   in `status.json` (404), a `prepare` or `doctor` device the account is
+   not signed in on (404), a `<harness>-default` account (declared or not)
+   or an external account (403), or a stale `expect` or existing id (409).
+   A `max_jobs` value must be 1-64; its `expect` may be any declared value.
+   [docs/ACCOUNTS.md](docs/ACCOUNTS.md) lists every op and code. Without the
    variable, `/api/settings` is 404; setting it without
    `DASHBOARD_GITHUB_CLIENT_ID` is a configuration error. At most 20
    requests wait at once.
@@ -2359,6 +2422,19 @@ cannot reach the orch host, and the orch host's credentials stay there:
    `settings-audit.jsonl` in the state dir (actor, request and apply times,
    device, field, previous and new values, result, error, backup), and the
    next push shows it on the page. An id is never applied twice.
+   An account request takes the same path with its own checks. It is
+   refused for a default or external account, an unknown account or device,
+   a device that does not list the harness, a key set in
+   `machines.local.yml`, a stale `expect`, or no change. A remove also
+   needs the account paused (`not-paused`) with no running job on any
+   device. No edit may drop a device where the account runs a job, and a
+   failed restart never restores a file that would. A `prepare` or `doctor`
+   request makes no edit, backup or restart. Prepare runs `orch accounts
+   prepare --device <device> --account <id> --machines /dev/stdin` from the
+   device's `factory_root` over the doctor's ssh path, with this
+   `machines.yml` on stdin, then runs a doctor pass. Doctor does the same:
+   it prepares the pair before the pass. Each records the pair's sign-in
+   status before and after.
 
 Setup, by Max: create the spool as an absolute directory, not a symlink,
 owned by the dashboard user with mode 0755; the account the push SSH logs in

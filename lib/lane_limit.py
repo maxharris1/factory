@@ -3,8 +3,9 @@ once every account serving it is paused (#367).
 
 When a run's stream reports the account's usage limit, telemetry records
 the account as limited until the reset (lane_account_limits). Placement
-(lib/device_pool.py) skips each device whose account for the harness is
-limited, so another account of that harness keeps taking jobs. A
+(lib/device_pool.py) skips a limited account and places on another account
+signed in for the harness, on the same device or another, so the harness
+keeps taking jobs while any of its accounts is free. A
 recipient's lane is paused (`recipient_paused`) while an older binary's
 harness-wide lane_limits row holds, or while every account serving it is
 limited; claim_order (lib/queue.py) claims nothing then, on every device,
@@ -132,13 +133,13 @@ class LaneLimit:
 
 def detect(harness: str, event: dict, now: float) -> UsageLimit | None:
     """The usage limit one parsed stream event reports, or None."""
-    text = _limit_text(harness, event)
+    text = error_text(harness, event)
     if text is None or not _PHRASE.search(text):
         return None
     return UsageLimit(_parse_reset(text, now))
 
 
-def _limit_text(harness: str, event: dict) -> str | None:
+def error_text(harness: str, event: dict) -> str | None:
     kind = event.get("type")
     if harness == "codex":
         if kind == "error":
@@ -231,16 +232,8 @@ def _valid(found: list[usage_readings.Reading]) -> list[usage_readings.Reading]:
 
 
 def readings(connection: sqlite3.Connection, account: str) -> list[usage_readings.Reading]:
-    if not _has_table(connection, usage_readings.TABLE):
-        return []
-    rows = connection.execute(
-        f"""
-        SELECT window, used, resets_at, observed_at FROM {usage_readings.TABLE}
-        WHERE {usage_readings.account_sql(connection)} = ?
-        """,
-        (account,),
-    ).fetchall()
-    return _valid([usage_readings.Reading(*row) for row in rows])
+    found = (row.reading() for row in usage_readings.stored(connection, account) or [])
+    return [r for r in found if r is not None]
 
 
 def record(

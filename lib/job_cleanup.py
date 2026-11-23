@@ -17,19 +17,27 @@ since the first read is moved back. For each confirmed folder the device
 renames `<job-id>.cleanup` to `<job-id>.gone`, the commit point, then moves
 its logs, results and worker records with the `.run/`, `.brief.md` and
 `.launched` beside it to `jobs-kept/<job-id>/` (lib/job_leftovers.py),
-deletes `.claimed` and the folder, and writes `kept.json` last. The
-`.lock` stays. A `<job-id>.gone` already there puts the folder back with
-an error. `_CLAIM` only ever restores `.cleanup`, never `.gone`, so the
-next HOLD first finishes every `<job-id>.gone` and pending `kept.json.tmp`
-under the root it was sent to. It archives the siblings and deletes
-`.claimed` only while the host still names the job finished, nothing
-claimed it since and no later `<job-id>` or `<job-id>.cleanup` checkout
-exists; otherwise it finishes only the `.gone` tree and leaves the siblings
-to the later run and its own guards. A device that cannot scan for
-processes of this user with a cwd or open file in a folder removes
-nothing. A process of this user whose cwd or open files the scan cannot
-read (a non-dumpable one: ssh, an agent, a sandboxed shell) could be in any
-job folder. So while one lives, every folder is kept as held-open.
+deletes `.claimed` and the folder, and writes `kept.json` last. A folder
+that is a dead owner's worktree has its uncommitted work saved as
+`jobs-kept/<job-id>/worktree.patch` and its unpushed commits pinned as
+`refs/orch-kept/<job-id>` just before that rename, and its `<job-id>.json`
+record is retired with the folder. A record with no folder whose owner is
+gone is retired the same way. Once nothing else of a job is left under
+`jobs/`, its `.lock` is unlinked last, while still held, when the host's
+plan says `unlink_lock`; a holder that waited on it relocks the new file. A
+plan from an older host leaves the `.lock`. A `<job-id>.gone` already
+there puts the folder back with an error. `_CLAIM` only ever restores
+`.cleanup`, never `.gone`, so the next HOLD first finishes every
+`<job-id>.gone` and pending `kept.json.tmp` under the root it was sent
+to. It archives the siblings and deletes `.claimed` only while the host
+still names the job finished, nothing claimed it since and no later
+`<job-id>` or `<job-id>.cleanup` checkout exists; otherwise it finishes
+only the `.gone` tree and leaves the siblings to the later run and its own
+guards. A device that cannot scan for processes of this user with a cwd or
+open file in a folder removes nothing. A process of this user whose cwd or
+open files the scan cannot read (a non-dumpable one: ssh, an agent, a
+sandboxed shell) could be in any job folder. So while one lives, every
+folder is kept as held-open.
 
 The runner's checkout and start claim the job first under `flock` on
 `jobs/<job-id>.lock`: they touch `jobs/<job-id>.claimed` and move a
@@ -38,6 +46,12 @@ archive here holds the same lock. A device whose login PATH has no `flock`
 claims unlocked, so it removes nothing. A folder the host did not name is
 never touched; the host labels each one live, recent, retry-held or
 unknown.
+
+`orch cleanup run --bot <bot>` sweeps only the jobs that bot received, on
+that bot's targets, after a default 10 minute grace. Its plan names every id
+the bot owns, so on a work root several bots share the device leaves the rest
+alone. It holds a flock on `cleanup-<bot>.lock` beside orch.db for the whole
+pass, and exits at once when another pass for that bot holds it.
 """
 
 from __future__ import annotations
@@ -55,16 +69,19 @@ import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TextIO
 
 from lib import health, job_leftovers, remote, worktrees
 from lib.device_deploy import PICK_PYTHON, Target, targets
 from lib.job_leftovers import GONE, WORKER_RECORD
 from lib.remote import SSH_UNREACHABLE, CaptureTransport, SshTransport, _login, _marked, ssh_argv
+from lib.wait import OWNING_BOTS
 
 DEFAULT_GRACE_HOURS = 6.0
+BOT_GRACE_MINUTES = 10
 TIMEOUT_SECONDS = 3600.0
 MARK = "orch-cleanup:"
 FINISHED = ("done", "failed", "cancelled")
@@ -81,7 +98,6 @@ LOCK_HELD = "lock-held"
 CLAIMED_SINCE = "claimed-since"
 WORKTREE_RECORD = "worktree-record"
 WORKTREE_OWNER_LIVE = "worktree-owner-live"
-WORKTREE_WORK = "worktree-work"
 WORKER_LIVE = "worker-live"
 WORKER_UNSURE = "worker-unsure"
 HOLD = "hold"
@@ -105,6 +121,7 @@ class JobRow:
     ticket_id: str
     state: str
     finished_at: float | None
+    recipient: str
     failure_handled: bool = True
 
 
@@ -131,13 +148,22 @@ def read_jobs(db: Path) -> list[JobRow]:
     connection = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
         return [
-            JobRow(id, repo, ticket, state, finished_at, bool(handled))
-            for id, repo, ticket, state, finished_at, handled in connection.execute(
-                "SELECT id, repo, ticket_id, state, finished_at, failure_handled FROM jobs"
+            JobRow(id, repo, ticket, state, finished_at, recipient, bool(handled))
+            for id, repo, ticket, state, finished_at, recipient, handled in connection.execute(
+                "SELECT id, repo, ticket_id, state, finished_at, recipient, failure_handled"
+                " FROM jobs"
             )
         ]
     finally:
         connection.close()
+
+
+def _job_ids(value: object, name: str) -> frozenset[str]:
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) and _JOB_ID.fullmatch(item) for item in value
+    ):
+        raise ValueError(f"{name} must be a list of plain job ids")
+    return frozenset(value)
 
 
 @dataclass(frozen=True)
@@ -147,24 +173,29 @@ class Plan:
     dry_run: bool
     step: str = HOLD
     finished_at: Mapping[str, float] = field(default_factory=dict)
+    unlink_lock: bool = False
+    owned: frozenset[str] | None = None
 
     def own_finish(self, job_id: str) -> float:
         return self.finished_at.get(job_id, self.cutoff)
 
+    def owns(self, job_id: str) -> bool:
+        return self.owned is None or job_id in self.owned
+
     def to_json(self) -> str:
-        return json.dumps(
-            {"finished": sorted(self.finished), "cutoff": self.cutoff, "dry_run": self.dry_run,
-             "step": self.step, "finished_at": dict(sorted(self.finished_at.items()))}
-        )
+        data = {"finished": sorted(self.finished), "cutoff": self.cutoff,
+                "dry_run": self.dry_run, "step": self.step,
+                "finished_at": dict(sorted(self.finished_at.items())),
+                "unlink_lock": self.unlink_lock}
+        if self.owned is not None:
+            data["owned"] = sorted(self.owned)
+        return json.dumps(data)
 
     @classmethod
     def parse(cls, text: str) -> Plan:
         data = json.loads(text)
-        finished = data["finished"]
-        if not isinstance(finished, list) or not all(
-            isinstance(item, str) and _JOB_ID.fullmatch(item) for item in finished
-        ):
-            raise ValueError("finished must be a list of plain job ids")
+        finished = _job_ids(data["finished"], "finished")
+        owned = data.get("owned")
         step = data.get("step", HOLD)
         if step not in (HOLD, FINISH):
             raise ValueError(f"unknown step {step!r}")
@@ -173,8 +204,10 @@ class Plan:
             isinstance(key, str) and _JOB_ID.fullmatch(key) for key in finished_at
         ):
             raise ValueError("finished_at must map plain job ids to times")
-        return cls(frozenset(finished), float(data["cutoff"]), bool(data["dry_run"]), step,
-                   {key: float(value) for key, value in finished_at.items()})
+        return cls(finished, float(data["cutoff"]), bool(data["dry_run"]), step,
+                   {key: float(value) for key, value in finished_at.items()},
+                   bool(data.get("unlink_lock", False)),
+                   None if owned is None else _job_ids(owned, "owned"))
 
 
 @dataclass(frozen=True)
@@ -336,23 +369,43 @@ def runner_locks() -> bool:
     return shutil.which("flock") is not None
 
 
+def _still_the_lock_file(lock, path: Path) -> bool:
+    try:
+        return os.fstat(lock.fileno()).st_ino == os.stat(path).st_ino
+    except FileNotFoundError:
+        return False
+
+
 @contextmanager
 def _claim_lock(jobs: Path, job_id: str, *, wait: bool = True,
-                create: bool = True) -> Iterator[bool]:
-    try:
-        opened = open(jobs / f"{job_id}{LOCK}", "a" if create else "r")
-    except FileNotFoundError:
-        if create:
-            raise
-        yield True
-        return
-    with opened as lock:
+                create: bool = True) -> Iterator[TextIO | bool]:
+    path = jobs / f"{job_id}{LOCK}"
+    while True:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
-        except BlockingIOError:
-            yield False
+            opened = open(path, "a" if create else "r")
+        except FileNotFoundError:
+            if create:
+                raise
+            yield True
             return
-        yield True
+        with opened as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+            except BlockingIOError:
+                yield False
+                return
+            if _still_the_lock_file(lock, path):
+                yield lock
+                return
+
+
+def _unlink_held_lock(jobs: Path, job_id: str, plan: Plan, held: TextIO | bool) -> None:
+    lock = f"{job_id}{LOCK}"
+    if (plan.unlink_lock and not plan.dry_run and not isinstance(held, bool)
+            and _still_the_lock_file(held, jobs / lock) and not any(
+            entry.name.split(".", 1)[0] == job_id and entry.name != lock
+            for entry in jobs.iterdir())):
+        (jobs / lock).unlink(missing_ok=True)
 
 
 def _worker_tags(folder: Path, job_id: str) -> list[str]:
@@ -379,19 +432,21 @@ def _worker_reason(folder: Path, job_id: str) -> str | None:
     return None
 
 
-def _worktree_reason(folder: Path, job_id: str) -> str | None:
-    record = folder.parent / f"{job_id}.json"
-    if not record.exists() and not record.is_symlink():
-        return None
+def _record_reason(record: Path) -> str | None:
     live = worktrees.record_owner_live(record)
     if live is None:
         return WORKTREE_RECORD
-    if live:
-        return WORKTREE_OWNER_LIVE
-    if not (folder / ".git").is_file():
-        return WORKTREE_WORK
-    held = worktrees.keep_reason(folder, worktrees.recorded_start(record))
-    return None if held is None else WORKTREE_WORK
+    return WORKTREE_OWNER_LIVE if live else None
+
+
+def _worktree_reason(folder: Path, job_id: str) -> str | None:
+    record = folder.parent / f"{job_id}.json"
+    if not os.path.lexists(record):
+        return None
+    reason = _record_reason(record)
+    if reason is None and not worktrees.owns(folder.parent.parent, record, folder):
+        return WORKTREE_RECORD
+    return reason
 
 
 def _claimed_since(jobs: Path, job_id: str, own_finish: float) -> bool:
@@ -446,7 +501,7 @@ def _finish_crashed(root: Path, plan: Plan, locks: bool) -> tuple[dict[str, int]
     removed: dict[str, int] = {}
     kept: dict[str, str] = {}
     pending = filter(_JOB_ID.fullmatch, job_leftovers.pending(root))
-    for job_id in sorted(set(_job_folders(jobs, GONE)).union(pending)):
+    for job_id in sorted(filter(plan.owns, set(_job_folders(jobs, GONE)).union(pending))):
         gone = jobs / f"{job_id}{GONE}"
         try:
             with _claim_lock(jobs, job_id, wait=False, create=not plan.dry_run) as locked:
@@ -461,21 +516,74 @@ def _finish_crashed(root: Path, plan: Plan, locks: bool) -> tuple[dict[str, int]
                         job_leftovers.retire(root, job_id, gone, siblings=siblings,
                                              finished_at=plan.own_finish(job_id),
                                              removed_bytes=size)
+                        if siblings:
+                            _unlink_held_lock(jobs, job_id, plan, locked)
                     removed[job_id] = size
                 else:
                     removed[job_id] = (0 if plan.dry_run
                                        else job_leftovers.commit_record(root, job_id))
-        except OSError as exc:
+                    _unlink_held_lock(jobs, job_id, plan, locked)
+        except (OSError, worktrees.WorktreeError) as exc:
             kept[job_id] = f"error: {exc}".splitlines()[0]
     return removed, kept
+
+
+def _orphan_records(root: Path, plan: Plan,
+                    locks: bool) -> tuple[dict[str, int], dict[str, str]]:
+    jobs = root / "jobs"
+    removed: dict[str, int] = {}
+    kept: dict[str, str] = {}
+    for record in sorted(jobs.glob("*.json")):
+        job_id = record.stem
+        if (job_id not in plan.finished or _checked_out_again(jobs, job_id)
+                or os.path.lexists(jobs / f"{job_id}{GONE}")):
+            continue
+        if not locks:
+            kept[job_id] = CANNOT_LOCK
+            continue
+        try:
+            with _claim_lock(jobs, job_id, wait=False, create=not plan.dry_run) as locked:
+                claimed = _claimed_since(jobs, job_id, plan.own_finish(job_id))
+                reason = (LOCK_HELD if not locked else CLAIMED_SINCE if claimed
+                          else _record_reason(record))
+                if reason is not None:
+                    kept[job_id] = reason
+                    continue
+                if not plan.dry_run:
+                    worktrees.retire_record(root, record)
+                    _unlink_held_lock(jobs, job_id, plan, locked)
+                removed[job_id] = 0
+        except (OSError, worktrees.WorktreeError) as exc:
+            kept[job_id] = f"error: {exc}".splitlines()[0]
+    return removed, kept
+
+
+def _unlink_stranded_locks(jobs: Path, plan: Plan) -> dict[str, str]:
+    kept: dict[str, str] = {}
+    if not plan.unlink_lock or plan.dry_run:
+        return kept
+    for lock in sorted(jobs.glob(f"*{LOCK}")):
+        job_id = lock.name.removesuffix(LOCK)
+        if job_id not in plan.finished:
+            continue
+        try:
+            with _claim_lock(jobs, job_id, wait=False, create=False) as locked:
+                _unlink_held_lock(jobs, job_id, plan, locked)
+        except OSError as exc:
+            kept[job_id] = f"error: {exc}".splitlines()[0]
+    return kept
 
 
 def _hold(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None]) -> Report:
     jobs = root / "jobs"
     locks = runner_locks()
     removed, kept = _finish_crashed(root, plan, locks)
-    held = list(_job_folders(jobs, SET_ASIDE))
-    folders = _job_folders(jobs)
+    orphans_removed, orphans_kept = _orphan_records(root, plan, locks)
+    removed = {**orphans_removed, **removed}
+    kept = {**_unlink_stranded_locks(jobs, plan), **orphans_kept, **kept}
+    held = list(filter(plan.owns, _job_folders(jobs, SET_ASIDE)))
+    folders = {job_id: folder for job_id, folder in _job_folders(jobs).items()
+               if plan.owns(job_id)}
     away = job_leftovers.cross_device(root) if folders else None
     for job_id, folder in folders.items():
         if job_id not in plan.finished:
@@ -520,11 +628,14 @@ def _finish(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None]) -> 
     jobs = root / "jobs"
     locks = runner_locks()
     for job_id, aside in _job_folders(jobs, SET_ASIDE).items():
+        if not plan.owns(job_id):
+            continue
         gone = jobs / f"{job_id}{GONE}"
         try:
-            with _claim_lock(jobs, job_id):
+            with _claim_lock(jobs, job_id) as locked:
                 if not aside.is_dir():
                     kept[job_id] = RECENT
+                    _unlink_held_lock(jobs, job_id, plan, locked)
                     continue
                 reason = (_finish_reason(aside, job_id, plan, locks, scan)
                           or job_leftovers.cross_device(root)
@@ -533,12 +644,19 @@ def _finish(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None]) -> 
                 if reason is not None or os.path.lexists(jobs / job_id):
                     kept[job_id] = _put_back(aside, job_id) or reason
                     continue
+                try:
+                    job_leftovers.save_work(root, job_id, aside)
+                except (OSError, worktrees.WorktreeError) as exc:
+                    kept[job_id] = (_put_back(aside, job_id)
+                                    or f"error: {exc}".splitlines()[0])
+                    continue
                 size = _deleted_bytes(aside)
                 aside.rename(gone)
                 job_leftovers.retire(root, job_id, gone, siblings=True,
                                      finished_at=plan.own_finish(job_id), removed_bytes=size)
                 removed[job_id] = size
-        except OSError as exc:
+                _unlink_held_lock(jobs, job_id, plan, locked)
+        except (OSError, worktrees.WorktreeError) as exc:
             kept[job_id] = f"error: {exc}".splitlines()[0]
     return Report(removed, kept, False)
 
@@ -559,8 +677,12 @@ def _gib(size: int) -> str:
     return f"{size / 2**30:.2f} GiB"
 
 
+def _label(target: Target) -> str:
+    return f"{target.label} {target.remote.workdir_root}"
+
+
 def summary(target: Target, outcome: Report | str) -> str:
-    label = f"{target.label} {target.remote.workdir_root}"
+    label = _label(target)
     if isinstance(outcome, str):
         return f"{label}: failed: {outcome}"
     report = outcome
@@ -571,6 +693,18 @@ def summary(target: Target, outcome: Report | str) -> str:
         f"{label}: {verb} {len(report.removed)} checkouts ({_gib(report.bytes_freed)}), "
         f"kept {len(report.kept)}" + (f" ({kept})" if kept else "")
     )
+
+
+def report_lines(target: Target, outcome: Report | str) -> list[str]:
+    if isinstance(outcome, str):
+        return [summary(target, outcome)]
+    label = _label(target)
+    verb = "would remove" if outcome.dry_run else "removed"
+    return [summary(target, outcome),
+            *(f"{label}: {verb} {job_id} {size} bytes"
+              for job_id, size in sorted(outcome.removed.items())),
+            *(f"{label}: kept {job_id} {reason}"
+              for job_id, reason in sorted(outcome.kept.items()))]
 
 
 def device_script(checkout: str, workdir_root: str) -> str:
@@ -611,7 +745,8 @@ def clean_target(transport: CaptureTransport, target: Target, db: Path, plan: Pl
     confirmed = frozenset(i for i in hold.held if i in reread and reread[i] is None)
     finish = _device_call(transport, target, Plan(
         confirmed, plan.cutoff, False, FINISH,
-        {i: at for i, at in plan.finished_at.items() if i in confirmed}))
+        {i: at for i, at in plan.finished_at.items() if i in confirmed}, plan.unlink_lock,
+        plan.owned))
     if isinstance(finish, str):
         return f"set aside {len(hold.held)} checkouts, then {finish}"
     taken_back = {i: reread.get(i) or RECENT for i in hold.held if i not in finish.removed}
@@ -622,14 +757,18 @@ def clean_target(transport: CaptureTransport, target: Target, db: Path, plan: Pl
 
 
 def run(db: Path, machines, transport: CaptureTransport, *, now: float, grace_hours: float,
-        dry_run: bool) -> list[tuple[Target, Report | str]]:
+        dry_run: bool, bot: str | None = None) -> list[tuple[Target, Report | str]]:
     cutoff = now - grace_hours * 3600
     rows = read_jobs(db)
     reasons = keep_reasons(rows, cutoff)
-    finished_at = {row.id: row.finished_at for row in rows
+    mine = [row for row in rows if bot is None or row.recipient == OWNING_BOTS[bot]]
+    owned = None if bot is None else frozenset(row.id for row in mine)
+    finished_at = {row.id: row.finished_at for row in mine
                    if reasons[row.id] is None and row.finished_at is not None}
-    plan = Plan(frozenset(finished_at), cutoff, dry_run, HOLD, finished_at)
-    found = {(t.device, t.remote.workdir_root): t for t in targets(machines)}
+    plan = Plan(frozenset(finished_at), cutoff, dry_run, HOLD, finished_at, unlink_lock=True,
+                owned=owned)
+    found = {(t.device, t.remote.workdir_root): t for t in targets(machines)
+             if bot is None or t.bot == bot}
     work = list(found.values())
     if not work:
         return []
@@ -639,7 +778,8 @@ def run(db: Path, machines, transport: CaptureTransport, *, now: float, grace_ho
 
 
 USAGE = """\
-orch cleanup run --backlog [--dry-run] [--grace-hours H] [--db PATH] [--machines PATH]
+orch cleanup run (--backlog | --bot BOT) [--dry-run] [--grace-hours H] [--db PATH]
+                  [--machines PATH]
 orch cleanup device --root DIR      (reads the host's plan as JSON on stdin)
 """
 
@@ -648,10 +788,12 @@ def main(argv: list[str], *, clock: Callable[[], float] = time.time,
          transport: CaptureTransport | None = None) -> int:
     parser = argparse.ArgumentParser(prog="orch cleanup", usage=USAGE)
     commands = parser.add_subparsers(dest="command", required=True)
-    host = commands.add_parser("run")
-    host.add_argument("--backlog", action="store_true")
+    host = commands.add_parser("run", prog="orch cleanup run")
+    sweep = host.add_mutually_exclusive_group(required=True)
+    sweep.add_argument("--backlog", action="store_true")
+    sweep.add_argument("--bot", choices=tuple(OWNING_BOTS))
     host.add_argument("--dry-run", action="store_true")
-    host.add_argument("--grace-hours", type=float, default=DEFAULT_GRACE_HOURS)
+    host.add_argument("--grace-hours", type=float)
     host.add_argument("--db", type=Path)
     host.add_argument("--machines", type=Path)
     device = commands.add_parser("device")
@@ -668,9 +810,8 @@ def main(argv: list[str], *, clock: Callable[[], float] = time.time,
             return 2
         print(MARK, device_step(args.root, plan).to_json(), flush=True)
         return 0
-    if not args.backlog:
-        print("orch cleanup run: only the hand-run --backlog pass exists so far", file=sys.stderr)
-        return 2
+    if args.grace_hours is None:
+        args.grace_hours = BOT_GRACE_MINUTES / 60 if args.bot else DEFAULT_GRACE_HOURS
     if args.grace_hours < 0:
         print("orch cleanup run: --grace-hours must not be negative", file=sys.stderr)
         return 2
@@ -679,9 +820,19 @@ def main(argv: list[str], *, clock: Callable[[], float] = time.time,
     if not db.is_file():
         print(f"orch cleanup run: no orch.db at {db}", file=sys.stderr)
         return 1
-    outcomes = run(db, health.load_machines(args.machines),
-                   transport if transport is not None else SshTransport(),
-                   now=clock(), grace_hours=args.grace_hours, dry_run=args.dry_run)
+    with ExitStack() as held:
+        if args.bot:
+            lock = held.enter_context(open(db.parent / f"cleanup-{args.bot}.lock", "a"))
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print(f"orch cleanup run: cleanup for {args.bot} already running")
+                return 0
+        outcomes = run(db, health.load_machines(args.machines),
+                       transport if transport is not None else SshTransport(),
+                       now=clock(), grace_hours=args.grace_hours, dry_run=args.dry_run,
+                       bot=args.bot)
     for target, outcome in outcomes:
-        print(summary(target, outcome), flush=True)
+        for line in report_lines(target, outcome):
+            print(line, flush=True)
     return 1 if any(isinstance(outcome, str) for _, outcome in outcomes) else 0

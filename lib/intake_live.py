@@ -27,9 +27,13 @@ Reads:
   in one repo folder at a commit (`contents/`), for the feature map check
   and the truncated tree walk (#1029);
 * closed_issues_since: issues closed at or after a time (`issues?state=closed&since=`);
-* split_children: every issue whose body says `Split from #<parent>` (`search/issues`);
-  a search that returns fewer issues than its total_count, as past the
-  1,000-result ceiling, fails the read rather than returning a partial set.
+* split_children: every issue whose body says `Split from #<parent>`, found
+  by search (`search/issues`) or by the parent's timeline cross-references
+  (`issues/<parent>/timeline`), which a lagging search index cannot omit;
+  the timeline's copy wins. A search that returns fewer issues than its
+  total_count, as past the 1,000-result ceiling, fails the read rather than
+  returning a partial set;
+* issue_record: one issue's state, close reason and body (`issues/<n>`).
 
 Writes (each one exactly once per call; the feeder makes them idempotent):
 the empty start commit (git data API: the base commit's tree, one parent),
@@ -46,6 +50,7 @@ from typing import Any, TypeVar
 from urllib.parse import quote
 
 from lib.branch_stack import OpenPull
+from lib.dispatch.constants import GITHUB_STATE_LABEL_PREFIX
 from lib.dispatcher import Comment
 from lib.feeder import IntakeIssue, IssueRecord
 from lib.feeder_gates import Progress, Ref, RefStatus
@@ -109,7 +114,7 @@ _LINKED_PULLS = (
 )
 REF_STATUS_FIELDS = (
     "__typename "
-    "... on PullRequest { state merged } "
+    "... on PullRequest { state merged labels(first: 30) { nodes { name } } } "
     "... on Issue { state stateReason " + _LINKED_PULLS.replace("{after}", "") + " }"
 )
 LINKED_PULLS_QUERY = (
@@ -271,13 +276,41 @@ class GitHubIntakeClient(GitHubReviewActions):
             raise GitHubAdapterError(
                 f"issue search returned {returned} of {max(totals)} issues"
             )
-        items = _issue_items(found)
-        children = [
-            _issue_record(item)
-            for item in items
-            if split_parent(_text(item.get("body"))) == parent
+        children = {
+            child.number: child
+            for child in map(_issue_record, _issue_items(found))
+            if split_parent(child.body) == parent
+        }
+        children.update((child.number, child) for child in self._referencing_children(repo, parent))
+        return tuple(sorted(children.values(), key=lambda child: child.number))
+
+    def _referencing_children(self, repo: str, parent: int) -> list[IssueRecord]:
+        path = _repo_path(repo)
+        pages = self._pages(f"{path}/issues/{parent}/timeline?per_page=100")
+        if not all(isinstance(page, list) for page in pages):
+            raise GitHubAdapterError("issue timeline page is not a list")
+        here = f"https://api.github.com/{path}".lower()
+        sources = [
+            event["source"]["issue"]
+            for page in pages
+            for event in page
+            if isinstance(event, dict)
+            and event.get("event") == "cross-referenced"
+            and isinstance(event.get("source"), dict)
+            and isinstance(event["source"].get("issue"), dict)
+            and _text(event["source"]["issue"].get("repository_url")).lower() == here
         ]
-        return tuple(sorted(children, key=lambda child: child.number))
+        return [
+            child
+            for child in map(_issue_record, _issue_items([sources]))
+            if split_parent(child.body) == parent
+        ]
+
+    def issue_record(self, repo: str, number: int) -> IssueRecord:
+        items = _issue_items([[self._json(f"{_repo_path(repo)}/issues/{number}")]])
+        if not items:
+            raise GitHubAdapterError(f"{repo}#{number} is not an issue")
+        return _issue_record(items[0])
 
     def _applied_by(self, repo: str, number: int, label: str, updated_at: str) -> str | None:
         key = (repo.lower(), number, label, updated_at)
@@ -449,6 +482,17 @@ class GitHubIntakeClient(GitHubReviewActions):
         the poller does not discover it, so its brief and go would go
         nowhere.
         """
+        numbers = sorted(
+            item["number"]
+            for item in self._branch_pull_items(repo, branch)
+            if item.get("state") == "open" and item.get("merged_at") is None
+        )
+        return numbers[0] if numbers else None
+
+    def branch_pulls(self, repo: str, branch: str) -> tuple[int, ...]:
+        return tuple(sorted(item["number"] for item in self._branch_pull_items(repo, branch)))
+
+    def _branch_pull_items(self, repo: str, branch: str) -> list[dict]:
         owner = repo.split("/", 1)[0]
         endpoint = (
             f"{_repo_path(repo)}/pulls?state=all&per_page=100"
@@ -457,17 +501,14 @@ class GitHubIntakeClient(GitHubReviewActions):
         pulls = self._json(endpoint)
         if not isinstance(pulls, list):
             raise GitHubAdapterError("pulls list is not a list")
-        numbers = sorted(
-            item["number"]
+        return [
+            item
             for item in pulls
             if isinstance(item, dict)
             and isinstance(item.get("number"), int)
             and not isinstance(item.get("number"), bool)
-            and item.get("state") == "open"
-            and item.get("merged_at") is None
             and ((item.get("head") or {}).get("ref") == branch)
-        )
-        return numbers[0] if numbers else None
+        ]
 
     def ahead_commits(self, repo: str, base: str, tip: str) -> tuple[str, ...]:
         """The commits on tip that base lacks (#205). The compare read
@@ -699,12 +740,18 @@ def _ref_status(node: object, linked_merged: bool) -> RefStatus:
     kind = node.get("__typename")
     state = node.get("state")
     if kind == "PullRequest":
+        labels = node.get("labels")
+        nodes = labels.get("nodes") if isinstance(labels, dict) else None
+        abandoned = isinstance(nodes, list) and any(
+            isinstance(label, dict) and label.get("name") == GITHUB_STATE_LABEL_PREFIX + "abandoned"
+            for label in nodes
+        )
         if node.get("merged") is True or state == "MERGED":
-            return RefStatus(Progress.DONE, is_pull=True)
+            return RefStatus(Progress.DONE, is_pull=True, abandoned=abandoned)
         if state == "CLOSED":
-            return RefStatus(Progress.UNFINISHED, is_pull=True, detail="closed without merge")
+            return RefStatus(Progress.UNFINISHED, is_pull=True, detail="closed without merge", abandoned=abandoned)
         if state == "OPEN":
-            return RefStatus(Progress.OPEN, is_pull=True)
+            return RefStatus(Progress.OPEN, is_pull=True, abandoned=abandoned)
     elif kind == "Issue":
         if linked_merged:
             return RefStatus(Progress.DONE)

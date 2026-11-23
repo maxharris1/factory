@@ -78,6 +78,20 @@ the words, token, cookie or CSRF). A request refused before that (no
 session, bad CSRF, wrong content type or origin) writes none. Setting the
 audit file without actions is a configuration error, and without it
 /api/act is 404.
+
+Account sign-in from the Accounts panel is on only with the settings spool
+and DASHBOARD_SIGNIN_RELAY set: an absolute, existing directory that is not
+a symlink and gives others no access (the group may write: the push login
+shares it), opened once at startup. POST /api/accounts/signin, from the
+signed-in approver, checks the account and device pair against the served
+status.json (declared, not a default or external account, no running job on
+that device) and spools an `op: signin` request for the sign-in broker.
+GET /api/accounts/signin?id= answers only the session that started the
+attempt, with the broker's `<id>.relay` view re-checked field by field (a
+URL or code outside the harness's pattern is dropped). POST
+/api/accounts/signin/code writes one Claude paste code, once, as `<id>.code`;
+/api/accounts/signin/cancel writes `<id>.cancel`. A code the broker has not
+taken is removed after 120 seconds.
 """
 
 from __future__ import annotations
@@ -85,6 +99,7 @@ from __future__ import annotations
 import contextlib
 import ipaddress
 import json
+import math
 import os
 import pwd
 import re
@@ -213,6 +228,7 @@ class ActionsConfig(NamedTuple):
     web_base: str = GITHUB_WEB
     settings_spool: Path | None = None
     audit: Path | None = None
+    signin_relay: Path | None = None
 
 
 def check_spool(value: str) -> Path:
@@ -228,6 +244,22 @@ def check_spool(value: str) -> Path:
         raise ConfigError(f"DASHBOARD_SETTINGS_SPOOL is not a directory: {value}")
     if info.st_mode & 0o022:
         raise ConfigError("DASHBOARD_SETTINGS_SPOOL must not be group- or world-writable")
+    return Path(value)
+
+
+def check_relay(value: str) -> Path:
+    if not os.path.isabs(value):
+        raise ConfigError("DASHBOARD_SIGNIN_RELAY must be an absolute path")
+    try:
+        info = os.lstat(value)
+    except OSError:
+        raise ConfigError(f"DASHBOARD_SIGNIN_RELAY does not exist: {value}") from None
+    if stat.S_ISLNK(info.st_mode):
+        raise ConfigError("DASHBOARD_SIGNIN_RELAY must not be a symlink")
+    if not stat.S_ISDIR(info.st_mode):
+        raise ConfigError(f"DASHBOARD_SIGNIN_RELAY is not a directory: {value}")
+    if info.st_mode & 0o007:
+        raise ConfigError("DASHBOARD_SIGNIN_RELAY must give the world no access")
     return Path(value)
 
 
@@ -265,9 +297,11 @@ def check_actions(
     client_id = environ.get("DASHBOARD_GITHUB_CLIENT_ID", "")
     spool = environ.get("DASHBOARD_SETTINGS_SPOOL", "")
     audit = environ.get("DASHBOARD_ACTIONS_AUDIT", "")
+    relay = environ.get("DASHBOARD_SIGNIN_RELAY", "")
     if not client_id:
         for name, value in (("DASHBOARD_SETTINGS_SPOOL", spool),
-                            ("DASHBOARD_ACTIONS_AUDIT", audit)):
+                            ("DASHBOARD_ACTIONS_AUDIT", audit),
+                            ("DASHBOARD_SIGNIN_RELAY", relay)):
             if value:
                 raise ConfigError(f"{name} needs GitHub actions (DASHBOARD_GITHUB_CLIENT_ID)")
         return None
@@ -298,9 +332,12 @@ def check_actions(
                 "DASHBOARD_ACTION_CLIENTS must not hold this node's own TAILNET_IP"
             )
         clients.add(ipaddress.IPv4Address(entry))
+    if relay and not spool:
+        raise ConfigError("DASHBOARD_SIGNIN_RELAY needs DASHBOARD_SETTINGS_SPOOL")
     return ActionsConfig(client_id, approver, frozenset(clients),
                          settings_spool=check_spool(spool) if spool else None,
-                         audit=check_audit(audit) if audit else None)
+                         audit=check_audit(audit) if audit else None,
+                         signin_relay=check_relay(relay) if relay else None)
 
 
 def current_user() -> str:
@@ -691,6 +728,63 @@ def _is_slot_max(value: object) -> bool:
 FIELDS = {"enabled": _is_bool, "drain": _is_bool, "slot_max": _is_slot_max}
 
 
+def _is_devices(value: object) -> bool:
+    return (isinstance(value, list) and all(isinstance(item, str) for item in value)
+            and len(set(value)) == len(value))
+
+
+def _is_max_jobs_expect(value: object) -> bool:
+    return value is None or (isinstance(value, int) and not isinstance(value, bool))
+
+
+ACCOUNT_ID = re.compile(r"^(?!\.\.?$)[A-Za-z0-9._-]{1,64}$")
+ACCOUNT_HARNESSES = ("claude", "codex", "cursor", "external")
+DEFAULT_ACCOUNT_IDS = frozenset(
+    f"{harness}-default" for harness in ACCOUNT_HARNESSES if harness != "external"
+)
+ACCOUNT_REQUEST_KEYS = frozenset({"id", "actor", "requested_at", "target", "op", "account"})
+ACCOUNT_OPS = {
+    "add": frozenset({"harness", "max_jobs", "signed_in_on"}),
+    "set": frozenset({"field", "expect", "value"}),
+    "remove": frozenset({"expect"}),
+    "prepare": frozenset({"device"}),
+    "doctor": frozenset({"device"}),
+    "signout": frozenset({"device"}),
+}
+ACCOUNT_FIELDS = {
+    "max_jobs": (_is_slot_max, _is_max_jobs_expect),
+    "paused": (_is_bool, _is_bool),
+    "signed_in_on": (_is_devices, _is_devices),
+}
+REMOVE_EXPECT_KEYS = frozenset({"harness", "max_jobs", "paused", "signed_in_on"})
+
+
+def _is_account_view(value: object) -> bool:
+    return (isinstance(value, dict) and set(value) == REMOVE_EXPECT_KEYS
+            and value["harness"] in ACCOUNT_HARNESSES
+            and all(expect_ok(value[key]) for key, (_, expect_ok) in ACCOUNT_FIELDS.items()))
+
+
+ACCOUNT_SHAPES: dict[str, Callable[[dict], bool]] = {
+    "add": lambda p: (p["harness"] in ACCOUNT_HARNESSES and _is_slot_max(p["max_jobs"])
+                      and _is_devices(p["signed_in_on"])),
+    "set": lambda p: (ACCOUNT_FIELDS[p["field"]][0](p["value"])
+                      and ACCOUNT_FIELDS[p["field"]][1](p["expect"])),
+    "remove": lambda p: _is_account_view(p["expect"]),
+    "prepare": lambda p: isinstance(p["device"], str),
+    "doctor": lambda p: isinstance(p["device"], str),
+    "signout": lambda p: isinstance(p["device"], str),
+}
+ACCOUNT_DEVICES: dict[str, Callable[[dict], list]] = {
+    "add": lambda p: p["signed_in_on"],
+    "set": lambda p: p["value"] if p["field"] == "signed_in_on" else [],
+    "remove": lambda p: [],
+    "prepare": lambda p: [p["device"]],
+    "doctor": lambda p: [p["device"]],
+    "signout": lambda p: [p["device"]],
+}
+
+
 def is_bot_login(login: str) -> bool:
     return login.endswith("[bot]") or BOT_USER.fullmatch(login.casefold()) is not None
 
@@ -711,6 +805,27 @@ def device_row(status: dict, device: object) -> dict:
         if isinstance(row, dict) and isinstance(device, str) and row.get("name") == device:
             return row
     raise ApiError(404, "not-in-snapshot")
+
+
+def account_row(status: dict, account: str) -> dict | None:
+    accounts = status.get("accounts")
+    for row in accounts if isinstance(accounts, list) else []:
+        if isinstance(row, dict) and row.get("id") == account:
+            return row
+    return None
+
+
+def account_view(row: dict) -> dict:
+    signed_in = row.get("signed_in_on")
+    return {
+        "harness": row.get("harness"),
+        "max_jobs": row.get("max_jobs"),
+        "paused": row.get("paused"),
+        "signed_in_on": frozenset(
+            entry["device"] for entry in (signed_in if isinstance(signed_in, list) else [])
+            if isinstance(entry, dict) and isinstance(entry.get("device"), str)
+        ),
+    }
 
 
 def applied_ids(status: dict) -> set[str]:
@@ -898,6 +1013,152 @@ class Spool:
             self.fd = -1
 
 
+RELAY_FILE = re.compile(r"[A-Za-z0-9_-]{16,64}\.(code|cancel)")
+CODE_SECONDS = 120
+CANCEL_SECONDS = 900
+RELAY_AGES = {"code": CODE_SECONDS, "cancel": CANCEL_SECONDS}
+MAX_VIEW = 4096
+MAX_SIGNINS = 8
+ATTEMPT_SECONDS = 20 * 60
+SWEEP_SECONDS = 5
+SIGNIN_URLS = {
+    "claude": re.compile(r"https://claude\.com/cai/oauth/authorize(?:\?[A-Za-z0-9._~%&=+-]*)?"),
+    "codex": re.compile(r"https://auth\.openai\.com/codex/device"),
+}
+SIGNIN_CODE = re.compile(r"[A-Z0-9]{4}-[A-Z0-9]{4,5}")
+PASTE_CODE = re.compile(r"[A-Za-z0-9._~#-]{8,512}")
+SIGNIN_STATES = ("accepted", "preparing", "launching", "awaiting-url", "awaiting-code",
+                 "awaiting-approval", "verifying")
+SIGNIN_RESULTS = ("ok", "mismatch", "expired", "cancelled", "failed", "refused")
+SIGNIN_ERROR = re.compile(r"[A-Za-z0-9 :._-]{1,80}")
+
+
+class RelayDir:
+    def __init__(self, path: Path):
+        self.fd = open_root(path)
+
+    def read_view(self, rid: str) -> dict | None:
+        fd = open_under(self.fd, (f"{rid}.relay",))
+        if fd is None:
+            return None
+        with os.fdopen(fd, "rb") as handle:
+            data = handle.read(MAX_VIEW + 1)
+        try:
+            view = json.loads(data) if len(data) <= MAX_VIEW else None
+        except ValueError:
+            return None
+        return view if isinstance(view, dict) else None
+
+    def write(self, rid: str, kind: str, data: bytes) -> bool:
+        if kind not in RELAY_AGES:
+            raise ValueError(f"bad relay file kind {kind!r}")
+        final = f"{rid}.{kind}"
+        try:
+            os.lstat(final, dir_fd=self.fd)
+            return False
+        except FileNotFoundError:
+            pass
+        temp = f".{final}.{secrets.token_hex(6)}.tmp"
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | NOFOLLOW
+            with os.fdopen(os.open(temp, flags, 0o640, dir_fd=self.fd), "wb") as handle:
+                os.fchmod(handle.fileno(), 0o640)
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.rename(temp, final, src_dir_fd=self.fd, dst_dir_fd=self.fd)
+            os.fsync(self.fd)
+        except OSError:
+            with contextlib.suppress(OSError):
+                os.unlink(temp, dir_fd=self.fd)
+            raise
+        return True
+
+    def sweep(self, now: float) -> list[str]:
+        removed = []
+        for name in os.listdir(self.fd):
+            found = RELAY_FILE.fullmatch(name)
+            if found is None:
+                continue
+            try:
+                if now - os.lstat(name, dir_fd=self.fd).st_mtime >= RELAY_AGES[found[1]]:
+                    os.unlink(name, dir_fd=self.fd)
+                    removed.append(name)
+            except FileNotFoundError:
+                continue
+        return removed
+
+    def close(self) -> None:
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
+
+
+class SignInAttempt:
+    def __init__(self, session_id: str, harness: str, started: float):
+        self.session_id = session_id
+        self.harness = harness
+        self.started = started
+        self.code_used = False
+
+
+class SignIns:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.attempts: dict[str, SignInAttempt] = {}
+
+    def _prune(self, now: float) -> None:
+        self.attempts = {rid: attempt for rid, attempt in self.attempts.items()
+                         if now - attempt.started < ATTEMPT_SECONDS}
+
+    def add(self, rid: str, session_id: str, harness: str) -> None:
+        now = time.monotonic()
+        with self.lock:
+            self._prune(now)
+            while len(self.attempts) >= MAX_SIGNINS:
+                self.attempts.pop(next(iter(self.attempts)))
+            self.attempts[rid] = SignInAttempt(session_id, harness, now)
+
+    def find(self, rid: object, session_id: str) -> SignInAttempt:
+        with self.lock:
+            self._prune(time.monotonic())
+            attempt = self.attempts.get(rid) if isinstance(rid, str) else None
+        if attempt is None or not secrets.compare_digest(attempt.session_id, session_id):
+            raise ApiError(404, "no-attempt")
+        return attempt
+
+    def use_code(self, attempt: SignInAttempt, write: Callable[[], bool]) -> None:
+        with self.lock:
+            if attempt.code_used:
+                raise ApiError(409, "code-used")
+            try:
+                written = write()
+            except OSError:
+                written = False
+            if not written:
+                raise ApiError(500, "relay")
+            attempt.code_used = True
+
+
+def _fullmatch(pattern: re.Pattern[str], value: object) -> bool:
+    return isinstance(value, str) and pattern.fullmatch(value) is not None
+
+
+def sanitized_signin_view(harness: str, view: dict | None) -> dict:
+    view = view or {}
+    state, expires, result = view.get("state"), view.get("expires_at"), view.get("result")
+    return {
+        "state": state if isinstance(state, str) and state in SIGNIN_STATES else "accepted",
+        "url": view.get("url") if _fullmatch(SIGNIN_URLS[harness], view.get("url")) else None,
+        "code": view.get("code") if harness == "codex" and _fullmatch(SIGNIN_CODE, view.get("code"))
+        else None,
+        "expires_at": expires if isinstance(expires, (int, float)) and not isinstance(expires, bool)
+        and math.isfinite(expires) else None,
+        "result": result if isinstance(result, str) and result in SIGNIN_RESULTS else None,
+        "error": view.get("error") if _fullmatch(SIGNIN_ERROR, view.get("error")) else None,
+    }
+
+
 def cookie(name: str, value: str, max_age: int) -> str:
     return f"{name}={value}; HttpOnly; SameSite=Strict; Path=/api; Max-Age={max_age}"
 
@@ -948,15 +1209,33 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if actions is None or not (path == "/api" or path.startswith("/api/")):
             return False
-        if path != "/api/session" or not actions.allows(self.client_address[0]):
+        relay: RelayDir | None = self.server.relay  # type: ignore[attr-defined]
+        if not actions.allows(self.client_address[0]):
             self._json(404, {"error": "not-found"})
-            return True
-        session = actions.current(self._cookie("factory_session"))
-        if session is None:
-            self._json(200, {"signed_in": False})
+        elif path == "/api/session":
+            session = actions.current(self._cookie("factory_session"))
+            signin = {"account_signin": relay is not None}
+            if session is None:
+                self._json(200, {"signed_in": False, **signin})
+            else:
+                self._json(200, {"signed_in": True, "login": session.login, "csrf": session.csrf,
+                                 **signin})
+        elif path == "/api/accounts/signin" and relay is not None:
+            self._signin_status(actions, relay)
         else:
-            self._json(200, {"signed_in": True, "login": session.login, "csrf": session.csrf})
+            self._json(404, {"error": "not-found"})
         return True
+
+    def _signin_status(self, actions: Actions, relay: RelayDir) -> None:
+        query = urllib.parse.parse_qs(urlsplit(self.path).query)
+        rid = query.get("id", [""])[0]
+        try:
+            session = self._session(actions)
+            attempt = self.server.signins.find(rid, session.session_id)  # type: ignore[attr-defined]
+        except ApiError as exc:
+            self._json(exc.status, exc.body)
+            return
+        self._json(200, sanitized_signin_view(attempt.harness, relay.read_view(rid)))
 
     def _read_json(self) -> dict:
         content_type = self.headers.get("Content-Type", "").split(";")[0].strip().lower()
@@ -1096,6 +1375,8 @@ class SnapshotHandler(BaseHTTPRequestHandler):
     def _settings(self, actions: Actions, session: Session | None, payload: dict):
         assert session is not None
         require_approver(actions, session)
+        if payload.get("target") == "account":
+            return self._account_settings(session, payload)
         field = payload.get("field")
         valid = FIELDS.get(field) if isinstance(field, str) else None
         if valid is None:
@@ -1118,6 +1399,110 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         }
         self.server.spool.submit(request, applied_ids(status))  # type: ignore[attr-defined]
         return 202, {"id": request["id"]}, []
+
+    def _account_settings(self, session: Session, payload: dict):
+        op = payload.get("op")
+        if not isinstance(op, str) or op not in ACCOUNT_OPS:
+            raise ApiError(400, "bad-op")
+        if set(payload) != {"target", "op", "account"} | ACCOUNT_OPS[op]:
+            raise ApiError(400, "bad-keys")
+        name, field = payload["account"], payload.get("field")
+        if not isinstance(name, str) or ACCOUNT_ID.fullmatch(name) is None:
+            raise ApiError(400, "bad-value")
+        if op == "set" and (not isinstance(field, str) or field not in ACCOUNT_FIELDS):
+            raise ApiError(400, "bad-field")
+        if not ACCOUNT_SHAPES[op](payload):
+            raise ApiError(400, "bad-value")
+        status = read_status(self.server.root_fd)  # type: ignore[attr-defined]
+        row = account_row(status, name)
+        if row is None and op != "add":
+            raise ApiError(404, "not-in-snapshot")
+        for device in ACCOUNT_DEVICES[op](payload):
+            device_row(status, device)
+        view = account_view(row) if row is not None else {}
+        if "device" in payload and payload["device"] not in view["signed_in_on"]:
+            raise ApiError(404, "not-in-snapshot")
+        if name in DEFAULT_ACCOUNT_IDS or (row or {}).get("read_only") is not None or (
+            op == "add" and payload["harness"] == "external"
+        ):
+            raise ApiError(403, "read-only")
+        if op == "add" and row is not None:
+            raise ApiError(409, "exists")
+        claimed = {field: payload["expect"]} if op == "set" else payload.get("expect", {})
+        if any(view[key] != (frozenset(value) if isinstance(value, list) else value)
+               for key, value in claimed.items()):
+            raise ApiError(409, "changed")
+        request = {
+            "id": secrets.token_urlsafe(16),
+            "actor": session.login,
+            "requested_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            **payload,
+        }
+        self.server.spool.submit(request, applied_ids(status))  # type: ignore[attr-defined]
+        return 202, {"id": request["id"]}, []
+
+    def _account_signin(self, actions: Actions, session: Session | None, payload: dict):
+        assert session is not None
+        require_approver(actions, session)
+        if set(payload) != {"account", "device"}:
+            raise ApiError(400, "bad-keys")
+        name, device = payload["account"], payload["device"]
+        if not isinstance(name, str) or ACCOUNT_ID.fullmatch(name) is None or not isinstance(
+            device, str
+        ):
+            raise ApiError(400, "bad-value")
+        status = read_status(self.server.root_fd)  # type: ignore[attr-defined]
+        row = account_row(status, name)
+        if row is None or device not in account_view(row)["signed_in_on"]:
+            raise ApiError(404, "not-in-snapshot")
+        if name in DEFAULT_ACCOUNT_IDS or row.get("read_only") is not None:
+            raise ApiError(403, "read-only")
+        harness = row.get("harness")
+        if not isinstance(harness, str) or harness not in SIGNIN_URLS:
+            raise ApiError(403, "no-signin")
+        running = row.get("running")
+        if any(isinstance(job, dict) and job.get("device") == device
+               for job in (running if isinstance(running, list) else [])):
+            raise ApiError(409, "running-job")
+        request = {
+            "id": secrets.token_urlsafe(16),
+            "actor": session.login,
+            "requested_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "target": "account",
+            "op": "signin",
+            "account": name,
+            "device": device,
+        }
+        self.server.spool.submit(request, applied_ids(status))  # type: ignore[attr-defined]
+        self.server.signins.add(request["id"], session.session_id, harness)  # type: ignore[attr-defined]
+        return 202, {"id": request["id"]}, []
+
+    def _signin_code(self, actions: Actions, session: Session | None, payload: dict):
+        assert session is not None
+        if set(payload) != {"id", "code"}:
+            raise ApiError(400, "bad-keys")
+        rid, code = payload["id"], payload["code"]
+        attempt = self.server.signins.find(rid, session.session_id)  # type: ignore[attr-defined]
+        if attempt.harness == "codex":
+            raise ApiError(409, "no-code")
+        code = code.strip() if isinstance(code, str) else ""
+        if PASTE_CODE.fullmatch(code) is None:
+            raise ApiError(400, "bad-code")
+        relay: RelayDir = self.server.relay  # type: ignore[attr-defined]
+        self.server.signins.use_code(  # type: ignore[attr-defined]
+            attempt, lambda: relay.write(rid, "code", code.encode()))
+        return 202, {}, []
+
+    def _signin_cancel(self, actions: Actions, session: Session | None, payload: dict):
+        assert session is not None
+        if set(payload) != {"id"}:
+            raise ApiError(400, "bad-keys")
+        self.server.signins.find(payload["id"], session.session_id)  # type: ignore[attr-defined]
+        try:
+            self.server.relay.write(payload["id"], "cancel", b"")  # type: ignore[attr-defined]
+        except OSError:
+            raise ApiError(500, "relay") from None
+        return 202, {}, []
 
     def _json(self, code: int, payload: dict, cookies: list[str] | None = None) -> None:
         data = json.dumps(payload).encode()
@@ -1180,6 +1565,11 @@ POST_ROUTES = {
 }
 SETTINGS_ROUTES = {"/api/settings": (SnapshotHandler._settings, True)}
 ACT_ROUTES = {"/api/act": (SnapshotHandler._act, True)}
+SIGNIN_ROUTES = {
+    "/api/accounts/signin": (SnapshotHandler._account_signin, True),
+    "/api/accounts/signin/code": (SnapshotHandler._signin_code, True),
+    "/api/accounts/signin/cancel": (SnapshotHandler._signin_cancel, True),
+}
 
 
 class SnapshotServer(ThreadingHTTPServer):
@@ -1190,31 +1580,49 @@ class SnapshotServer(ThreadingHTTPServer):
         self.actions = Actions(actions) if actions is not None else None
         self.spool: Spool | None = None
         self.audit: Audit | None = None
+        self.relay: RelayDir | None = None
+        self.signins = SignIns()
+        self.sweep_stop = threading.Event()
+        self.sweeper: threading.Thread | None = None
         self.root_fd = open_root(root)
         try:
             if actions is not None and actions.settings_spool is not None:
                 self.spool = Spool(actions.settings_spool)
             if actions is not None and actions.audit is not None:
                 self.audit = Audit(actions.audit)
+            if actions is not None and actions.signin_relay is not None:
+                self.relay = RelayDir(actions.signin_relay)
             self.post_routes = {
                 **POST_ROUTES,
                 **(SETTINGS_ROUTES if self.spool else {}),
                 **(ACT_ROUTES if self.audit else {}),
+                **(SIGNIN_ROUTES if self.relay else {}),
             }
             super().__init__(address, SnapshotHandler)
         except BaseException:
             os.close(self.root_fd)
-            for held in (self.spool, self.audit):
+            for held in (self.spool, self.audit, self.relay):
                 if held is not None:
                     held.close()
             raise
+        if self.relay is not None:
+            self.sweeper = threading.Thread(target=self._sweep, args=(self.relay,), daemon=True)
+            self.sweeper.start()
+
+    def _sweep(self, relay: RelayDir) -> None:
+        while not self.sweep_stop.wait(SWEEP_SECONDS):
+            with contextlib.suppress(OSError):
+                relay.sweep(time.time())
 
     def server_close(self) -> None:
         super().server_close()
+        self.sweep_stop.set()
+        if self.sweeper is not None:
+            self.sweeper.join()
         if self.root_fd >= 0:
             os.close(self.root_fd)
             self.root_fd = -1
-        for held in (self.spool, self.audit):
+        for held in (self.spool, self.audit, self.relay):
             if held is not None:
                 held.close()
 
@@ -1241,6 +1649,8 @@ def main(argv: list[str]) -> int:
             suffix += f" and settings requests to {actions.settings_spool}"
         if actions and actions.audit:
             suffix += f" and Max's actions audited to {actions.audit}"
+        if actions and actions.signin_relay:
+            suffix += f" and account sign-in relayed through {actions.signin_relay}"
         print(f"ok: would serve {root} on {host}:{port}{suffix}")
         return 0
     server = make_server(host, port, root, actions)

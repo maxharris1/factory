@@ -328,6 +328,13 @@ def test_find_pull_takes_the_oldest_of_two_open_prs() -> None:
     assert GitHubIntakeClient(gh).find_pull("owner/app", "factory/issue-85") == 90
 
 
+def test_branch_pulls_lists_every_pr_on_the_branch_whatever_its_state() -> None:
+    gh = RecordedGh()
+    other = pull(7, "open", branch="factory/issue-850")
+    gh.route(FIND, ok([pull(95, "open"), pull(12, "closed", merged=True), pull(14, "closed"), other]))
+    assert GitHubIntakeClient(gh).branch_pulls("owner/app", "factory/issue-85") == (12, 14, 95)
+
+
 @pytest.mark.parametrize(
     ("served", "state"),
     [
@@ -420,6 +427,35 @@ def test_ref_statuses_reads_issue_and_pr_kinds() -> None:
     }
     assert found[github_ref("owner/app", 2)].detail == "closed without merge"
     assert found[github_ref("owner/app", 5)].detail == "closed as not planned"
+
+
+def test_ref_statuses_marks_an_open_pr_labelled_abandoned() -> None:
+    from lib.feeder_gates import github_ref
+
+    labelled = {"nodes": [{"name": "factory"}, {"name": "orch:state/abandoned"}]}
+    gh = GraphQLGh({"owner/app": {
+        1: {**pull_node("OPEN"), "labels": labelled},
+        2: {**pull_node("OPEN"), "labels": {"nodes": [{"name": "orch:state/building"}]}},
+        3: pull_node("OPEN"),
+    }})
+    found = GitHubIntakeClient(gh).ref_statuses([github_ref("owner/app", n) for n in (1, 2, 3)])
+    assert {int(ref.key): status.abandoned for ref, status in found.items()} == {1: True, 2: False, 3: False}
+    assert "labels(first: 30) { nodes { name } }" in " ".join(gh.calls[0])
+
+
+def test_ref_statuses_keeps_the_abandoned_label_on_a_closed_or_merged_pr() -> None:
+    from lib.feeder_gates import Progress, github_ref
+
+    labelled = {"nodes": [{"name": "orch:state/abandoned"}]}
+    gh = GraphQLGh({"owner/app": {
+        1: {**pull_node("CLOSED"), "labels": labelled},
+        2: {**pull_node("MERGED", merged=True), "labels": labelled},
+        3: pull_node("CLOSED"),
+    }})
+    found = GitHubIntakeClient(gh).ref_statuses([github_ref("owner/app", n) for n in (1, 2, 3)])
+    assert {int(ref.key): (status.progress, status.abandoned) for ref, status in found.items()} == {
+        1: (Progress.UNFINISHED, True), 2: (Progress.DONE, True), 3: (Progress.UNFINISHED, False),
+    }
 
 
 def test_ref_statuses_is_one_cached_graphql_read_per_repo() -> None:
@@ -652,6 +688,7 @@ def test_split_children_returns_every_issue_split_from_the_parent() -> None:
         {"number": 22, "body": "Context.\n\nSplit from #12\n", "state": "open",
          "state_reason": "reopened"},
     ]}), ""))
+    gh.route(timeline(12), ok([]))
 
     found = GitHubIntakeClient(gh).split_children("owner/app", 12)
 
@@ -659,6 +696,54 @@ def test_split_children_returns_every_issue_split_from_the_parent() -> None:
         IssueRecord(number=21, state="closed", reason="completed", body="Split from #12 (plan url)."),
         IssueRecord(number=22, state="open", reason="reopened", body="Context.\n\nSplit from #12\n"),
     )
+
+
+def timeline(parent: int) -> tuple[str, ...]:
+    return ("--paginate", f"{REPO}/issues/{parent}/timeline?per_page=100")
+
+
+def reference(number: int, body: str, state: str = "open", reason: str | None = None,
+              repo: str = "owner/app", **extra: object) -> dict:
+    return {"event": "cross-referenced", "source": {"type": "issue", "issue": {
+        "number": number, "body": body, "state": state, "state_reason": reason,
+        "repository_url": f"https://api.github.com/repos/{repo}", **extra,
+    }}}
+
+
+def test_split_children_finds_a_follow_up_the_search_index_has_not_caught() -> None:
+    gh = RecordedGh()
+    gh.route(search(12), ok({"total_count": 2, "incomplete_results": False, "items": [
+        {"number": 21, "body": "Split from #12", "state": "closed", "state_reason": "completed"},
+        {"number": 22, "body": "Split from #12", "state": "open", "state_reason": None},
+    ]}))
+    gh.route(timeline(12), ok([
+        {"event": "labeled", "label": {"name": "factory:ready"}},
+        reference(21, "Split from #12", "closed", "completed"),
+        reference(22, "Split from #12", "closed", "completed"),
+        reference(23, "Found later.\n\nSplit from #12\n"),
+        reference(24, "Mentions #12 only."),
+        reference(25, "Split from #12", repo="other/app"),
+        reference(26, "Split from #12", pull_request={}),
+    ]))
+
+    found = GitHubIntakeClient(gh).split_children("owner/app", 12)
+
+    assert found == (
+        IssueRecord(number=21, state="closed", reason="completed", body="Split from #12"),
+        IssueRecord(number=22, state="closed", reason="completed", body="Split from #12"),
+        IssueRecord(number=23, state="open", reason=None, body="Found later.\n\nSplit from #12\n"),
+    )
+
+
+def test_issue_record_reads_one_issue() -> None:
+    gh = RecordedGh()
+    gh.route((f"{REPO}/issues/31",), ok(
+        {"number": 31, "body": "Split from #12", "state": "open", "state_reason": None}
+    ))
+
+    found = GitHubIntakeClient(gh).issue_record("owner/app", 31)
+
+    assert found == IssueRecord(number=31, state="open", reason=None, body="Split from #12")
 
 
 def test_split_children_raises_on_incomplete_search_results() -> None:

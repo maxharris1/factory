@@ -178,6 +178,7 @@ from lib import account_doctor, exposure
 from lib import health as component_health
 from lib import live_settings
 from lib.config_overlay import apply_overlay
+from lib.dashboard_accounts import read_accounts
 from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
 from lib.dashboard_flow import (
     JobStep,
@@ -253,8 +254,8 @@ RELAY_STEPS = 40
 SETTINGS_AUDIT = "settings-audit.jsonl"
 SETTINGS_RESULTS = 50
 AUDIT_KEYS = ("id", "actor", "requested_at", "applied_at", "device", "field", "previous", "new",
-              "result", "error", "backup", "restarted", "pending", "version")
-AUDIT_RESULTS = ("applied", "pending", "refused", "failed")
+              "result", "error", "backup", "restarted", "pending", "version", "target", "account")
+AUDIT_RESULTS = ("applied", "pending", "ok", "signed-out", "mismatch", "expired", "cancelled", "failed", "refused")
 # The Linear share of the hourly API budget the poller allows itself
 # (lib/poll_source.py LINEAR_*_PER_HOUR * LINEAR_SHARE).
 LINEAR_BUDGET_REQUESTS_PER_HOUR = 1250
@@ -294,7 +295,9 @@ HANDOFF_SAVINGS_DEFINITION = (
     "ticket and hand off by hand (stops, clarify, refusals, ship failures). "
     "scripted_share = scripted / (scripted + bot_to_bot). The database does not "
     "record bot messages sent outside the factory, so grok wakes are the "
-    "measurable stand-in for bot-to-bot handoffs."
+    "measurable stand-in for bot-to-bot handoffs. "
+    "engine_handled = granted plus landed rulings in the engine_decisions log, "
+    "and engine_escalated = escalated rulings in that log."
 )
 SCRIPTED_SHARE_DEFINITION = (
     "Scripted share is the part of handoffs a script routed straight to the "
@@ -851,6 +854,7 @@ def collect_snapshot(
         telemetry = read_telemetry(connection, now)  # issue #93
         rules = read_project_rules(connection)  # issue #152
         usage = read_usage(connection, now, machines)  # issue #151
+        accounts = read_accounts(connection, now, machines)
         live = live_settings.peek(connection)
         connection.execute("COMMIT")
     except sqlite3.Error as exc:
@@ -965,6 +969,7 @@ def collect_snapshot(
         "projects": _projects(orch, rules, now),
         "rules": rules_and_limits(chart),
         "usage": usage,
+        "accounts": accounts,
         RECORDS: records,
     }
     snapshot["ci_lane"] = ci_lane(snapshot)
@@ -2210,6 +2215,18 @@ def _read_db(
         in_flight = int(row["in_flight"])
         bot_to_bot = int(row["bot_to_bot"])
     denominator = scripted + bot_to_bot
+    engine_handled = engine_escalated = 0
+    if "engine_decisions" in tables:
+        row = connection.execute(
+            """
+            SELECT
+              COALESCE(SUM(outcome IN ('granted', 'landed')), 0) AS handled,
+              COALESCE(SUM(outcome = 'escalated'), 0) AS escalated
+            FROM engine_decisions
+            """
+        ).fetchone()
+        engine_handled = int(row["handled"])
+        engine_escalated = int(row["escalated"])
 
     return {
         "queue": {
@@ -2253,6 +2270,8 @@ def _read_db(
             "scripted": scripted,
             "scripted_in_flight": in_flight,
             "bot_to_bot": bot_to_bot,
+            "engine_handled": engine_handled,
+            "engine_escalated": engine_escalated,
             "scripted_share": (
                 round(scripted / denominator, 3) if denominator else None
             ),
@@ -2526,15 +2545,38 @@ def _every_service_uses(pending: object, version: int, live: live_settings.Live 
 
 
 def _adopted_new(row: dict, live: live_settings.Live) -> bool:
-    device, name = row["device"], row["field"]
+    name = row["field"]
+    if row["target"] == "account":
+        account = row["account"]
+        return (isinstance(account, str) and isinstance(name, str)
+                and live.adopted_account_holds(account, name, row["new"]))
+    device = row["device"]
     return (isinstance(device, str) and isinstance(name, str)
             and live.adopted_holds(device, name, row["new"]))
 
 
+def _change_key(row: dict) -> tuple[str | None, str, str] | None:
+    subject = row["account"] if row["target"] == "account" else row["device"]
+    field = row["field"]
+    return (row["target"], subject, field) if isinstance(subject, str) and isinstance(field, str) else None
+
+
+def _supersedes(later: dict, row: dict) -> bool:
+    if later["version"] <= row["version"]:
+        return False
+    key = _change_key(row)
+    if key is not None and key == _change_key(later):
+        return True
+    return (row["target"] == later["target"] == "account" and later["field"] in ("add", "remove")
+            and isinstance(row["account"], str) and later["account"] == row["account"])
+
+
 def _settings_results(path: Path, live: live_settings.Live | None) -> list[dict]:
     """The last SETTINGS_RESULTS entries of the settings audit log (#777),
-    oldest first, each cut to the AuditEntry keys with its strings clipped."""
-    results = []
+    oldest first, each cut to the AuditEntry keys with its strings clipped.
+    A landed change that a later landed change replaced reads `superseded`
+    (#990 f-2), so it never waits on a restart that can no longer finish it."""
+    rows = []
     for line in read_log_tail(path, lines=SETTINGS_RESULTS):
         try:
             entry = json.loads(line)
@@ -2543,17 +2585,23 @@ def _settings_results(path: Path, live: live_settings.Live | None) -> list[dict]
         if isinstance(entry, dict):
             row = {key: _audit_value(entry.get(key)) for key in AUDIT_KEYS}
             row["result"] = _enum(entry.get("result"), AUDIT_RESULTS)
-            version = row["version"]
-            if row["result"] == "applied" and type(version) is int:
-                row["waiting"] = (live is None or not live.is_applied(version)
-                                  or not _adopted_new(row, live))
-                if row["waiting"]:
-                    row["result"] = "pending"
-            elif row["result"] == "pending" and type(version) is int:
-                if _every_service_uses(row["pending"], version, live) and _adopted_new(row, live):
-                    row["result"] = "applied"
-            results.append(row)
-    return results
+            rows.append(row)
+    landed = [r for r in rows if r["result"] in ("applied", "pending") and type(r["version"]) is int]
+    for i, row in enumerate(landed):
+        later = next((s for s in landed[i + 1:] if _supersedes(s, row)), None)
+        if later is not None:
+            row["result"], row["superseded_by"] = "superseded", later["id"]
+    for row in rows:
+        version = row["version"]
+        if row["result"] == "applied" and type(version) is int:
+            row["waiting"] = (live is None or not live.is_applied(version)
+                              or not _adopted_new(row, live))
+            if row["waiting"]:
+                row["result"] = "pending"
+        elif row["result"] == "pending" and type(version) is int:
+            if _every_service_uses(row["pending"], version, live) and _adopted_new(row, live):
+                row["result"] = "applied"
+    return rows
 
 
 # --- writing --------------------------------------------------------------------

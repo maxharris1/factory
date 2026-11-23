@@ -53,9 +53,9 @@ in on; each such device names home, the bot's home folder there (the
 workdir_root path rules, but no {bot} beside ssh_user), and the account
 runs from <home>/.factory-accounts/<id>. Every declared account other
 than an external one must be signed in on some device. An optional
-max_jobs must be a positive integer. The older
-{bot, account} harness value, which names the device's own login
-account, still loads with a deprecation warning. The device name
+max_jobs must be a positive integer, and an optional paused true or
+false. The older {bot, account} harness value, which names the device's
+own login account, still loads with a deprecation warning. The device name
 `external` is reserved for external readings.
 """
 
@@ -86,8 +86,8 @@ _LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 _TOP_KEYS = {"devices", "orch_host", "accounts"}
 EXTERNAL = "external"
 ACCOUNT_HARNESSES = (*HARNESSES, EXTERNAL)
-_ACCOUNT_ID = re.compile(r"^(?!\.\.?$)[A-Za-z0-9._-]{1,64}$")
-_ACCOUNT_KEYS = {"id", "harness", "plan", "label", "signed_in_on", "max_jobs"}
+ACCOUNT_ID = re.compile(r"^(?!\.\.?$)[A-Za-z0-9._-]{1,64}$")
+_ACCOUNT_KEYS = {"id", "harness", "plan", "label", "signed_in_on", "max_jobs", "paused"}
 ACCOUNTS_DIR = ".factory-accounts"
 _ACCOUNT_TEXT_MAX = 100
 _HARNESS_VALUE_KEYS = {"bot", "account"}
@@ -124,6 +124,7 @@ class Account:
     label: str | None = None
     signed_in_on: frozenset[str] = frozenset()
     max_jobs: int | None = None
+    paused: bool = False
 
 
 @dataclass(frozen=True)
@@ -295,12 +296,16 @@ def is_placeholder(value: object) -> bool:
     return isinstance(value, str) and value.startswith(PLACEHOLDER_PREFIX)
 
 
+def _readable_stream_or_file(path: Path) -> bool:
+    return path.exists() and not path.is_dir()
+
+
 def load_machines_yml(
     path: Path,
     *,
     overlay: bool = True,
 ) -> tuple[MachinesConfig | None, list[Finding]]:
-    if not path.is_file():
+    if not _readable_stream_or_file(path):
         return None, [Finding("error", "file not found")]
     text = path.read_text(encoding="utf-8")
     try:
@@ -394,7 +399,7 @@ def _accounts(
             if key not in _ACCOUNT_KEYS:
                 findings.append(Finding("error", f"unknown field '{prefix}.{key}'"))
         account_id = item.get("id")
-        if not isinstance(account_id, str) or _ACCOUNT_ID.fullmatch(account_id) is None:
+        if not isinstance(account_id, str) or ACCOUNT_ID.fullmatch(account_id) is None:
             findings.append(
                 Finding(
                     "error",
@@ -450,6 +455,7 @@ def _accounts(
             findings.append(
                 Finding("error", f"{prefix}.max_jobs must be a positive integer")
             )
+        paused = _bool(item, "paused", False, prefix, findings)
         if _error_count(findings) > errors_before:
             continue
         if account_id in accounts:
@@ -463,6 +469,7 @@ def _accounts(
             item.get("label"),
             frozenset(signed_in_on),
             max_jobs,
+            paused,
         )
     return accounts, positions
 

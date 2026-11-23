@@ -56,7 +56,7 @@ def remote_machines(tmp_path: Path, *, box_slots: int = 1, box_enabled: bool = T
 
 
 def make_waiter(tmp_path: Path, machines: Path, spawn, *, environ=None, log=None,
-                orch=("python3", "/factory/bin/orch"), alive=None, gone=None):
+                orch=("python3", "/factory/bin/orch"), alive=None, gone=None, transport=None):
     db = tmp_path / "orch.db"
     queue = SQLiteJobQueue(db, clock=time.time)
     config, findings = load_machines_yml(machines)
@@ -76,6 +76,7 @@ def make_waiter(tmp_path: Path, machines: Path, spawn, *, environ=None, log=None
         environ=environ or {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
         **({"alive": alive} if alive is not None else {}),
         **({"gone": gone} if gone is not None else {}),
+        **({"transport": transport} if transport is not None else {}),
     )
     return waiter, queue, db
 
@@ -559,3 +560,64 @@ def test_a_remote_run_whose_runner_is_killed_never_runs_two_workers(
         for pid in workers():
             with contextlib.suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGKILL)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the device's scripts read /proc")
+@pytest.mark.parametrize("held", [False, True], ids=["unheld", "held"])
+def test_the_sweep_kills_only_a_finished_jobs_tagged_leftovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, held: bool
+) -> None:
+    from lib import waiter as waiter_module
+    from tests.fake_docker import Docker
+    from tests.test_waiter import make_queue, set_state, sweeping_waiter
+
+    ssh = Ssh(tmp_path)
+    for name, value in ssh.env().items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("PATH", f"{ssh.bin}{os.pathsep}{Docker(tmp_path / 'box').path('/usr/bin:/bin')}")
+    monkeypatch.setenv("FAKE_SSH_HOME", str(Docker(tmp_path).login_home()))
+    db, queue = make_queue(tmp_path)
+    config, findings = load_machines_yml(remote_machines(tmp_path))
+    assert config is not None, findings
+    pool = DevicePool(queue, config)
+    done, running = enqueue(queue, "done"), enqueue(queue, "running")
+    finished_tag, running_tag = "a" * 32, "b" * 32
+    if held:
+        claimed, _ = pool.claim("claude")
+        assert claimed.id == done
+        pool.attach_worker(done, owner="claude", remote=True, tag=finished_tag)
+    set_state(db, done, "done")
+    set_state(db, running, "running")
+    jobs = tmp_path / "remote" / "claude-bot" / "work" / "jobs"
+    sleepers = {}
+    try:
+        for job_id, tag in ((done, finished_tag), (running, running_tag)):
+            run = jobs / f"{job_id}.run" / tag
+            run.mkdir(parents=True)
+            (run / "exit").write_text("0\n", encoding="utf-8")
+            sleepers[tag] = subprocess.Popen(
+                ["env", f"ORCH_WORKER_TAG={tag}", "sleep", "300"], start_new_session=True
+            )
+        log: list[str] = []
+        waiter, now = sweeping_waiter(tmp_path, queue, db, log, pool=pool)
+        now[0] = waiter_module.CONTAINER_SWEEP_SECONDS
+        waiter._reap()
+
+        if held:
+            assert sleepers[finished_tag].poll() is None
+            assert f"kept run {finished_tag} of job {done} on pc: a held slot carries its tag" in log, log
+        else:
+            sleepers[finished_tag].wait(timeout=10)
+            assert (jobs / f"{done}.run" / finished_tag / "swept").exists()
+            assert f"killed what was left of run {finished_tag} of job {done} on pc" in log, log
+        assert sleepers[running_tag].poll() is None
+        assert f"kept run {running_tag} of job {running} on pc: its job is running" in log, log
+
+        before = len(ssh.calls())
+        now[0] += waiter_module.CONTAINER_SWEEP_SECONDS
+        waiter._reap()
+        assert not [call for call in ssh.calls()[before:] if finished_tag in call["script"]]
+    finally:
+        for sleeper in sleepers.values():
+            sleeper.kill()
+            sleeper.wait()

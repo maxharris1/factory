@@ -433,6 +433,15 @@ class MergeQueueMixin:
         if ticket.mergeable_state in ("dirty", "behind") and not self._base_update_out(ticket):
             self._queue_update(ticket, row)
             return True
+        if _behind_base_workflow(ticket) and not self._base_update_out(ticket):
+            base = ticket.factory.base_branch
+            self._queue_update(
+                ticket,
+                row,
+                f"{base} changed a CI workflow after the checks on this head started, "
+                f"and a rerun keeps the old workflow: merge {base} in so CI runs the new one.",
+            )
+            return True
         head = ticket.current_head
         wait = self._queue_head_wait_reason(ticket, row, head)
         if wait is not None:
@@ -856,8 +865,9 @@ class MergeQueueMixin:
             ).fetchall()
         return any(_merge_only(row["detail"]) for row in rows)
 
-    def _queue_update(self, ticket: TrackedTicket, row: sqlite3.Row) -> None:
-        """An update-from-main job for the conflicting queue head (#130)."""
+    def _queue_update(
+        self, ticket: TrackedTicket, row: sqlite3.Row, why: str | None = None
+    ) -> None:
         head = ticket.current_head
         if head is None:
             return
@@ -879,7 +889,8 @@ class MergeQueueMixin:
                 action="update-from-main",
                 head=head,
                 round_number=int(row["review_round"]) + 1,
-                instruction=(
+                instruction=why
+                or (
                     f"The approved PR is {ticket.mergeable_state} against "
                     f"{ticket.factory.base_branch}: merge it in."
                 ),
@@ -907,8 +918,9 @@ class MergeQueueMixin:
             connection.commit()
         if self.log is not None:
             self.log(
-                f"updating: {ticket.repo}#{ticket.ticket_id} conflicts with "
-                f"{ticket.factory.base_branch}; update-from-main queued"
+                f"updating: {ticket.repo}#{ticket.ticket_id} "
+                + ("is behind a CI workflow change on " if why else "conflicts with ")
+                + f"{ticket.factory.base_branch}; update-from-main queued"
             )
 
     def _update_failed(
@@ -1168,3 +1180,9 @@ def _with_event(connection: sqlite3.Connection, job_ids: list[str], *events: str
             (*events, *job_ids),
         )
     }
+
+
+def _behind_base_workflow(ticket: TrackedTicket) -> bool:
+    head = ticket.current_head
+    ci = ticket.ci.get(head) if head is not None else None
+    return ci is not None and any(change.kind == "base-workflow" for change in ci.stale)

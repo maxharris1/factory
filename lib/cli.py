@@ -27,6 +27,7 @@ from typing import Any
 from lib import (
     account_doctor,
     account_home,
+    codex_rollout,
     codex_sandbox,
     containers,
     exposure,
@@ -68,7 +69,7 @@ from lib.factory_md import EXAMPLE_PATHS, QA_RUNNERS, FactoryConfig, load_factor
 from lib.github_actions import GitHubAdapterError, _status as gh_status
 from lib.grok_delivery import GrokDeliveryError, wake_delivery
 from lib.handoff import format_header
-from lib.harness_env import CPU_CAP, account_tokens, harness_env
+from lib.harness_env import CPU_CAP, account_environ, harness_env
 from lib.hold import MergeUpdate
 from lib.hook_t7 import T7Hook
 from lib.hook_t8 import T8Hook
@@ -99,6 +100,7 @@ from lib.poll_source import (
     IntakeRisks,
     LivePollSource,
     PollSourceError,
+    RequiredGlobs,
 )
 from lib.linear_upload import HttpLinear
 from lib.qa_cloud import QaWorker
@@ -146,12 +148,14 @@ from lib.state_backup import (
 from lib.status import main as status_main
 from lib.update_check import (
     HeadDiff,
+    MovedHead,
     RebaseScope,
     UpdateClass,
     classify as classify_update,
     head_diff,
     merge_base,
     merge_update,
+    moved_head_probe,
     rebase_scope,
 )
 from lib.wait import (
@@ -194,7 +198,7 @@ commands:
   wait             block until the dispatcher queues a job for a bot
   job              run, heartbeat, finish or cancel a job
   gc               remove stale job worktrees with no changes
-  cleanup          delete finished job checkouts on every device (issue #928)
+  cleanup          delete finished job checkouts on every device, or one bot's with --bot (#928)
   dashboard        write (and optionally push) the read-only status snapshot
   linear-webhook   serve the Linear webhook listener that marks issues dirty
   health           component heartbeats: report or forget (issue #92)
@@ -204,7 +208,7 @@ commands:
   retry            ask the dispatcher to restart a stuck ticket (kind=retry)
   trace            read-only: every job attempt on a ticket and its handoff verdict
   usage            per-account usage readings: migrate orch.db, record an external reading (#772)
-  accounts         prepare a bot's account folders, check every sign-in (issue #1065)
+  accounts         prepare account folders, check sign-ins, run the dashboard sign-in broker
 
 check-config [--orch PATH] [--machines PATH] [--factory [owner/name=]PATH ...]
              [--allow-placeholders] [--digest]
@@ -553,7 +557,8 @@ trace <owner/repo>#<n> [--db PATH] [--json]
 usage migrate [--db PATH]
   Key the usage readings on the account (#772). Takes the labelled backup
   usage-accounts (as db-backup does) first, then adds usage_readings.account
-  filled with <harness>-default and the account-keyed tables. `orch poll`
+  filled with <harness>-default and the account-keyed tables, seeding
+  usage_account_readings from usage_readings. `orch poll`
   runs it at start. Says whether it migrated; a second run changes nothing.
   --db defaults to ORCH_DB. Exit 1 when the backup or the migration fails.
 
@@ -588,6 +593,18 @@ accounts doctor [--db PATH] [--machines PATH] [--json]
   $ORCH_DB, --machines to the checkout's machines.yml. Exits 0 after a
   pass whatever the statuses, 2 on a config error, 1 when the database
   cannot be written.
+
+accounts signin-broker [--state DIR] [--db PATH] [--machines PATH] [--orch PATH] [--once]
+  Take the dashboard's sign-in requests from the settings spool through
+  dashboard.settings.relay and run each admitted attempt to one audit
+  line. Prints "dashboard sign-in is off" and exits 0 when orch.yml sets
+  no relay. Beats as the signin-broker health component until SIGTERM or
+  SIGINT, which cancel live attempts and wait for their audit lines; --once
+  makes one pass, running admitted attempts to the end.
+  --state defaults to $ORCH_STATE_DIR or ~/.local/state/factory, --db to
+  $ORCH_DB or orch.db in the state dir. Exits 1 on an invalid orch.yml, a
+  relay host ssh -G names no user for, or a --once pass that cannot read
+  the spool; a serving broker logs spool errors and retries.
 """
 
 
@@ -947,6 +964,7 @@ def _wait_autostart(
             drain=waiter.drain_marker(args.bot),
             orch_yml=orch_path,
             home=Path.home(),
+            sweep_cleanup=True,
         )
     except (WaitError, waiter.WaiterError) as exc:
         print(f"orch wait: {exc}", file=sys.stderr)
@@ -1373,6 +1391,7 @@ def _runtime(
         risks=None if create else IntakeRisks(path),
         fed_pulls=None if create else FedPulls(path),
         gh_cache=None if create else GhCacheExpiries(path),
+        required_globs=None if create else RequiredGlobs(path),
     )
     devices = None
     machines = None
@@ -1412,12 +1431,14 @@ def _runtime(
         approvals=approvals(config),
         ci_logs=source.github.failed_run_logs,
         ci_rerun=source.github.rerun_failed_jobs,
+        ci_full_rerun=source.github.rerun_workflow_runs,
         ci_base_checks=source.github.base_checks,
         ci_runs=source.github.run_jobs,
         ci_job_log=source.github.job_log,
         ci_pool=source.github.list_runners,
         hold_carry=_hold_carry,
         qa_diff=_qa_diff,
+        moved_head=_moved_head_probe,
     )
     source.error_sink = dispatcher.record_poll_error
     source.warning_sink = lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True)
@@ -1464,6 +1485,13 @@ def _hold_carry(repo: str, base: str, approved: str, head: str) -> MergeUpdate:
         worktrees.work_root(None), repo, (approved, head), worktrees.url_template(None)
     )
     return merge_update(clone, approved, head, f"refs/remotes/origin/{base}")
+
+
+def _moved_head_probe(repo: str, base: str, ok: str, head: str) -> MovedHead:
+    clone = worktrees.fetched_clone(
+        worktrees.work_root(None), repo, (ok, head), worktrees.url_template(None)
+    )
+    return moved_head_probe(clone, f"refs/remotes/origin/{base}", ok, head)
 
 
 def _feeder(
@@ -2330,18 +2358,12 @@ def _job_run_command(argv: list[str]) -> int:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
 
-    dropped = account_tokens(owner, placed.account_home)
-    environment = {name: value for name, value in os.environ.items() if name not in dropped}
     # Never pass on a token this process inherited (another job's run).
-    environment.pop(job_token.PROOF_ENV, None)
-    environment.update(
-        {
-            "ORCH_JOB_ID": args.job_id,
-            "ORCH_JOB_BOT": args.bot,
-            DB_ENV: str(database),
-            **harness_env(owner, placed.account_home),
-        }
+    inherited = {name: value for name, value in os.environ.items() if name != job_token.PROOF_ENV}
+    inherited.update(
+        {"ORCH_JOB_ID": args.job_id, "ORCH_JOB_BOT": args.bot, DB_ENV: str(database), **harness_env(owner)}
     )
+    environment = account_environ(inherited, owner, placed.account_home)
     if proof is not None and not placed.remote:
         # Not sent to a remote device: it would be on the ssh command line.
         environment[job_token.PROOF_ENV] = proof
@@ -2360,10 +2382,11 @@ def _job_run_command(argv: list[str]) -> int:
         worker_env=placed.remote,
         device=placed.device.name,
         account=placed.account,
+        own_login=placed.account_home is None,
         guard=lambda connection: require_latest_claim(connection, args.job_id, claim_proof),
         skills_root=None if factory_root is None else f"{factory_root}/skills",
     )
-    usage_read = None
+    usage_reads: list = []
     if session is None:
         log("usage probe: skipped (telemetry off)")
     else:
@@ -2373,13 +2396,16 @@ def _job_run_command(argv: list[str]) -> int:
         if binary is None:
             log(f"usage probe: skipped ({session.flags.reason})")
         else:
-            target, probe_env = placed.target, dict(environment)
-            usage_read = usage_probe.start_claude(
-                session.add_usage,
+            target = placed.target
+            usage_reads = usage_probe.start_pass(
+                usage_probe.account_probes(
+                    machines, placed.device.name, session.harness, (placed.account, placed.account_home), log
+                ),
+                lambda readings, account, home: session.add_usage(readings, account, own_login=home is None),
                 session.clock,
-                (lambda: usage_probe.claude_remote(placed.transport, target, home=placed.account_home))
+                (lambda home: usage_probe.claude_remote(placed.transport, target, home=home))
                 if target is not None
-                else (lambda: usage_probe.claude_local(binary, probe_env)),
+                else (lambda home: usage_probe.claude_local(binary, account_environ(inherited, session.harness, home))),
                 log,
             )
     checkout: list[worktrees.JobCheckout] = []
@@ -2566,14 +2592,21 @@ def _job_run_command(argv: list[str]) -> int:
             _record_wall_clock(queue, args.job_id, budget, placed.device.name, log, claim_proof)
             if session is not None:
                 session.wall_clock(budget.elapsed())
-        if usage_read is not None:
-            usage_read.join(usage_probe.TIMEOUT_SECONDS)
+        usage_probe.join_pass(usage_reads)
         if session is not None:
             if placed.target is not None:
                 session.add_rollout(usage_probe.remote_codex(
                     placed.transport, placed.target, session.harness, session.summary.thread_id,
                     home=placed.account_home,
                 ))
+            usage_probe.read_idle_codex(
+                machines, placed.device.name, session.harness, (placed.account, placed.account_home),
+                lambda found, account, home: session.add_rollout(found, account, own_login=home is None),
+                (lambda home: usage_probe.codex_remote(placed.transport, placed.target, None, home=home))
+                if placed.target is not None
+                else (lambda home: codex_rollout.newest(home or codex_rollout.default_home(dict(inherited)))),
+                log,
+            )
             session.finish(code)
         placed.ended(code)  # #91: the exit reason, while the job still runs
         # A remote run's job is finished by its waiter on the box, from the
@@ -2900,6 +2933,10 @@ def _usage(argv: list[str]) -> int:
 
 
 def _accounts(argv: list[str]) -> int:
+    if argv[:1] == ["signin-broker"]:
+        from lib import signin_broker
+
+        return signin_broker.main(argv[1:])
     parser = _Parser(prog="orch accounts", add_help=True, allow_abbrev=False)
     commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
     prepare = commands.add_parser("prepare", allow_abbrev=False)

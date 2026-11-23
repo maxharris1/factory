@@ -381,7 +381,7 @@ class SchemaMixin:
                 )
                 """
             )
-            _add_missing_columns(connection, "review_events", {"stop": "TEXT"})
+            _add_missing_columns(connection, "review_events", {"stop": "TEXT", "finding_ids": "TEXT"})
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS followup_filings (
@@ -475,6 +475,26 @@ class SchemaMixin:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS engine_decisions (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    site TEXT NOT NULL CHECK (site IN ('cap', 'repeat', 'moved-head')),
+                    subject TEXT NOT NULL,
+                    rule TEXT NOT NULL,
+                    outcome TEXT NOT NULL
+                        CHECK (outcome IN ('granted', 'landed', 'waiting', 'escalated')),
+                    reason TEXT,
+                    checks TEXT NOT NULL,
+                    finding_ids TEXT NOT NULL,
+                    header TEXT,
+                    decided_at REAL NOT NULL,
+                    PRIMARY KEY (repo, ticket_id, site, subject)
+                )
+                """
+            )
+            _add_missing_columns(connection, "engine_decisions", {"notice_status": "TEXT"})
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ticket_retries (
@@ -632,6 +652,21 @@ class SchemaMixin:
                     requested_at REAL NOT NULL,
                     detail TEXT,
                     PRIMARY KEY (repo, ticket_id, head)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ci_fresh_runs (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    head TEXT NOT NULL,
+                    trigger TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    run_ids TEXT NOT NULL,
+                    requested_at REAL NOT NULL,
+                    detail TEXT,
+                    PRIMARY KEY (repo, ticket_id, head, trigger)
                 )
                 """
             )

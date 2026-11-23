@@ -11,9 +11,11 @@ import fcntl
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -61,6 +63,17 @@ def flock_on_path(tmp_path_factory, monkeypatch) -> None:
     (shim / "flock").write_text(FLOCK.format(python=sys.executable))
     (shim / "flock").chmod(0o755)
     monkeypatch.setenv("PATH", f"{shim}:{os.environ['PATH']}")
+
+
+@pytest.fixture(autouse=True)
+def no_ambient_git_identity(tmp_path_factory, monkeypatch) -> None:
+    config = tmp_path_factory.mktemp("gitconfig") / "config"
+    config.write_text("[user]\n\tuseConfigOnly = true\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for name in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME",
+                 "GIT_COMMITTER_EMAIL", "EMAIL"):
+        monkeypatch.delenv(name, raising=False)
 
 
 def _this_test_and_its_descendants() -> set[str]:
@@ -170,7 +183,8 @@ def work_root(tmp_path: Path, name: str = "pc") -> Path:
 
 
 def database(tmp_path: Path, rows: list[tuple[str, str, str, float | None]],
-             unhandled: frozenset[str] = frozenset()) -> Path:
+             unhandled: frozenset[str] = frozenset(),
+             recipients: dict[str, str] | None = None) -> Path:
     db = tmp_path / "orch.db"
     SQLiteJobQueue(db, clock=lambda: NOW)
     with SQLiteJobQueue(db, clock=lambda: NOW).connect() as connection:
@@ -180,9 +194,10 @@ def database(tmp_path: Path, rows: list[tuple[str, str, str, float | None]],
                 INSERT INTO jobs (id, dedupe_key, repo, ticket_id, action, recipient,
                     source_comment_id, timeout_seconds, generation, attempt, state,
                     created_at, last_activity_at, finished_at, failure_handled)
-                VALUES (?, ?, 'Owner/Repo', ?, 'build', 'claude', 'c1', 60, 1, 1, ?, ?, ?, ?, ?)
+                VALUES (?, ?, 'Owner/Repo', ?, 'build', ?, 'c1', 60, 1, 1, ?, ?, ?, ?, ?)
                 """,
-                (job_id, job_id, ticket, state, OLD, OLD, finished_at,
+                (job_id, job_id, ticket, (recipients or {}).get(job_id, "claude"), state, OLD,
+                 OLD, finished_at,
                  0 if job_id in unhandled else 1),
             )
     return db
@@ -265,7 +280,7 @@ def test_finished_checkout_goes_and_its_logs_and_records_stay(tmp_path: Path) ->
     assert (root.parent / "outside" / "keep").exists()
 
 
-def test_cli_backlog_pass_prints_one_line_per_target(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_backlog_pass_prints_a_summary_and_one_line_per_id(tmp_path: Path, capsys, monkeypatch) -> None:
     root = work_root(tmp_path)
     job_folder(root, "done1")
     db = database(tmp_path, [("done1", "t1", "done", OLD)])
@@ -274,8 +289,10 @@ def test_cli_backlog_pass_prints_one_line_per_target(tmp_path: Path, capsys, mon
     code, out = cleanup(["run", "--backlog", "--db", str(db)], ShellTransport(tmp_path), capsys)
 
     assert code == 0
-    assert out.startswith(f"pc claude-bot {root}: removed 1 checkouts (")
-    assert out.rstrip().endswith("kept 0")
+    summary, removed = out.splitlines()
+    assert summary.startswith(f"pc claude-bot {root}: removed 1 checkouts (")
+    assert summary.endswith("kept 0")
+    assert re.fullmatch(rf"pc claude-bot {root}: removed done1 \d+ bytes", removed), removed
 
 
 def test_run_without_backlog_is_refused(tmp_path: Path, capsys) -> None:
@@ -922,6 +939,84 @@ def test_a_checkout_waits_while_cleanup_holds_the_job_lock(tmp_path: Path) -> No
     assert (jobs / "j.claimed").stat().st_mtime > wall_clock_days_ago(1 / 24)
 
 
+LOGGED_FLOCK = '#!/bin/sh\necho "$*" >> "$FLOCK_LOG"\nexec {flock} "$@"\n'
+
+
+def wait_for(done: Callable[[], bool], what: str, seconds: float = 30) -> None:
+    end = time.monotonic() + seconds
+    while not done():
+        assert time.monotonic() < end, what
+        time.sleep(0.01)
+
+
+def lines(path: Path) -> int:
+    return len(path.read_text().splitlines()) if path.exists() else 0
+
+
+@pytest.mark.parametrize("shell", ["sh", "bash"])
+def test_a_claim_waiting_on_the_old_lock_relocks_the_new_one(tmp_path: Path, shell: str) -> None:
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+    log = tmp_path / "flock.log"
+    logged = tmp_path / "flock"
+    logged.write_text(LOGGED_FLOCK.format(flock=shutil.which("flock")))
+    logged.chmod(0o755)
+    path = jobs / "j.lock"
+
+    with open(path, "a") as old:
+        fcntl.flock(old, fcntl.LOCK_EX)
+        claim = subprocess.Popen(
+            [shell, "-c", f'd=$1; lk={logged}; {remote._CLAIM}', "claim", str(jobs / "j")],
+            env={**os.environ, "FLOCK_LOG": str(log)})
+        wait_for(lambda: lines(log) == 1, "the claim never waited on the old lock")
+        path.unlink()
+        with open(path, "a") as new:
+            fcntl.flock(new, fcntl.LOCK_EX)
+            old.close()
+            wait_for(lambda: lines(log) == 2 or claim.poll() is not None,
+                     "the claim neither relocked nor finished")
+            assert not (jobs / "j.claimed").exists(), "claimed on the old inode"
+            assert claim.poll() is None
+        assert claim.wait(timeout=30) == 0
+
+    assert (jobs / "j.claimed").exists() and path.exists()
+
+
+def test_cleanup_relocks_when_the_lock_was_replaced(tmp_path: Path, monkeypatch) -> None:
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+    path = jobs / "j.lock"
+    real_flock = fcntl.flock
+    waits: list[int] = []
+    entered: list[int] = []
+
+    def flock(fd, operation):
+        if threading.current_thread() is waiter:
+            waits.append(os.fstat(fd.fileno()).st_ino)
+        real_flock(fd, operation)
+
+    def wait_then_enter() -> None:
+        with job_cleanup._claim_lock(jobs, "j") as locked:
+            assert locked
+            entered.append(path.stat().st_ino)
+
+    monkeypatch.setattr(job_cleanup.fcntl, "flock", flock)
+    waiter = threading.Thread(target=wait_then_enter)
+    with job_cleanup._claim_lock(jobs, "j"):
+        old = path.stat().st_ino
+        waiter.start()
+        wait_for(lambda: len(waits) == 1, "the second holder never waited")
+        path.unlink()
+        new = open(path, "a")
+        real_flock(new, fcntl.LOCK_EX)
+    try:
+        wait_for(lambda: len(waits) == 2 or bool(entered), "the second holder never woke")
+        assert entered == [] and waits == [old, path.stat().st_ino]
+    finally:
+        new.close()
+    waiter.join(timeout=30)
+
+    assert entered == [waits[1]]
 
 
 @pytest.mark.parametrize("dry_run", [True, False])
@@ -1007,10 +1102,10 @@ def test_leftover_claimed_and_lock_from_the_jobs_own_run_do_not_block(tmp_path: 
     assert set(report.removed) == {"j"} and report.kept == {}
     assert not folder.exists()
     assert not (jobs / "j.claimed").exists() and not (jobs / "j.launched").exists()
-    assert (jobs / "j.lock").exists()
+    assert not (jobs / "j.lock").exists()
 
 
-def test_a_collected_job_leaves_only_its_lock_under_jobs(tmp_path: Path) -> None:
+def test_a_collected_job_leaves_nothing_under_jobs(tmp_path: Path) -> None:
     root = work_root(tmp_path)
     finished_with_leftovers(root, "j")
     db = database(tmp_path, [("j", "t1", "done", OLD)])
@@ -1019,8 +1114,177 @@ def test_a_collected_job_leaves_only_its_lock_under_jobs(tmp_path: Path) -> None
                                     now=NOW, grace_hours=6, dry_run=False)
 
     assert set(report.removed) == {"j"}
-    assert [path.name for path in (root / "jobs").iterdir()
-            if path.name == "j" or path.name.startswith("j.")] == ["j.lock"]
+    assert list((root / "jobs").iterdir()) == []
+
+
+class PlanFromAnOlderHost(InProcessTransport):
+    def __init__(self, root: Path):
+        super().__init__(root)
+        self.sent: list[dict] = []
+
+    def call(self, argv, *, timeout: float, input: bytes | None = None) -> Called:
+        sent = json.loads(input.decode())
+        self.sent.append(sent)
+        older = {key: value for key, value in sent.items() if key != "unlink_lock"}
+        return super().call(argv, timeout=timeout, input=json.dumps(older).encode())
+
+
+def test_a_plan_from_an_older_host_leaves_the_lock(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    folder = finished_with_leftovers(root, "j")
+    transport = PlanFromAnOlderHost(root)
+
+    [(_, report)] = job_cleanup.run(database(tmp_path, DONE), machines(tmp_path, "pc"),
+                                    transport, now=NOW, grace_hours=6, dry_run=False)
+
+    assert set(report.removed) == {"j"} and not folder.exists()
+    assert [path.name for path in (root / "jobs").iterdir()] == ["j.lock"]
+    assert [(plan["step"], plan["unlink_lock"]) for plan in transport.sent] == [
+        (job_cleanup.HOLD, True), (job_cleanup.FINISH, True)]
+
+
+def no_process_holds(jobs: Path) -> set[str]:
+    return set()
+
+
+def test_a_finish_that_waited_out_another_finish_leaves_nothing_under_jobs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = work_root(tmp_path)
+    jobs = root / "jobs"
+    job_folder(root, "j")
+    cutoff = NOW - 6 * HOUR
+    hold = Plan(frozenset({"j"}), cutoff, False, unlink_lock=True)
+    finish = Plan(frozenset({"j"}), cutoff, False, job_cleanup.FINISH, unlink_lock=True)
+    assert job_cleanup.device_step(root, hold, scan=no_process_holds).held == ("j",)
+    waiting = threading.Event()
+    reports: dict[str, job_cleanup.Report] = {}
+    real_flock, real_save = fcntl.flock, job_leftovers.save_work
+    second = threading.Thread(target=lambda: reports.__setitem__(
+        "second", job_cleanup.device_step(root, finish, scan=no_process_holds)))
+
+    def flock(fd, operation):
+        if threading.current_thread() is second:
+            waiting.set()
+        return real_flock(fd, operation)
+
+    def save_while_the_second_waits(*args):
+        second.start()
+        assert waiting.wait(30), "the second finish never waited on the lock"
+        return real_save(*args)
+
+    monkeypatch.setattr(job_cleanup.fcntl, "flock", flock)
+    monkeypatch.setattr(job_leftovers, "save_work", save_while_the_second_waits)
+    reports["first"] = job_cleanup.device_step(root, finish, scan=no_process_holds)
+    second.join(30)
+
+    assert not second.is_alive() and set(reports["first"].removed) == {"j"}
+    assert [path.name for path in jobs.iterdir()] == []
+
+
+def test_a_lock_left_by_a_pass_that_stopped_after_retiring_goes_with_the_next_pass(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = work_root(tmp_path)
+    jobs = root / "jobs"
+    finished_with_leftovers(root, "j")
+    real_commit = job_leftovers.commit_record
+
+    def commit_then_stop(*args) -> int:
+        real_commit(*args)
+        raise SystemExit(1)
+
+    with monkeypatch.context() as stopping:
+        stopping.setattr(job_leftovers, "commit_record", commit_then_stop)
+        with pytest.raises(SystemExit):
+            device_pass(root, Plan(frozenset({"j"}), NOW - 6 * HOUR, False, unlink_lock=True),
+                        scan=no_process_holds)
+    assert [path.name for path in jobs.iterdir()] == ["j.lock"]
+    assert (root / "jobs-kept" / "j" / "kept.json").exists()
+
+    [(_, report)] = job_cleanup.run(database(tmp_path, DONE), machines(tmp_path, "pc"),
+                                    InProcessTransport(root, no_process_holds),
+                                    now=NOW, grace_hours=6, dry_run=False)
+
+    assert report.kept == {}
+    assert [path.name for path in jobs.iterdir()] == []
+
+
+def test_a_lone_lock_another_pass_retired_first_is_not_unlinked_from_its_next_holder(
+    tmp_path: Path, monkeypatch
+) -> None:
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+    path = jobs / "j.lock"
+    path.touch()
+    plan = Plan(frozenset({"j"}), NOW - 6 * HOUR, False, unlink_lock=True)
+    enumerated, retired, looked = threading.Event(), threading.Event(), threading.Event()
+    claimant_holds = threading.Event()
+    real_iterdir = Path.iterdir
+    errors: list[BaseException] = []
+
+    def open_after_retired(file, mode="r", *args, **kwargs):
+        if threading.current_thread() is cleaner and Path(file) == path:
+            enumerated.set()
+            assert retired.wait(30), "the other pass never retired the lock"
+            try:
+                return open(file, mode, *args, **kwargs)
+            finally:
+                looked.set()
+        return open(file, mode, *args, **kwargs)
+
+    def iterdir_once_claimed(self):
+        if threading.current_thread() is cleaner and self == jobs and retired.is_set():
+            assert claimant_holds.wait(30), "the claimant never took the replacement"
+        return real_iterdir(self)
+
+    def first_pass() -> None:
+        try:
+            job_cleanup.device_step(tmp_path, plan, scan=no_process_holds)
+        except BaseException as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(job_cleanup, "open", open_after_retired, raising=False)
+    monkeypatch.setattr(Path, "iterdir", iterdir_once_claimed)
+    cleaner = threading.Thread(target=first_pass)
+    cleaner.start()
+    assert enumerated.wait(30), "the first pass never reached the lone lock"
+    job_cleanup.device_step(tmp_path, plan, scan=no_process_holds)
+    assert not path.exists(), "the second pass did not retire the lone lock"
+    retired.set()
+    assert looked.wait(30), "the first pass never looked for the retired lock"
+    with job_cleanup._claim_lock(jobs, "j") as first:
+        assert first
+        claimant_holds.set()
+        cleaner.join(30)
+        assert not cleaner.is_alive() and errors == []
+        assert path.exists(), "the first pass unlinked a lock it never held"
+        with job_cleanup._claim_lock(jobs, "j", wait=False) as second:
+            assert not second, "a second holder entered on a different inode"
+
+
+@pytest.mark.parametrize("case", ["held", "claimed", "not-named", "older-host", "dry-run"])
+def test_a_lone_lock_stays_while_claimed_or_not_retired_by_the_plan(
+    tmp_path: Path, case: str
+) -> None:
+    root = work_root(tmp_path)
+    jobs = root / "jobs"
+    jobs.mkdir(parents=True)
+    (jobs / "j.lock").touch()
+    if case == "claimed":
+        (jobs / "j.claimed").touch()
+    plan = Plan(frozenset() if case == "not-named" else frozenset({"j"}), NOW - 6 * HOUR,
+                case == "dry-run", unlink_lock=case != "older-host")
+    holder = hold_lock(jobs / "j.lock", 60) if case == "held" else None
+    try:
+        report = job_cleanup.device_step(root, plan, scan=no_process_holds)
+    finally:
+        if holder is not None:
+            holder.kill()
+            holder.wait()
+
+    assert report.removed == {}
+    assert "j.lock" in [path.name for path in jobs.iterdir()]
 
 
 def stale_worktree(tmp_path: Path, root: Path, job_id: str = "j") -> Path:
@@ -1057,17 +1321,96 @@ def age_job(root: Path, job_id: str) -> None:
         age(path, OLD - HOUR)
 
 
-@pytest.mark.parametrize("work", ["uncommitted-edit", "untracked-file", "unpushed-commit"])
-def test_a_dead_owners_worktree_holding_work_keeps_the_folder(tmp_path: Path, work: str) -> None:
-    root = work_root(tmp_path)
-    make_work(stale_worktree(tmp_path, root), work)
+CLONE = Path("clones") / "acme" / "widgets.git"
+
+
+def git_out(cwd: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True,
+                          check=True).stdout.strip()
+
+
+def registered(root: Path) -> list[str]:
+    return [line.removeprefix("worktree ") for line in
+            git_out(root / CLONE, "worktree", "list", "--porcelain").splitlines()
+            if line.startswith("worktree ") and "/jobs/" in line]
+
+
+def pinned(root: Path, ref: str = "refs/orch-kept/j") -> str:
+    return git_out(root / CLONE, "rev-parse", "--verify", ref)
+
+
+def collect_stale(tmp_path: Path, root: Path) -> job_cleanup.Report:
     age_job(root, "j")
-    live_cases_unchanged(root, "j", "worktree-work", [("j", "t1", "done", OLD)], tmp_path)
+    db = tmp_path / "orch.db"
+    [(_, report)] = job_cleanup.run(db if db.exists() else database(tmp_path, DONE),
+                                    machines(tmp_path, "pc"),
+                                    InProcessTransport(root), now=NOW, grace_hours=6,
+                                    dry_run=False)
+    return report
 
 
-def test_work_made_in_a_dead_owners_worktree_after_hold_keeps_it_at_finish(tmp_path: Path) -> None:
+def assert_retired(root: Path, report: job_cleanup.Report) -> None:
+    jobs = root / "jobs"
+    assert set(report.removed) == {"j"} and report.kept == {}
+    assert not (jobs / "j").exists() and not (jobs / "j.json").exists()
+    assert registered(root) == []
+
+
+def test_a_dead_owners_worktree_with_an_unpushed_commit_is_retired_and_pinned(
+    tmp_path: Path
+) -> None:
+    root = work_root(tmp_path)
+    folder = stale_worktree(tmp_path, root)
+    make_work(folder, "unpushed-commit")
+    commit = git_out(folder, "rev-parse", "HEAD")
+
+    assert_retired(root, collect_stale(tmp_path, root))
+
+    assert pinned(root) == commit
+    assert git_out(root / CLONE, "show", f"{commit}:tracked.txt") == "committed, never pushed"
+    assert not (root / "jobs-kept" / "j" / "worktree.patch").exists()
+
+
+def apply_to_a_fresh_worktree(tmp_path: Path, root: Path, start: str, patch: Path) -> Path:
+    fresh = tmp_path / "fresh"
+    git_out(root / CLONE, "worktree", "add", "-q", "--detach", str(fresh), start)
+    git_out(fresh, "apply", "--check", str(patch))
+    git_out(fresh, "apply", str(patch))
+    return fresh
+
+
+UNCOMMITTED = {
+    "tracked-edit": ("tracked.txt", b"valuable uncommitted edit\n"),
+    "untracked-file": ("notes.md", b"valuable new file\n"),
+    "new-file-one-level-down": ("docs/plan.md", b"\x00binary\xffplan\n"),
+}
+
+
+@pytest.mark.parametrize("work", UNCOMMITTED)
+def test_a_dead_owners_uncommitted_work_is_saved_as_a_patch_that_applies(
+    tmp_path: Path, work: str
+) -> None:
+    root = work_root(tmp_path)
+    folder = stale_worktree(tmp_path, root)
+    start = json.loads((root / "jobs" / "j.json").read_text())["start"]
+    name, content = UNCOMMITTED[work]
+    (folder / name).parent.mkdir(parents=True, exist_ok=True)
+    (folder / name).write_bytes(content)
+
+    assert_retired(root, collect_stale(tmp_path, root))
+
+    patch = root / "jobs-kept" / "j" / "worktree.patch"
+    fresh = apply_to_a_fresh_worktree(tmp_path, root, start, patch)
+    assert (fresh / name).read_bytes() == content
+    assert git_out(root / CLONE, "for-each-ref", "refs/orch-kept/") == ""
+
+
+def test_work_made_in_a_dead_owners_worktree_after_hold_is_saved_at_finish(
+    tmp_path: Path
+) -> None:
     root = work_root(tmp_path)
     stale_worktree(tmp_path, root)
+    start = json.loads((root / "jobs" / "j.json").read_text())["start"]
     age_job(root, "j")
     jobs = root / "jobs"
     plan = Plan(frozenset({"j"}), NOW - 6 * HOUR, False, finished_at={"j": OLD})
@@ -1077,24 +1420,308 @@ def test_work_made_in_a_dead_owners_worktree_after_hold_keeps_it_at_finish(tmp_p
     done = job_cleanup.device_step(
         root, Plan(frozenset({"j"}), plan.cutoff, False, job_cleanup.FINISH, {"j": OLD}))
 
-    assert done.removed == {} and done.kept == {"j": "worktree-work"}
-    assert (jobs / "j" / "tracked.txt").read_text() == "valuable uncommitted edit\n"
+    assert set(done.removed) == {"j"} and done.kept == {}
+    assert not (jobs / "j.json").exists() and registered(root) == []
+    fresh = apply_to_a_fresh_worktree(tmp_path, root, start,
+                                      root / "jobs-kept" / "j" / "worktree.patch")
+    assert (fresh / "tracked.txt").read_text() == "valuable uncommitted edit\n"
 
 
-def test_a_dead_owners_clean_worktree_no_longer_keeps_the_folder(tmp_path: Path) -> None:
+def test_a_dead_owners_clean_worktree_is_retired_with_its_record(tmp_path: Path) -> None:
     root = work_root(tmp_path)
-    folder = stale_worktree(tmp_path, root)
-    age_job(root, "j")
-    db = database(tmp_path, [("j", "t1", "done", OLD)])
+    stale_worktree(tmp_path, root)
 
-    [(_, report)] = job_cleanup.run(db, machines(tmp_path, "pc"), InProcessTransport(root),
-                                    now=NOW, grace_hours=6, dry_run=False)
+    assert_retired(root, collect_stale(tmp_path, root))
 
     jobs = root / "jobs"
-    assert set(report.removed) == {"j"} and report.kept == {}
-    assert not folder.exists()
-    assert not (jobs / "j.claimed").exists() and not (jobs / "j.launched").exists()
-    assert (jobs / "j.lock").exists() and (jobs / "j.json").exists()
+    assert not (jobs / "j.claimed").exists()
+    assert not (root / "jobs-kept" / "j" / "worktree.patch").exists()
+    assert git_out(root / CLONE, "for-each-ref", "refs/orch-kept/") == ""
+
+
+def test_a_requeued_job_retired_twice_keeps_both_pins_and_both_patches(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    folder = stale_worktree(tmp_path, root)
+    make_work(folder, "unpushed-commit")
+    (folder / "first.txt").write_text("first run\n")
+    first = git_out(folder, "rev-parse", "HEAD")
+    assert_retired(root, collect_stale(tmp_path, root))
+    again = worktrees.prepare(root, "j", "acme/widgets", git_out(tmp_path / "origin", "rev-parse",
+                              "HEAD"), url_template=str(tmp_path / "origin"), pid=dead_pid())
+    (again.path / "tracked.txt").write_text("second run\n")
+    subprocess.run(["git", "-C", str(again.path), "-c", "user.name=t", "-c",
+                    "user.email=t@example.invalid", "commit", "-qam", "second"], check=True)
+    (again.path / "second.txt").write_text("second run\n")
+    second = git_out(again.path, "rev-parse", "HEAD")
+
+    assert_retired(root, collect_stale(tmp_path, root))
+
+    assert {pinned(root), pinned(root, "refs/orch-kept/j.1")} == {first, second}
+    kept = root / "jobs-kept" / "j"
+    patches = sorted(path.read_text() for path in kept.glob("worktree.patch*"))
+    assert len(patches) == 2
+    assert any("first run" in text for text in patches)
+    assert any("second run" in text for text in patches)
+
+
+def test_a_dead_owners_record_over_a_folder_that_is_not_its_worktree_keeps_it(
+    tmp_path: Path
+) -> None:
+    root = work_root(tmp_path)
+    stale_worktree(tmp_path, root, "other")
+    finished_with_leftovers(root, "j")
+    record = json.loads((root / "jobs" / "other.json").read_text())
+    shutil.rmtree(root / "jobs" / "other")
+    (root / "jobs" / "j.json").write_text(json.dumps({**record, "job_id": "j"}))
+    age(root / "jobs" / "j.json", OLD - HOUR)
+
+    live_cases_unchanged(root, "j", "worktree-record", DONE, tmp_path)
+
+
+def orphan_record(tmp_path: Path, root: Path, owner: int) -> str:
+    folder = stale_worktree(tmp_path, root)
+    make_work(folder, "unpushed-commit")
+    commit = git_out(folder, "rev-parse", "HEAD")
+    shutil.rmtree(folder)
+    record = root / "jobs" / "j.json"
+    record.write_text(json.dumps({**json.loads(record.read_text()), "pid": owner}))
+    (root / "jobs" / "j.claimed").unlink()
+    return commit
+
+
+def test_an_orphan_record_with_a_dead_owner_is_unlinked_and_its_commit_pinned(
+    tmp_path: Path
+) -> None:
+    root = work_root(tmp_path)
+    commit = orphan_record(tmp_path, root, dead_pid())
+
+    report = collect_stale(tmp_path, root)
+
+    assert report.removed == {"j": 0} and report.kept == {}
+    assert list((root / "jobs").iterdir()) == []
+    assert registered(root) == []
+    assert pinned(root) == commit
+
+
+def test_an_orphan_record_with_a_live_owner_is_kept(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    orphan_record(tmp_path, root, os.getpid())
+    before = (root / "jobs" / "j.json").read_bytes()
+
+    report = collect_stale(tmp_path, root)
+
+    assert report.removed == {} and report.kept == {"j": "worktree-owner-live"}
+    assert (root / "jobs" / "j.json").read_bytes() == before
+    assert len(registered(root)) == 1
+
+
+def test_an_orphan_record_the_plan_does_not_name_is_untouched(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    orphan_record(tmp_path, root, dead_pid())
+    before = (root / "jobs" / "j.json").read_bytes()
+    age_job(root, "j")
+
+    [(_, report)] = job_cleanup.run(database(tmp_path, [("j", "t1", "running", None)]),
+                                    machines(tmp_path, "pc"), InProcessTransport(root),
+                                    now=NOW, grace_hours=6, dry_run=False)
+
+    assert report.removed == {} and "j" not in report.kept
+    assert (root / "jobs" / "j.json").read_bytes() == before
+    assert len(registered(root)) == 1
+
+
+def commit_in(folder: Path, text: str) -> str:
+    (folder / "tracked.txt").write_text(text)
+    subprocess.run(["git", "-C", str(folder), "-c", "user.name=t", "-c",
+                    "user.email=t@example.invalid", "commit", "-qam", text], check=True)
+    return git_out(folder, "rev-parse", "HEAD")
+
+
+def survives_gc(root: Path, commit: str) -> bool:
+    clone = root / CLONE
+    git_out(clone, "reflog", "expire", "--expire=now", "--all")
+    git_out(clone, "gc", "-q", "--prune=now")
+    return subprocess.run(["git", "-C", str(clone), "cat-file", "-e", commit]).returncode == 0
+
+
+def test_every_orphan_in_one_clone_keeps_its_commit_when_one_is_retired(
+    tmp_path: Path
+) -> None:
+    root = work_root(tmp_path)
+    commits = {"j": commit_in(stale_worktree(tmp_path, root), "j never pushed\n")}
+    k = worktrees.prepare(root, "k", "acme/widgets", None,
+                          url_template=str(tmp_path / "origin"), pid=dead_pid())
+    commits["k"] = commit_in(k.path, "k never pushed\n")
+    for job_id in commits:
+        shutil.rmtree(root / "jobs" / job_id)
+        age_job(root, job_id)
+    database(tmp_path, [*DONE, ("k", "t2", "done", OLD)])
+
+    report = collect_stale(tmp_path, root)
+
+    assert set(report.removed) == {"j", "k"} and report.kept == {}
+    assert {job_id: pinned(root, f"refs/orch-kept/{job_id}") for job_id in commits} == commits
+    assert all(survives_gc(root, commit) for commit in commits.values())
+
+
+def test_finishing_another_job_pins_a_missing_worktrees_unpushed_commit(
+    tmp_path: Path
+) -> None:
+    root = work_root(tmp_path)
+    commit = commit_in(stale_worktree(tmp_path, root), "never pushed\n")
+    shutil.rmtree(root / "jobs" / "j")
+    other = worktrees.prepare(root, "k", "acme/widgets", None,
+                              url_template=str(tmp_path / "origin"), pid=dead_pid())
+
+    assert worktrees.finish(other, lambda _: None)
+
+    assert pinned(root) == commit and survives_gc(root, commit)
+
+
+def test_staged_work_that_differs_from_the_working_file_is_saved(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    folder = stale_worktree(tmp_path, root)
+    start = json.loads((root / "jobs" / "j.json").read_text())["start"]
+    (folder / "tracked.txt").write_text("unique staged work\n")
+    git_out(folder, "add", "tracked.txt")
+    (folder / "tracked.txt").write_text("different working edit\n")
+
+    assert_retired(root, collect_stale(tmp_path, root))
+
+    kept = root / "jobs-kept" / "j"
+    staged = apply_to_a_fresh_worktree(tmp_path, root, start, kept / "index.patch")
+    assert (staged / "tracked.txt").read_text() == "unique staged work\n"
+    shutil.rmtree(staged)
+    git_out(root / CLONE, "worktree", "prune")
+    working = apply_to_a_fresh_worktree(tmp_path, root, start, kept / "worktree.patch")
+    assert (working / "tracked.txt").read_text() == "different working edit\n"
+
+
+def hold_then_finish(root: Path, between: Callable[[], None]) -> job_cleanup.Report:
+    age_job(root, "j")
+    plan = Plan(frozenset({"j"}), NOW - 6 * HOUR, False, finished_at={"j": OLD})
+    assert job_cleanup.device_step(root, plan, scan=lambda _: set()).held == ("j",)
+    between()
+    return job_cleanup.device_step(
+        root, Plan(frozenset({"j"}), plan.cutoff, False, job_cleanup.FINISH, {"j": OLD}),
+        scan=lambda _: set())
+
+
+def test_gc_between_hold_and_finish_leaves_the_work_to_be_saved(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    folder = stale_worktree(tmp_path, root)
+    start = json.loads((root / "jobs" / "j.json").read_text())["start"]
+    commit = commit_in(folder, "never pushed\n")
+    (folder / "notes.md").write_text("valuable uncommitted note\n")
+
+    done = hold_then_finish(root, lambda: worktrees.gc(root, older_than_hours=0,
+                                                         log=lambda _: None, now=NOW))
+
+    assert set(done.removed) == {"j"} and done.kept == {}
+    assert pinned(root) == commit
+    fresh = apply_to_a_fresh_worktree(tmp_path, root, start,
+                                      root / "jobs-kept" / "j" / "worktree.patch")
+    assert (fresh / "notes.md").read_text() == "valuable uncommitted note\n"
+
+
+def test_a_set_aside_worktree_whose_record_vanished_is_kept(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    folder = stale_worktree(tmp_path, root)
+    (folder / "notes.md").write_text("valuable uncommitted note\n")
+
+    done = hold_then_finish(root, (root / "jobs" / "j.json").unlink)
+
+    assert done.removed == {} and done.kept["j"].startswith("error:")
+    assert (root / "jobs" / "j" / "notes.md").read_text() == "valuable uncommitted note\n"
+
+
+def test_a_nested_repository_with_its_own_work_keeps_the_folder(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    nested = stale_worktree(tmp_path, root) / "nested"
+    nested.mkdir()
+    git_out(nested, "init", "-q")
+    (nested / "work.txt").write_text("unique nested work\n")
+    git_out(nested, "add", ".")
+    git_out(nested, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+            "commit", "-qm", "nested")
+
+    report = collect_stale(tmp_path, root)
+
+    assert report.removed == {} and report.kept["j"].startswith("error:")
+    assert (root / "jobs" / "j" / "nested" / "work.txt").read_text() == "unique nested work\n"
+    assert git_out(root / "jobs" / "j" / "nested", "log", "--format=%s") == "nested"
+    assert (root / "jobs" / "j.json").exists()
+
+
+def detour(folder: Path, text: str) -> str:
+    start = git_out(folder, "rev-parse", "HEAD")
+    commit = commit_in(folder, text)
+    git_out(folder, "reset", "-q", "--hard", start)
+    return commit
+
+
+def stop_on_merge_conflict(folder: Path) -> str:
+    incoming = detour(folder, "unique incoming merge work\n")
+    commit_in(folder, "ours\n")
+    merge = subprocess.run(["git", "-C", str(folder), "-c", "user.name=t", "-c",
+                            "user.email=t@example.invalid", "merge", "--no-edit", incoming],
+                           capture_output=True, text=True)
+    assert merge.returncode == 1 and "CONFLICT" in merge.stdout, merge.stderr
+    assert git_out(folder, "rev-parse", "MERGE_HEAD") == incoming
+    return incoming
+
+
+def conflicted_merge(folder: Path) -> str:
+    stop_on_merge_conflict(folder)
+    (folder / "tracked.txt").write_text("ours\n")
+    return git_out(folder, "rev-parse", ":3:tracked.txt")
+
+
+def resolved_merge(folder: Path) -> str:
+    incoming = stop_on_merge_conflict(folder)
+    git_out(folder, "add", "tracked.txt")
+    assert git_out(folder, "ls-files", "--unmerged") == ""
+    return incoming
+
+
+def stopped_rebase(folder: Path) -> str:
+    first = commit_in(folder, "first\n")
+    later = commit_in(folder, "unique later work\n")
+    subprocess.run(["git", "-C", str(folder), "-c", "user.name=t",
+                    "-c", "user.email=t@example.invalid", "rebase", "-q",
+                    "--exec", "false", "--force-rebase", f"{first}~1"], capture_output=True)
+    assert (folder / "tracked.txt").read_text() == "first\n"
+    return later
+
+
+@pytest.mark.parametrize("state", [conflicted_merge, resolved_merge, stopped_rebase])
+def test_index_or_operation_state_no_patch_holds_keeps_the_folder(
+        tmp_path: Path, state) -> None:
+    root = work_root(tmp_path)
+    folder = stale_worktree(tmp_path, root)
+    work = state(folder)
+
+    report = collect_stale(tmp_path, root)
+
+    assert report.removed == {} and report.kept["j"].startswith("error:")
+    assert (root / "jobs" / "j.json").exists()
+    assert git_out(root / "jobs" / "j", "cat-file", "-t", work) in ("blob", "commit")
+
+
+def test_gc_keeps_a_clean_worktree_whose_rebase_holds_the_only_copy(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    folder = stale_worktree(tmp_path, root)
+    start = git_out(folder, "rev-parse", "HEAD")
+    later = commit_in(folder, "unique later work\n")
+    git_out(folder, "-c", "sequence.editor=printf 'break\\n' >", "rebase", "-q", "-i", start)
+    assert git_out(folder, "rev-parse", "HEAD") == start
+    assert git_out(folder, "status", "--porcelain", "--untracked-files=all") == ""
+    logged: list[str] = []
+
+    worktrees.gc(root, older_than_hours=0, log=logged.append, now=NOW)
+
+    assert folder.exists(), logged
+    assert git_out(folder, "cat-file", "-t", later) == "commit"
 
 
 def test_a_held_lock_keeps_the_folder_without_waiting(tmp_path: Path) -> None:
@@ -1172,10 +1799,11 @@ def test_a_worker_that_starts_between_hold_and_finish_keeps_the_folder(
 
 
 def test_the_plan_carries_each_jobs_finish_time_to_the_device(tmp_path: Path) -> None:
-    plan = Plan(frozenset({"a", "b"}), NOW, True, finished_at={"a": OLD, "b": OLD + 1})
+    plan = Plan(frozenset({"a", "b"}), NOW, True, finished_at={"a": OLD, "b": OLD + 1},
+                unlink_lock=True)
     assert Plan.parse(plan.to_json()) == plan
     legacy = Plan.parse(json.dumps({"finished": ["a"], "cutoff": NOW, "dry_run": False}))
-    assert legacy.own_finish("a") == NOW
+    assert legacy.own_finish("a") == NOW and not legacy.unlink_lock
     with pytest.raises(ValueError):
         Plan.parse(json.dumps({"finished": ["a"], "cutoff": NOW, "dry_run": False,
                                "finished_at": {"../x": 1.0}}))
@@ -1265,9 +1893,8 @@ def test_archive_mirrors_jobs_and_drops_the_trees(tmp_path: Path, layout: str) -
     assert written["archived"] == archived
     assert (written["id"], written["finished_at"]) == ("j", OLD)
     assert written["removed_bytes"] == report.removed["j"]
-    for name in ("j", "j.claimed", "j.launched", "j.gone", "j.cleanup"):
+    for name in ("j", "j.claimed", "j.launched", "j.gone", "j.cleanup", "j.lock"):
         assert not os.path.lexists(jobs / name), name
-    assert (jobs / "j.lock").exists()
 
 
 @pytest.mark.parametrize("layout", ["remote", "local"])
@@ -1424,11 +2051,6 @@ def worktree_owner_live(root, monkeypatch, stack):
     return DONE, job_cleanup.jobs_held_open
 
 
-def worktree_work(root, monkeypatch, stack):
-    (root / "jobs" / "j.json").write_text(json.dumps({"job_id": "j", "pid": dead_pid()}))
-    return DONE, job_cleanup.jobs_held_open
-
-
 def worker_exits(code: int):
     def arrange(root, monkeypatch, stack):
         monkeypatch.setattr(job_cleanup.remote, "worker_check_script",
@@ -1456,7 +2078,6 @@ PART_1_GUARDS = {
     "claimed-since": claimed_since,
     "worktree-record": worktree_record,
     "worktree-owner-live": worktree_owner_live,
-    "worktree-work": worktree_work,
     "worker-live": worker_exits(1),
     "worker-unsure": worker_exits(3),
     "held-open": held_open,
@@ -1616,11 +2237,36 @@ def test_a_crash_after_the_commit_point_is_finished_by_the_next_pass(
     report = collect(root, DONE)
 
     assert set(report.removed) == {"j"} and report.kept == {}
-    assert [path.name for path in jobs.iterdir()] == ["j.lock"]
+    assert list(jobs.iterdir()) == []
     assert archived(root) == archived(reference)
     record = json.loads((root / "jobs-kept" / "j" / job_leftovers.KEPT_JSON).read_text())
     assert record["archived"] == sorted(archived(reference))
     assert record["id"] == "j" and record["finished_at"] == OLD
+
+
+@pytest.mark.parametrize("point", ("after the rename", "after the archive",
+                                   "after the folder is deleted"))
+def test_a_crash_after_the_commit_point_with_a_record_is_finished_by_the_next_pass(
+    tmp_path: Path, monkeypatch, point: str
+) -> None:
+    root = work_root(tmp_path)
+    folder = stale_worktree(tmp_path, root)
+    make_work(folder, "unpushed-commit")
+    commit = git_out(folder, "rev-parse", "HEAD")
+    (folder / "tracked.txt").write_text("uncommitted on top\n")
+    age_job(root, "j")
+    jobs = root / "jobs"
+    crash_while_finishing(root, point, monkeypatch)
+    assert (jobs / "j.json").exists()
+
+    report = collect(root, DONE)
+
+    assert set(report.removed) == {"j"} and report.kept == {}
+    assert list(jobs.iterdir()) == []
+    assert registered(root) == [] and pinned(root) == commit
+    fresh = apply_to_a_fresh_worktree(tmp_path, root, commit,
+                                      root / "jobs-kept" / "j" / "worktree.patch")
+    assert (fresh / "tracked.txt").read_text() == "uncommitted on top\n"
 
 
 @pytest.mark.parametrize("since", ["requeued", "claimed after the host read"])
@@ -1681,3 +2327,198 @@ def test_a_dry_run_lists_a_gone_folder_and_writes_nothing(tmp_path: Path, monkey
     assert {str(path.relative_to(root)): None if path.is_dir() else path.read_bytes()
             for path in root.rglob("*") if not path.is_symlink()} == before
     assert (jobs / "j.gone").is_dir()
+
+
+BOTS = {"claude": "claude-bot", "codex": "codex-bot"}
+
+
+def fleet(tmp_path: Path) -> MachinesConfig:
+    def device(name: str, workdir_root: str) -> Device:
+        return Device(
+            name=name, slot_max=2, harnesses=MappingProxyType(BOTS),
+            tailscale_name=f"{name}.example.ts.net", local=False, enabled=True,
+            workdir_root=workdir_root, ssh_alias=f"{name}-{{bot}}", factory_root=str(ROOT),
+        )
+
+    return MachinesConfig(devices=(device("pc", f"{tmp_path}/pc/{{bot}}/work"),
+                                   device("box", f"{tmp_path}/box/work")))
+
+
+class FleetTransport:
+    def __init__(self, tmp_path: Path):
+        self.roots = {f"pc-{bot}": tmp_path / "pc" / bot / "work" for bot in BOTS.values()}
+        self.roots |= {f"box-{bot}": tmp_path / "box" / "work" for bot in BOTS.values()}
+        self.sent: list[tuple[str, dict, job_cleanup.Report]] = []
+
+    def call(self, argv, *, timeout: float, input: bytes | None = None) -> Called:
+        alias = argv[-2]
+        report = job_cleanup.device_step(self.roots[alias], Plan.parse(input.decode()))
+        self.sent.append((alias, json.loads(input.decode()), report))
+        return Called(0, f"{job_cleanup.MARK} {report.to_json()}\n", "")
+
+
+def gone_folder(root: Path, job_id: str) -> Path:
+    folder = job_folder(root, job_id)
+    return folder.rename(folder.with_name(f"{job_id}{job_leftovers.GONE}"))
+
+
+def pending_record(root: Path, job_id: str) -> Path:
+    record = root / "jobs-kept" / job_id / job_leftovers.PENDING
+    record.parent.mkdir(parents=True)
+    record.write_text(json.dumps({"id": job_id, "removed_bytes": 7}))
+    return record
+
+
+def tree(root: Path) -> dict[str, bytes | None]:
+    return {str(path.relative_to(root)): None if path.is_dir() or path.is_symlink()
+            else path.read_bytes() for path in sorted(root.rglob("*"))}
+
+
+SHARED_ROWS = [("c1", "t1", "done", OLD), ("c3", "t3", "done", OLD),
+               ("x1", "t11", "done", OLD), ("x2", "t12", "done", OLD),
+               ("x3", "t13", "done", OLD), ("x4", "t14", "done", OLD)]
+CODEX_IDS = {"x1": "codex", "x2": "codex", "x3": "codex", "x4": "codex"}
+
+
+def shared_root(tmp_path: Path) -> tuple[Path, dict[str, bytes | None]]:
+    root = tmp_path / "box" / "work"
+    job_folder(root, "c1")
+    gone_folder(root, "c3")
+    job_folder(root, "x1")
+    aside = job_folder(root, "x2")
+    aside.rename(aside.with_name("x2.cleanup"))
+    gone_folder(root, "x3")
+    pending_record(root, "x4")
+    codex = {name: value for name, value in tree(root).items()
+             if name.startswith(("jobs/x", "jobs-kept/x"))}
+    return root, codex
+
+
+def test_bot_passes_on_a_shared_root_touch_only_their_own_jobs(tmp_path: Path) -> None:
+    root, codex = shared_root(tmp_path)
+    db = database(tmp_path, SHARED_ROWS, recipients=CODEX_IDS)
+    transport = FleetTransport(tmp_path)
+
+    outcomes = job_cleanup.run(db, fleet(tmp_path), transport, now=NOW, grace_hours=6,
+                               dry_run=False, bot="claude-bot")
+
+    box = [report for target, report in outcomes if target.device == "box"]
+    assert len(box) == 1 and not isinstance(box[0], str), box
+    assert set(box[0].removed) == {"c1", "c3"} and box[0].kept == {}
+    for alias, plan, report in transport.sent:
+        if alias.startswith("box-"):
+            assert set(report.held) <= {"c1", "c3"}, (plan["step"], report.held)
+            assert set(report.removed) | set(report.kept) <= {"c1", "c3"}, report
+    jobs = root / "jobs"
+    assert not (jobs / "c1").exists() and not (jobs / "c3.gone").exists()
+    assert (root / "jobs-kept" / "c1" / job_leftovers.KEPT_JSON).exists()
+    assert {name: value for name, value in tree(root).items()
+            if name.startswith(("jobs/x", "jobs-kept/x"))} == codex
+    assert not (jobs / "x2").exists()
+
+
+def test_bot_pass_reaches_only_targets_of_that_bot(tmp_path: Path) -> None:
+    db = database(tmp_path, [("c1", "t1", "done", OLD), ("x1", "t11", "done", OLD),
+                             ("x5", "t15", "running", None)],
+                  recipients={"x1": "codex", "x5": "codex"})
+    transport = FleetTransport(tmp_path)
+
+    outcomes = job_cleanup.run(db, fleet(tmp_path), transport, now=NOW, grace_hours=6,
+                               dry_run=True, bot="codex-bot")
+
+    assert sorted(target.label for target, _ in outcomes) == ["box codex-bot", "pc codex-bot"]
+    assert sorted(alias for alias, _, _ in transport.sent) == ["box-codex-bot", "pc-codex-bot"]
+    assert all(plan["owned"] == ["x1", "x5"] and plan["finished"] == ["x1"]
+               for _, plan, _ in transport.sent)
+
+
+def test_report_prints_one_line_per_removed_and_kept_id(tmp_path: Path) -> None:
+    [target, *_] = job_cleanup.targets(fleet(tmp_path))
+    label = f"{target.label} {target.remote.workdir_root}"
+    live = job_cleanup.Report({"b": 20, "a": 10}, {"d": "live", "c": "error: x"}, False)
+
+    assert job_cleanup.report_lines(target, live) == [
+        job_cleanup.summary(target, live),
+        f"{label}: removed a 10 bytes",
+        f"{label}: removed b 20 bytes",
+        f"{label}: kept c error: x",
+        f"{label}: kept d live",
+    ]
+    dry = job_cleanup.Report({"a": 10}, {}, True)
+    assert job_cleanup.report_lines(target, dry) == [
+        job_cleanup.summary(target, dry), f"{label}: would remove a 10 bytes"]
+    assert job_cleanup.report_lines(target, "ssh failed") == [f"{label}: failed: ssh failed"]
+
+
+def test_cli_bot_pass_keeps_jobs_inside_its_ten_minute_grace(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    root = work_root(tmp_path)
+    job_folder(root, "old")
+    job_folder(root, "fresh")
+    db = database(tmp_path, [("old", "t1", "done", NOW - 11 * 60),
+                             ("fresh", "t2", "done", NOW - 9 * 60)])
+    monkeypatch.setattr(job_cleanup.health, "load_machines", lambda _: machines(tmp_path, "pc"))
+
+    code, out = cleanup(["run", "--bot", "claude-bot", "--db", str(db)],
+                        InProcessTransport(root), capsys)
+
+    assert code == 0, out
+    label = f"pc claude-bot {root}"
+    summary, removed, kept = out.splitlines()
+    assert summary.startswith(f"{label}: removed 1 checkouts (")
+    assert re.fullmatch(rf"{label}: removed old \d+ bytes", removed), removed
+    assert kept == f"{label}: kept fresh recent"
+    assert (root / "jobs" / "fresh" / "repo" / "README").exists()
+
+
+class NoCalls:
+    def call(self, argv, *, timeout: float, input: bytes | None = None) -> Called:
+        raise AssertionError(f"a pass ran beside another: {argv}")
+
+
+def test_bot_pass_exits_when_another_pass_of_that_bot_runs(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    root = work_root(tmp_path)
+    job_folder(root, "done1")
+    db = database(tmp_path, [("done1", "t1", "done", OLD)])
+    monkeypatch.setattr(job_cleanup.health, "load_machines", lambda _: machines(tmp_path, "pc"))
+
+    with open(db.parent / "cleanup-claude-bot.lock", "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        code, out = cleanup(["run", "--bot", "claude-bot", "--db", str(db)], NoCalls(), capsys)
+
+    assert code == 0
+    assert out == "orch cleanup run: cleanup for claude-bot already running\n"
+    assert (root / "jobs" / "done1").exists()
+    code, out = cleanup(["run", "--bot", "claude-bot", "--db", str(db)],
+                        InProcessTransport(root), capsys)
+    assert code == 0 and not (root / "jobs" / "done1").exists(), out
+
+
+def test_cli_run_takes_backlog_or_bot_but_not_both(tmp_path: Path, capsys) -> None:
+    db = database(tmp_path, [])
+    both = job_cleanup.main(["run", "--backlog", "--bot", "claude-bot", "--db", str(db)],
+                            clock=lambda: NOW)
+    unknown = job_cleanup.main(["run", "--bot", "grok-bot", "--db", str(db)], clock=lambda: NOW)
+    assert both == 2 and unknown == 2
+
+
+def test_a_plan_without_owned_owns_every_id(tmp_path: Path) -> None:
+    plan = Plan.parse(json.dumps({"finished": ["c1"], "cutoff": NOW, "dry_run": False}))
+    assert plan.owned is None and "owned" not in json.loads(plan.to_json())
+    owned = Plan(frozenset({"c1"}), NOW, False, owned=frozenset({"c1", "c2"}))
+    assert Plan.parse(owned.to_json()) == owned
+
+    root, _ = shared_root(tmp_path)
+    jobs = root / "jobs"
+    db = database(tmp_path, SHARED_ROWS, recipients=CODEX_IDS)
+
+    outcomes = job_cleanup.run(db, fleet(tmp_path), FleetTransport(tmp_path), now=NOW,
+                               grace_hours=6, dry_run=False)
+
+    [box] = [report for target, report in outcomes if target.device == "box"]
+    assert set(box.removed) == {"c1", "c3", "x1", "x2", "x3", "x4"} and box.kept == {}
+    assert [path.name for path in jobs.iterdir()] == []
+    assert (root / "jobs-kept" / "x4" / job_leftovers.KEPT_JSON).exists()

@@ -18,7 +18,9 @@ harness detached on the device, and a `Follower` on the box:
   dropped call is never an end;
 * on a cancel (a signal, or the job ended elsewhere: `Control`), stops the
   worker on the device (SIGTERM, then SIGKILL from `KILL_AFTER_SECONDS` on)
-  and follows it until it is gone, for at most `STOP_GRACE_SECONDS`.
+  and follows it until it is gone, for at most `STOP_GRACE_SECONDS`. A
+  cancelled run ends with 128 plus the cancel's signal, whatever status
+  the device recorded for the worker it killed.
 
 It never touches the job's state: lib/placed_run.py maps the `FollowEnd`.
 """
@@ -216,11 +218,11 @@ class Follower:
                 self.offset += len(poll.data)
             if self.offset < poll.size:
                 continue
+            if poll.state in (EXITED, GONE, "none") and stopping:
+                return FollowEnd(STOPPED, 128 + (control.signum or 15))
             if poll.state == EXITED:
-                return FollowEnd(STOPPED if stopping else EXITED, poll.code)
+                return FollowEnd(EXITED, poll.code)
             if poll.state in (GONE, "none"):
-                if stopping:
-                    return FollowEnd(STOPPED, 128 + (control.signum or 15))
                 return FollowEnd(GONE, None, "worker gone without an exit status")
             if self.clock() - contact >= self.grace:
                 return FollowEnd(LOST, None, f"no certain answer for {self.grace:g} seconds")

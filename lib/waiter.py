@@ -22,7 +22,10 @@ runs as the owning bot's own user and login, starts the job itself:
   the preflight's ssh cannot reach (`preflight-unreachable`, #460) requeues
   the job at once with no round, attempt or free requeue charged, and backs
   that device off for UNREACHABLE_BACKOFF_SECONDS so the next claim goes to
-  a reachable device;
+  a reachable device. A harness login on the placed device that reads not
+  logged in (#1334) never starts the harness: it holds that account@device
+  for the doctor (lib/account_doctor.py) and requeues the job with no round,
+  attempt or free requeue charged;
 * it renders the standard brief for the job (lib/brief/), with the target
   repo's factory.md prose as additional context, read from the repo's
   trusted `factory_ref` in orch.yml (never a PR head) with `gh api` and every
@@ -32,6 +35,9 @@ runs as the owning bot's own user and login, starts the job itself:
   <command>` with the brief on stdin and its path in ORCH_JOB_BRIEF, in a new
   session (so a waiter restart never kills a job), output to run.log there;
 * it goes straight back to waiting, and reaps each `orch job run` it started;
+* on its first step and every CLEANUP_SWEEP_SECONDS after, it starts
+  `orch cleanup run --bot <bot>` (lib/job_cleanup.py) in a new session,
+  output to `<state>/cleanup.log`, never while its last pass still runs;
 * before each claim, whatever jobs it runs (#366), it brings its own box
   factory_root to the deployed box checkout's HEAD with lib/device_deploy.py's
   git steps, then its home's installed skills to that pin with the preflight's
@@ -140,7 +146,7 @@ from lib.device_pool import UNREACHABLE_BACKOFF_SECONDS, DevicePool, Placement, 
 from lib.factory_md import FactoryContext, parse_factory_context
 from lib.load import load_yaml
 from lib.machines_yml import Device, MachinesConfig, orch_host
-from lib import containers, device_deploy, job_token, stacks
+from lib import account_doctor, containers, device_deploy, job_token, leftovers, stacks
 from lib.device_monitor import remote_target
 from lib.harness_env import ApproverProfileExposed, harness_environ
 from lib.handoff_check import (
@@ -171,13 +177,13 @@ from lib.queue import (
     job_from_row,
     require_proof,
 )
-from lib.remote import CaptureTransport, SshTransport
+from lib.remote import ByteTransport, CaptureTransport, SshTransport
 from lib.scratch import remove as remove_scratch
 from lib.self_deploy import git_env, own_repo
 from lib import skill_preflight
 from lib.skill_preflight import CheckoutLagging, DeviceUnreachable, PreflightError
 from lib import device_sync
-from lib.job_state import fail_lagging, requeue_unreachable
+from lib.job_state import fail_lagging, requeue_signed_out, requeue_unreachable
 from lib.telemetry import STATE_DIR_ENV
 from lib.wait import (
     OWNING_BOTS,
@@ -221,6 +227,8 @@ STATUS_FILE = "exit"
 RUN_LOCK = "run.lock"
 HOME_RETRY_SECONDS = 60.0
 CONTAINER_SWEEP_SECONDS = 600.0
+CLEANUP_SWEEP_SECONDS = 900.0
+CLEANUP_LOG = "cleanup.log"
 UNSTARTED_CLAIM = (
     "harness = ? AND autostart_pid = ? AND runner_pid IS NULL "
     "AND worker_pid IS NULL AND COALESCE(remote_started, 0) = 0"
@@ -487,6 +495,10 @@ class GhContextSource:
         return ContextResult(context, ref, None)
 
 
+class WaiterTransport(CaptureTransport, ByteTransport, Protocol):
+    pass
+
+
 class Child(Protocol):
     pid: int
 
@@ -613,7 +625,9 @@ class Waiter:
         orch_yml: Path = FACTORY_CHECKOUT / "orch.yml",
         home: Path | None = None,
         clock: Callable[[], float] = time.monotonic,
-        transport: CaptureTransport | None = None,
+        transport: WaiterTransport | None = None,
+        sweep_cleanup: bool = False,
+        cleanup_spawn: Callable[..., Child] | None = None,
     ):
         if bot not in OWNING_BOTS:
             raise WaiterError(f"{bot!r} is not a harness bot")
@@ -647,6 +661,7 @@ class Waiter:
         self.transport = transport if transport is not None else SshTransport()
         self._containers_swept_at = clock()
         self._container_lines: set[str] = set()
+        self._leftover_tries: dict[str, dict[str, int]] = {}
         self._locked = 0
         self._recovered = False
         self._claimer = (os.getpid(), process_start(os.getpid()))
@@ -658,6 +673,10 @@ class Waiter:
         self.clock = clock
         self._home_key: tuple[object, ...] | None = None
         self._home_retry_at = 0.0
+        self.sweep_cleanup = sweep_cleanup
+        self.cleanup_spawn = cleanup_spawn if cleanup_spawn is not None else spawn
+        self._cleanup: Child | None = None
+        self._cleanup_started_at: float | None = None
 
     def running(self) -> set[str]:
         return set(self._children)
@@ -667,6 +686,7 @@ class Waiter:
         if not self._recovered:
             self._recover()
         self._reap()
+        self._sweep_job_folders()
         self._reconcile_home()
         if self._draining():
             return None
@@ -682,6 +702,38 @@ class Waiter:
             return None
         job, placement, proof = claimed
         return self._start(job, placement, proof)
+
+    def _sweep_job_folders(self) -> None:
+        if not self.sweep_cleanup:
+            return
+        log_path = self.state_dir / CLEANUP_LOG
+        if self._cleanup is not None:
+            code = self._cleanup.poll()
+            if code is None:
+                return
+            self._cleanup = None
+            self.log(f"cleanup run exited {code} ({log_path})")
+        now = self.clock()
+        if self._cleanup_started_at is not None and now - self._cleanup_started_at < CLEANUP_SWEEP_SECONDS:
+            return
+        self._cleanup_started_at = now
+        argv = [*self.orch, "cleanup", "run", "--bot", self.bot,
+                "--db", str(self.db), "--machines", str(self.machines)]
+        try:
+            self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with open(log_path, "wb", opener=_private_nofollow) as output:
+                self._cleanup = self.cleanup_spawn(
+                    argv,
+                    stdin=subprocess.DEVNULL,
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                    cwd=str(self.state_dir),
+                    start_new_session=True,
+                    close_fds=True,
+                    shell=False,
+                )
+        except OSError as exc:
+            self.log(f"cleanup run not started: {_one_line(exc)}")
 
     def _reconcile_home(self) -> None:
         if self.home is None:
@@ -840,13 +892,18 @@ class Waiter:
         factory_root = self._factory_root(device)
         if not remote:
             self._sync_checkout_to_box_head(factory_root, label)
+        placed = placement is not None and device is not None
         try:
+            account, account_home = run_account(self.pool.config, placement) if placed else (None, None)
             skill_preflight.preflight(
                 self.queue, job, bot=self.bot, placement=placement, device=device,
                 checkout=factory_root, held=self._box_held(), host=orch_host(self.pool.config),
-                account_home=run_account(self.pool.config, placement)[1]
-                if placement is not None and device is not None else None,
+                account_home=account_home,
             )
+            if placed:
+                account_doctor.check_login(
+                    self.transport, self.pool.config, device, placement.harness, account, self.environ
+                )
             job_dir = self._job_dir(job.id)
             argv = job_run_argv(
                 self.orch,
@@ -884,6 +941,9 @@ class Waiter:
             return None
         except DeviceUnreachable as exc:
             self._requeue_unreachable(job, exc, label, claim)
+            return None
+        except account_doctor.SignedOut as exc:
+            self._requeue_signed_out(job, exc, label, claim)
             return None
         except (WaiterError, BriefError, PreflightError, OSError, ValueError) as exc:
             self.log(f"{label}: not started: {_one_line(exc)}; failed it for T6")
@@ -1006,6 +1066,37 @@ class Waiter:
             return
         self.log(f"{label}: not started: {reason}; requeued, {exc.device} backed off "
                  f"for {UNREACHABLE_BACKOFF_SECONDS}s")
+
+    def _requeue_signed_out(
+        self, job: Job, exc: account_doctor.SignedOut, label: str, proof: Proof
+    ) -> None:
+        reason = str(exc)
+        claimer, _ = self._claimer
+
+        def write() -> tuple[str, str] | None:
+            with self.queue.connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                require_proof(connection, job.id, proof)
+                result = requeue_signed_out(
+                    connection, job.id, account=exc.account, device=exc.device, now=self.queue.now(),
+                    reason=reason, slot_guard=UNSTARTED_CLAIM, slot_params=(self.recipient, claimer),
+                )
+                connection.commit()
+                return result
+
+        try:
+            result = retry_locked(write)
+        except ClaimProofError:
+            result = None
+        except (QueueError, sqlite3.Error, OSError) as error:
+            self.log(f"{label}: not started: {reason}; could not record it ({_one_line(error)})")
+            self._fail(job, proof)
+            return
+        if result is None:
+            self.log(f"{label}: not started: {reason}; its claim changed, left alone")
+            return
+        self.log(f"{label}: not started: {reason}; requeued, {exc.account}@{exc.device} signed out, "
+                 "held until its login reads signed in")
 
     def _factory_root(self, device: Device | None) -> str | None:
         """The placed device's deployed factory checkout, never the job's worktree.
@@ -1165,12 +1256,12 @@ class Waiter:
         if now - self._containers_swept_at < CONTAINER_SWEEP_SECONDS:
             return
         self._containers_swept_at = now
-        runners = [(orch_host(self.pool.config), containers.local_runner(), [str(work_root(None))])]
+        runners = [(orch_host(self.pool.config), containers.local_runner(), [str(work_root(None))], None)]
         for device in self.pool.config.devices:
             target = remote_target(device, self.recipient, "containers")
             if target is not None:
                 roots = [root for harness in device.harnesses if (root := device.workdir_for(harness))]
-                runners.append((device.name, containers.remote_runner(self.transport, target), roots))
+                runners.append((device.name, containers.remote_runner(self.transport, target), roots, target))
         lines: set[str] = set()
 
         def note(line: str) -> None:
@@ -1179,12 +1270,26 @@ class Waiter:
             lines.add(line)
 
         ledger = functools.cache(lambda: self._stack_ledger(note))
-        for name, runner, roots in runners:
+        held_tags = functools.cache(lambda: self._held_tags(note))
+        for name, runner, roots, target in runners:
             for line in containers.sweep(runner, self._job_state_name, name):
                 note(line)
             for line in stacks.sweep(runner, ledger, name, roots):
                 note(line)
+            if target is not None:
+                for line in leftovers.sweep(
+                    runner, target, self._job_state_name, held_tags, self._leftover_tries.setdefault(name, {})
+                ):
+                    note(line)
         self._container_lines = lines
+
+    def _held_tags(self, note: Log) -> frozenset[str] | None:
+        try:
+            held = retry_locked(self.pool.held)
+        except (QueueError, sqlite3.Error, OSError) as exc:
+            note(f"runs kept, orch.db is unreadable ({_one_line(exc)})")
+            return None
+        return frozenset(slot.placement.worker_tag for slot in held if slot.placement.worker_tag)
 
     def _stack_ledger(self, note: Log) -> stacks.Ledger | None:
         def read() -> stacks.Ledger:
@@ -1201,7 +1306,7 @@ class Waiter:
         try:
             state = retry_locked(lambda: self._job_state(job_id))
         except (QueueError, sqlite3.Error, OSError) as exc:
-            self.log(f"job {job_id}: containers kept, its state is unreadable ({_one_line(exc)})")
+            self.log(f"job {job_id}: what it left is kept, its state is unreadable ({_one_line(exc)})")
             return "unreadable"
         return None if state is None else state[0]
 
@@ -1560,6 +1665,10 @@ def _write_private(path: Path, data: bytes) -> None:
     with os.fdopen(fd, "wb") as handle:
         handle.write(data)
     os.chmod(path, 0o600)
+
+
+def _private_nofollow(path: str, flags: int) -> int:
+    return os.open(path, flags | os.O_NOFOLLOW, 0o600)
 
 
 def _one_line(exc: BaseException) -> str:

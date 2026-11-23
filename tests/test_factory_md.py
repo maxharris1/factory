@@ -878,11 +878,116 @@ def test_ci_branches_and_local_checks_are_read_from_factory_md(tmp_path: Path) -
     assert config.ci_local_checks == ("typecheck", "Jest", "pgTAP")
 
 
+def test_ci_required_checks_default_to_none(tmp_path: Path) -> None:
+    data = copy.deepcopy(VALID)
+    data["ci"] = {"branches": ["main"]}
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert findings == []
+    assert config is not None
+    assert config.ci_required_checks == ()
+
+
+def test_ci_required_checks_parse_without_branches(tmp_path: Path) -> None:
+    data = copy.deepcopy(VALID)
+    data["ci"] = {"required_checks": ["ci-ok", "test (*)"]}
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert findings == []
+    assert config is not None
+    assert config.ci_required_checks == ("ci-ok", "test (*)")
+    assert (config.ci_branches, config.ci_local_checks) == (None, ())
+
+
+def test_ci_required_checks_parse_beside_branches(tmp_path: Path) -> None:
+    data = copy.deepcopy(VALID)
+    data["ci"] = {"branches": ["main"], "required_checks": ["ci-ok"]}
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert findings == []
+    assert config is not None
+    assert (config.ci_branches, config.ci_required_checks) == (("main",), ("ci-ok",))
+
+
+def test_feeder_and_ci_required_checks_are_set_independently(tmp_path: Path) -> None:
+    data = copy.deepcopy(VALID)
+    data["feeder"] = {"required_checks": ["test (*)"]}
+    data["ci"] = {"required_checks": ["ci-ok"]}
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert findings == []
+    assert config is not None
+    assert config.required_checks == ("test (*)",)
+    assert config.ci_required_checks == ("ci-ok",)
+
+    data["ci"] = {"branches": ["main"]}
+    feeder_only, _ = load_factory_md(write_factory(tmp_path, data))
+    assert feeder_only is not None
+    assert (feeder_only.required_checks, feeder_only.ci_required_checks) == (("test (*)",), ())
+
+    del data["feeder"]
+    data["ci"] = {"required_checks": ["ci-ok"]}
+    ci_only, _ = load_factory_md(write_factory(tmp_path, data))
+    assert ci_only is not None
+    assert (ci_only.required_checks, ci_only.ci_required_checks) == ((), ("ci-ok",))
+
+
+def test_ci_force_rerun_paths_default_to_workflows(tmp_path: Path) -> None:
+    config, findings = load_factory_md(write_factory(tmp_path, VALID))
+    assert findings == []
+    assert config is not None
+    assert config.ci_force_rerun_paths == (".github/workflows/**",)
+
+    data = copy.deepcopy(VALID)
+    data["ci"] = {"branches": ["main"]}
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert findings == []
+    assert config is not None
+    assert config.ci_force_rerun_paths == (".github/workflows/**",)
+
+
+def test_ci_force_rerun_paths_override_parses_without_branches(tmp_path: Path) -> None:
+    data = copy.deepcopy(VALID)
+    data["ci"] = {"force_rerun_paths": [".github/workflows/ci.yml", "scripts/ci/**"]}
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert findings == []
+    assert config is not None
+    assert config.ci_force_rerun_paths == (".github/workflows/ci.yml", "scripts/ci/**")
+    assert (config.ci_branches, config.ci_required_checks) == (None, ())
+
+
+def test_ci_force_rerun_paths_empty_list_turns_the_path_trigger_off(tmp_path: Path) -> None:
+    data = copy.deepcopy(VALID)
+    data["ci"] = {"branches": ["main"], "force_rerun_paths": []}
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert findings == []
+    assert config is not None
+    assert (config.ci_branches, config.ci_force_rerun_paths) == (("main",), ())
+
+
 @pytest.mark.parametrize(
     ("ci", "message"),
     [
         (["dev"], "ci must be a mapping"),
         ({"local_checks": ["Jest"]}, "ci.branches must be a non-empty list"),
+        ({}, "ci.branches must be a non-empty list"),
+        ({"required_checks": ["ci-ok"], "branches": []}, "ci.branches must be a non-empty list"),
+        ({"required_checks": "ci-ok"}, "ci.required_checks must be a list"),
+        ({"required_checks": [""]}, "ci.required_checks[0] must be a non-empty job name glob"),
+        ({"required_checks": ["  "]}, "ci.required_checks[0] must be a non-empty job name glob"),
+        ({"required_checks": [3]}, "ci.required_checks[0] must be a non-empty job name glob"),
+        ({"required_checks": ["ci-ok"], "bogus": 1}, "unknown field 'ci.bogus'"),
+        ({"force_rerun_paths": ".github/workflows/**"}, "ci.force_rerun_paths must be a list"),
+        ({"force_rerun_paths": None}, "ci.force_rerun_paths must be a list"),
+        (
+            {"force_rerun_paths": ["/etc/ci.yml"]},
+            "ci.force_rerun_paths[0] must be a repo-relative path or glob",
+        ),
+        (
+            {"force_rerun_paths": ["ok/**", "../x"]},
+            "ci.force_rerun_paths[1] must be a repo-relative path or glob",
+        ),
+        (
+            {"force_rerun_paths": [3]},
+            "ci.force_rerun_paths[0] must be a repo-relative path or glob",
+        ),
+        ({"force_rerun_paths": [], "bogus": 1}, "unknown field 'ci.bogus'"),
         ({"branches": []}, "ci.branches must be a non-empty list"),
         ({"branches": "dev"}, "ci.branches must be a non-empty list"),
         ({"branches": ["dev", "bad branch"]}, "ci.branches[1] must be a branch name"),
@@ -915,6 +1020,46 @@ def test_check_config_refuses_an_empty_ci_branch_list(tmp_path: Path) -> None:
     )
     assert result.returncode != 0
     assert "ci.branches must be a non-empty list" in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("ci", "message"),
+    [
+        (None, None),
+        ({"required_checks": ["ci-ok"]}, None),
+        ({"required_checks": "ci-ok"}, "ci.required_checks must be a list"),
+        ({"required_checks": [""]}, "ci.required_checks[0] must be a non-empty job name glob"),
+        ({"required_checks": [3]}, "ci.required_checks[0] must be a non-empty job name glob"),
+        ({"force_rerun_paths": [".github/workflows/ci.yml", "scripts/ci/**"]}, None),
+        ({"force_rerun_paths": []}, None),
+        ({"force_rerun_paths": "x"}, "ci.force_rerun_paths must be a list"),
+        (
+            {"force_rerun_paths": ["../ci.yml"]},
+            "ci.force_rerun_paths[0] must be a repo-relative path or glob",
+        ),
+        ({"force_rerun_paths": [], "rerun": True}, "unknown field 'ci.rerun'"),
+    ],
+)
+def test_check_config_reads_ci_required_checks(
+    tmp_path: Path, ci: object, message: str | None
+) -> None:
+    data = copy.deepcopy(VALID)
+    if ci is not None:
+        data["ci"] = ci
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "bin/orch"), "check-config", "--allow-placeholders",
+         "--factory", str(write_factory(tmp_path, data))],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=ROOT,
+    )
+    output = result.stdout + result.stderr
+    if message is None:
+        assert result.returncode == 0, output
+    else:
+        assert result.returncode != 0
+        assert message in output
 
 
 def test_removing_a_ci_branch_is_a_trust_change() -> None:
@@ -1214,3 +1359,116 @@ def test_check_config_refuses_an_unknown_stop_on(tmp_path: Path) -> None:
     )
     assert result.returncode != 0
     assert STOP_ON_MESSAGE in result.stdout + result.stderr
+
+
+def factory_text(rule_engine_line: str) -> str:
+    raw = yaml.safe_dump(VALID, sort_keys=False)
+    return f"---\n{raw}{rule_engine_line}---\n"
+
+
+def test_rule_engine_defaults_to_off() -> None:
+    config, findings = parse_factory_md(factory_text(""))
+    assert findings == []
+    assert config is not None
+    assert config.rule_engine == "off"
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ("rule_engine: on\n", "on"),
+        ("rule_engine: off\n", "off"),
+        ("rule_engine: 'on'\n", "on"),
+        ("rule_engine: \"off\"\n", "off"),
+    ],
+    ids=["bare-on", "bare-off", "quoted-on", "quoted-off"],
+)
+def test_rule_engine_reads_bare_and_quoted_on_off(line: str, expected: str) -> None:
+    config, findings = parse_factory_md(factory_text(line))
+    assert findings == []
+    assert config is not None
+    assert config.rule_engine == expected
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["rule_engine: 'true'\n", "rule_engine: 1\n", "rule_engine: maybe\n", "rule_engine: [on]\n"],
+    ids=["quoted-true", "one", "maybe", "list"],
+)
+def test_rule_engine_refuses_a_bad_value(line: str) -> None:
+    config, findings = parse_factory_md(factory_text(line))
+    assert config is None
+    assert [finding.message for finding in findings] == ["rule_engine must be on or off"]
+
+
+def test_a_lenient_read_of_a_bad_rule_engine_warns_and_stays_off() -> None:
+    config, findings = parse_factory_md(factory_text("rule_engine: maybe\n"), strict=False)
+    assert config is not None
+    assert config.rule_engine == "off"
+    assert [(finding.severity, finding.message) for finding in findings] == [
+        ("warning", "rule_engine must be on or off")
+    ]
+
+
+def test_check_config_refuses_a_bad_rule_engine(tmp_path: Path) -> None:
+    path = tmp_path / "factory.md"
+    path.write_text(factory_text("rule_engine: maybe\n"), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "bin" / "orch"), "check-config", "--factory", str(path)],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "rule_engine must be on or off" in result.stdout + result.stderr
+
+
+def test_flipping_rule_engine_is_a_trust_change() -> None:
+    assert trust_front_matter_changed(
+        ROOT_FACTORY_MD, _edit("rule_engine: on\n", "rule_engine: off\n")
+    ) is True
+
+
+def test_this_repo_turns_the_rule_engine_on() -> None:
+    config, findings = parse_factory_md(ROOT_FACTORY_MD)
+    assert findings == []
+    assert config is not None
+    assert config.rule_engine == "on"
+
+
+def test_human_reviewers_are_logins_and_a_trust_field(tmp_path: Path) -> None:
+    config, findings = load_factory_md(
+        write_factory(tmp_path, {**VALID, "human_reviewers": ["olivermillard", "KonstantineBiganashvili"]})
+    )
+    assert findings == []
+    assert config is not None
+    assert config.human_reviewers == ("olivermillard", "KonstantineBiganashvili")
+    absent, _ = load_factory_md(write_factory(tmp_path, VALID))
+    assert absent is not None and absent.human_reviewers == ()
+    base = _with_root_qa(ROOT_FACTORY_MD, "human_reviewers: [olivermillard]\n")
+    head = _with_root_qa(ROOT_FACTORY_MD, "human_reviewers: [olivermillard, stranger]\n")
+    assert trust_front_matter_changed(base, head) is True
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("olivermillard", "human_reviewers must be a list"),
+        (["bad login"], "human_reviewers[0] must be a GitHub login"),
+        ([7], "human_reviewers[0] must be a GitHub login"),
+        (["olivermillard", "OliverMillard"], "human_reviewers[1] is listed twice"),
+    ],
+)
+def test_human_reviewers_rejects_what_is_not_a_login_list(
+    tmp_path: Path, value: object, message: str
+) -> None:
+    path = write_factory(tmp_path, {**VALID, "human_reviewers": value})
+    assert messages(path) == [message]
+
+
+def test_the_aut0_example_names_its_human_reviewers() -> None:
+    aut0, _ = load_factory_md(ROOT / "examples/aut0/factory.md")
+    assert aut0 is not None
+    assert aut0.human_reviewers == ("olivermillard", "KonstantineBiganashvili")

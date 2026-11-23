@@ -12,6 +12,7 @@ from lib import device_sync, job_detail, lane_limit, skill_preflight
 from lib.device_memory import MEMORY_WAIT
 from lib.device_pool import (
     UNREACHABLE_BACKOFF_SECONDS,
+    account_loads,
     back_off,
     backed_off_through,
     device_lost_detail,
@@ -81,8 +82,10 @@ from lib.job_state import (
     release_link_dropped,
     requeue_lagging,
     requeue_link_drop,
+    requeue_signed_out_run,
     requeue_unstarted,
     requeue_usage_limited,
+    signout_end,
     unstarted_too_long,
     usage_limit_end,
 )
@@ -290,6 +293,32 @@ class JobsMixin:
 
         return waiting
 
+    def _account_held(self) -> Callable[[Job], bool]:
+        config = getattr(self.devices, "config", None)
+        if config is None:
+            return lambda job: False
+        with self.queue.connect() as connection:
+            loads = account_loads(connection, config, self.queue.now())
+        used = used_slots(self.queue, config)
+        blocked = placement_blocks(self.queue, config, self._head())
+        pins = self._pins()
+
+        def held(job: Job) -> bool:
+            harness = job.request.recipient
+            allowed = pins.get(job.request.repo.lower())
+            pairs = {
+                (account, device.name)
+                for device in config.devices
+                if device.takes_new(harness) and (allowed is None or device.name in allowed)
+                for account in config.accounts_on(device.name, harness)
+            }
+            return (
+                any(loads.holds(account, device) for account, device in pairs)
+                and free_slots(config, harness, used, blocked, allowed=allowed) == 0
+            )
+
+        return held
+
     def _pins(self) -> Mapping[str, frozenset[str]]:
         pool = getattr(self.devices, "pool", None)
         pins = None if pool is None else pool.pins()
@@ -382,6 +411,7 @@ class JobsMixin:
         placement = self._placement_config()
         no_free_slot = self._no_free_slot(placement)
         memory_wait = self._memory_wait(placement)
+        account_held = self._account_held()
         lag_blocked = self._lag_blocked_recipients()
         serving = self._serving()
         with self._connect() as connection:
@@ -393,7 +423,7 @@ class JobsMixin:
             paused = lane_limit.paused_through(connection, now, serving)
         backed_off = self._backed_off_through()
         for job in self.queue.outstanding():
-            if job.state == "queued" and job.request.recipient in limited:
+            if job.state == "queued" and (job.request.recipient in limited or account_held(job)):
                 self._restart_queue_wait(job, now)
                 continue
             # A queued job's last_activity_at is its queue-wait start: when
@@ -991,6 +1021,8 @@ class JobsMixin:
             return
         if not queue_owned and self._usage_limit_handled(job):
             return
+        if not queue_owned and self._signout_handled(job):
+            return
         link_drop = self._link_drop(job)
         if link_drop is not None:
             with self._connect() as connection:
@@ -1148,6 +1180,24 @@ class JobsMixin:
             connection.execute("BEGIN IMMEDIATE")
             release_link_dropped(connection, job.id)
             result = requeue_usage_limited(
+                connection, job.id, now=self.queue.now(), reason=detail
+            )
+            connection.commit()
+        if result is not None:
+            self._log_job_event(job, *result)
+        return True
+
+    def _signout_handled(self, job: Job) -> bool:
+        with self._connect() as connection:
+            detail = signout_end(connection, job.id)
+        if detail is None:
+            return False
+        if job.request.action == "review" and self._review_retry_waits(job):
+            return True
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            release_link_dropped(connection, job.id)
+            result = requeue_signed_out_run(
                 connection, job.id, now=self.queue.now(), reason=detail
             )
             connection.commit()

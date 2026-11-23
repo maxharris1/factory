@@ -214,6 +214,7 @@ class RefStatus:
     progress: Progress
     is_pull: bool = False
     detail: str = ""
+    abandoned: bool = False
 
 
 def linear_status(state_type: str | None) -> RefStatus:

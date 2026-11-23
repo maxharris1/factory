@@ -95,7 +95,7 @@ the bot's login shell is (bash on Linux, zsh on macOS).
 keeps its files in `<workdir>/jobs/<job-id>.run/<tag>/`, and the box follows
 it with `poll_script` (lib/remote_follow.py). check and stop are unchanged:
 they find the detached start by its tag or record as before; the stop of
-a cancelled run escalates to SIGKILL. #679: the box's check
+a cancelled, exited or gone run escalates to SIGKILL. #679: the box's check
 (`check_worker`) first makes the tag's run directory itself, so a launch
 that reaches the device after it starts nothing (`fenced_check_script`).
 
@@ -162,7 +162,7 @@ import shlex
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import NamedTuple, Protocol, runtime_checkable
 
 from lib.github_app_token import TOKEN_VARIABLES
 from lib.handoff_marker import MARKER_LINE_LIMIT, MARKER_PREFIX, MARKER_SEARCH_LINES, RUNNER_LOG_PREFIX
@@ -260,6 +260,8 @@ _SHA = re.compile(r"^[0-9a-f]{7,64}$")
 _BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
 _ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _TAG = re.compile(r"^[0-9a-f]{32}$")
+CGROUP_ROOT = "/sys/fs/cgroup"
+WRAPPER_KILL_ROUNDS = 30
 
 # Shell fragments shared by the scripts. NUL-separated environments are read
 # with `grep -z`; a device whose grep cannot do that cannot check a worker.
@@ -851,12 +853,24 @@ def fenced_check_script(target: RemoteTarget) -> str:
 def stop_script(target: RemoteTarget, *, kill: bool = False) -> str:
     """SIGTERM (SIGKILL with kill) each process of the run, and each tagged one's group.
 
-    With kill, every member is stopped (SIGSTOP) first, tracking again until
-    no new one appears, so none forks a process that escapes the SIGKILL.
+    With kill, the scope's cgroup.kill is written first when the scope record
+    names it (#1210), then every member is stopped (SIGSTOP), tracking again
+    until no new one appears, so none forks a process that escapes the SIGKILL.
     """
     tag = target.require_tag()
     sig = "KILL" if kill else "TERM"
     pid_file = shlex.quote(f"{target.job_dir}/{PID_FILE}")
+    scope = f"{shlex.quote(target.job_dir)}/{scope_record('$t')}"
+    cgroup_kill = (
+        f'u=; {{ read -r u < {scope}; }} 2>/dev/null; '
+        'if [ "$u" = "orch-run-$t.scope" ]; then for w in /proc/[0-9]*; do y=; '
+        '{ while read -r y; do case "$y" in 0::*) break;; esac; y=; done < "$w/cgroup"; } 2>/dev/null; '
+        f'case "$y" in 0::*/"$u") z="{CGROUP_ROOT}${{y#0::}}/cgroup.kill"; '
+        '[ ! -e "$z" ] || { echo 1 > "$z"; } 2>/dev/null; break;; esac; '
+        "done; fi; "
+        if kill
+        else ""
+    )
     halt = (
         'a=; n=1; while [ -n "$n" ]; do n=; '
         'm=$(members) || { for q in $a; do kill -CONT "$q" 2>/dev/null; done; exit 3; }; '
@@ -881,6 +895,7 @@ def stop_script(target: RemoteTarget, *, kill: bool = False) -> str:
         f"{_CAN_SCAN} || exit 3; "
         "command -v flock >/dev/null 2>&1 || exit 3; "
         f"{_members(shlex.quote(target.job_dir))}"
+        f"{cgroup_kill}"
         f"{halt}"
         f"for e in $({_TAGGED}); do "
         "q=${e#/proc/}; q=${q%/environ}; "
@@ -1004,8 +1019,17 @@ _DEADLINE = (
     'while live; do sh -c "$5"; sleep 1; done'
 )
 
-_WRITE_RESULT_PAST_STOPS = (
-    'trap "" TERM INT; '
+# #1210: the wrapper's last step. $1 the run's directory, $2 the start's
+# status, $3 and $4 the kill and check scripts, $5 the launch call's pid.
+# The launch call carries the tag, so the kill would end it: it waits for
+# that call first. TERM and INT stay ignored across the wrapper's exec.
+_FINISH = (
+    'T=$1; r=$2; K=$3; C=$4; L=$5; k=0; '
+    'while [ -n "$L" ] && kill -0 "$L" 2>/dev/null && [ "$k" -lt 100 ]; do '
+    'k=$((k + 1)); sleep 0.1 2>/dev/null || sleep 1; done; k=0; '
+    'while :; do sh -c "$K" > /dev/null 2>&1; sh -c "$C" > /dev/null 2>&1; '
+    f'[ $? -ne 0 ] && [ "$k" -lt {WRAPPER_KILL_ROUNDS} ] || break; '
+    "k=$((k + 1)); sleep 1; done; "
     f"awk {shlex.quote(HANDOFF_AWK)} "
     '"$T/log" > "$T/handoff.tmp" 2>/dev/null; mv -f -- "$T/handoff.tmp" "$T/handoff"; '
     'printf "%s\\n" "$r" > "$T/exit.tmp" && mv -f -- "$T/exit.tmp" "$T/exit"'
@@ -1014,14 +1038,14 @@ _WRITE_RESULT_PAST_STOPS = (
 # The wrapper: the run's own monitor, detached by the launch. $1 the run's
 # directory, $2 the detacher, $3 the start script, then (#199 r1) $4 the
 # budget in whole seconds (empty: none), $5 the grace, $6 and $7 the stop and
-# kill scripts, $8 the check script. It starts the start (start_script, which
-# records the worker and execs the harness) in a session of its own with
+# kill scripts, $8 the check script, $9 the launch call's pid. It starts
+# the start (start_script, which records the worker and execs the harness) in a session of its own with
 # the brief as its stdin and its output in `log`, records both pids, starts
 # its deadline (_DEADLINE) when it has a budget, waits for the start (again
 # after a SIGTERM, which it catches so the start keeps default handling),
-# then writes `handoff` and `exit`, each through a temporary file.
+# then execs into _FINISH.
 _WRAPPER = (
-    'T=$1; S=$2; x=$3; t=$ORCH_WORKER_TAG; s=; trap "s=1" TERM INT; '
+    'T=$1; S=$2; x=$3; K=$7; C=$8; L=$9; t=$ORCH_WORKER_TAG; s=; trap "s=1" TERM INT; '
     + _DETACH
     + 'detach sh -c "$x" < "$T/stdin" > "$T/log" 2>&1 & c=$!; '
     'printf "%s %s\\n" "$$" "$c" > "$T/pid.tmp" && mv -f -- "$T/pid.tmp" "$T/pid"; '
@@ -1034,7 +1058,8 @@ _WRAPPER = (
     '< /dev/null > /dev/null 2>&1 & fi; fi; '
     'while :; do s=; wait "$c"; r=$?; '
     'if [ -n "$s" ] && kill -0 "$c" 2>/dev/null; then continue; fi; break; done; '
-    + _WRITE_RESULT_PAST_STOPS
+    f'trap "" TERM INT; exec env -u {TAG_ENV} "{DEADLINE_ENV}=$t" '
+    f'sh -c {shlex.quote(_FINISH)} orch-finish "$T" "$r" "$K" "$C" "$L"'
 )
 
 
@@ -1051,6 +1076,69 @@ def run_file(target: RemoteTarget, name: str) -> str:
 def env_clear_script(target: RemoteTarget) -> str:
     """Remove the start's environment report once the box has it."""
     return _sh(f"rm -f -- {shlex.quote(run_file(target, ENV_FILE))}")
+
+
+SWEPT_FILE = "swept"
+LEFTOVER_MARK = "orch-leftover:"
+REAP_MARK = "orch-reap:"
+
+
+@dataclass(frozen=True)
+class ListedRun:
+    job_id: str
+    tag: str
+    ended: bool
+
+
+def leftovers_script(jobs_dir: str) -> str:
+    return _sh(
+        f"cd -- {shlex.quote(jobs_dir)} 2>/dev/null || exit 0; "
+        'for r in *.run/*/; do r=${r%/}; j=${r%%.run/*}; t=${r#*.run/}; '
+        '[ -d "$r" ] && [ ! -L "$r" ] && [ ! -L "$j.run" ] || continue; '
+        'case "$j" in ""|*[!A-Za-z0-9_-]*) continue;; esac; '
+        'case "$t" in *[!0-9a-f]*) continue;; esac; '
+        f'[ ${{#t}} = 32 ] && [ ! -e "$r/{SWEPT_FILE}" ] || continue; '
+        'e=1; if [ ! -e "$r/exit" ]; then p=; { read -r p < "$r/pid"; } 2>/dev/null; '
+        'for q in $p; do kill -0 "$q" 2>/dev/null && e=0; done; fi; '
+        f'echo "{LEFTOVER_MARK} $j $t $e"; done'
+    )
+
+
+class Listing(NamedTuple):
+    runs: list[ListedRun]
+    unreadable: int
+
+
+def read_leftovers(stdout: str) -> Listing:
+    runs: list[ListedRun] = []
+    unreadable = 0
+    for line in stdout.splitlines():
+        if not line.startswith(LEFTOVER_MARK):
+            continue
+        match line[len(LEFTOVER_MARK):].split():
+            case [job_id, tag, ("0" | "1") as ended] if _JOB_ID.fullmatch(job_id) and _TAG.fullmatch(tag):
+                runs.append(ListedRun(job_id, tag, ended == "1"))
+            case _:
+                unreadable += 1
+    return Listing(runs, unreadable)
+
+
+def reap_script(target: RemoteTarget) -> str:
+    check = worker_check_script(target.job_dir, target.require_tag())
+    swept = shlex.quote(run_file(target, SWEPT_FILE))
+    return _sh(
+        f"({check}); b=$?; a=-; "
+        f'if [ "$b" != 0 ]; then ({stop_script(target, kill=True)}); ({check}); a=$?; fi; '
+        f'if [ "$b" = 0 ] || [ "$a" = 0 ]; then {{ : > {swept}; }} 2>/dev/null; fi; '
+        f'echo "{REAP_MARK} $b $a"'
+    )
+
+
+def read_reap(stdout: str) -> tuple[str, str | None] | None:
+    fields = (_marked(stdout, REAP_MARK) or "").split()
+    if len(fields) != 2 or not fields[0].isdigit() or not (fields[1].isdigit() or fields[1] == "-"):
+        return None
+    return worker_state(int(fields[0])), None if fields[1] == "-" else worker_state(int(fields[1]))
 
 
 def launch_script(
@@ -1077,6 +1165,8 @@ def launch_script(
     #199 r1: with a budget (whole seconds), the device stops the run once it
     is past it (stop_script), and kills it `grace` seconds later
     (stop_script with kill), whether or not the box still follows it.
+    #1210: with or without one, once the start exits (a SIGKILL included)
+    the device kills every process the run left before it writes `exit`.
     """
     tag = target.require_tag()
     if size < 0 or not_after <= 0:
@@ -1084,10 +1174,9 @@ def launch_script(
     if (budget is not None and budget <= 0) or grace < 0:
         raise RemoteError("a launch's budget must be above 0 and its grace not below 0")
     limits = (
-        f"{budget} {grace} {shlex.quote(stop_script(target))} "
+        f"{shlex.quote('' if budget is None else str(budget))} {grace} "
+        f"{shlex.quote(stop_script(target))} "
         f"{shlex.quote(stop_script(target, kill=True))} {shlex.quote(check_script(target))}"
-        if budget is not None
-        else "''"
     )
     mark = LAUNCH_MARK
     launcher = (
@@ -1115,7 +1204,7 @@ def launch_script(
         f'|| {{ echo {START_REFUSED} > "$T/exit"; say refused current; exit 0; }}; '
         + _DETACH
         + f"detach sh -c {shlex.quote(_WRAPPER)} orch-run \"$T\" \"$S\" {shlex.quote(start)} "
-        f"{limits} < /dev/null > /dev/null 2>&1 & "
+        f"{limits} \"$$\" < /dev/null > /dev/null 2>&1 & "
         "k=0; while [ ! -e \"$T/pid\" ] && [ ! -e \"$T/exit\" ] && [ \"$k\" -lt 100 ]; do "
         "sleep 0.1 2>/dev/null || sleep 1; k=$((k+1)); done; "
         'if [ -e "$T/pid" ]; then say started; '
@@ -1192,11 +1281,18 @@ _PREFLIGHT = (
 # which cleanup reads under the lock, and moves `<job-dir>.cleanup` back to
 # `<job-dir>` when cleanup set the folder aside first. With no `flock` ($lk
 # empty) the claim runs unlocked; cleanup then leaves every folder alone.
+# `ino` compares inode numbers: `-ef` against /dev/fd/9 never matches on
+# macOS, whose devfs gives /dev/fd/9 another st_dev (#1298).
+_RELOCK = 75
 _CLAIM = (
     '{ claim() { touch -- "$d.claimed" && { [ -e "$d" ] || [ -L "$d" ] '
     '|| [ ! -d "$d.cleanup" ] || [ -L "$d.cleanup" ] || mv -- "$d.cleanup" "$d"; }; }; '
-    'mkdir -p -- "${d%/*}" && if [ -n "$lk" ]; then { "$lk" -w 600 9 && claim; } 9>>"$d.lock"; '
-    "else claim; fi; }"
+    'ino() { ls -iL -- "$1" 2>/dev/null | { read -r i _ && echo "$i"; }; }; '
+    'held() { "$lk" -w 600 9 || return 1; held_ino=$(ino /dev/fd/9); '
+    f'[ -z "$held_ino" ] || [ "$(ino "$d.lock")" = "$held_ino" ] || return {_RELOCK}; claim; }}; '
+    f'locked() {{ while {{ held; }} 9>>"$d.lock"; lr=$?; [ "$lr" -eq {_RELOCK} ]; do :; done; '
+    'return "$lr"; }; '
+    'mkdir -p -- "${d%/*}" && if [ -n "$lk" ]; then locked; else claim; fi; }'
 )
 _FLOCK_ON_START_OR_LOGIN_PATH = (
     f"command -v flock 2>/dev/null || {LOGIN_SHELL} -lc 'command -v flock | sed s/^/orch-flock:/' "

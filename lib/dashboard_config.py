@@ -27,6 +27,9 @@ dashboard:
     spool_owner: dash                  # the OS user the server runs as; only
                                        #   request files it owns are read
     approver: maxharris1               # the GitHub login whose requests apply
+    relay: /home/dash/signin-relay     # optional: the sign-in relay directory
+                                       #   (lib/signin_relay.py); without it
+                                       #   dashboard sign-in is off
 
 Without `settings`, `orch settings apply` does nothing (lib/settings_apply.py).
 The section holds no secrets. The ssh transport relies on the SSH login
@@ -61,7 +64,7 @@ DEFAULT_REMOTE_DIR = "factory-dashboard"
 EVERY_MINUTES_MAX = 1440
 
 _DASHBOARD_KEYS = {"refresh_seconds", "push", "settings"}
-_SETTINGS_KEYS = {"spool", "spool_owner", "approver"}
+_SETTINGS_KEYS = {"spool", "spool_owner", "approver", "relay"}
 OS_USER = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 GITHUB_LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 BOT_LOGINS = frozenset({"claude-bot", "codex-bot", "cursor-bot", "grok", "grok-bot"})
@@ -99,6 +102,7 @@ class SettingsConfig:
     spool: str
     spool_owner: str
     approver: str
+    relay: str | None = None
 
 
 @dataclass(frozen=True)
@@ -195,10 +199,12 @@ def _settings(value: object, findings: list[Finding]) -> SettingsConfig | None:
     spool = value.get("spool")
     owner = value.get("spool_owner")
     approver = value.get("approver")
-    for key in ("spool", "spool_owner", "approver"):
+    relay = value.get("relay")
+    for key in ("spool", "spool_owner", "approver", "relay"):
         item = value.get(key)
         if item is None:
-            findings.append(Finding("error", f"dashboard.settings.{key} is required"))
+            if key != "relay":
+                findings.append(Finding("error", f"dashboard.settings.{key} is required"))
         elif isinstance(item, str) and PLACEHOLDER in item:
             findings.append(
                 Finding("error", f"dashboard.settings.{key} is a REPLACE_WITH_ placeholder")
@@ -213,6 +219,14 @@ def _settings(value: object, findings: list[Finding]) -> SettingsConfig | None:
                 "of letters, digits, '.', '_', '-' and '/'",
             )
         )
+    if relay is not None and not valid_ssh_config(relay):
+        findings.append(
+            Finding(
+                "error",
+                "dashboard.settings.relay must be an absolute path "
+                "of letters, digits, '.', '_', '-' and '/'",
+            )
+        )
     if not isinstance(owner, str) or OS_USER.fullmatch(owner) is None:
         findings.append(Finding("error", "dashboard.settings.spool_owner must be an OS user name"))
     if not isinstance(approver, str) or GITHUB_LOGIN.fullmatch(approver) is None:
@@ -223,7 +237,7 @@ def _settings(value: object, findings: list[Finding]) -> SettingsConfig | None:
         )
     if len(findings) > start:
         return None
-    return SettingsConfig(spool=spool, spool_owner=owner, approver=approver)
+    return SettingsConfig(spool=spool, spool_owner=owner, approver=approver, relay=relay)
 
 
 def _push(value: object, findings: list[Finding]) -> PushConfig | None:
