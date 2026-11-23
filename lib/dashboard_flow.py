@@ -65,6 +65,7 @@ QUEUE_JOB_BEFORE_ROW = frozenset(
         "cap-resume",
         "handoff-reopen",
         "blocked-resume",
+        "overrule-review",
         "unsat-fix",
         "update-queued",
         "held-base-update",

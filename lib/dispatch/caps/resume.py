@@ -50,7 +50,55 @@ class ResumeMixin:
                     """,
                     (*key, comment.id),
                 )
+                row = connection.execute(
+                    "SELECT review_round, generation FROM ticket_state WHERE repo = ? AND ticket_id = ?",
+                    key,
+                ).fetchone()
+                stopped = int(row["review_round"])
+                self._enqueue_step(
+                    connection,
+                    ticket,
+                    comment,
+                    JobRequest(
+                        repo=ticket.repo,
+                        ticket_id=ticket.ticket_id,
+                        action="review",
+                        recipient=ticket.factory.reviewer_harness,
+                        source_comment_id=comment.id,
+                        timeout_seconds=ticket.job_timeout_minutes * 60,
+                        generation=int(row["generation"]),
+                        head=ticket.current_head,
+                        detail=self._job_detail(
+                            ticket,
+                            action="review",
+                            head=ticket.current_head,
+                            round_number=stopped,
+                            instruction="\n".join([_comment_link(verdict), _comment_link(comment)]),
+                            connection=connection,
+                        ),
+                    ),
+                    dedupe_key=f"t1:{_scope(ticket.repo, ticket.ticket_id)}:review:{comment.id}",
+                )
+                write_workflow_state(
+                    connection,
+                    ticket.repo,
+                    ticket.ticket_id,
+                    "review",
+                    source="overrule-review",
+                    at=self.queue.now(),
+                    also={
+                        "review_round": stopped - 1,
+                        "paused_action": None,
+                        "paused_recipient": None,
+                        "paused_head": None,
+                        "paused_generation": None,
+                        "paused_question_id": None,
+                    },
+                )
             connection.commit()
+        if replayed is None:
+            self._write_state_label(ticket, "review")
+            self._queue_qa(ticket, comment, head=ticket.current_head, review_round=stopped)
         return True, "overruled-finding"
 
     def _resume_after_cap(
