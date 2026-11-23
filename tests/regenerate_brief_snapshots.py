@@ -330,6 +330,7 @@ CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
         "evidence": ci_bundle({"31000000004": None}),
     }),
     "merge-only": ("fix", "claude", 1, HEAD, {"kind": "merge-only", "round": "1/3"}),
+    "rebase": ("fix", "claude", 1, HEAD, {"kind": "rebase", "gitBranchName": "factory/issue-42", "round": "1/3"}),
     "review": ("review", "codex", 1, HEAD, {"round": "1/3", "risk": "low"}),
     "review-qa-block": ("review", "codex", 1, HEAD, {"round": "1/3", "risk": "low", "evidence": QA_EVIDENCE}),
     "review-qa-report": ("review", "codex", 1, HEAD, {"round": "1/3", "risk": "low"}),
