@@ -307,7 +307,6 @@ def test_max_jobs_64_is_the_highest_accepted(tmp_path: Path) -> None:
         ({"field": "paused", "expect": True, "value": False}, "changed"),
         ({"value": 2}, "no-change"),
         ({"field": "paused", "expect": False, "value": "true"}, "bad-value"),
-        ({"field": "signed_in_on", "expect": ["box"], "value": ["pc"]}, "bad-field"),
         ({"field": "harness", "expect": "claude", "value": "codex"}, "bad-field"),
     ],
 )

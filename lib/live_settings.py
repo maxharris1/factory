@@ -144,7 +144,7 @@ class Live:
 
     def adopted_account_holds(self, account: str, name: str, value: object) -> bool:
         switch = self.adopted_accounts.get(account)
-        return switch is not None and name in _ACCOUNT_FIELDS and getattr(switch, name) == value
+        return name not in _ACCOUNT_FIELDS or (switch is not None and getattr(switch, name) == value)
 
     def places_by_adopted(self) -> bool:
         return self.adopted > 0 and _digest(self.switches, self.accounts) == self.adopted_digest

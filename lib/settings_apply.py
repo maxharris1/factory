@@ -70,7 +70,7 @@ from typing import TYPE_CHECKING, ClassVar, Protocol
 from lib import dashboard_push, heal, live_settings
 from lib.config_overlay import overlay_path, read_overlay
 from lib.dashboard_config import SettingsConfig, is_bot_login
-from lib.device_pool import slots_in_use
+from lib.device_pool import RunningPair, running_pairs, slots_in_use
 from lib.load import is_strict_int
 from lib.machines_yml import Device, MachinesConfig, load_machines_yml
 from lib.orch_yml import load_orch_yml
@@ -185,6 +185,8 @@ def _clip(value: object) -> object:
         return value
     if isinstance(value, str):
         return value[:CLIP]
+    if isinstance(value, list):
+        return [_clip(item) for item in value]
     return None
 
 
@@ -431,6 +433,8 @@ def _key_lines(lines: Sequence[str], block: tuple[int, int, int], key: str) -> l
 
 
 def _render(value: object) -> str:
+    if isinstance(value, list):
+        return f"[{', '.join(map(str, value))}]"
     return ("true" if value else "false") if isinstance(value, bool) else str(value)
 
 
@@ -555,10 +559,12 @@ def services(config_dir: Path, state_dir: Path) -> tuple[tuple[str, ...], tuple[
 class Held:
     running: Callable[[MachinesConfig], Mapping[str, int]]
     commit_version: Callable[[Path], int | None]
+    pairs: Callable[[MachinesConfig], list[RunningPair]]
 
 
 ClaimLock = Callable[[], AbstractContextManager[Held]]
-NO_DATABASE = Held(running=lambda config: {}, commit_version=lambda machines: None)
+NO_DATABASE = Held(running=lambda config: {}, commit_version=lambda machines: None,
+                   pairs=lambda config: [])
 
 
 def claim_lock(db: Path) -> ClaimLock:
@@ -580,7 +586,8 @@ def claim_lock(db: Path) -> ClaimLock:
                 return live.written
 
             yield Held(running=lambda config: slots_in_use(connection, config),
-                       commit_version=commit_version)
+                       commit_version=commit_version,
+                       pairs=lambda config: running_pairs(connection, config))
         finally:
             connection.close()
 
@@ -651,7 +658,7 @@ class Applier:
             from lib import account_settings
 
             new_text, previous = account_settings.plan(request, old, text, self.machines,
-                                                       self._parse)
+                                                       self._parse, held.pairs)
         else:
             new_text, previous = self._plan_device(request, old, text, held)
         if _comments(new_text) != _comments(text):
@@ -724,15 +731,25 @@ class Applier:
                  mode: int) -> str | None:
         try:
             with self.claims() as held:
+                now, _ = load_machines_yml(self.machines)
                 if request.field == "enabled" and request.value is True:
-                    now, _ = load_machines_yml(self.machines)
                     running = 0 if now is None else held.running(now).get(request.device, 0)
                     if running:
                         return f"not restored: {request.device} holds {running} running job(s)"
+                if now is not None:
+                    from lib import account_settings
+
+                    before = self._parse(old_bytes.decode("utf-8"), None)
+                    reason = account_settings.blocking_change(now.accounts, before.accounts,
+                                                              held.pairs(now))
+                    if reason is not None:
+                        return f"not restored: {reason}"
                 _replace(self.machines, old_bytes, mode)
                 held.commit_version(self.machines)
         except sqlite3.Error:
             return "not restored: cannot read running jobs"
+        except Refused as refusal:
+            return f"not restored: {refusal.error}"
         return None
 
     def _backup(self, data: bytes, mode: int) -> Path:

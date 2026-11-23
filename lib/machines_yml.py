@@ -86,7 +86,7 @@ _LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 _TOP_KEYS = {"devices", "orch_host", "accounts"}
 EXTERNAL = "external"
 ACCOUNT_HARNESSES = (*HARNESSES, EXTERNAL)
-_ACCOUNT_ID = re.compile(r"^(?!\.\.?$)[A-Za-z0-9._-]{1,64}$")
+ACCOUNT_ID = re.compile(r"^(?!\.\.?$)[A-Za-z0-9._-]{1,64}$")
 _ACCOUNT_KEYS = {"id", "harness", "plan", "label", "signed_in_on", "max_jobs", "paused"}
 ACCOUNTS_DIR = ".factory-accounts"
 _ACCOUNT_TEXT_MAX = 100
@@ -395,7 +395,7 @@ def _accounts(
             if key not in _ACCOUNT_KEYS:
                 findings.append(Finding("error", f"unknown field '{prefix}.{key}'"))
         account_id = item.get("id")
-        if not isinstance(account_id, str) or _ACCOUNT_ID.fullmatch(account_id) is None:
+        if not isinstance(account_id, str) or ACCOUNT_ID.fullmatch(account_id) is None:
             findings.append(
                 Finding(
                     "error",

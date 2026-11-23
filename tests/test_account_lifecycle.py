@@ -7,7 +7,6 @@ import pytest
 
 from lib import settings_apply
 from lib.queue import SQLiteJobQueue
-from tests import test_settings_apply
 from tests.pool_helpers import poller_adopts
 from tests.test_account_settings import MACHINES, Box, _audit_result
 
@@ -15,6 +14,7 @@ NEW_BLOCK = "  - id: fresh\n    harness: codex\n    signed_in_on: [box]\n    max
 SPARE_BLOCK = "  - id: spare\n    harness: claude\n    signed_in_on: [pc]\n    paused: true\n"
 SPARE_SHOWN = {"harness": "claude", "max_jobs": None, "paused": True, "signed_in_on": ["pc"]}
 WORK_SHOWN = {"harness": "claude", "max_jobs": 2, "paused": True, "signed_in_on": ["box"]}
+NO_ACCOUNTS = MACHINES[:MACHINES.index("accounts:\n")]
 
 
 def _base(box: Box, text: str) -> None:
@@ -66,56 +66,69 @@ def test_add_appends_one_block_after_the_last_account(tmp_path: Path) -> None:
 
 def test_add_creates_the_accounts_block_at_eof_when_absent(tmp_path: Path) -> None:
     box = Box(tmp_path)
-    _base(box, test_settings_apply.MACHINES)
+    _base(box, NO_ACCOUNTS)
     _add(box)
 
     (entry,) = box.run()
 
     _applied_once(box, entry, "add")
-    assert box.machines.read_text() == test_settings_apply.MACHINES + "accounts:\n" + NEW_BLOCK
+    assert box.machines.read_text() == NO_ACCOUNTS + "accounts:\n" + NEW_BLOCK
 
 
 def test_add_to_a_file_without_a_final_newline_keeps_every_line(tmp_path: Path) -> None:
     box = Box(tmp_path)
-    _base(box, test_settings_apply.MACHINES.rstrip("\n"))
+    _base(box, NO_ACCOUNTS.rstrip("\n"))
     _add(box)
 
     (entry,) = box.run()
 
     assert entry.result == "pending", entry
-    assert box.machines.read_text() == test_settings_apply.MACHINES + "accounts:\n" + NEW_BLOCK
+    assert box.machines.read_text() == NO_ACCOUNTS + "accounts:\n" + NEW_BLOCK
 
 
 def test_add_replaces_an_empty_accounts_list_keeping_its_comment(tmp_path: Path) -> None:
     box = Box(tmp_path)
-    _base(box, test_settings_apply.MACHINES + "accounts: []  # none yet\n")
+    _base(box, NO_ACCOUNTS + "accounts: []  # none yet\n")
     _add(box)
 
     (entry,) = box.run()
 
     assert entry.result == "pending", entry
     assert box.machines.read_text() == (
-        test_settings_apply.MACHINES + "accounts:  # none yet\n" + NEW_BLOCK)
+        NO_ACCOUNTS + "accounts:  # none yet\n" + NEW_BLOCK)
 
 
-def test_add_without_a_cap_or_devices_writes_only_id_and_harness(tmp_path: Path) -> None:
+def test_add_without_a_cap_writes_no_max_jobs_line(tmp_path: Path) -> None:
+    box = Box(tmp_path)
+    _add(box, account="solo", harness="claude", max_jobs=None, signed_in_on=("pc",))
+
+    (entry,) = box.run()
+
+    assert entry.result == "pending", entry
+    assert box.machines.read_text() == (
+        MACHINES + "  - id: solo\n    harness: claude\n    signed_in_on: [pc]\n")
+
+
+def test_add_signed_in_nowhere_is_refused_by_the_schema(tmp_path: Path) -> None:
     box = Box(tmp_path)
     _add(box, account="solo", harness="claude", max_jobs=None, signed_in_on=())
 
     (entry,) = box.run()
 
-    assert entry.result == "pending", entry
-    assert box.machines.read_text() == MACHINES + "  - id: solo\n    harness: claude\n"
+    assert entry.result == "refused", entry
+    assert entry.error.startswith("invalid after the edit: "), entry
+    box.unchanged()
 
 
 def test_add_quotes_an_id_yaml_would_read_as_another_type(tmp_path: Path) -> None:
     box = Box(tmp_path)
-    _add(box, account="1e3", harness="claude", max_jobs=None, signed_in_on=())
+    _add(box, account="1e3", harness="claude", max_jobs=None, signed_in_on=("pc",))
 
     (entry,) = box.run()
 
     assert entry.result == "pending", entry
-    assert box.machines.read_text() == MACHINES + '  - id: "1e3"\n    harness: claude\n'
+    assert box.machines.read_text() == (
+        MACHINES + '  - id: "1e3"\n    harness: claude\n    signed_in_on: [pc]\n')
 
 
 @pytest.mark.parametrize(
@@ -175,15 +188,15 @@ def test_expect_matches_signed_in_on_in_any_order(tmp_path: Path) -> None:
     assert "    signed_in_on: [pc]\n" in box.machines.read_text()
 
 
-def test_emptying_signed_in_on_writes_an_empty_list(tmp_path: Path) -> None:
+def test_emptying_signed_in_on_is_refused_by_the_schema(tmp_path: Path) -> None:
     box = Box(tmp_path)
     _devices(box, value=())
 
     (entry,) = box.run()
 
-    assert entry.result == "pending", entry
-    assert box.machines.read_text() == MACHINES.replace(
-        "    signed_in_on: [box]\n", "    signed_in_on: []\n")
+    assert entry.result == "refused", entry
+    assert entry.error.startswith("invalid after the edit: "), entry
+    box.unchanged()
 
 
 @pytest.mark.parametrize(
@@ -245,13 +258,13 @@ def test_removing_keeps_the_blocks_comments_as_comment_lines(tmp_path: Path) -> 
 
 def test_removing_the_last_account_writes_an_empty_list(tmp_path: Path) -> None:
     box = Box(tmp_path)
-    _base(box, test_settings_apply.MACHINES + "accounts:  # seats\n" + SPARE_BLOCK)
+    _base(box, NO_ACCOUNTS + "accounts:  # seats\n" + SPARE_BLOCK)
     _remove(box)
 
     (entry,) = box.run()
 
     assert entry.result == "pending", entry
-    assert box.machines.read_text() == test_settings_apply.MACHINES + "accounts: []  # seats\n"
+    assert box.machines.read_text() == NO_ACCOUNTS + "accounts: []  # seats\n"
 
 
 @pytest.mark.parametrize(

@@ -79,7 +79,8 @@ def holding(running: dict[str, int]):
     @contextmanager
     def lock():
         yield settings_apply.Held(running=lambda config: running,
-                                  commit_version=lambda machines: None)
+                                  commit_version=lambda machines: None,
+                                  pairs=lambda config: [])
 
     return lock
 
