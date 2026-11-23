@@ -691,9 +691,7 @@ MaxGoAfterBlocked ==
   /\ counts' = [counts EXCEPT !.deaths = 0]
   /\ QaFollowsHead
 
-\* #1420. An approver's go that names Overrule the finding at a capped or
-\* stalled stop queues one review of the head at the stopped round. The round
-\* steps back one so the re-review lands on it, and the cap does not move.
+\* #1420. The round steps back one so the re-review counts the stopped round.
 ApproverOverrule ==
   /\ state = "capped"
   /\ counts.round >= 1

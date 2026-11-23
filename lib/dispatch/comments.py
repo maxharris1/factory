@@ -388,9 +388,7 @@ class CommentsMixin:
         Codex PR #82 r2 F2.3: only an earlier verdict whose recorded outcome
         is in ACTED_VERDICT_OUTCOMES counts. A rejected (wrong role or
         author), stale, refused or failed one took no action, so it never
-        suppresses a later verdict, such as its corrected repost. Nor does
-        one an approver's overrule released: its re-review reruns that round
-        at the same head (#1420).
+        suppresses a later verdict, such as its corrected repost.
         """
         head = fields.get("head") or ""
         for earlier in comments:
@@ -410,12 +408,12 @@ class CommentsMixin:
                 and other.get("round") == fields.get("round")
                 and _matching_head(other.get("head") or "", head) is not None
                 and _acted_verdict(self._handled_outcome(ticket, earlier.id))
-                and not self._overruled(ticket, earlier.id)
+                and not self._released_by_overrule(ticket, earlier.id)
             ):
                 return True
         return False
 
-    def _overruled(self, ticket: TrackedTicket, verdict_id: str) -> bool:
+    def _released_by_overrule(self, ticket: TrackedTicket, verdict_id: str) -> bool:
         with self._connect() as connection:
             return (
                 connection.execute(
