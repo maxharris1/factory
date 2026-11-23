@@ -491,6 +491,7 @@ def heal(
     sleep: Callable[[float], None] = time.sleep,
 ) -> list[Action]:
     """One self-heal pass: observe, decide, act, log, save."""
+    begun = clock()
     log_path = state_dir / LOG_NAME
 
     def log(line: str) -> None:
@@ -539,7 +540,7 @@ def heal(
             if action.service == POLLER_SERVICE:
                 env["ORCH_POLL_STOP_WAIT"] = POLLER_STOP_WAIT
             fenced = action.service == SIGNIN_BROKER_SERVICE and action.state != health.DOWN
-            with _signin_fence(facts.db, now) if fenced else nullcontext(True) as admitted:
+            with _signin_fence(facts.db, now + clock() - begun) if fenced else nullcontext(True) as admitted:
                 if not admitted:
                     actions[index] = replace(action, kind=DEFER, reason=SIGNIN_HELD)
                     note(actions[index], key)
