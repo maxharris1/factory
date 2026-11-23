@@ -171,7 +171,7 @@ expect_clean() {
   fi
 }
 
-echo "1/9 phase 1 model (T9 off)"
+echo "1/11 phase 1 model (T9 off)"
 run_statechart "$root/model/Orchestrator.cfg"
 expect_clean "phase 1" 0
 grep -q '^## Rules that hold$' "$RUN_OUT/report.md" || fail "phase 1 report has no holding rules"
@@ -186,11 +186,14 @@ grep -q 'RebaseDecided' "$RUN_OUT/report.md" || fail "phase 1 report did not che
 grep -q 'RebaseSpendsNoRound' "$RUN_OUT/report.md" || fail "phase 1 report did not check RebaseSpendsNoRound"
 grep -q 'RebaseKeepsExtra' "$RUN_OUT/report.md" || fail "phase 1 report did not check RebaseKeepsExtra"
 grep -q 'RebaseReviewsAtR' "$RUN_OUT/report.md" || fail "phase 1 report did not check RebaseReviewsAtR"
+for rule in NoShipIntoParent StackHeldStartsNoJob; do
+  grep -q "$rule" "$RUN_OUT/report.md" || fail "phase 1 report did not check $rule"
+done
 if grep -q ' breaks$' "$RUN_OUT/report.md"; then
   fail "phase 1 report contains a broken rule"
 fi
 
-echo "2/9 model with T9 enabled"
+echo "2/11 model with T9 enabled"
 run_statechart "$root/model/OrchestratorAll.cfg"
 expect_clean "T9-enabled" 0
 grep -q 'T9Decided' "$RUN_OUT/report.md" || fail "T9-enabled report did not check T9Decided"
@@ -198,11 +201,14 @@ grep -q 'RebaseDecided' "$RUN_OUT/report.md" || fail "T9-enabled report did not 
 grep -q 'RebaseSpendsNoRound' "$RUN_OUT/report.md" || fail "T9-enabled report did not check RebaseSpendsNoRound"
 grep -q 'RebaseKeepsExtra' "$RUN_OUT/report.md" || fail "T9-enabled report did not check RebaseKeepsExtra"
 grep -q 'RebaseReviewsAtR' "$RUN_OUT/report.md" || fail "T9-enabled report did not check RebaseReviewsAtR"
+for rule in NoShipIntoParent StackHeldStartsNoJob; do
+  grep -q "$rule" "$RUN_OUT/report.md" || fail "T9-enabled report did not check $rule"
+done
 if grep -q ' breaks$' "$RUN_OUT/report.md"; then
   fail "T9-enabled report contains a broken rule"
 fi
 
-echo "3/9 phase 1 chart"
+echo "3/11 phase 1 chart"
 run_statechart "$root/model/chart.cfg"
 expect_clean "phase 1 chart" 0
 got=$(state_labels "$RUN_OUT/chart.mmd")
@@ -213,7 +219,7 @@ if state_labels "$RUN_OUT/chart.mmd" | grep -qx 'post-merge'; then
 fi
 grep -q 'kind=go' "$RUN_OUT/chart.mmd" || fail "phase 1 chart has no kind=go handoff"
 
-echo "4/9 section 4.1 chart"
+echo "4/11 section 4.1 chart"
 run_statechart "$root/model/chart-all.cfg"
 expect_clean "section 4.1 chart" 0
 got=$(state_labels "$RUN_OUT/chart.mmd")
@@ -230,29 +236,39 @@ drawn=$(mktemp)
 add_ci_red_self_loops "$RUN_OUT/chart.mmd" >"$drawn"
 diff -u "$root/model/chart.mmd" "$drawn" || fail "model/chart.mmd is not the section 4.1 chart"
 
-echo "5/9 fixture omitting T1"
+echo "5/11 fixture omitting T1"
 run_statechart "$root/model/fixtures/omit-t1.cfg"
 expect_clean "omit-t1" 1
 expect_break "omit-t1" T1KindGo questions
 
-echo "6/9 fixture omitting T1P"
+echo "6/11 fixture omitting T1P"
 run_statechart "$root/model/fixtures/omit-t1p.cfg"
 expect_clean "omit-t1p" 1
 expect_break "omit-t1p" T1PDecided planning
 
-echo "7/9 fixture dropping the covered guard on ship = merge"
+echo "7/11 fixture dropping the covered guard on ship = merge"
 run_statechart "$root/model/fixtures/omit-ship-guard.cfg"
 expect_clean "omit-ship-guard" 1
 expect_break "omit-ship-guard" ShipPinnedToCoveredHead merged
 
-echo "8/9 fixture dropping the QA guard on ship = merge"
+echo "8/11 fixture dropping the QA guard on ship = merge"
 run_statechart "$root/model/fixtures/omit-qa-guard.cfg"
 expect_clean "omit-qa-guard" 1
 expect_break "omit-qa-guard" ShipNeedsCoveredQa merged
 
-echo "9/9 fixture omitting TRB"
+echo "9/11 fixture omitting TRB"
 run_statechart "$root/model/fixtures/omit-trb.cfg"
 expect_clean "omit-trb" 1
 expect_break "omit-trb" RebaseDecided review
+
+echo "10/11 fixture dropping the stacked guard on ship = merge"
+run_statechart "$root/model/fixtures/omit-stack-guard.cfg"
+expect_clean "omit-stack-guard" 1
+expect_break "omit-stack-guard" NoShipIntoParent merged
+
+echo "11/11 fixture letting a held stacked child start a job"
+run_statechart "$root/model/fixtures/omit-hold-guard.cfg"
+expect_clean "omit-hold-guard" 1
+expect_break "omit-hold-guard" StackHeldStartsNoJob ship
 
 echo "statechart ok"

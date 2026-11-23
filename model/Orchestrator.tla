@@ -73,7 +73,7 @@ LinearFrom == HandoffFrom \cup {
   "handed-off-externally"
 }
 
-Guards == {"ShipGuard", "QaGuard"}
+Guards == {"ShipGuard", "QaGuard", "StackGuard", "HoldGuard"}
 
 QaRuns == {"none", "running", "pass", "fail", "env-failed", "not-required"}
 
@@ -87,7 +87,8 @@ TypeOK ==
   /\ configOk \in BOOLEAN
   /\ flags \in [
        covered: BOOLEAN, planOk: BOOLEAN, questionsDone: BOOLEAN, byHand: BOOLEAN,
-       reopenHold: BOOLEAN, rebase: {"none", "capped", "other", "review"}
+       reopenHold: BOOLEAN, rebase: {"none", "capped", "other", "review"},
+       stack: {"none", "parent", "held"}
      ]
   /\ external \in {"none"} \cup HandoffFrom
   /\ counts \in [
@@ -107,9 +108,10 @@ Init ==
   /\ paused = "none"
   /\ cap = 0
   /\ configOk \in BOOLEAN
-  /\ flags = [
-       covered |-> FALSE, planOk |-> FALSE, questionsDone |-> FALSE,
-       byHand |-> FALSE, reopenHold |-> FALSE, rebase |-> "none"
+  /\ flags \in [
+       covered: {FALSE}, planOk: {FALSE}, questionsDone: {FALSE},
+       byHand: {FALSE}, reopenHold: {FALSE}, rebase: {"none"},
+       stack: {"none", "parent"}
      ]
   /\ counts = [
        round |-> 0, acUnmet |-> 0, gate |-> 0,
@@ -304,6 +306,8 @@ T1PPlanAutoSplit ==
   /\ counts' = [counts EXCEPT !.deaths = 0]
   /\ QaFollowsHead
 
+Unheld == flags.stack # "held" \/ "HoldGuard" \in Omit
+
 keep ==
   cap' = cap /\ configOk' = configOk /\ paused' = "none" /\ external' = external
 
@@ -458,6 +462,7 @@ T4ApproveCiRed ==
 T4PatchDiffers ==
   /\ "T4" \notin Omit
   /\ state = "ship"
+  /\ Unheld
   /\ state' = "review"
   /\ keep
   /\ flags' = [flags EXCEPT !.covered = FALSE]
@@ -469,6 +474,7 @@ T4ShipMerge ==
   /\ state = "ship"
   /\ flags.covered \/ "ShipGuard" \in Omit
   /\ QaCovers \/ "QaGuard" \in Omit
+  /\ flags.stack = "none" \/ "StackGuard" \in Omit
   /\ state' = "merged"
   /\ keep
   /\ flags' = flags
@@ -480,6 +486,7 @@ T4ShipHandoff ==
   /\ state = "ship"
   /\ flags.covered
   /\ QaCovers
+  /\ flags.stack = "none"
   /\ state' = "handed-off"
   /\ keep
   /\ flags' = flags
@@ -493,6 +500,7 @@ T4ShipQueue ==
   /\ state = "ship"
   /\ flags.covered
   /\ QaCovers
+  /\ flags.stack = "none"
   /\ state' = "merge-queue"
   /\ keep
   /\ flags' = flags
@@ -504,6 +512,7 @@ T4ShipAfter ==
   /\ state = "ship"
   /\ flags.covered
   /\ QaCovers
+  /\ flags.stack = "none"
   /\ state' = "waiting-external"
   /\ keep
   /\ flags' = flags
@@ -532,6 +541,7 @@ T4Hold ==
   /\ state = "ship"
   /\ flags.covered
   /\ QaCovers
+  /\ flags.stack = "none"
   /\ state' = "awaiting-ok"
   /\ keep
   /\ flags' = flags
@@ -768,6 +778,13 @@ RebaseReady ==
   /\ counts' = [counts EXCEPT !.gate = 0, !.deaths = 0, !.round = RebaseRound]
   /\ QaFollowsHead
 
+StackWaits == state = "ship" /\ flags.covered /\ flags.stack = "parent"
+
+StackHold ==
+  /\ StackWaits
+  /\ flags' = [flags EXCEPT !.stack = "held"]
+  /\ UNCHANGED <<state, paused, cap, configOk, counts, external, qa>>
+
 \* #108. The poll sees the PR merged, by the factory or by hand: merged, with
 \* stuck, paused and every counter that marks stuck cleared.
 MergeObserved ==
@@ -777,7 +794,7 @@ MergeObserved ==
   /\ keep
   /\ flags' = [flags EXCEPT !.byHand = ~flags.covered \/ ~QaCovers \/ state \notin
        {"ship", "awaiting-ok", "waiting-external", "handed-off", "merge-queue",
-        "updating"}, !.reopenHold = FALSE, !.rebase = "none"]
+        "updating"} \/ flags.stack # "none", !.reopenHold = FALSE, !.rebase = "none"]
   /\ counts' = [counts EXCEPT !.gate = 0, !.deaths = 0, !.declines = 0,
        !.planGaps = 0, !.updates = 0]
   /\ QaFollowsHead
@@ -879,6 +896,7 @@ UpdateStuck ==
 
 QaRunsHere ==
   /\ state = "ship"
+  /\ Unheld
   /\ qa.gate
   /\ flags.covered
 
@@ -1007,6 +1025,7 @@ Factory ==
   \/ QueueGoPlan \/ QueueGoBuild
   \/ UpdateTrivial \/ UpdateNonTrivial \/ UpdateRetry \/ UpdateStuck
   \/ RebaseQueued \/ RebaseReady
+  \/ StackHold
   \/ QaStart \/ QaPass \/ QaFail \/ QaNotRequired \/ QaEnvFail \/ QaEnvFailPark
   \/ End
 
@@ -1098,8 +1117,8 @@ T3Decided ==
 T4Decided ==
   /\ state = "review" => ENABLED T4Approve
   /\ state = "review" /\ counts.gate < 2 => ENABLED T4ApproveCiRed
-  /\ state = "ship" => ENABLED T4PatchDiffers
-  /\ state = "ship" /\ flags.covered /\ QaCovers =>
+  /\ state = "ship" /\ flags.stack # "held" => ENABLED T4PatchDiffers
+  /\ state = "ship" /\ flags.covered /\ QaCovers /\ flags.stack = "none" =>
        ENABLED T4ShipMerge /\ ENABLED T4ShipHandoff /\ ENABLED T4ShipAfter
          /\ ENABLED T4Hold /\ ENABLED T4ShipQueue
   /\ state = "awaiting-ok" => ENABLED T4HoldPatchDiffers
@@ -1107,7 +1126,7 @@ T4Decided ==
        ENABLED T4HoldOk /\ ENABLED T4HoldOkQueue /\ ENABLED T4HoldOkHandoff
 
 QaDecided ==
-  /\ state = "ship" /\ qa.gate /\ flags.covered =>
+  /\ state = "ship" /\ qa.gate /\ flags.covered /\ flags.stack # "held" =>
        /\ qa.run = "none" => ENABLED QaStart /\ ENABLED QaNotRequired
        /\ qa.run = "running" => ENABLED QaPass /\ ENABLED QaFail
        /\ qa.run = "running" /\ qa.envFails = 0 => ENABLED QaEnvFail
@@ -1173,6 +1192,14 @@ RebaseReviewsAtR ==
 
 ReopenHoldOnlyAtWork ==
   flags.reopenHold => state \in HandoffFrom
+
+NoShipIntoParent ==
+  state \in Covered /\ flags.stack # "none" => flags.byHand
+
+StartsJob == state' \in JobStates \/ (qa.run # "running" /\ qa'.run = "running")
+
+StackHeldStartsNoJob ==
+  flags.stack = "held" => ~ENABLED (Factory /\ StartsJob)
 
 \* #130. A ticket in merge-queue can always leave it: merged, abandoned,
 \* updating, or back to work on a go or a ready. An update can always end:
@@ -1250,6 +1277,7 @@ ChartSlice ==
   /\ ~flags.reopenHold \/ (state = "fixing" /\ counts.gate = 0 /\ counts.deaths = 0)
   /\ cap \in {0, 3}
   /\ counts.deaths = 0 \/ counts.gate = 0
+  /\ flags.stack = "none" \/ state \in {"intake", "questions", "building", "review", "ship"}
   /\ \/ ~flags.planOk
      \/ /\ counts.round = 0
         /\ counts.declines = 0
