@@ -385,11 +385,25 @@ def work(flow: AppFlow) -> dict[str, int]:
     }
 
 
-def assert_overruled(flow: AppFlow, comment_id: str, before: dict[str, int], state: str) -> None:
-    assert flow.post(comment_id, OVERRULE, MAX) == "overruled-finding"
+def review_detail(flow: AppFlow, source: str) -> dict:
+    with flow.queue.connect() as connection:
+        [row] = connection.execute(
+            "SELECT id, detail FROM jobs WHERE action = 'review' AND source_comment_id = ?", (source,)
+        ).fetchall()
+        return json.loads(job_detail.load_row(connection, row["id"], row["detail"]))
+
+
+def assert_rereviewed(flow: AppFlow, before: dict[str, int], stopped: int, body: str = OVERRULE) -> None:
+    assert flow.post("go-overrule", body, MAX) == "overruled-finding"
     flow.dispatcher.process(flow.snapshot())
-    assert work(flow) == before
-    assert flow.state()["workflow_state"] == state
+    assert work(flow) == {**before, "review": before["review"] + 1, "review_round": stopped - 1}
+    row = flow.state()
+    assert row["workflow_state"] == "review"
+    assert row["paused_question_id"] is None
+    detail = review_detail(flow, "go-overrule")
+    assert detail["round"].startswith(f"{stopped}/")
+    assert any(decision["choice"].startswith("Overrule the finding: f-1") for decision in detail["decisions"])
+    assert "Overrule the finding: f-1" in decided_section(detail, reviewer=True)
 
 
 def low_risk_extra_round_used(tmp_path: Path) -> AppFlow:
@@ -412,27 +426,45 @@ def low_risk_extra_round_used(tmp_path: Path) -> AppFlow:
     return flow
 
 
-def test_an_overrule_go_after_the_first_extra_round_queues_no_fix(tmp_path: Path) -> None:
+def test_an_overrule_go_after_the_first_extra_round_queues_a_same_round_review(tmp_path: Path) -> None:
     flow = low_risk_extra_round_used(tmp_path)
     before = work(flow)
-    assert before["fix"] == 1
+    assert (before["fix"], before["cap_extra"]) == (1, 1)
 
-    assert_overruled(flow, "go-overrule", before, flow.state()["workflow_state"])
+    assert_rereviewed(flow, before, stopped=2)
 
 
-def test_an_overrule_go_on_a_repeat_park_queues_no_fix(tmp_path: Path) -> None:
+def test_an_overrule_go_on_a_repeat_park_queues_a_same_round_review(tmp_path: Path) -> None:
     flow = repeat_stop(tmp_path)
     before = work(flow)
 
-    assert_overruled(flow, "go-overrule", before, "waiting-max")
-    assert flow.state()["paused_question_id"] == "revise-2"
+    assert_rereviewed(flow, before, stopped=2)
 
 
-def test_an_overrule_go_on_a_capped_stop_queues_no_fix(tmp_path: Path) -> None:
+def test_an_overrule_go_on_a_capped_stop_queues_a_same_round_review(tmp_path: Path) -> None:
     flow = capped_stop(tmp_path)
     before = work(flow)
 
-    assert_overruled(flow, "go-overrule", before, "capped")
+    assert_rereviewed(flow, before, stopped=3)
+
+
+def test_an_overrule_go_on_a_stalled_stop_queues_a_same_round_review(tmp_path: Path) -> None:
+    flow = stalled_stop(tmp_path)
+    before = work(flow)
+
+    assert_rereviewed(flow, before, stopped=3)
+
+
+def test_the_overrule_review_runs_at_the_current_head(tmp_path: Path) -> None:
+    flow = repeat_stop(tmp_path)
+
+    assert flow.post("go-overrule", OVERRULE, MAX) == "overruled-finding"
+
+    with flow.queue.connect() as connection:
+        [row] = connection.execute(
+            "SELECT head FROM jobs WHERE action = 'review' AND source_comment_id = 'go-overrule'"
+        ).fetchall()
+    assert row["head"] == flow.head
 
 
 def test_an_overrule_go_records_its_decision(tmp_path: Path) -> None:
@@ -448,34 +480,50 @@ def test_an_overrule_go_records_its_decision(tmp_path: Path) -> None:
     assert (decision["question_id"], decision["answer_id"]) == ("revise-2", "go-overrule")
 
 
-def test_a_replayed_overrule_records_one_decision_and_queues_nothing(tmp_path: Path) -> None:
+def test_a_replayed_overrule_queues_one_review(tmp_path: Path) -> None:
     flow = capped_stop(tmp_path)
     before = work(flow)
 
-    assert_overruled(flow, "go-overrule", before, "capped")
+    assert_rereviewed(flow, before, stopped=3)
     flow.dispatcher.process(flow.snapshot())
 
-    assert work(flow) == before
+    assert work(flow) == {**before, "review": before["review"] + 1, "review_round": 2}
     assert [decision["answer_id"] for decision in decisions(flow)] == ["go-overrule"]
 
 
-def test_a_later_fix_quotes_the_overrule(tmp_path: Path) -> None:
-    flow = capped_stop(tmp_path)
-    assert flow.post("go-overrule", OVERRULE, MAX) == "overruled-finding"
-
-    assert flow.post("go-max", "/go\nAnother round.", MAX) == "queued-fix"
-
-    detail = fix_detail(flow, "go-max")
-    assert any(decision["choice"].startswith("Overrule the finding: f-1") for decision in detail["decisions"])
-    assert "Overrule the finding: f-1" in decided_section(detail, reviewer=True)
-
-
-def test_another_round_after_an_overrule_still_resumes_a_repeat_park(tmp_path: Path) -> None:
+def test_another_round_after_an_overrule_has_nothing_to_release(tmp_path: Path) -> None:
     flow = repeat_stop(tmp_path)
     assert flow.post("go-overrule", OVERRULE, MAX) == "overruled-finding"
 
-    assert flow.post("go-max", "/go\nAnother round.", MAX) == "resumed-fix"
-    assert flow.state()["workflow_state"] != "waiting-max"
+    assert flow.post("go-max", "/go\nAnother round.", MAX) == "slash-go-no-target"
+    assert flow.state()["workflow_state"] == "review"
+
+
+@pytest.mark.parametrize(
+    ("make", "round_text", "outcome"),
+    [(repeat_stop, "2/3", "queued-review-fix"), (capped_stop, "3/3", "capped-review")],
+    ids=["repeat", "capped"],
+)
+def test_a_same_head_revise_after_an_overrule_is_not_a_duplicate(
+    tmp_path: Path, make, round_text: str, outcome: str
+) -> None:
+    flow = make(tmp_path)
+    assert flow.post("go-overrule", OVERRULE, MAX) == "overruled-finding"
+    flow.finish("codex")
+
+    assert revise(flow, round_text, "revise-again", body="- [blocking] f-9: the docs are missing.\n") == outcome
+
+
+def test_an_approve_after_an_overrule_counts_the_stopped_round(tmp_path: Path) -> None:
+    flow = capped_stop(tmp_path)
+    assert flow.post("go-overrule", OVERRULE, MAX) == "overruled-finding"
+    flow.finish("codex")
+
+    approve = VERDICT.format(round="3/3", head=flow.head, verdict="APPROVE", risk="high")
+
+    assert flow.post("approve-3", approve, "codex-login") != "rejected-over-cap"
+    assert flow.state()["review_round"] == 3
+    assert flow.state()["cap_extra"] == 0
 
 
 def test_an_overrule_from_a_login_that_may_not_lift_the_cap_changes_nothing(tmp_path: Path) -> None:
@@ -507,20 +555,15 @@ def max_quoted_overrule() -> str:
 
 
 @pytest.mark.parametrize(
-    ("make", "state"),
-    [(repeat_stop, "waiting-max"), (capped_stop, "capped"), (low_risk_extra_round_used, None)],
+    ("make", "stopped"),
+    [(repeat_stop, 2), (capped_stop, 3), (low_risk_extra_round_used, 2)],
     ids=["repeat", "capped", "low-risk-extra-used"],
 )
-def test_an_overrule_answer_quoted_under_maxs_words_queues_no_fix(tmp_path: Path, make, state: str | None) -> None:
+def test_an_overrule_answer_quoted_under_maxs_words_queues_a_review(tmp_path: Path, make, stopped: int) -> None:
     flow = make(tmp_path)
     before = work(flow)
     earlier = decisions(flow)
-    state = state or flow.state()["workflow_state"]
 
-    assert flow.post("go-overrule", max_quoted_overrule(), MAX) == "overruled-finding"
-    flow.dispatcher.process(flow.snapshot())
-
-    assert work(flow) == before
-    assert flow.state()["workflow_state"] == state
+    assert_rereviewed(flow, before, stopped, body=max_quoted_overrule())
     [decision] = decisions(flow)[len(earlier):]
-    assert decision["choice"] == "Overrule the finding: f-1. Prose in flags is accepted."
+    assert decision["choice"].startswith("Overrule the finding: f-1")
