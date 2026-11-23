@@ -70,7 +70,7 @@ stateDiagram-v2
   s12 --> s16: approver's building go within the cap, reopen or trusted kind=rebase, rebase-only fix or approver's go at the cap, one more round
   s12 --> s10: trusted ready at a new head, within the effective cap
   s13 --> s7: post-merge fails, follow-up filed or post-merge passes
-  s14 --> s10: head changed and the patch differs
+  s14 --> s10: head changed and the patch differs or parent merged, retarget rebase, one scoped review
   s14 --> s17: ship = merge or handoff and the PR is held, QA covers the head
   s14 --> s12: ship = handoff, QA covers the head
   s14 --> s18: APPROVE, finish_line merge, QA covers the head

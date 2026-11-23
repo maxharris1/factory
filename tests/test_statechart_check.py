@@ -141,19 +141,27 @@ case $cfg in
   omit-trb.cfg) {trb} ;;
   omit-stack-guard.cfg) {omit_stack_guard} ;;
   omit-hold-guard.cfg) {omit_hold_guard} ;;
+  omit-tst.cfg) {omit_tst} ;;
+  omit-stack-round.cfg) {omit_stack_round} ;;
 esac
 exit 0
 """
 
 QA_GUARD_BREAKS = "breaks ShipNeedsCoveredQa '1. ship = merge, QA covers the head: merged'"
 TRB_BREAKS = "breaks RebaseDecided '1. ready, CI green: review'"
-STACK_RULES = "NoShipIntoParent, StackHeldStartsNoJob"
+STACK_RULES = "NoShipIntoParent, StackHeldStartsNoJob, StackDecided, StackSpendsNoRound"
 STACK_FIXTURES = {
     "omit-stack-guard": ("NoShipIntoParent", "ship = merge, QA covers the head", "merged"),
     "omit-hold-guard": (
         "StackHeldStartsNoJob",
         "parent closed unmerged or the retarget fails, needs attention",
         "ship",
+    ),
+    "omit-tst": ("StackDecided", "APPROVE on the current head", "ship"),
+    "omit-stack-round": (
+        "StackSpendsNoRound",
+        "parent merged, retarget rebase, one scoped review",
+        "review",
     ),
 }
 

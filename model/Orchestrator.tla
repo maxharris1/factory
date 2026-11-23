@@ -56,7 +56,7 @@ Covered == {
   "post-merge", "done"
 }
 
-Decided == {"T1", "T1P", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "TL", "TRB"}
+Decided == {"T1", "T1P", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "TL", "TRB", "TST"}
 
 \* #749. States a Linear handoff name (orch.yml linear_handoff_states) parks
 \* in handed-off-externally. orch.db keeps stuck as a flag on one of the
@@ -73,7 +73,7 @@ LinearFrom == HandoffFrom \cup {
   "handed-off-externally"
 }
 
-Guards == {"ShipGuard", "QaGuard", "StackGuard", "HoldGuard"}
+Guards == {"ShipGuard", "QaGuard", "StackGuard", "HoldGuard", "StackRound"}
 
 QaRuns == {"none", "running", "pass", "fail", "env-failed", "not-required"}
 
@@ -785,6 +785,19 @@ StackHold ==
   /\ flags' = [flags EXCEPT !.stack = "held"]
   /\ UNCHANGED <<state, paused, cap, configOk, counts, external, qa>>
 
+StackRetarget ==
+  /\ "TST" \notin Omit
+  /\ StackWaits
+  /\ keep
+  /\ \/ /\ state' = state
+        /\ flags' = [flags EXCEPT !.stack = "none"]
+        /\ counts' = counts
+        /\ qa' = qa
+     \/ /\ state' = "review"
+        /\ flags' = [flags EXCEPT !.stack = "none", !.covered = FALSE]
+        /\ counts' = IF "StackRound" \in Omit THEN [counts EXCEPT !.round = @ + 1] ELSE counts
+        /\ QaFollowsHead
+
 \* #108. The poll sees the PR merged, by the factory or by hand: merged, with
 \* stuck, paused and every counter that marks stuck cleared.
 MergeObserved ==
@@ -1025,7 +1038,7 @@ Factory ==
   \/ QueueGoPlan \/ QueueGoBuild
   \/ UpdateTrivial \/ UpdateNonTrivial \/ UpdateRetry \/ UpdateStuck
   \/ RebaseQueued \/ RebaseReady
-  \/ StackHold
+  \/ StackHold \/ StackRetarget
   \/ QaStart \/ QaPass \/ QaFail \/ QaNotRequired \/ QaEnvFail \/ QaEnvFailPark
   \/ End
 
@@ -1172,6 +1185,12 @@ HandoffCountsApprovedRound ==
 RebaseDecided ==
   /\ state \in RebaseFrom => ENABLED RebaseQueued
   /\ state = "fixing" /\ flags.rebase \in {"capped", "other"} => ENABLED RebaseReady
+
+StackDecided ==
+  StackWaits => ENABLED StackRetarget /\ ENABLED StackHold
+
+StackSpendsNoRound ==
+  [][StackRetarget => counts'.round = counts.round /\ counts'.extra = counts.extra]_vars
 
 RebaseSpendsNoRound ==
   [][RebaseQueued => counts'.round = counts.round /\ counts'.extra = counts.extra]_vars
