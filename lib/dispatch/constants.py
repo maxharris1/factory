@@ -14,9 +14,13 @@ CI_INFRA_WAIT = "ci-infra-wait"
 CI_RERUN: Final = "ci-rerun"
 CI_BASE_RED: Final = "ci-base-red"
 CIHold = Literal["ci-rerun", "ci-base-red"]
-OkReading = Literal["hold-ok", "ok-no-hold", "rejected-hold-ok-author"]
+OkReading = Literal["hold-ok", "hold-ok-other-head", "ok-no-hold", "rejected-hold-ok-author"]
 OK_OUTCOMES: tuple[OkReading, ...] = get_args(OkReading)
 OK_UNREAD: Final = "unread"
+# #1419: states where an APPROVE already covers the head or the factory let go,
+# so an ok-no-hold there needs no note.
+OK_COVERED_STATES = ("awaiting-ok", "merge-queue", "updating", "handed-off")
+OK_WITHOUT_APPROVE: Final = "ok-without-approve"
 CI_WAIT_REASONS = ("ci-pending", "approved-ci-pending", CI_RERUN, CI_INFRA_WAIT, CI_BASE_RED)
 CI_RERUN_SETTLE_SECONDS = 900.0
 CI_INFRA_WAIT_SECONDS = 1800.0

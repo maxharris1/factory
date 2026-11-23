@@ -201,6 +201,7 @@ from lib.dispatch.constants import (
     CI_WAIT_REASONS,
     HANDED_OFF_EXTERNALLY,
     OK_OUTCOMES,
+    OK_WITHOUT_APPROVE,
 )
 from lib.ci_lane import ci_lane
 from lib.dispatch.types import CHECK_FAILED
@@ -282,7 +283,7 @@ TRACKERS = ("github", "linear")
 ATTENTION_REASONS = (
     "ship-failed", "dedupe-dropped", "edited-comment", "base-mismatch", "deploy-conflict",
     "linear-reopen-failed", "linear-not-reopened",
-    SLOW_CYCLE, LOCK_ERRORS, CI_INFRA_BLOCKED_REASON, CI_RERUN_REFUSED, CI_STALE_REASON,
+    SLOW_CYCLE, LOCK_ERRORS, CI_INFRA_BLOCKED_REASON, CI_RERUN_REFUSED, CI_STALE_REASON, OK_WITHOUT_APPROVE,
     *FEEDER_ATTENTION_REASONS, account_doctor.REASON,
 )
 

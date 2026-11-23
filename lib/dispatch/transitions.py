@@ -11,6 +11,8 @@ from lib.dispatch.constants import (
     CI_INFRA_BLOCKED_REASON,
     CI_SILENT_REASON,
     CI_STALE_REASON,
+    OK_COVERED_STATES,
+    OK_WITHOUT_APPROVE,
     TERMINAL_STATES,
 )
 
@@ -70,6 +72,11 @@ def write_workflow_state(
         connection.execute(
             "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason IN (?, ?, ?)",
             (*key, CI_SILENT_REASON, CI_INFRA_BLOCKED_REASON, CI_STALE_REASON),
+        )
+    if state in TERMINAL_STATES or state in OK_COVERED_STATES:
+        connection.execute(
+            "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason = ?",
+            (*key, OK_WITHOUT_APPROVE),
         )
     if prior != state:
         if prior is not None:
