@@ -44,6 +44,8 @@ not seen:
   on stdin, then the doctor, and records the pair's
   account_signins status before and after. A signout request runs the
   harness's logout there instead, refused while the pair holds a running job.
+  A signin request is the sign-in broker's (lib/signin_broker.py): the
+  applier skips it, untrusted or malformed ones too, and writes no line.
 * Every outcome is one AuditEntry line in `<state>/settings-audit.jsonl`. An
   id already there is never applied again, so a pass is safe to repeat.
 """
@@ -73,7 +75,15 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
-from lib import account_doctor, account_signin, dashboard_push, heal, live_settings, self_deploy
+from lib import (
+    account_doctor,
+    account_requests,
+    account_signin,
+    dashboard_push,
+    heal,
+    live_settings,
+    self_deploy,
+)
 from lib.config_overlay import overlay_path, read_overlay
 from lib.dashboard_config import SettingsConfig, is_bot_login
 from lib.device_pool import RunningPair, running_pairs, slots_in_use
@@ -217,9 +227,19 @@ def audited_ids(path: Path) -> set[str]:
 
 def append_audit(path: Path, entry: AuditEntry) -> None:
     with open(path, "a", encoding="utf-8") as out:
+        fcntl.flock(out, fcntl.LOCK_EX)
         out.write(entry.line() + "\n")
         out.flush()
         os.fsync(out.fileno())
+
+
+def is_broker_request(body: bytes) -> bool:
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return False
+    return (isinstance(data, dict) and data.get("target") == "account"
+            and isinstance(data.get("op"), str) and data["op"] in account_requests.BROKER_OPS)
 
 
 
@@ -580,6 +600,50 @@ class Held:
     hold: Callable[[str, str, float], None]
 
 
+def approve(request: SettingsRequest | AccountRequest | PairRequest, approver: str) -> None:
+    if request.actor.casefold() != approver.casefold() or is_bot_login(request.actor):
+        raise Refused("not-approver")
+
+
+def resolve_pair(request: PairRequest, machines: Path, approver: str,
+                 db: Path | None) -> tuple[MachinesConfig, Device, str]:
+    """The pair's (config, device, harness), or Refused naming why it may not run."""
+    approve(request, approver)
+    config, _ = load_machines_yml(machines)
+    if config is None:
+        raise Refused("machines.yml is invalid")
+    account = config.account(request.account)
+    if account is None:
+        raise Refused("unknown-account")
+    device = config.device(request.device)
+    if device is None:
+        raise Refused("unknown-device")
+    if request.account not in config.accounts_on(device.name, account.harness):
+        raise Refused(f"{request.account} is not signed in on {device.name}")
+    if db is None or not db.is_file():
+        raise Refused("no orch.db to record the doctor in")
+    return config, device, account.harness
+
+
+def prepare_pair(transport: ByteTransport, machines: Path, device: Device, harness: str,
+                 account: str) -> str | None:
+    """Run `orch accounts prepare` for the pair on its device; the error, or None."""
+    unreachable = account_doctor.no_ssh_path(device, harness)
+    if unreachable is not None:
+        return unreachable
+    command = shlex.join([f"{device.factory_root_for(harness)}/bin/orch", "accounts", "prepare",
+                          "--device", device.name, "--account", account,
+                          "--machines", "/dev/stdin"])
+    exchanged = transport.exchange(
+        account_doctor.ssh_argv(device, harness,
+                                _login(f"{_UNTRACE}exec {command}", "orch-accounts-prepare", ())),
+        timeout=PROBE_TIMEOUT_SECONDS, input=machines.read_bytes())
+    if exchanged.code == 0:
+        return None
+    said = _orch_lines_only(exchanged.stderr)
+    return f"prepare exited {exchanged.code}" + (f": {_clip(said[-1])}" if said else "")
+
+
 ClaimLock = Callable[[], AbstractContextManager[Held]]
 NO_DATABASE = Held(running=lambda config: {}, commit_version=lambda machines: None,
                    pairs=lambda config: [], hold=lambda account, device, now: None)
@@ -675,13 +739,9 @@ class Applier:
             account=_clip(request.account), **extra,
         )
 
-    def _approve(self, request: SettingsRequest | AccountRequest | PairRequest) -> None:
-        if request.actor.casefold() != self.approver.casefold() or is_bot_login(request.actor):
-            raise Refused("not-approver")
-
     def _plan(self, request: SettingsRequest | AccountRequest,
               held: Held) -> tuple[bytes, str, object]:
-        self._approve(request)
+        approve(request, self.approver)
         old_bytes = self.machines.read_bytes()
         old, _ = load_machines_yml(self.machines)
         if old is None:
@@ -700,7 +760,7 @@ class Applier:
 
     def _apply_pair(self, request: PairRequest) -> AuditEntry:
         try:
-            config, device, harness = self._pair(request)
+            config, device, harness = resolve_pair(request, self.machines, self.approver, self.db)
         except Refused as refusal:
             return self._entry(request, REFUSED, None, refusal.error)
         previous = error = None
@@ -708,7 +768,7 @@ class Applier:
             with closing(sqlite3.connect(self.db, timeout=30, isolation_level=None)) as connection:
                 account_doctor.ensure_table(connection)
                 previous = _signin(connection, request)
-                error = self._prepare(request, device, harness)
+                error = prepare_pair(self.transport, self.machines, device, harness, request.account)
                 account_doctor.run(connection, config, self.transport, self.clock(), self.repo)
                 new = _signin(connection, request)
         except sqlite3.Error as exc:
@@ -719,7 +779,7 @@ class Applier:
 
     def _apply_signout(self, request: PairRequest) -> AuditEntry:
         try:
-            config, device, harness = self._pair(request)
+            config, device, harness = resolve_pair(request, self.machines, self.approver, self.db)
         except Refused as refusal:
             return self._entry(request, REFUSED, None, refusal.error)
         if request.account == config.accounts_on(device.name, harness)[0]:
@@ -763,39 +823,6 @@ class Applier:
         if exchanged.code == SSH_UNREACHABLE:
             return "unreachable"
         return None if exchanged.code == 0 else "logout-exit"
-
-    def _pair(self, request: PairRequest) -> tuple[MachinesConfig, Device, str]:
-        self._approve(request)
-        config, _ = load_machines_yml(self.machines)
-        if config is None:
-            raise Refused("machines.yml is invalid")
-        account = config.account(request.account)
-        if account is None:
-            raise Refused("unknown-account")
-        device = config.device(request.device)
-        if device is None:
-            raise Refused("unknown-device")
-        if request.account not in config.accounts_on(device.name, account.harness):
-            raise Refused(f"{request.account} is not signed in on {device.name}")
-        if self.db is None or not self.db.is_file():
-            raise Refused("no orch.db to record the doctor in")
-        return config, device, account.harness
-
-    def _prepare(self, request: PairRequest, device: Device, harness: str) -> str | None:
-        unreachable = account_doctor.no_ssh_path(device, harness)
-        if unreachable is not None:
-            return unreachable
-        command = shlex.join([f"{device.factory_root_for(harness)}/bin/orch", "accounts", "prepare",
-                              "--device", device.name, "--account", request.account,
-                              "--machines", "/dev/stdin"])
-        exchanged = self.transport.exchange(
-            account_doctor.ssh_argv(device, harness,
-                                    _login(f"{_UNTRACE}exec {command}", "orch-accounts-prepare", ())),
-            timeout=PROBE_TIMEOUT_SECONDS, input=self.machines.read_bytes())
-        if exchanged.code == 0:
-            return None
-        said = _orch_lines_only(exchanged.stderr)
-        return f"prepare exited {exchanged.code}" + (f": {_clip(said[-1])}" if said else "")
 
     def _plan_device(self, request: SettingsRequest, old: MachinesConfig, text: str,
                      held: Held) -> tuple[str, object]:
@@ -931,7 +958,7 @@ def run_pass(applier: Applier, spool: Spool, owner: str) -> list[AuditEntry]:
     entries = []
     for item in listing.files:
         stem = item.name[: -len(".json")]
-        if stem in done:
+        if stem in done or is_broker_request(item.body):
             continue
         reason = untrusted(listing, item, owner)
         if reason is None:

@@ -53,7 +53,8 @@ from lib.settings_apply import (
 )
 
 ADD_KEYS = ("harness", "max_jobs", "signed_in_on")
-PAIR_OPS = frozenset({"prepare", "doctor", "signout"})
+PAIR_OPS = frozenset({"prepare", "doctor", "signout", *account_requests.BROKER_OPS})
+REQUEST_KEYS = {**account_requests.OPS, **account_requests.BROKER_OPS}
 _HEAD = re.compile(r"^accounts:(?P<empty>[ 	]*\[\])?(?P<rest>[ 	]*(?:#.*)?)$")
 
 def _is_max_jobs(value: object) -> bool:
@@ -113,9 +114,9 @@ class PairRequest:
 
 def parse(data: dict, stem: str) -> AccountRequest | PairRequest:
     op = data.get("op")
-    if not isinstance(op, str) or (op not in OPS and op not in PAIR_OPS):
+    if not isinstance(op, str) or op not in REQUEST_KEYS:
         raise BadRequest("bad-op")
-    if set(data) != COMMON_KEYS | account_requests.OPS[op]:
+    if set(data) != COMMON_KEYS | REQUEST_KEYS[op]:
         raise BadRequest("bad-keys")
     for key in ("id", "actor", "requested_at", "account", "device"):
         if key in data and not isinstance(data[key], str):
