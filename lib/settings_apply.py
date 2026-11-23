@@ -37,8 +37,8 @@ not seen:
   backup under the same lock and writes it into the shared settings row (not
   when that would disable a device now holding a job), restarts them again
   and records `failed`.
-* A body with `target: "account"` is an account request (lib/account_settings.py,
-  #1358) and takes this same path, with its own checks and line edit.
+* A body with `target: "account"` is an account request (lib/account_settings.py)
+  and takes this same path, with its own checks and line edit.
 * Every outcome is one AuditEntry line in `<state>/settings-audit.jsonl`. An
   id already there is never applied again, so a pass is safe to repeat.
 """
@@ -392,7 +392,7 @@ def _scalar(text: str) -> str:
 
 
 def _blocks(lines: Sequence[str], section: str) -> list[tuple[int, int, int]]:
-    """(first line, last content line, key indent) of each item of top-level list `section`."""
+    """(first line, last content line, key indent) of each `section` item."""
     head = re.compile(rf"^{section}:[ \t]*(#.*)?$")
     top = next((i for i, line in enumerate(lines) if head.match(line.rstrip("\r\n"))), None)
     if top is None:
@@ -436,8 +436,6 @@ def _render(value: object) -> str:
 
 def _item(lines: Sequence[str], section: str, id_key: str,
           ident: str) -> tuple[tuple[int, int, int], int] | None:
-    """(block, line of its `id_key:`) of the first `section` item whose single
-    `id_key:` scalar is ident."""
     for block in _blocks(lines, section):
         found = _key_lines(lines, block, id_key)
         if len(found) != 1:
@@ -450,8 +448,6 @@ def _item(lines: Sequence[str], section: str, id_key: str,
 
 def _set_key(lines: list[str], block: tuple[int, int, int], after: int, key: str,
              value: object) -> str | None:
-    """The text with `key: value` set in block, replacing its line or inserted
-    after line `after`; None when the key cannot be edited by line."""
     found = _key_lines(lines, block, key)
     if len(found) > 1:
         return None
@@ -689,7 +685,6 @@ class Applier:
         return new_text, previous
 
     def _parse(self, text: str, previous: object) -> MachinesConfig:
-        """text parsed as machines.yml beside this one's overlay; refused when invalid."""
         with tempfile.TemporaryDirectory() as tmp:
             probe = Path(tmp) / self.machines.name
             probe.write_text(text, encoding="utf-8")

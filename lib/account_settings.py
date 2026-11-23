@@ -1,13 +1,9 @@
-"""Account `set` requests for `orch settings apply` (#1358).
+"""Account requests for `orch settings apply`.
 
 A spool body `{id, actor, requested_at, target: "account", op: "set",
-account, field, expect, value}` sets `max_jobs` (1..64) or `paused` on one
-declared account, through lib/settings_apply.py's lock, backup, replace,
-restart and audit. It is refused, leaving machines.yml byte-identical, when
-the account is a `<harness>-default` one or external (read-only), undeclared,
-the field or value is bad, machines.local.yml sets that key for it, `expect`
-is not the current value, or the line edit inside its `accounts:` item would
-change anything but that one field.
+account, field, expect, value}` sets `max_jobs` or `paused` on one declared
+account through lib/settings_apply.py's lock, backup, replace, restart and
+audit. Pause writes `paused: true`; resume deletes the line.
 """
 
 from __future__ import annotations
@@ -85,8 +81,6 @@ def parse(data: dict, stem: str) -> AccountRequest:
 
 
 def edit_account_field(text: str, account: str, key: str, value: object) -> str | None:
-    """text with `key: value` set in the account's item, or its `paused:`
-    line deleted for paused false; None when that cannot be done by line."""
     lines = text.splitlines(keepends=True)
     found = _item(lines, "accounts", "id", account)
     if found is None:
@@ -114,7 +108,6 @@ def _only_change(old: MachinesConfig, new: MachinesConfig, request: AccountReque
 
 def plan(request: AccountRequest, old: MachinesConfig, text: str, machines: Path,
          parse_text: Callable[[str, object], MachinesConfig]) -> tuple[str, object]:
-    """(the new machines.yml text, the field's current value), or Refused."""
     if request.account in {default_account(harness) for harness in HARNESSES}:
         raise Refused("read-only")
     account = next((item for item in old.accounts if item.id == request.account), None)

@@ -1,5 +1,3 @@
-"""Account `set` requests for `max_jobs` and `paused`, applied by `orch settings apply` (#1358)."""
-
 from __future__ import annotations
 
 import json
