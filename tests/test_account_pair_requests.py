@@ -13,7 +13,7 @@ from lib.machines_yml import load_machines_yml
 from lib.remote import SshTransport
 from lib.settings_apply import Applier, LocalSpool, run_pass
 from tests.test_account_doctor import World
-from tests.test_settings_apply import NOW, OWNER, Runner, holding
+from tests.test_settings_apply import NOW, OWNER, Runner
 
 ROOT = Path(__file__).resolve().parent.parent
 PREPARE = "accounts prepare --device pc --account claude-c --machines /dev/stdin"
@@ -41,7 +41,7 @@ class Box:
         self.applier = Applier(
             machines=self.machines, state_dir=self.state, deploy=tmp_path / "deploy",
             approver="maxharris1", environ={}, restart=("poller",), pending=(),
-            claims=holding({}), run=self.runner, clock=lambda: NOW,
+            claims=settings_apply.claim_lock(world.db), run=self.runner, clock=lambda: NOW,
             db=world.db, transport=SshTransport(), repo=None,
         )
         self.count = 0
@@ -422,6 +422,80 @@ def test_a_running_job_on_another_device_or_account_does_not_refuse_a_signout(bo
     (entry,) = box.run()
 
     assert entry.result == "signed-out"
+
+
+def test_no_job_is_placed_on_the_pair_while_it_signs_out(box: Box) -> None:
+    from dataclasses import replace
+
+    from lib.device_pool import DevicePool, running_pairs
+    from lib.queue import SQLiteJobQueue
+    from tests.test_device_pool import enqueue
+
+    logout = Logout(box, "claude")
+    assert box.world.doctor() == 0
+    config, _ = load_machines_yml(box.machines)
+    queue = SQLiteJobQueue(box.world.db, clock=lambda: NOW)
+    pool = DevicePool(queue, config)
+    placed = []
+    transport = box.applier.transport
+
+    class ClaimDuringLogout:
+        def exchange(self, argv, **kwargs):
+            if "orch-accounts-logout" in argv[-1]:
+                for key in ("first", "second", "third"):
+                    enqueue(queue, "claude", f"signout-race-{key}")
+                    claimed = pool.claim("claude")
+                    if claimed is not None:
+                        placed.append((claimed[1].account, claimed[1].device))
+            return transport.exchange(argv, **kwargs)
+
+    box.applier = replace(box.applier, transport=ClaimDuringLogout())
+    box.request("signout", account="claude-b")
+
+    (entry,) = box.run()
+
+    assert len(logout.calls()) == 1 and entry.result == "signed-out"
+    assert placed, "the claims during the logout placed work elsewhere"
+    assert ("claude-b", "pc") not in placed
+    with sqlite3.connect(box.world.db) as connection:
+        assert ("claude-b", "pc") not in {(p.account, p.device) for p in running_pairs(connection, config)}
+
+
+def test_a_failed_signout_gives_the_pair_back_to_placement(box: Box) -> None:
+    from dataclasses import replace
+
+    logout = Logout(box, "claude")
+    logout.code.write_text("3", encoding="utf-8")
+    assert box.world.doctor() == 0
+    ticks = iter(range(10))
+    box.applier = replace(box.applier, clock=lambda: NOW + next(ticks))
+    box.request("signout", account="claude-b")
+
+    (entry,) = box.run()
+
+    assert entry.result == "failed"
+    with sqlite3.connect(box.world.db) as connection:
+        assert ("claude-b", "pc") not in account_doctor.held(connection)
+
+
+def test_a_signout_on_a_device_with_a_placeholder_home_records_one_failed_line(box: Box) -> None:
+    logout = Logout(box, "claude")
+    box.machines.write_text(box.machines.read_text(encoding="utf-8").replace(
+        str(box.world.device_home), "REPLACE_WITH_BOT_HOME"), encoding="utf-8")
+    box.original = box.machines.read_bytes()
+    config, _ = load_machines_yml(box.machines)
+    assert config is not None and config.device("pc").placeholder
+    rid = box.request("signout", account="claude-b")
+
+    (entry,) = box.run()
+
+    assert logout.calls() == []
+    line = _signout_line(box)
+    assert (line["id"], line["field"], line["result"], line["error"]) == (
+        rid, "signout", "failed", account_doctor.PLACEHOLDER_DEVICE)
+    assert entry.result == "failed"
+    assert box.run() == [] and len(box.audit()) == 1, "the request is not retried"
+    box.untouched()
 
 
 def test_a_logout_that_exits_nonzero_records_failed_and_still_runs_the_doctor(box: Box) -> None:
