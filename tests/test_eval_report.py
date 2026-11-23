@@ -285,6 +285,22 @@ def test_t2_self_loops_are_charted() -> None:
         assert (state, state) in chart
 
 
+REBASE_FROM = ("review", "awaiting-ok", "capped", "handed-off", "merge-queue", "waiting-external")
+
+
+def test_rebase_edges_are_charted() -> None:
+    spec = (ROOT / "docs" / "SPEC.md").read_text(encoding="utf-8")
+    text = (ROOT / "model" / "chart.mmd").read_text(encoding="utf-8")
+    chart = mmd_edges(text)
+    for state in REBASE_FROM:
+        assert (state, "fixing") in CHART_TRANSITIONS
+        assert (state, "fixing") in spec_edges(spec)
+        assert (state, "fixing") in chart
+    assert spec.count("--> Fixing: trusted kind=rebase, rebase-only fix") == len(REBASE_FROM)
+    assert text.count("trusted kind=rebase, rebase-only fix") == len(REBASE_FROM)
+    assert re.search(r"^\| TRB \|", spec, re.MULTILINE)
+
+
 @pytest.mark.parametrize(
     ("source", "bad", "message"),
     [

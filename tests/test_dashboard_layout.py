@@ -554,7 +554,8 @@ def test_running_job_carries_its_flow(tmp_path: Path) -> None:
             ("review", "codex", NOW - 4000, 1000, True, False, "ready, CI green", False,
              ran("h-review", "review", "codex")),
             ("fixing", "claude", NOW - 3000, 1000, True, False,
-             "APPROVE on red CI, CI fix or REVISE, under the round cap", False,
+             "APPROVE on red CI, CI fix or REVISE, under the round cap"
+             " or trusted kind=rebase, rebase-only fix", False,
              ran("h-fix", "fix", "claude")),
             ("review", "codex", NOW - 2000, 2000, True, False, "ready, CI green", True,
              ran("h-review", "review", "codex")),

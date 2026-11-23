@@ -56,7 +56,7 @@ Covered == {
   "post-merge", "done"
 }
 
-Decided == {"T1", "T1P", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "TL"}
+Decided == {"T1", "T1P", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "TL", "TRB"}
 
 \* #749. States a Linear handoff name (orch.yml linear_handoff_states) parks
 \* in handed-off-externally. orch.db keeps stuck as a flag on one of the
@@ -738,6 +738,21 @@ ReopenAfterHandoff ==
   /\ counts' = [counts EXCEPT !.round = @ + 1, !.deaths = 0, !.gate = 0]
   /\ QaFollowsHead
 
+RebaseFrom == {
+  "review", "fixing", "awaiting-ok", "capped", "handed-off", "merge-queue",
+  "waiting-external"
+}
+
+RebaseQueued ==
+  /\ "TRB" \notin Omit
+  /\ state \in RebaseFrom
+  /\ state' = "fixing"
+  /\ cap' \in HandoffCaps
+  /\ configOk' = configOk /\ paused' = "none" /\ external' = external
+  /\ flags' = [flags EXCEPT !.covered = FALSE, !.byHand = FALSE]
+  /\ counts' = [counts EXCEPT !.deaths = 0, !.gate = 0]
+  /\ QaFollowsHead
+
 \* #108. The poll sees the PR merged, by the factory or by hand: merged, with
 \* stuck, paused and every counter that marks stuck cleared.
 MergeObserved ==
@@ -976,6 +991,7 @@ Factory ==
   \/ T4ShipQueue \/ QueueMerge \/ QueueConflict \/ QueueClosed
   \/ QueueGoPlan \/ QueueGoBuild
   \/ UpdateTrivial \/ UpdateNonTrivial \/ UpdateRetry \/ UpdateStuck
+  \/ RebaseQueued
   \/ QaStart \/ QaPass \/ QaFail \/ QaNotRequired \/ QaEnvFail \/ QaEnvFailPark
   \/ End
 
@@ -1119,6 +1135,12 @@ HandoffCountsApprovedRound ==
   [][MaxOkAfterHandoff \/ ReenterAfterHandoff \/ ReopenAfterHandoff
        => counts'.round = counts.round + 1]_vars
 
+RebaseDecided ==
+  state \in RebaseFrom => ENABLED RebaseQueued
+
+RebaseSpendsNoRound ==
+  [][RebaseQueued => counts'.round = counts.round /\ counts'.extra = counts.extra]_vars
+
 ReopenHoldOnlyAtWork ==
   flags.reopenHold => state \in HandoffFrom
 
@@ -1222,5 +1244,21 @@ ChartLinear ==
 \* 500-state drawing limit for Max's hand-off.
 ChartAbandoned ==
   state' = "abandoned" /\ state # "abandoned" => counts.round = 0
+
+\* Drawing bound for kind=rebase (#1404). A rebase from round 0 lands in a
+\* fixing no other step reaches, and its every successor is a new state, so
+\* only rebases after a REVISE are drawn, to stay under statechart's
+\* 500-state drawing limit. The rebase in fixing is a self-loop the chart
+\* does not draw. Naming RebaseQueued here bounds nothing under TLC 1.7.4, so
+\* the constraint names the step's effect.
+ChartRebase ==
+  (/\ state' = "fixing"
+   /\ state \in RebaseFrom
+   /\ ~flags'.covered
+   /\ counts'.round = counts.round
+   /\ counts'.extra = counts.extra
+   /\ counts'.gate = 0
+   /\ counts'.deaths = 0)
+  => state # "fixing" /\ counts.round >= 1
 
 ====

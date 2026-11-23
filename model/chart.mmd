@@ -60,14 +60,14 @@ stateDiagram-v2
   s9 --> s4: an acceptance criterion is unmapped
   s10 --> s11: BLOCKED
   s10 --> s14: APPROVE on the current head
-  s10 --> s16: APPROVE on red CI, CI fix or REVISE, under the round cap
+  s10 --> s16: APPROVE on red CI, CI fix or REVISE, under the round cap or trusted kind=rebase, rebase-only fix
   s10 --> s5: REVISE with unsat=, the criterion goes to Max
   s3 --> s15: job dies twice (T6) or CI red three times
   s4 --> s15: job dies twice (T6)
   s11 --> s10: approver's go, fresh review at the same round
   s11 --> s12: Max hands it off (answers state=handed-off)
   s12 --> s8: PR merged
-  s12 --> s16: approver's building go within the cap, reopen or approver's go at the cap, one more round
+  s12 --> s16: approver's building go within the cap, reopen or trusted kind=rebase, rebase-only fix or approver's go at the cap, one more round
   s12 --> s10: trusted ready at a new head, within the effective cap
   s13 --> s7: post-merge fails, follow-up filed or post-merge passes
   s14 --> s10: head changed and the patch differs
@@ -85,7 +85,7 @@ stateDiagram-v2
   s5 --> s10: answer, same step resumes
   s5 --> s16: approver's building go on an unsat= REVISE, fix round or answer, same step resumes
   s17 --> s10: head changed and the patch differs
-  s17 --> s16: REVISE, under the round cap or PR dirty or behind, base update
+  s17 --> s16: REVISE, under the round cap or trusted kind=rebase, rebase-only fix or PR dirty or behind, base update
   s17 --> s5: REVISE with unsat=, the criterion goes to Max
   s17 --> s12: approver's OK at the head, ship = handoff, finish_line ready-for-review or Max hands it off (answers state=handed-off)
   s17 --> s18: approver's OK at the head, finish_line merge
@@ -98,7 +98,6 @@ stateDiagram-v2
   s18 --> s21: PR conflicts with base, update-from-main queued
   s19 --> s8: OK names the previewed SHA
   s19 --> s12: Max hands it off (answers state=handed-off)
-  s19 --> s16: declined
   s20 --> s6: Linear Canceled
   s20 --> s7: Linear Done, PR not merged
   s20 --> s8: Linear Done, PR merged
@@ -109,11 +108,13 @@ stateDiagram-v2
   s21 --> s18: trivial update, approval carried
   s14 --> s5: QA environment fails twice at one head
   s21 --> s15: two failed updates (update-failed-2)
+  s18 --> s16: trusted kind=rebase, rebase-only fix
+  s19 --> s16: trusted kind=rebase, rebase-only fix or declined
   s10 --> s22: REVISE at the cap
   s22 --> s10: approver's go names Overrule the finding, review at the same round
+  s22 --> s16: trusted kind=rebase, rebase-only fix or Max okays one more round
   s22 --> s12: Max hands it off (answers state=handed-off)
   s22 --> s20: Max moves the Linear issue to a handoff state
-  s22 --> s16: Max okays one more round
   s5 --> s14: answer, QA runs again at the same head
   s17 --> s22: REVISE at the cap
   s20 --> s22: Linear back to a started state, the prior state resumes

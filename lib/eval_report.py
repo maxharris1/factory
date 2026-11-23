@@ -251,6 +251,7 @@ CHART_TRANSITIONS = frozenset(
         ("merge-queue", "planning"),
         ("merge-queue", "building"),
         ("merge-queue", "review"),
+        ("merge-queue", "fixing"),
         ("merge-queue", "abandoned"),
         ("updating", "merge-queue"),
         ("updating", "review"),

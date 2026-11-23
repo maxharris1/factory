@@ -8,6 +8,7 @@ sha256sum and sleep are fakes on PATH; HOME and the cache are temporary.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -15,6 +16,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "model" / "check.sh"
+FIRST_STEP = re.search(r'echo "(1/\d+ phase 1 model)', SCRIPT.read_text()).group(1)
 
 FAKE_GIT = """#!/bin/sh
 echo "$*" >> "$FAKE_LOG/git"
@@ -85,7 +87,7 @@ def count(log: Path, name: str) -> int:
 @pytest.mark.parametrize("fails", [1, 3])
 def test_downloads_retry_through_rate_limits(tmp_path: Path, fails: int) -> None:
     proc, log = run_check(tmp_path, fails, fails)
-    assert "1/8 phase 1 model" in proc.stdout, proc.stderr
+    assert FIRST_STEP in proc.stdout, proc.stderr
     assert count(log, "fetches") == fails + 1
     assert count(log, "curls") == fails + 1
     sleeps = (log / "sleeps").read_text().split()
@@ -98,7 +100,7 @@ def test_downloads_give_up_after_every_try_fails(tmp_path: Path, curl_fails: int
                                                  git_fails: int) -> None:
     proc, log = run_check(tmp_path, curl_fails, git_fails)
     assert proc.returncode != 0
-    assert "1/8 phase 1 model" not in proc.stdout
+    assert FIRST_STEP not in proc.stdout
     tries = count(log, "curls") if curl_fails else count(log, "fetches")
     assert 1 < tries < 100
 
