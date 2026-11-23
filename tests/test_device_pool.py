@@ -388,6 +388,161 @@ def test_pools_loaded_from_different_files_never_pass_the_slot_max_on_disk_toget
     assert pools[0].used() == {"box": 2}
 
 
+ACCOUNT_FILE = """\
+devices:
+  - name: box
+    local: true
+    slot_max: 4
+    harnesses: {{claude: {{bot: claude-bot, account: max-1}}}}
+accounts:
+  - {{id: max-1, harness: claude{max_1}}}
+"""
+
+
+def account_file(**max_1: object) -> str:
+    return ACCOUNT_FILE.format(
+        max_1="".join(f", {key}: {str(value).lower()}" for key, value in max_1.items())
+    )
+
+
+def settings_writes(queue: SQLiteJobQueue, machines: Path, text: str, at: int) -> None:
+    machines.write_text(text, encoding="utf-8")
+    os.utime(machines, ns=(10**18 + at, 10**18 + at))
+    with queue.connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        live_settings.requested(connection, machines)
+        connection.commit()
+
+
+@pytest.mark.parametrize(
+    ("narrower", "running"),
+    [({"paused": True, "max_jobs": 3}, 1), ({"max_jobs": 1}, 1)],
+    ids=["pause", "lower-max-jobs"],
+)
+def test_a_settings_pause_or_lower_max_jobs_stops_the_next_claim_while_running_jobs_stay(
+    tmp_path: Path, narrower: dict, running: int
+) -> None:
+    pool, queue, machines = edited_after_load(
+        tmp_path, account_file(max_jobs=3), account_file(max_jobs=3), jobs=3
+    )
+    first = pool.claim("claude")
+    assert first is not None and first[1].account in (None, "max-1")
+
+    settings_writes(queue, machines, account_file(**narrower), at=1)
+
+    assert pool.claim("claude") is None, "the claim after the write sees the account closed"
+    assert pool.used() == {"box": running}, "the running job keeps its slot"
+    assert [job.state for job in queue.outstanding()].count("running") == running
+
+
+@pytest.mark.parametrize(
+    ("loaded", "wider", "placed"),
+    [({"paused": True, "max_jobs": 3}, {"max_jobs": 3}, 3), ({"max_jobs": 1}, {"max_jobs": 3}, 2)],
+    ids=["resume", "raise-max-jobs"],
+)
+def test_an_account_resume_or_higher_max_jobs_waits_for_the_pollers_adopt(
+    tmp_path: Path, loaded: dict, wider: dict, placed: int
+) -> None:
+    pool, queue, machines = edited_after_load(
+        tmp_path, account_file(**loaded), account_file(**loaded), jobs=4
+    )
+    before = placements(pool, 4)
+    settings_writes(queue, machines, account_file(**wider), at=1)
+
+    assert placements(pool, 4) == 0, "the requested widening does not place yet"
+    assert placements(restarted(queue, machines), 4) == 0, "nor does a restart alone"
+    poller_adopts(queue, machines)
+    assert placements(pool, 4) == placed, "the same unrestarted pool places once adopted"
+    assert pool.used() == {"box": before + placed}
+
+
+@pytest.mark.parametrize(
+    ("on_disk", "placed"),
+    [({"max_jobs": 1}, 1), ({"paused": True, "max_jobs": 3}, 0)],
+    ids=["lower-cap", "paused"],
+)
+def test_pools_loaded_from_different_files_never_pass_the_accounts_switches_on_disk(
+    tmp_path: Path, on_disk: dict, placed: int
+) -> None:
+    machines = tmp_path / "machines.yml"
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 100.0)
+    for n in range(8):
+        enqueue(queue, "claude", str(n))
+    pools = []
+    for at, cap in enumerate((4, 3)):
+        machines.write_text(account_file(max_jobs=cap), encoding="utf-8")
+        os.utime(machines, ns=(10**18 + at, 10**18 + at))
+        pools.append(restarted(queue, machines))
+        if at == 0:
+            poller_adopts(queue, machines)
+    machines.write_text(account_file(**on_disk), encoding="utf-8")
+    os.utime(machines, ns=(10**18 + 2, 10**18 + 2))
+
+    total = sum(pool.claim("claude") is not None for _ in range(4) for pool in pools)
+
+    assert total == placed, "the file's max_jobs and pause hold both pools together"
+
+
+BARE_CODEX = """\
+devices:
+  - name: box
+    local: true
+    slot_max: 8
+    harnesses: {codex: codex-bot}
+"""
+
+
+@pytest.mark.parametrize("restriction", ["paused: true", "max_jobs: 1"])
+@pytest.mark.parametrize("settings_file", ["same", "another-checkout"])
+def test_a_pause_or_cap_on_the_implicit_default_account_stops_a_pool_that_never_declared_it(
+    tmp_path: Path, restriction: str, settings_file: str
+) -> None:
+    machines = tmp_path / "machines.yml"
+    machines.write_text(BARE_CODEX, encoding="utf-8")
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 100.0)
+    pool = restarted(queue, machines)
+    poller_adopts(queue, machines)
+    enqueue(queue, "codex", "0")
+    assert pool.claim("codex") is not None
+    settings = machines
+    if settings_file == "another-checkout":
+        settings = tmp_path / "settings" / "machines.yml"
+        settings.parent.mkdir()
+
+    settings_writes(
+        queue, settings,
+        f"accounts:\n  - {{id: codex-default, harness: codex, {restriction}}}\n{BARE_CODEX}", at=1,
+    )
+    enqueue(queue, "codex", "1")
+
+    assert pool.claim("codex") is None, f"the cached pool honors the committed {restriction}"
+    poller_adopts(queue, machines)
+    assert pool.claim("codex") is None, "and still does after the poller adopts its own file"
+
+
+def test_a_settings_pin_written_before_account_switches_leaves_accounts_open_after_adopt(
+    tmp_path: Path,
+) -> None:
+    poller, settings = (tmp_path / name / "machines.yml" for name in ("poller", "settings"))
+    poller.parent.mkdir()
+    settings.parent.mkdir()
+    poller.write_text(account_file(max_jobs=2), encoding="utf-8")
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 100.0)
+    for n in range(3):
+        enqueue(queue, "claude", str(n))
+    poller_adopts(queue, poller)
+    settings_writes(queue, settings, account_file(max_jobs=2), at=1)
+    with queue.connect() as connection:
+        connection.execute(f"DROP TABLE {live_settings.ACCOUNT_TABLE}")
+
+    for _ in range(3):
+        poller_adopts(queue, poller)
+
+    assert placements(restarted(queue, poller), 3) == 2, (
+        "a pin from before account switches neither closes the account nor lifts its cap"
+    )
+
+
 def test_concurrent_claims_never_take_the_same_last_slot(tmp_path: Path) -> None:
     devices = (device("box", 2, "claude", "codex"),)
     pool, queue = make_pool(tmp_path, *devices)
