@@ -1,15 +1,24 @@
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from lib.dispatcher import Comment
+from lib.dispatch.helpers import _grok_logical_key
+from lib.dispatcher import Comment, Dispatcher
+from lib.grok_delivery import (
+    ClaudeDriverDelivery,
+    WebhookGrokDelivery,
+    WebhookResult,
+    wake_body,
+)
 from lib.poll_source import _linear_comment
-from lib.queue import Job
+from lib.queue import Job, JobRequest, SQLiteJobQueue, job_from_row
 from tests.merge_queue_support import Board, sha
 from tests.test_hooks import (
     HEAD_A,
+    TRUSTED_LOGINS,
     VERDICT,
     FakeBot,
     FakeGrokDelivery,
@@ -306,3 +315,98 @@ def test_failed_update_wake_names_the_failed_job(tmp_path: Path) -> None:
 
     [wake] = board.wakes("stuck")
     assert wake["job_id"] == failed.id
+
+
+def test_a_linear_keyed_clarify_wake_carries_every_id() -> None:
+    request = JobRequest(
+        repo="aut0-code/aut0",
+        ticket_id="AUT-2286",
+        action="clarify",
+        recipient="grok",
+        source_comment_id="7105835030",
+        timeout_seconds=60,
+        detail=json.dumps({"project_bot": "offer-brief-project"}),
+    )
+    job = Job("job-2286", "dedupe", request, "running", 1, 1, None, None)
+    expected = {
+        "job_id": "job-2286",
+        "ticket_id": "AUT-2286",
+        "repo": "aut0-code/aut0",
+        "source_comment_id": "7105835030",
+        "action": "clarify",
+    }
+    key = _grok_logical_key(job)
+
+    body = json.loads(wake_body(job, key))
+    assert {name: body[name] for name in expected} == expected
+
+    fired: list[bytes] = []
+
+    def fire(url: str, authorization: str, sent: bytes, timeout: float) -> WebhookResult:
+        del url, authorization, timeout
+        fired.append(sent)
+        return WebhookResult(200, {})
+
+    ClaudeDriverDelivery(
+        url_env="FAKE_FIRE_URL",
+        token_env="FAKE_FIRE_TOKEN",
+        environ={"FAKE_FIRE_URL": "https://fire.test/fire", "FAKE_FIRE_TOKEN": "tok"},
+        transport=fire,
+    ).deliver(job, logical_key=key)
+
+    [sent] = fired
+    text = json.loads(json.loads(sent)["text"])
+    assert {name: text[name] for name in expected} == expected
+
+
+def test_each_wake_delivery_logs_one_matchable_line(tmp_path: Path) -> None:
+    environ = {
+        "FAKE_GROK_URL": "https://grok-secret.test/hook",
+        "FAKE_GROK_KEY": "grok-key-secret",
+    }
+    statuses = [503, 200]
+    received: list[bytes] = []
+
+    def transport(url: str, authorization: str, body: bytes, timeout: float) -> WebhookResult:
+        del url, authorization, timeout
+        received.append(body)
+        return WebhookResult(statuses.pop(0), {})
+
+    lines: list[str] = []
+    path = tmp_path / "d.db"
+    queue = SQLiteJobQueue(path, clock=lambda: 100.0)
+    dispatcher = Dispatcher(
+        path,
+        queue,
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions=FakeReviewActions(),
+        grok_delivery=WebhookGrokDelivery(
+            url_env="FAKE_GROK_URL",
+            key_env="FAKE_GROK_KEY",
+            environ=environ,
+            transport=transport,
+        ),
+        log=lines.append,
+    )
+    snapshot = on_pr(linked(say("906", GO.format(state=""), "grok-login", 1)))
+
+    dispatcher.poll_once(FakeSource(snapshot))
+    assert len(received) == 1
+    assert [line for line in lines if "wake delivered" in line] == []
+
+    dispatcher.poll_once(FakeSource(snapshot))
+    assert len(received) == 2
+    with queue.connect() as connection:
+        [row] = connection.execute("SELECT * FROM jobs WHERE recipient = 'grok'").fetchall()
+        job = job_from_row(row, connection)
+    request = job.request
+    digest = hashlib.sha256(wake_body(job, _grok_logical_key(job))).hexdigest()
+    [line] = [line for line in lines if "wake delivered" in line]
+    assert line == (
+        f"wake delivered: job={job.id} repo={request.repo} ticket={request.ticket_id} "
+        f"action={request.action} attempt={request.attempt} body_sha256={digest}"
+    )
+    assert digest == hashlib.sha256(received[-1]).hexdigest()
+    assert "https://" not in line
+    assert "Bearer" not in line
+    assert not any(value in line for value in environ.values())
