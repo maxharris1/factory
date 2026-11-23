@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from lib.dispatch.helpers import _comment_link, _comment_order, _scope
 from lib.dispatch.retry import _harness_job_active, _newest_harness_job
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
+from lib.handoff import parse_comment
 from lib.job_detail import as_object
 from lib.queue import JobRequest
 
@@ -18,6 +20,40 @@ LEAVES_MERGE_QUEUE = frozenset({"merge-queue", "waiting-external"})
 REBASE_FROM = (
     frozenset({"review", "fixing", "awaiting-ok", "capped", "handed-off"}) | LEAVES_MERGE_QUEUE
 )
+_LIST_MARKER = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+_FENCE = re.compile(r"^\s*(?:```|~~~)")
+_ALONE = re.compile(r"`?([^`\s]+)`?")
+_BACKTICKED = re.compile(r"`([^`\s]+)`")
+_PATH_LIKE = re.compile(r"/|\w\.\w")
+_NOT_A_FILE = re.compile(r"-.*|[0-9a-f]{7,40}|\w*HEAD[~^\d]*|.*[.,;:!?]")
+
+
+def conflict_files(body: str, base: str = "main") -> tuple[str, ...]:
+    refs = {base, f"origin/{base}"}
+
+    def named(span: str) -> bool:
+        return span not in refs and _NOT_A_FILE.fullmatch(span) is None
+
+    files = []
+    fenced = False
+    in_run = False
+    for line in body.splitlines():
+        if _FENCE.match(line):
+            fenced = not fenced
+            continue
+        listed = not fenced and _LIST_MARKER.match(line) is not None
+        text = line.strip() if fenced else _LIST_MARKER.sub("", line, count=1).strip()
+        alone = _ALONE.fullmatch(text)
+        if alone and (
+            fenced or listed or in_run or text.startswith("`") or _PATH_LIKE.search(text)
+        ):
+            in_run = named(alone[1])
+            if in_run:
+                files.append(alone[1])
+        elif not fenced:
+            files.extend(span for span in _BACKTICKED.findall(text) if named(span))
+            in_run = text.endswith(":")
+    return tuple(dict.fromkeys(files))
 
 
 def rebase_fix_is_newest(connection: sqlite3.Connection, key: tuple[str, str]) -> bool:
@@ -37,6 +73,34 @@ class RebaseStep:
 
 
 class RebaseMixin:
+    def _rebase_conflicted(
+        self,
+        connection: sqlite3.Connection,
+        ticket: TrackedTicket,
+        comment: Comment,
+    ) -> None:
+        if not rebase_fix_is_newest(connection, (ticket.repo.lower(), ticket.ticket_id)):
+            return
+        body = parse_comment(comment.body).body
+        files = ", ".join(conflict_files(body, ticket.factory.base_branch))
+        record_decisions(
+            connection,
+            ticket,
+            comment.id,
+            [
+                Decision(
+                    question=f"rebase-conflict:{comment.id}",
+                    options=(),
+                    choice=f"Conflict: waiting on Max; files: {files}",
+                    answerer=comment.author,
+                    answered_at=comment.created_at,
+                    url=_comment_link(comment),
+                    answer_id=comment.id,
+                    position=0,
+                )
+            ],
+        )
+
     def _superseded_by_rebase(self, ticket: TrackedTicket, comment: Comment) -> bool:
         with self._connect() as connection:
             sources = {

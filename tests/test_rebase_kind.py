@@ -8,8 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from lib.brief import brief_kind
+from lib.brief import brief_kind, render_brief
 from lib.brief.common import detail_of
+from lib.dispatch.rebase import conflict_files
+from lib.dispatch.types import CIResult
 from lib.orch_yml import Approvals
 from lib.queue import JobRequest
 from tests.merge_queue_support import PR, READY, Board, sha
@@ -385,3 +387,131 @@ def test_a_rebase_on_a_pr_with_no_head_is_refused_with_no_job(tmp_path: Path) ->
 
 def harness_jobs(flow: Flow) -> list:
     return [row for row in jobs(flow.queue) if row["recipient"] != "grok"]
+
+
+CONFLICT = (
+    "<!-- orch:v1 kind=questions from=claude-bot role=builder -->\n"
+    "The rebase onto origin/main stopped on conflicts I cannot resolve without changing behavior:\n"
+    "\n"
+    "- `lib/dispatch/questions.py`\n"
+    "- `tests/test_rebase_kind.py`\n"
+    "\n"
+    "HEAD is back at the PR head and nothing was pushed. Which side should win?\n"
+)
+ANSWERS = "<!-- orch:v1 kind=answers from=grok-bot role=orchestrator -->\nKeep main's side.\n"
+
+
+def conflicted(tmp_path: Path, body: str = CONFLICT) -> tuple[Flow, dict]:
+    flow = in_review(tmp_path)
+    assert flow.post("rebase-42", REBASE, "grok-login") == "queued-rebase"
+    rebase = detail_of(flow.finish("claude", "conflict-1"))["rebase"]
+    assert flow.post("conflict-1", body, "claude-login") == "waiting-max"
+    return flow, rebase
+
+
+def test_a_rebase_conflict_parks_on_max_at_the_unchanged_head(tmp_path: Path) -> None:
+    flow, _ = conflicted(tmp_path)
+
+    row = flow.state()
+    assert (row["workflow_state"], row["paused_action"], row["paused_question_id"]) == (
+        "waiting-max",
+        "fix",
+        "conflict-1",
+    )
+    assert row["paused_head"] == HEADS[1] == flow.head
+    assert flow.actions.states[-1] == "waiting-max"
+    [wake] = [job for job in jobs(flow.queue, "clarify") if job["source_comment_id"] == "conflict-1"]
+    assert wake["head"] == HEADS[1]
+
+
+QUESTIONS = "<!-- orch:v1 kind=questions from=claude-bot role=builder -->\n"
+CONFLICT_FORMATS = {
+    "dash bullets": CONFLICT,
+    "star bullets": "Conflicted files:\n* `lib/dispatch/questions.py`\n* `tests/test_rebase_kind.py`\n",
+    "dotted numbers": "Conflicted files:\n1. lib/dispatch/questions.py\n2. tests/test_rebase_kind.py\n",
+    "paren numbers": (
+        "Conflicted files:\n1) `lib/dispatch/questions.py`\n2) `tests/test_rebase_kind.py`\n"
+        "Which side should I keep?\n"
+    ),
+    "prose": (
+        "HEAD is back at `0123abc`. The rebase onto `main` stopped in "
+        "`lib/dispatch/questions.py` and `tests/test_rebase_kind.py`. Which side should I keep?\n"
+    ),
+    "fenced name-only output": (
+        "`git diff --name-only --diff-filter=U` printed:\n\n```\n"
+        "lib/dispatch/questions.py\ntests/test_rebase_kind.py\n```\n\nWhich side should I keep?\n"
+    ),
+    "bare lines": "Conflicted files:\nlib/dispatch/questions.py\ntests/test_rebase_kind.py\nThanks.\n",
+}
+
+
+@pytest.mark.parametrize("body", CONFLICT_FORMATS.values(), ids=CONFLICT_FORMATS.keys())
+def test_a_rebase_conflict_records_the_outcome_with_its_files(tmp_path: Path, body: str) -> None:
+    flow, _ = conflicted(tmp_path, body if body.startswith("<!--") else QUESTIONS + body)
+
+    assert decisions(flow)[-1] == (
+        "conflict-1",
+        "conflict-1",
+        "rebase-conflict:conflict-1",
+        "Conflict: waiting on Max; files: lib/dispatch/questions.py, tests/test_rebase_kind.py",
+        "claude-login",
+    )
+
+
+ROOT_FILE_FORMATS = {
+    "prose": "Conflicts in `Makefile` and `Dockerfile`. Which side should I keep?\n",
+    "prose past refs and flags": (
+        "HEAD is back at `0123abc` after `git rebase --abort`; `--abort` ended the rebase onto "
+        "`origin/main` at `HEAD`. Conflicts in `Makefile` and `Dockerfile`.\n"
+    ),
+    "plain list": "Conflicted files:\n- Makefile\n- Dockerfile\n",
+    "bare lines": "Conflicted files:\nMakefile\nDockerfile\nThanks.\n",
+    "fenced": "```\nMakefile\nDockerfile\n```\nWhich side should I keep?\n",
+}
+
+
+@pytest.mark.parametrize("body", ROOT_FILE_FORMATS.values(), ids=ROOT_FILE_FORMATS.keys())
+def test_a_rebase_conflict_keeps_root_files_without_a_dot(tmp_path: Path, body: str) -> None:
+    flow, _ = conflicted(tmp_path, QUESTIONS + body)
+
+    assert decisions(flow)[-1][3] == "Conflict: waiting on Max; files: Makefile, Dockerfile"
+
+
+def test_conflict_files_keeps_backticked_root_files() -> None:
+    body = "Conflicts in `Makefile` and `Dockerfile`. Which side should I keep?"
+
+    assert conflict_files(body) == ("Makefile", "Dockerfile")
+
+
+def test_a_question_after_an_ordinary_fix_records_no_conflict(tmp_path: Path) -> None:
+    flow = Flow(tmp_path)
+    assert flow.go() == "queued-build"
+    flow.finish("claude", f"ready-{HEADS[1][:6]}")
+    assert flow.ready(HEADS[1]) == "queued-review"
+    flow.finish("codex", "revise-1/3")
+    assert flow.revise("1/3") == "queued-review-fix"
+    flow.finish("claude", "conflict-1")
+
+    assert flow.post("conflict-1", CONFLICT, "claude-login") == "waiting-max"
+
+    assert [row for row in decisions(flow) if row[2].startswith("rebase-conflict:")] == []
+
+
+def test_maxs_answer_resumes_the_rebase_not_a_ci_fix(tmp_path: Path) -> None:
+    flow, rebase = conflicted(tmp_path)
+    red = CIResult("failure", log="failed: pytest")
+    snapshot = flow.snapshot
+    flow.snapshot = lambda: replace(snapshot(), ci={HEADS[1]: red})
+    before = len(fixes(flow))
+
+    assert flow.post("answers-1", ANSWERS, "grok-login") == "resumed-fix"
+
+    [fix] = fixes(flow)[before:]
+    detail = detail_of_row(fix)
+    assert (fix["head"], detail["kind"], detail["rebase"]) == (HEADS[1], "rebase", rebase)
+    assert "ci_failure" not in detail
+    assert flow.state()["workflow_state"] == "fixing"
+    resumed = flow.finish("claude")
+    assert brief_kind(resumed) == "rebase"
+    brief = render_brief(resumed, bot="claude-bot", context=None)
+    assert "git rebase --abort" in brief and "resumes a paused step" in brief

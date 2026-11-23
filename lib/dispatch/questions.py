@@ -27,6 +27,7 @@ from lib.dispatch.helpers import (
     red_checks,
 )
 from lib.dispatch.plan import gap_of
+from lib.dispatch.rebase import RebaseStep
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, PausedStep, Registration, RoundGrant, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
@@ -201,6 +202,7 @@ class QuestionsMixin:
                     **paused,
                 },
             )
+            self._rebase_conflicted(connection, ticket, comment)
             self._cancel_paused_step(connection, ticket, comment, action, recipient)
             self.queue.enqueue_in_transaction(
                 connection,
@@ -382,6 +384,9 @@ class QuestionsMixin:
         grant: RoundGrant | None,
     ) -> str:
         record_decisions(connection, ticket, step.question_id, decisions)
+        prior = step.prior or {}
+        rebase = prior.get("rebase") if prior.get("kind") == "rebase" else None
+        rebase_step = RebaseStep(**rebase) if isinstance(rebase, dict) else None
         if grant is not None:
             connection.execute(
                 """
@@ -412,9 +417,14 @@ class QuestionsMixin:
                     plan_text=step.plan_text,
                     resume=True,
                     cap=self._effective_cap(ticket, connection),
-                    update=UpdateScope.from_detail(step.prior or {}, step.head),
+                    update=UpdateScope.from_detail(prior, step.head),
                     plan_round=step.plan_round,
-                    ci_failure=red_checks(ticket, step.head) if step.action == "fix" else (),
+                    ci_failure=(
+                        red_checks(ticket, step.head)
+                        if step.action == "fix" and rebase_step is None
+                        else ()
+                    ),
+                    rebase_step=rebase_step,
                     unmapped=step.unmapped,
                     connection=connection,
                 ),
