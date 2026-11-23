@@ -2378,7 +2378,13 @@ cannot reach the orch host, and the orch host's credentials stay there:
    CSRF and approver login, the field and value, that the device is in the
    served `status.json` and that `expect` is still its value there. It then
    writes one request file, `<id>.json` (id, actor, time, device, field,
-   expect, value; no token or session), and answers 202. Without the
+   expect, value; no token or session), and answers 202. A body with
+   `target: "account"` instead names an `op` (`add`, `set`, `remove`,
+   `prepare` or `doctor`) and an `account`. It is refused before anything
+   is written for a bad op, keys or value (400), an account or device not
+   in `status.json` (404), a `<harness>-default` account (declared or not)
+   or an external account (403), or a stale `expect` or existing id (409).
+   A `max_jobs` value must be 1-64; its `expect` may be any declared value. Without the
    variable, `/api/settings` is 404; setting it without
    `DASHBOARD_GITHUB_CLIENT_ID` is a configuration error. At most 20
    requests wait at once.
