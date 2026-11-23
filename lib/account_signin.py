@@ -17,9 +17,14 @@ class Prompt:
     code: str | None
 
 
+End = Literal["exit", "expired", "cancelled", "unrecognized-output"]
+PGID = re.compile(rb"ORCH-SIGNIN-PGID ([0-9]{1,10})\r?\n")
+KILL_GRACE_SECONDS = 3
+
+
 @dataclass(frozen=True)
 class Outcome:
-    result: Literal["ok", "mismatch", "failed"]
+    result: Literal["ok", "mismatch", "failed", "expired", "cancelled"]
     error: str | None
     doctor: str | None
 
@@ -60,6 +65,15 @@ def judge(new: SignIn, before: Mapping[str, SignIn], after: Mapping[str, SignIn]
     return Outcome("failed", "unreachable" if new.status == "unreachable" else "signed-out", new.status)
 
 
+def settle(end: End, outcome: Outcome) -> Outcome:
+    """The attempt's result: judge's, unless the attempt ended without the CLI's own exit."""
+    if end == "exit" or outcome.result == "mismatch":
+        return outcome
+    if end in ("expired", "cancelled"):
+        return Outcome(end, None, outcome.doctor)
+    return Outcome("failed", end, outcome.doctor)
+
+
 def _unchanged(row: SignIn, later: SignIn | None) -> bool:
     return later is not None and (later.status, later.fingerprint) == (row.status, row.fingerprint)
 
@@ -70,14 +84,32 @@ _LOGOUT: dict[Harness, str] = {"claude": "claude auth logout", "codex": "codex l
 
 
 def login_script(harness: Harness, home: str) -> str:
-    return _account_cli(harness, home, _LOGIN[harness], "orch-accounts-login")
+    group = "printf '\\nORCH-SIGNIN-PGID %s\\n' \"$(ps -o pgid= -p $$ | tr -d ' ')\"; "
+    return _account_cli(harness, home, _LOGIN[harness], "orch-accounts-login", group)
 
 
 def logout_script(harness: Harness, home: str) -> str:
     return _account_cli(harness, home, f"{_LOGOUT[harness]} </dev/null >/dev/null 2>&1", "orch-accounts-logout")
 
 
-def _account_cli(harness: Harness, home: str, command: str, name: str) -> str:
-    inner = (f"{_UNTRACE}unset {_TOKENS} CLAUDE_SECURESTORAGE_CONFIG_DIR; exec env "
+def kill_script(pgid: int) -> str:
+    if pgid < 2:
+        raise ValueError("no process group to kill")
+    group = f"-{pgid}"
+    inner = (f"{_UNTRACE}kill -TERM -- {group} 2>/dev/null; i=0; "
+             f"while [ $i -lt {KILL_GRACE_SECONDS} ] && kill -0 -- {group} 2>/dev/null; do sleep 1; i=$((i+1)); done; "
+             f"kill -KILL -- {group} 2>/dev/null; exit 0")
+    return _login(inner, "orch-signin-kill", ())
+
+
+def process_group(output: bytes) -> int | None:
+    """The group login_script printed: only the first marker counts, since the CLI's output follows it."""
+    at = output.find(b"ORCH-SIGNIN-PGID ")
+    found = None if at < 0 else PGID.match(output, at)
+    return None if found is None or int(found[1]) < 2 else int(found[1])
+
+
+def _account_cli(harness: Harness, home: str, command: str, name: str, before: str = "") -> str:
+    inner = (f"{_UNTRACE}{before}unset {_TOKENS} CLAUDE_SECURESTORAGE_CONFIG_DIR; exec env "
              f"{ACCOUNT_ISOLATION[harness].home}={shlex.quote(home)} {command}")
     return _login(inner, name, ())

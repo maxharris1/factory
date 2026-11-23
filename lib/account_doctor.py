@@ -303,8 +303,9 @@ def no_ssh_path(device: Device, harness: str) -> str | None:
     return None
 
 
-def ssh_argv(device: Device, harness: str, script: str) -> list[str]:
-    return [SSH_BINARY, *SSH_OPTIONS, "-l", device.login_for(harness), "--", device.ssh_alias_for(harness), script]
+def ssh_argv(device: Device, harness: str, script: str, *, tty: bool = False) -> list[str]:
+    return [SSH_BINARY, *SSH_OPTIONS, *(["-tt"] if tty else []), "-l", device.login_for(harness), "--",
+            device.ssh_alias_for(harness), script]
 
 
 def probe(transport: ByteTransport, config: MachinesConfig, device: Device, harness: Harness) -> list[Probe]:

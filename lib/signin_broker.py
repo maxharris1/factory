@@ -5,7 +5,7 @@ Every POLL_SECONDS it lists the settings spool through the relay
 seen. It re-checks the request against machines.yml, account_signins and
 running jobs, allows one attempt per pair and MAX_CONCURRENT in all,
 prepares the account's home on the device when it is missing, and hands the
-attempt to `launch`, which ends it with `finish`. Each request ends in
+attempt to `launch` (lib/signin_attempt.py), which ends it with `finish`. Each request ends in
 exactly one audit line, a refusal or failure before launch included.
 """
 
@@ -79,7 +79,7 @@ class Broker:
     state_dir: Path
     approver: str
     owner: str
-    launch: Callable[[Attempt], None]
+    launch: Callable[[Attempt, Callable[[Attempt, str, str | None, object], AuditEntry]], None]
     claims: ClaimLock
     transport: ByteTransport = field(default_factory=SshTransport)
     clock: Callable[[], float] = time.time
@@ -154,7 +154,7 @@ class Broker:
             error = type(exc).__name__
         if error is None:
             try:
-                self.launch(attempt)
+                self.launch(attempt, self.finish)
                 return
             except Exception as exc:
                 error = f"launch: {type(exc).__name__}"
@@ -262,5 +262,8 @@ class Broker:
                 del self._attempts[_pair(attempt.request)]
         if attempt is not None:
             self._unhold(attempt)
-        self.relay.publish(entry.id, {"result": entry.result, "error": entry.error})
+        try:
+            self.relay.publish(entry.id, {"result": entry.result, "error": entry.error})
+        except (SpoolError, OSError) as exc:
+            print(f"signin broker: publish: {type(exc).__name__}", file=sys.stderr)
         return entry
