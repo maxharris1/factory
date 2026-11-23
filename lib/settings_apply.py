@@ -37,6 +37,8 @@ not seen:
   backup under the same lock and writes it into the shared settings row (not
   when that would disable a device now holding a job), restarts them again
   and records `failed`.
+* A body with `target: "account"` is an account request (lib/account_settings.py,
+  #1358) and takes this same path, with its own checks and line edit.
 * Every outcome is one AuditEntry line in `<state>/settings-audit.jsonl`. An
   id already there is never applied again, so a pass is safe to repeat.
 """
@@ -63,7 +65,7 @@ from contextlib import AbstractContextManager, contextmanager
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from types import MappingProxyType
-from typing import Protocol
+from typing import TYPE_CHECKING, ClassVar, Protocol
 
 from lib import dashboard_push, heal, live_settings
 from lib.config_overlay import overlay_path, read_overlay
@@ -73,6 +75,9 @@ from lib.load import is_strict_int
 from lib.machines_yml import Device, MachinesConfig, load_machines_yml
 from lib.orch_yml import load_orch_yml
 from lib.wait import OWNING_BOTS
+
+if TYPE_CHECKING:
+    from lib.account_settings import AccountRequest
 
 ROOT = Path(__file__).resolve().parent.parent
 AUDIT_NAME = "settings-audit.jsonl"
@@ -107,6 +112,8 @@ FIELDS: Mapping[str, Callable[[object], bool]] = MappingProxyType(
 
 @dataclass(frozen=True)
 class SettingsRequest:
+    target: ClassVar[str | None] = None
+    account: ClassVar[str | None] = None
     id: str
     actor: str
     requested_at: str
@@ -120,14 +127,22 @@ class BadRequest(ValueError):
     pass
 
 
-def parse_request(body: bytes, stem: str) -> SettingsRequest:
+def parse_request(body: bytes, stem: str) -> SettingsRequest | AccountRequest:
     """The request in a spool file named `<stem>.json`; values are checked
     against FIELDS later, so a bad value is refused with its device named."""
     try:
         data = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
         raise BadRequest("not-json") from None
-    if not isinstance(data, dict) or set(data) != REQUEST_KEYS:
+    if not isinstance(data, dict):
+        raise BadRequest("bad-keys")
+    if "target" in data:
+        if data["target"] != "account":
+            raise BadRequest("bad-target")
+        from lib import account_settings
+
+        return account_settings.parse(data, stem)
+    if set(data) != REQUEST_KEYS:
         raise BadRequest("bad-keys")
     for key in ("id", "actor", "requested_at", "device", "field"):
         if not isinstance(data[key], str):
@@ -366,7 +381,6 @@ def parse_listing(text: str) -> SpoolListing:
 
 
 
-_DEVICES = re.compile(r"^devices:[ \t]*(#.*)?$")
 _ITEM = re.compile(r"^(?P<dash>[ ]*-[ ]+)(?P<rest>\S.*)$")
 
 
@@ -377,9 +391,10 @@ def _scalar(text: str) -> str:
     return value
 
 
-def _blocks(lines: Sequence[str]) -> list[tuple[int, int, int]]:
-    """(first line, last content line, key indent) of each devices item."""
-    top = next((i for i, line in enumerate(lines) if _DEVICES.match(line.rstrip("\r\n"))), None)
+def _blocks(lines: Sequence[str], section: str) -> list[tuple[int, int, int]]:
+    """(first line, last content line, key indent) of each item of top-level list `section`."""
+    head = re.compile(rf"^{section}:[ \t]*(#.*)?$")
+    top = next((i for i, line in enumerate(lines) if head.match(line.rstrip("\r\n"))), None)
     if top is None:
         return []
     blocks: list[list[int]] = []
@@ -419,38 +434,52 @@ def _render(value: object) -> str:
     return ("true" if value else "false") if isinstance(value, bool) else str(value)
 
 
+def _item(lines: Sequence[str], section: str, id_key: str,
+          ident: str) -> tuple[tuple[int, int, int], int] | None:
+    """(block, line of its `id_key:`) of the first `section` item whose single
+    `id_key:` scalar is ident."""
+    for block in _blocks(lines, section):
+        found = _key_lines(lines, block, id_key)
+        if len(found) != 1:
+            continue
+        index, column = found[0]
+        if _scalar(lines[index].rstrip("\r\n")[column + len(id_key) + 1:]) == ident:
+            return block, index
+    return None
+
+
+def _set_key(lines: list[str], block: tuple[int, int, int], after: int, key: str,
+             value: object) -> str | None:
+    """The text with `key: value` set in block, replacing its line or inserted
+    after line `after`; None when the key cannot be edited by line."""
+    found = _key_lines(lines, block, key)
+    if len(found) > 1:
+        return None
+    if found:
+        line, column = found[0]
+        raw = lines[line]
+        eol = raw[len(raw.rstrip("\r\n")):]
+        body = raw.rstrip("\r\n")
+        match = re.match(r"(?P<gap>[ \t]*)(?P<value>[^#]*?)(?P<trail>[ \t]+#.*)?$",
+                         body[column + len(key) + 1:])
+        if match is None or not match["value"]:
+            return None
+        lines[line] = (body[:column] + f"{key}: {_render(value)}"
+                       + (match["trail"] or "") + eol)
+    else:
+        if not lines[after].endswith("\n"):
+            lines[after] += "\n"
+        eol = "\r\n" if lines[after].endswith("\r\n") else "\n"
+        lines.insert(after + 1, " " * block[2] + f"{key}: {_render(value)}{eol}")
+    return "".join(lines)
+
+
 def edit_device_field(text: str, device: str, key: str, value: object) -> str | None:
     """text with `key: value` set in the device's block, or None when the
     block cannot be found or edited by line."""
     lines = text.splitlines(keepends=True)
-    for block in _blocks(lines):
-        names = _key_lines(lines, block, "name")
-        if len(names) != 1:
-            continue
-        index, column = names[0]
-        if _scalar(lines[index].rstrip("\r\n")[column + len("name:"):]) != device:
-            continue
-        found = _key_lines(lines, block, key)
-        if len(found) > 1:
-            return None
-        if found:
-            line, column = found[0]
-            raw = lines[line]
-            eol = raw[len(raw.rstrip("\r\n")):]
-            body = raw.rstrip("\r\n")
-            match = re.match(r"(?P<gap>[ \t]*)(?P<value>[^#]*?)(?P<trail>[ \t]+#.*)?$",
-                             body[column + len(key) + 1:])
-            if match is None or not match["value"]:
-                return None
-            lines[line] = (body[:column] + f"{key}: {_render(value)}"
-                           + (match["trail"] or "") + eol)
-        else:
-            if not lines[index].endswith("\n"):
-                lines[index] += "\n"
-            eol = "\r\n" if lines[index].endswith("\r\n") else "\n"
-            lines.insert(index + 1, " " * block[2] + f"{key}: {_render(value)}{eol}")
-        return "".join(lines)
-    return None
+    found = _item(lines, "devices", "name", device)
+    return None if found is None else _set_key(lines, *found, key, value)
 
 
 def _changes(old: MachinesConfig, new: MachinesConfig) -> list[tuple[str, str, object]] | None:
@@ -466,11 +495,11 @@ def _changes(old: MachinesConfig, new: MachinesConfig) -> list[tuple[str, str, o
     ]
 
 
-def _overlay_sets(machines: Path, device: str, key: str) -> bool:
+def _overlay_sets(machines: Path, section: str, id_key: str, ident: str, key: str) -> bool:
     data, _ = read_overlay(machines)
-    entries = (data or {}).get("devices") or ()
+    entries = (data or {}).get(section) or ()
     return any(
-        isinstance(entry, dict) and entry.get("name") == device and key in entry
+        isinstance(entry, dict) and entry.get(id_key) == ident and key in entry
         for entry in entries
     )
 
@@ -584,7 +613,7 @@ class Applier:
     def audit_path(self) -> Path:
         return self.state_dir / AUDIT_NAME
 
-    def apply(self, request: SettingsRequest) -> AuditEntry:
+    def apply(self, request: SettingsRequest | AccountRequest) -> AuditEntry:
         try:
             with self.claims() as held:
                 old_bytes, new_text, previous = self._plan(request, held)
@@ -598,16 +627,17 @@ class Applier:
             return self._entry(request, REFUSED, None, "cannot read running jobs")
         return self._restart_all(request, old_bytes, mode, backup, previous, version)
 
-    def _entry(self, request: SettingsRequest, result: str, previous: object,
+    def _entry(self, request: SettingsRequest | AccountRequest, result: str, previous: object,
                error: str | None = None, **extra: object) -> AuditEntry:
         return AuditEntry(
             id=request.id, actor=_clip(request.actor), requested_at=request.requested_at,
             applied_at=heal.stamp(self.clock()), device=_clip(request.device),
             field=_clip(request.field), previous=_clip(previous), new=_clip(request.value),
-            result=result, error=error, **extra,
+            result=result, error=error, target=request.target,
+            account=_clip(request.account), **extra,
         )
 
-    def _plan(self, request: SettingsRequest,
+    def _plan(self, request: SettingsRequest | AccountRequest,
               held: Held) -> tuple[bytes, str, object]:
         if request.actor.casefold() != self.approver.casefold() or is_bot_login(request.actor):
             raise Refused("not-approver")
@@ -615,6 +645,18 @@ class Applier:
         old, _ = load_machines_yml(self.machines)
         if old is None:
             raise Refused("machines.yml is invalid")
+        text = old_bytes.decode("utf-8")
+        if request.target == "account":
+            from lib import account_settings
+
+            new_text, previous = account_settings.plan(request, old, text, self.machines,
+                                                       self._parse)
+        else:
+            new_text, previous = self._plan_device(request, old, text, held)
+        return old_bytes, new_text, previous
+
+    def _plan_device(self, request: SettingsRequest, old: MachinesConfig, text: str,
+                     held: Held) -> tuple[str, object]:
         device = old.device(request.device)
         if device is None:
             raise Refused("unknown-device")
@@ -624,7 +666,7 @@ class Applier:
         previous = getattr(device, request.field)
         if not check(request.value) or not check(request.expect):
             raise Refused("bad-value", previous)
-        if _overlay_sets(self.machines, request.device, request.field):
+        if _overlay_sets(self.machines, "devices", "name", request.device, request.field):
             raise Refused(f"{request.field} is set in machines.local.yml", previous)
         if request.expect != previous:
             raise Refused("changed", previous)
@@ -638,28 +680,29 @@ class Applier:
             if running:
                 raise Refused(f"{request.device} holds {running} running job(s); drain it first",
                               previous)
-        new_text = edit_device_field(old_bytes.decode("utf-8"), request.device,
-                                     request.field, request.value)
+        new_text = edit_device_field(text, request.device, request.field, request.value)
         if new_text is None:
             raise Refused("cannot edit the device's block", previous)
-        new, findings = self._parse(new_text)
-        if new is None:
-            error = next((f.message for f in findings if f.severity == "error"), "invalid")
-            raise Refused(f"invalid after the edit: {error}"[:200], previous)
+        new = self._parse(new_text, previous)
         if _changes(old, new) != [(request.device, request.field, request.value)]:
             raise Refused("the edit changed more than that field", previous)
-        return old_bytes, new_text, previous
+        return new_text, previous
 
-    def _parse(self, text: str):
+    def _parse(self, text: str, previous: object) -> MachinesConfig:
+        """text parsed as machines.yml beside this one's overlay; refused when invalid."""
         with tempfile.TemporaryDirectory() as tmp:
             probe = Path(tmp) / self.machines.name
             probe.write_text(text, encoding="utf-8")
             local = overlay_path(self.machines)
             if local.is_file():
                 shutil.copyfile(local, overlay_path(probe))
-            return load_machines_yml(probe)
+            new, findings = load_machines_yml(probe)
+        if new is None:
+            error = next((f.message for f in findings if f.severity == "error"), "invalid")
+            raise Refused(f"invalid after the edit: {error}"[:200], previous)
+        return new
 
-    def _restart_all(self, request: SettingsRequest, old_bytes: bytes, mode: int,
+    def _restart_all(self, request: SettingsRequest | AccountRequest, old_bytes: bytes, mode: int,
                      backup: Path, previous: object, version: int | None) -> AuditEntry:
         restarted, failure = self._restart(stop_on_failure=True)
         if failure is None:
@@ -675,7 +718,8 @@ class Applier:
                            restarted=tuple(dict.fromkeys(restarted + again)),
                            pending=self.pending)
 
-    def _restore(self, request: SettingsRequest, old_bytes: bytes, mode: int) -> str | None:
+    def _restore(self, request: SettingsRequest | AccountRequest, old_bytes: bytes,
+                 mode: int) -> str | None:
         try:
             with self.claims() as held:
                 if request.field == "enabled" and request.value is True:
@@ -743,7 +787,8 @@ def run_pass(applier: Applier, spool: Spool, owner: str) -> list[AuditEntry]:
 
 
 def describe(entry: AuditEntry) -> str:
-    text = (f"settings: {entry.id} {entry.result} {entry.device}.{entry.field} "
+    subject = f"account {entry.account}" if entry.target == "account" else entry.device
+    text = (f"settings: {entry.id} {entry.result} {subject}.{entry.field} "
             f"{json.dumps(entry.previous)} -> {json.dumps(entry.new)}")
     if entry.error:
         text += f" ({entry.error})"

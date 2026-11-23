@@ -17,7 +17,8 @@ the sibling `account_live` table and written in the same transaction, with
 the same meet over every account any side names: paused if any side says so,
 and the lowest max_jobs. A side that does not name an account leaves an
 implicit `<harness>-default` one open and closes any other. An entry written
-before account switches existed has no say on accounts.
+before account switches existed has no say on accounts, nor has the adopted
+side before the first adopt, while every device is still closed.
 
 * `recorded` runs inside every claim's BEGIN IMMEDIATE. When the caller's
   file changed since its entry was written, it replaces that entry. A
@@ -173,7 +174,7 @@ class _Row:
                 name: switch.meet(source.switches.get(name, CLOSED))
                 for name, switch in switches.items()
             }
-        sides = [self.adopted_accounts or {},
+        sides = [*([self.adopted_accounts or {}] if self.adopted else []),
                  *(source.accounts for source in self.sources.values()
                    if source.accounts is not None)]
         accounts = {}
