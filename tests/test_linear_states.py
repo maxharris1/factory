@@ -639,3 +639,57 @@ def test_building_moved_after_process_skips_handoff_verification(tmp_path: Path)
         ("building", "handed-off-externally", "linear-handoff")
     ]
     assert attention(queue, "AUT-9") == []
+
+
+REBASE_DETAIL = '{"kind":"rebase","rebase":{"from_state":"handed-off","from_head":"abc","round":2}}'
+
+
+def enqueue_detail(queue, ticket_id: str, action: str, key: str, detail: str | None):
+    return queue.enqueue(
+        JobRequest(
+            repo=REPO,
+            ticket_id=ticket_id,
+            action=action,
+            recipient="claude" if action != "review" else "codex",
+            source_comment_id=f"c-{key}",
+            timeout_seconds=3600,
+            detail=detail,
+        ),
+        dedupe_key=key,
+    )
+
+
+@pytest.mark.parametrize(
+    ("newest", "state"),
+    [
+        ((("fix", REBASE_DETAIL),), "fixing"),
+        ((("fix", REBASE_DETAIL), ("review", None)), "handed-off-externally"),
+        ((("fix", REBASE_DETAIL), ("fix", None)), "handed-off-externally"),
+        ((("fix", None),), "handed-off-externally"),
+    ],
+    ids=["rebase-newest", "review-after-rebase", "fix-after-rebase", "plain-fix"],
+)
+def test_a_rebase_fix_holds_a_handed_off_ticket_in_fixing_through_ready_for_review(
+    tmp_path: Path, newest: tuple, state: str
+) -> None:
+    now = [1000.0]
+    dispatcher, queue = setup(tmp_path, now)
+    seed(queue, "AUT-9", "fixing", review_round=2)
+    for index, (action, detail) in enumerate(newest):
+        job = enqueue_detail(queue, "AUT-9", action, f"job-{index}", detail)
+        if index < len(newest) - 1:
+            claimed = queue.claim(job.request.recipient)
+            queue.finish(claimed.id, owner=claimed.request.recipient, handoff_comment_id="h")
+        now[0] += 1
+    source = LinearSource(ticket(tickets="linear", ticket_id="AUT-9"))
+    source.states = {"AUT-9": RFR}
+
+    for _ in range(2):
+        dispatcher.poll_once(source)
+        now[0] += 60
+
+    assert state_of(queue, "AUT-9")["workflow_state"] == state
+    held = state == "fixing"
+    assert job_states(queue, "AUT-9")[f"job-{len(newest) - 1}"] == (
+        "queued" if held else "cancelled"
+    )

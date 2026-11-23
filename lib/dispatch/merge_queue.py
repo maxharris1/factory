@@ -324,31 +324,36 @@ class MergeQueueMixin:
         return dict(row)
 
     def _leave_merge_queue(self, ticket: TrackedTicket, reason: str) -> None:
-        """Clear the ticket's approval so ship waits for a new APPROVE, and
-        cancel a queued update-from-main job (#130)."""
-        key = (ticket.repo.lower(), ticket.ticket_id)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
-                """
-                UPDATE ticket_state
-                SET approved_head = NULL, approved_at = NULL,
-                    approve_comment_id = NULL, update_failures = 0,
-                    update_from_head = NULL
-                WHERE repo = ? AND ticket_id = ?
-                """,
-                key,
-            )
-            for job in connection.execute(
-                """
-                SELECT id FROM jobs
-                WHERE lower(repo) = ? AND ticket_id = ? AND state = 'queued'
-                  AND action = 'update-from-main'
-                """,
-                key,
-            ).fetchall():
-                self.queue.cancel(str(job["id"]), reason, connection=connection)
+            self._clear_approval(connection, ticket, reason)
             connection.commit()
+
+    def _clear_approval(
+        self, connection: sqlite3.Connection, ticket: TrackedTicket, reason: str
+    ) -> None:
+        """Clear the ticket's approval so ship waits for a new APPROVE, and
+        cancel a queued update-from-main job (#130), in the caller's transaction."""
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        connection.execute(
+            """
+            UPDATE ticket_state
+            SET approved_head = NULL, approved_at = NULL,
+                approve_comment_id = NULL, update_failures = 0,
+                update_from_head = NULL
+            WHERE repo = ? AND ticket_id = ?
+            """,
+            key,
+        )
+        for job in connection.execute(
+            """
+            SELECT id FROM jobs
+            WHERE lower(repo) = ? AND ticket_id = ? AND state = 'queued'
+              AND action = 'update-from-main'
+            """,
+            key,
+        ).fetchall():
+            self.queue.cancel(str(job["id"]), reason, connection=connection)
 
     def _enter_merge_queue(
         self,

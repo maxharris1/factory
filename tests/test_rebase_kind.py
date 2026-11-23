@@ -11,7 +11,8 @@ import pytest
 from lib.brief import brief_kind
 from lib.brief.common import detail_of
 from lib.orch_yml import Approvals
-from tests.merge_queue_support import READY
+from lib.queue import JobRequest
+from tests.merge_queue_support import PR, READY, Board, sha
 from tests.test_lifecycle import HEADS, Flow, jobs, outcome
 
 REBASE = "<!-- orch:v1 kind=rebase from=grok-bot role=orchestrator -->\nRebase onto the base.\n"
@@ -273,3 +274,114 @@ def test_the_rebase_fix_ready_still_starts_review(tmp_path: Path) -> None:
 
     assert [job.request.action for job in flow.queue.outstanding()] == ["review"]
     assert flow.state()["workflow_state"] == "review"
+
+
+def approved(tmp_path: Path, ship: str) -> tuple[Board, PR]:
+    board = Board(tmp_path, ship=ship)
+    pr = board.open("42", sha(1))
+    board.build_and_approve(pr, mergeable=None)
+    return board, pr
+
+
+def queue_update(board: Board, pr: PR) -> str:
+    return board.queue.enqueue(
+        JobRequest(
+            repo=pr.repo,
+            ticket_id=pr.number,
+            action="update-from-main",
+            recipient="claude",
+            source_comment_id="approve-42",
+            timeout_seconds=3600,
+            head=pr.head,
+        ),
+        dedupe_key="t-update:42",
+    ).id
+
+
+@pytest.mark.parametrize(
+    ("ship", "state"), [("handoff", "merge-queue"), ("after:max", "waiting-external")]
+)
+def test_rebase_from_the_merge_queue_clears_the_approval_and_cancels_the_update(
+    tmp_path: Path, ship: str, state: str
+) -> None:
+    board, pr = approved(tmp_path, ship)
+    assert board.state("42")["workflow_state"] == state
+    assert board.state("42")["approved_head"] == pr.head
+    spent = board.state("42")["review_round"]
+    queue_update(board, pr)
+
+    board.post(pr, "rebase-42", REBASE, "grok-login")
+    board.poll()
+
+    assert board.outcome("rebase-42") == "queued-rebase"
+    row = board.state("42")
+    assert (row["workflow_state"], row["approved_head"], row["approve_comment_id"]) == (
+        "fixing",
+        None,
+        None,
+    )
+    assert [job["state"] for job in board.jobs("update-from-main")] == ["cancelled"]
+    [fix] = board.jobs("fix")
+    assert (fix["state"], fix["head"]) == ("queued", pr.head)
+    detail = json.loads(fix["detail"])
+    assert detail["kind"] == "rebase"
+    assert detail["rebase"] == {"from_state": state, "from_head": pr.head, "round": spent}
+    pr.mergeable, pr.mergeable_state = True, "clean"
+    board.poll()
+    assert board.actions.merges == []
+
+
+def test_a_running_update_refuses_the_rebase_and_keeps_the_approval(tmp_path: Path) -> None:
+    board, pr = approved(tmp_path, "handoff")
+    queue_update(board, pr)
+    board.claim("claude")
+
+    board.post(pr, "rebase-42", REBASE, "grok-login")
+    board.poll()
+
+    assert board.outcome("rebase-42") == "rejected-rebase-job-active"
+    row = board.state("42")
+    assert (row["workflow_state"], row["approved_head"]) == ("merge-queue", pr.head)
+    assert [job["state"] for job in board.jobs("update-from-main")] == ["running"]
+    assert board.jobs("fix") == []
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "planning",
+        "plan-check",
+        "building",
+        "questions",
+        "blocked",
+        "updating",
+        "waiting-max",
+        "handed-off-externally",
+    ],
+)
+def test_a_rebase_in_any_other_state_is_refused_with_no_job(tmp_path: Path, state: str) -> None:
+    flow = in_review(tmp_path)
+    set_state(flow, state, 1)
+    before = len(harness_jobs(flow))
+
+    assert flow.post("rebase-42", REBASE, "grok-login") == "rejected-rebase-state"
+
+    assert len(harness_jobs(flow)) == before
+    assert flow.state()["workflow_state"] == state
+    assert decisions(flow) == []
+
+
+def test_a_rebase_on_a_pr_with_no_head_is_refused_with_no_job(tmp_path: Path) -> None:
+    flow = in_review(tmp_path)
+    flow.head = None
+    before = len(harness_jobs(flow))
+
+    assert flow.post("rebase-42", REBASE, "grok-login") == "rejected-rebase-no-pr"
+
+    assert len(harness_jobs(flow)) == before
+    assert flow.state()["workflow_state"] == "review"
+    assert decisions(flow) == []
+
+
+def harness_jobs(flow: Flow) -> list:
+    return [row for row in jobs(flow.queue) if row["recipient"] != "grok"]
