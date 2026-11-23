@@ -12,10 +12,11 @@ is enabled only if the adopted switches and every file say so, drained if
 any does, and its slot_max is the lowest. A device the poller has not
 adopted is closed, so nothing is placed before the first adopt.
 
-Each declared account's `paused` and `max_jobs` ride the same row, kept in
-the sibling `account_live` table and written in the same transaction, with
-the same meet over every account any side names: paused if any side says so,
-and the lowest max_jobs. A side that does not name an account leaves an
+Each declared account's `paused`, `max_jobs` and `signed_in_on` ride the
+same row, kept in the sibling `account_live` table and written in the same
+transaction, with the same meet over every account any side names: paused if
+any side says so, the lowest max_jobs, and only the devices every side signs
+it in on. A side that does not name an account leaves an
 implicit `<harness>-default` one open and closes any other. An entry written
 before account switches existed has no say on accounts.
 
@@ -86,14 +87,17 @@ _FIELDS = tuple(item.name for item in fields(Switch))
 class AccountSwitch:
     paused: bool
     max_jobs: int | None
+    signed_in_on: frozenset[str] | None = None
 
     def meet(self, other: AccountSwitch) -> AccountSwitch:
         caps = [cap for cap in (self.max_jobs, other.max_jobs) if cap is not None]
-        return AccountSwitch(self.paused or other.paused, min(caps) if caps else None)
+        sets = [item for item in (self.signed_in_on, other.signed_in_on) if item is not None]
+        return AccountSwitch(self.paused or other.paused, min(caps) if caps else None,
+                             frozenset.intersection(*sets) if sets else None)
 
 
 _ACCOUNT_FIELDS = tuple(item.name for item in fields(AccountSwitch))
-ACCOUNT_CLOSED = AccountSwitch(paused=True, max_jobs=0)
+ACCOUNT_CLOSED = AccountSwitch(paused=True, max_jobs=0, signed_in_on=frozenset())
 ACCOUNT_OPEN = AccountSwitch(paused=False, max_jobs=None)
 _IMPLICIT = frozenset(default_account(harness) for harness in HARNESSES)
 
@@ -104,7 +108,7 @@ def _absent(account_id: str) -> AccountSwitch:
 
 def _declared(accounts: Mapping[str, AccountSwitch]) -> dict[str, AccountSwitch]:
     return {name: switch for name, switch in accounts.items()
-            if not (name in _IMPLICIT and switch == ACCOUNT_OPEN)}
+            if not (name in _IMPLICIT and replace(switch, signed_in_on=None) == ACCOUNT_OPEN)}
 
 
 @dataclass(frozen=True)
@@ -127,7 +131,11 @@ class Live:
         accounts = []
         for account in config.accounts:
             switch = self.accounts.get(account.id, _absent(account.id))
-            accounts.append(replace(account, paused=switch.paused, max_jobs=switch.max_jobs))
+            signed_in_on = account.signed_in_on
+            if switch.signed_in_on is not None:
+                signed_in_on &= switch.signed_in_on
+            accounts.append(replace(account, paused=switch.paused, max_jobs=switch.max_jobs,
+                                    signed_in_on=signed_in_on))
         declared = {account.id for account in config.accounts}
         for name, switch in self.accounts.items():
             if name in _IMPLICIT and name not in declared:
@@ -144,6 +152,8 @@ class Live:
 
     def adopted_account_holds(self, account: str, name: str, value: object) -> bool:
         switch = self.adopted_accounts.get(account)
+        if name == "signed_in_on" and isinstance(value, list):
+            value = frozenset(value)
         return name not in _ACCOUNT_FIELDS or (switch is not None and getattr(switch, name) == value)
 
     def places_by_adopted(self) -> bool:
@@ -314,7 +324,7 @@ def _switches(config: MachinesConfig) -> dict[str, Switch]:
 
 
 def _account_switches(config: MachinesConfig) -> dict[str, AccountSwitch]:
-    return {a.id: AccountSwitch(a.paused, a.max_jobs) for a in config.accounts}
+    return {a.id: AccountSwitch(a.paused, a.max_jobs, a.signed_in_on) for a in config.accounts}
 
 
 def _plain(switches: Mapping[str, Switch]) -> dict[str, dict]:
@@ -333,14 +343,17 @@ def _parsed(plain: Mapping[str, Mapping]) -> dict[str, Switch]:
 
 def _plain_accounts(accounts: Mapping[str, AccountSwitch]) -> dict[str, dict]:
     return {
-        name: {"paused": s.paused, "max_jobs": s.max_jobs}
+        name: {"paused": s.paused, "max_jobs": s.max_jobs,
+               **({} if s.signed_in_on is None else {"signed_in_on": sorted(s.signed_in_on)})}
         for name, s in sorted(accounts.items())
     }
 
 
 def _parsed_accounts(plain: Mapping[str, Mapping]) -> dict[str, AccountSwitch]:
     return {
-        str(name): AccountSwitch(bool(value["paused"]), value["max_jobs"])
+        str(name): AccountSwitch(
+            bool(value["paused"]), value["max_jobs"],
+            None if value.get("signed_in_on") is None else frozenset(value["signed_in_on"]))
         for name, value in plain.items()
     }
 

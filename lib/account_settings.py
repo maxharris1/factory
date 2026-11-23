@@ -17,7 +17,6 @@ job, and a failed restart never restores a file that would.
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -28,7 +27,7 @@ from typing import ClassVar, NamedTuple
 from lib import account_requests
 from lib.account_requests import COMMON_KEYS
 from lib.device_pool import RunningPair
-from lib.load import is_strict_int, load_yaml
+from lib.load import is_strict_int
 from lib.machines_yml import ACCOUNT_ID, EXTERNAL, Account, MachinesConfig, default_account
 from lib.schema import HARNESSES
 from lib.settings_apply import (
@@ -45,6 +44,7 @@ from lib.settings_apply import (
     _overlay_sets,
     _render,
     _set_key,
+    _yaml_str,
 )
 
 ADD_KEYS = ("harness", "max_jobs", "signed_in_on")
@@ -152,14 +152,6 @@ def _head(lines: Sequence[str]) -> int | None:
                  if re.match(r"accounts:(\s|$)", line)), None)
 
 
-def _yaml_id(ident: str) -> str:
-    # PyYAML reads 1e3 as text but YAML 1.2 tools read it as a number, so any
-    # id not starting with a letter is quoted too.
-    if ident[:1].isalpha() and load_yaml(ident) == ident:
-        return ident
-    return json.dumps(ident)
-
-
 def add_account(text: str, account: Account) -> str | None:
     lines = text.splitlines(keepends=True)
     eol = "\r\n" if lines and lines[0].endswith("\r\n") else "\n"
@@ -181,7 +173,7 @@ def add_account(text: str, account: Account) -> str | None:
     else:
         at, dash, keys = top, "  - ", 4
     indent = " " * keys
-    block = [f"{dash}id: {_yaml_id(account.id)}", f"{indent}harness: {account.harness}"]
+    block = [f"{dash}id: {_yaml_str(account.id)}", f"{indent}harness: {account.harness}"]
     if account.signed_in_on:
         block.append(f"{indent}signed_in_on: {_render(sorted(account.signed_in_on))}")
     if account.max_jobs is not None:

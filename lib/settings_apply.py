@@ -71,7 +71,7 @@ from lib import dashboard_push, heal, live_settings
 from lib.config_overlay import overlay_path, read_overlay
 from lib.dashboard_config import SettingsConfig, is_bot_login
 from lib.device_pool import RunningPair, running_pairs, slots_in_use
-from lib.load import is_strict_int
+from lib.load import is_strict_int, load_yaml
 from lib.machines_yml import Device, MachinesConfig, load_machines_yml
 from lib.orch_yml import load_orch_yml
 from lib.wait import OWNING_BOTS
@@ -432,9 +432,17 @@ def _key_lines(lines: Sequence[str], block: tuple[int, int, int], key: str) -> l
     return found
 
 
+def _yaml_str(text: str) -> str:
+    # PyYAML reads 1e3 as text but YAML 1.2 tools read it as a number, so any
+    # string not starting with a letter is quoted too.
+    if text[:1].isalpha() and load_yaml(text) == text:
+        return text
+    return json.dumps(text)
+
+
 def _render(value: object) -> str:
     if isinstance(value, list):
-        return f"[{', '.join(map(str, value))}]"
+        return f"[{', '.join(map(_yaml_str, value))}]"
     return ("true" if value else "false") if isinstance(value, bool) else str(value)
 
 

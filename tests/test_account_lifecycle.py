@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from lib import settings_apply
+from lib.machines_yml import load_machines_yml
 from lib.queue import SQLiteJobQueue
 from tests.pool_helpers import poller_adopts
 from tests.test_account_settings import MACHINES, Box, _audit_result
@@ -130,6 +131,35 @@ def test_add_quotes_an_id_yaml_would_read_as_another_type(tmp_path: Path) -> Non
     assert entry.result == "pending", entry
     assert box.machines.read_text() == (
         MACHINES + '  - id: "1e3"\n    harness: claude\n    signed_in_on: [pc]\n')
+
+
+ON_DEVICE = MACHINES.replace("accounts:\n", (
+    "  - name: \"on\"\n    tailscale_name: on.example.ts.net\n    slot_max: 1\n"
+    "    harnesses: {claude: claude-bot}\n    workdir_root: /home/{bot}/work\n"
+    "    ssh_alias: on-{bot}\n    factory_root: /srv/factory\n    home: /home/{bot}\n"
+    "accounts:\n"))
+
+
+@pytest.mark.parametrize(
+    ("request_it", "account", "line"),
+    [(lambda box: _add(box, account="solo", harness="claude", max_jobs=None,
+                       signed_in_on=("on",)), "solo", '    signed_in_on: ["on"]\n'),
+     (lambda box: _devices(box, value=("box", "on")), "work",
+      '    signed_in_on: [box, "on"]\n')],
+    ids=["add", "set"],
+)
+def test_device_names_yaml_would_read_as_another_type_stay_names(
+        tmp_path: Path, request_it, account: str, line: str) -> None:
+    box = Box(tmp_path)
+    _base(box, ON_DEVICE)
+    request_it(box)
+
+    (entry,) = box.run()
+
+    assert entry.result == "pending", entry
+    assert line in box.machines.read_text()
+    config, _ = load_machines_yml(box.machines)
+    assert "on" in config.account(account).signed_in_on
 
 
 @pytest.mark.parametrize(
