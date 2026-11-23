@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from lib.factory_md import (
+    CheckCommand,
     EXAMPLE_PATHS,
     FactoryConfig,
     QaConfig,
@@ -1472,3 +1473,71 @@ def test_the_aut0_example_names_its_human_reviewers() -> None:
     aut0, _ = load_factory_md(ROOT / "examples/aut0/factory.md")
     assert aut0 is not None
     assert aut0.human_reviewers == ("olivermillard", "KonstantineBiganashvili")
+
+
+def with_local_gate(value: object) -> dict:
+    data = copy.deepcopy(VALID)
+    data["ci"] = {"branches": ["main"], "local_gate": value}
+    return data
+
+
+@pytest.mark.parametrize("timeout", [1, 1800])
+def test_ci_local_gate_parses_to_its_command_and_timeout(tmp_path: Path, timeout: int) -> None:
+    path = write_factory(tmp_path, with_local_gate({"command": "make gate", "timeout_seconds": timeout}))
+    config, findings = load_factory_md(path)
+
+    assert findings == []
+    assert config is not None
+    assert config.ci_local_gate == CheckCommand("make gate", timeout)
+
+
+def test_ci_local_gate_is_unset_without_the_key(tmp_path: Path) -> None:
+    data = copy.deepcopy(VALID)
+    data["ci"] = {"branches": ["main"]}
+    config, _ = load_factory_md(write_factory(tmp_path, data))
+
+    assert config is not None and config.ci_local_gate is None
+
+
+LOCAL_GATE_TIMEOUT = "ci.local_gate.timeout_seconds must be an integer from 1 to 1800"
+LOCAL_GATE_COMMAND = "ci.local_gate.command must be a non-empty string"
+BAD_LOCAL_GATES = [
+    ("make gate", "ci.local_gate must be a mapping"),
+    (["make gate"], "ci.local_gate must be a mapping"),
+    (None, "ci.local_gate must be a mapping"),
+    ({"command": "make", "timeout_seconds": 60, "env": {}}, "unknown field 'ci.local_gate.env'"),
+    ({"timeout_seconds": 60}, LOCAL_GATE_COMMAND),
+    ({"command": "", "timeout_seconds": 60}, LOCAL_GATE_COMMAND),
+    ({"command": "  ", "timeout_seconds": 60}, LOCAL_GATE_COMMAND),
+    ({"command": ["make"], "timeout_seconds": 60}, LOCAL_GATE_COMMAND),
+    ({"command": "make", "timeout_seconds": 0}, LOCAL_GATE_TIMEOUT),
+    ({"command": "make", "timeout_seconds": 1801}, LOCAL_GATE_TIMEOUT),
+    ({"command": "make", "timeout_seconds": True}, LOCAL_GATE_TIMEOUT),
+    ({"command": "make", "timeout_seconds": "60"}, LOCAL_GATE_TIMEOUT),
+    ({"command": "make", "timeout_seconds": None}, LOCAL_GATE_TIMEOUT),
+    ({"command": "make", "timeout_seconds": 60.0}, LOCAL_GATE_TIMEOUT),
+    ({"command": "make"}, LOCAL_GATE_TIMEOUT),
+]
+
+
+@pytest.mark.parametrize(("value", "message"), BAD_LOCAL_GATES)
+def test_ci_local_gate_refuses_bad_shapes(tmp_path: Path, value: object, message: str) -> None:
+    config, findings = load_factory_md(write_factory(tmp_path, with_local_gate(value)))
+
+    assert config is None
+    assert message in [finding.message for finding in findings]
+
+
+@pytest.mark.parametrize(("value", "message"), BAD_LOCAL_GATES)
+def test_check_config_refuses_a_bad_ci_local_gate(tmp_path: Path, value: object, message: str) -> None:
+    path = write_factory(tmp_path, with_local_gate(value))
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "bin/orch"), "check-config", "--factory", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=ROOT,
+    )
+
+    assert result.returncode != 0
+    assert message in result.stdout + result.stderr

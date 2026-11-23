@@ -17,7 +17,7 @@ from lib.brief import brief_kind
 from lib.device_monitor import DeviceMonitor
 from lib.device_pool import DevicePool
 from lib.dispatch.core import DispatcherBase
-from lib.factory_md import PreReady
+from lib.factory_md import CheckCommand
 from lib.github_actions import _comment
 from lib.pre_ready import run as run_pre_ready
 from lib.queue import PRE_READY_FAILED, _job
@@ -585,7 +585,7 @@ def test_a_refused_pre_ready_gate_cannot_carry_the_approval(tmp_path: Path) -> N
     board = Board(tmp_path, classifier=lambda *args: verdict)
     pr = board.open("42", approved)
     board.build_and_approve(pr, mergeable=False)
-    spec = PreReady("exit 1", 60)
+    spec = CheckCommand("exit 1", 60)
     board.factory = replace(board.factory, pre_ready=spec)
     board.dispatcher._registration = REGISTRATION.__get__(board.dispatcher)
     update = board.claim("claude")
@@ -614,7 +614,7 @@ def test_a_refused_pre_ready_gate_cannot_carry_the_approval(tmp_path: Path) -> N
 
 def test_an_unpassed_pre_ready_gate_routes_a_dead_update_to_a_fix(tmp_path: Path) -> None:
     board, pr = died_after_push(tmp_path)
-    board.factory = replace(board.factory, pre_ready=PreReady("make check", 60))
+    board.factory = replace(board.factory, pre_ready=CheckCommand("make check", 60))
     for _ in range(3):
         board.poll()
 

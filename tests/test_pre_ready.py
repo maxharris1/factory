@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from lib.factory_md import PreReady
+from lib.factory_md import CheckCommand
 from lib.pre_ready import TAIL_CHARS, TAIL_LINES, check_environ, cut, run
 
 
@@ -32,7 +32,7 @@ def checkout(tmp_path: Path) -> tuple[Path, str]:
 def test_a_passing_command_passes(tmp_path: Path) -> None:
     repo, head = checkout(tmp_path)
 
-    result = run(PreReady("echo fine", 10), repo, head, dict(os.environ))
+    result = run(CheckCommand("echo fine", 10), repo, head, dict(os.environ))
 
     assert (result.passed, result.reason, result.tail) == (True, "exit 0", "fine")
 
@@ -40,7 +40,7 @@ def test_a_passing_command_passes(tmp_path: Path) -> None:
 def test_a_failing_command_fails_with_its_exit_and_output(tmp_path: Path) -> None:
     repo, head = checkout(tmp_path)
 
-    result = run(PreReady("echo broke; exit 3", 10), repo, head, dict(os.environ))
+    result = run(CheckCommand("echo broke; exit 3", 10), repo, head, dict(os.environ))
 
     assert (result.passed, result.reason, result.tail) == (False, "exit 3", "broke")
 
@@ -51,7 +51,7 @@ def test_a_timeout_fails_and_kills_the_whole_group(tmp_path: Path) -> None:
 
     started = time.monotonic()
     result = run(
-        PreReady(f"(sleep 3; touch {marker}) & sleep 30", 1), repo, head, dict(os.environ)
+        CheckCommand(f"(sleep 3; touch {marker}) & sleep 30", 1), repo, head, dict(os.environ)
     )
 
     assert (result.passed, result.reason) == (False, "timeout after 1s")
@@ -67,7 +67,7 @@ def test_a_timeout_does_not_wait_on_a_descendant_that_left_the_group(tmp_path: P
     started = time.monotonic()
     try:
         result = run(
-            PreReady(f"echo before; setsid sh -c 'echo $$ > {pid_file}; exec sleep 30' & wait", 1),
+            CheckCommand(f"echo before; setsid sh -c 'echo $$ > {pid_file}; exec sleep 30' & wait", 1),
             repo,
             head,
             dict(os.environ),
@@ -83,7 +83,7 @@ def test_a_timeout_does_not_wait_on_a_descendant_that_left_the_group(tmp_path: P
 def test_another_head_or_a_dirty_tree_runs_nothing(tmp_path: Path) -> None:
     repo, head = checkout(tmp_path)
     marker = tmp_path / "ran"
-    spec = PreReady(f"touch {marker}", 10)
+    spec = CheckCommand(f"touch {marker}", 10)
 
     other = run(spec, repo, "b" * 40, dict(os.environ))
     (repo / "tracked.txt").write_text("changed\n", encoding="utf-8")
@@ -105,7 +105,7 @@ def test_the_command_sees_no_token_proof_or_queue_variables(tmp_path: Path) -> N
         "KEPT_VARIABLE": "kept",
     }
 
-    result = run(PreReady("env", 10), repo, head, check_environ(caller, None))
+    result = run(CheckCommand("env", 10), repo, head, check_environ(caller, None))
 
     names = {line.partition("=")[0] for line in result.tail.splitlines()}
     assert names.isdisjoint({"GH_TOKEN", "GITHUB_TOKEN", "ORCH_JOB_PROOF", "ORCH_DB"})
@@ -117,7 +117,7 @@ def test_orch_python_names_the_interpreter_orch_runs_under(tmp_path: Path) -> No
     caller = {"PATH": "/usr/bin:/bin", "ORCH_PYTHON": "/elsewhere/python3"}
 
     result = run(
-        PreReady('"$ORCH_PYTHON" -c "import sys; print(sys.executable)"', 10),
+        CheckCommand('"$ORCH_PYTHON" -c "import sys; print(sys.executable)"', 10),
         repo,
         head,
         check_environ(caller, None),
@@ -129,7 +129,7 @@ def test_orch_python_names_the_interpreter_orch_runs_under(tmp_path: Path) -> No
 def test_long_output_is_cut_to_its_last_lines(tmp_path: Path) -> None:
     repo, head = checkout(tmp_path)
 
-    result = run(PreReady("seq 1 10000", 10), repo, head, dict(os.environ))
+    result = run(CheckCommand("seq 1 10000", 10), repo, head, dict(os.environ))
     body = result.tail.splitlines()
 
     assert body[0] == f"[pre_ready output cut to its last {TAIL_LINES} lines]"
@@ -147,3 +147,39 @@ def test_wide_lines_are_cut_to_the_character_limit() -> None:
 
 def test_short_output_is_not_cut() -> None:
     assert cut("one\ntwo\n") == "one\ntwo"
+
+
+def test_a_secret_in_the_output_is_redacted(tmp_path: Path) -> None:
+    repo, head = checkout(tmp_path)
+    command = "echo GITHUB_TOKEN=ghp_abcdefghijklmnop; echo https://user:pw@example.test/x"
+
+    result = run(CheckCommand(command, 10), repo, head, dict(os.environ))
+
+    assert "ghp_abcdefghijklmnop" not in result.tail
+    assert "user:pw" not in result.tail
+    assert result.tail.count("<secret>") == 1 and "<url>" in result.tail
+
+
+def test_a_failing_check_redacts_its_tail(tmp_path: Path) -> None:
+    repo, head = checkout(tmp_path)
+
+    result = run(CheckCommand("echo password: hunter22; exit 4", 10), repo, head, dict(os.environ))
+
+    assert (result.passed, result.reason) == (False, "exit 4")
+    assert "hunter22" not in result.tail and "<secret>" in result.tail
+
+
+def test_a_secret_split_by_the_character_cut_is_redacted_whole() -> None:
+    token = "ghp_" + "a" * 60
+    secret_line = "token " + token
+    filler = "y" * (TAIL_CHARS - 30)
+
+    tail = cut(f"{secret_line}\n{filler}")
+
+    assert "a" * 8 not in tail and "<secret>" in tail
+
+
+def test_a_secret_assignment_split_across_lines_is_redacted() -> None:
+    tail = cut("API_KEY=\nsupersecretvalue\n" + "\n".join(str(n) for n in range(TAIL_LINES - 1)))
+
+    assert "supersecretvalue" not in tail

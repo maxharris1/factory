@@ -11,7 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from lib.factory_md import PreReady
+from lib.dispatch.errors_text import _redact
+from lib.factory_md import CheckCommand
 from lib.harness_env import harness_environ
 from lib.job_token import PROOF_ENV
 
@@ -38,7 +39,7 @@ class ContextUnavailable(Exception):
     """The base factory.md could not be read, so nothing is decided."""
 
 
-def spec_for(source: GhContextSource, repo: str) -> PreReady | None:
+def spec_for(source: GhContextSource, repo: str) -> CheckCommand | None:
     """review.pre_ready from factory.md at the repo's factory_ref."""
     config = source.config
     project = None if config is None else next(
@@ -59,7 +60,7 @@ def check_environ(environ: Mapping[str, str], approvals: Approvals | None) -> di
 
 
 def cut(text: str) -> str:
-    lines = text.splitlines()
+    lines = _redact(text).splitlines()
     kept = lines[-TAIL_LINES:]
     tail = "\n".join(kept)[-TAIL_CHARS:]
     if len(kept) == len(lines) and len(tail) == len("\n".join(kept)):
@@ -68,7 +69,7 @@ def cut(text: str) -> str:
     return f"[pre_ready output cut to its last {count} lines]\n{tail}"
 
 
-def run(spec: PreReady, cwd: Path, head: str, environ: Mapping[str, str]) -> PreReadyResult:
+def run(spec: CheckCommand, cwd: Path, head: str, environ: Mapping[str, str]) -> PreReadyResult:
     """Run the check in cwd, which must be a clean checkout at head."""
     at = _git(cwd, "rev-parse", "HEAD")
     dirty = _git(cwd, "status", "--porcelain", "--untracked-files=no")

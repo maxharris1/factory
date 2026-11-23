@@ -208,7 +208,7 @@ _TOP_KEYS = {
     "qa",
     "rule_engine",
 }
-_CI_KEYS = {"branches", "local_checks", "required_checks", "force_rerun_paths"}
+_CI_KEYS = {"branches", "local_checks", "required_checks", "force_rerun_paths", "local_gate"}
 DEFAULT_CI_FORCE_RERUN_PATHS = (".github/workflows/**",)
 _PLAN_KEYS = {"max_lines", "max_criteria"}
 DEFAULT_PLAN_MAX_LINES = 400
@@ -254,12 +254,13 @@ class HoldConfig:
 
 
 @dataclass(frozen=True)
-class PreReady:
+class CheckCommand:
     command: str
     timeout_seconds: int
 
 
 PRE_READY_MAX_TIMEOUT = 900
+LOCAL_GATE_MAX_TIMEOUT = 1800
 
 
 @dataclass(frozen=True)
@@ -333,13 +334,14 @@ class FactoryConfig:
     max_holders_per_path: int = DEFAULT_MAX_HOLDERS_PER_PATH
     exclusive_paths: tuple[str, ...] = ()
     required_checks: tuple[str, ...] = ()
-    pre_ready: PreReady | None = None
+    pre_ready: CheckCommand | None = None
     plan_max_lines: int = DEFAULT_PLAN_MAX_LINES
     plan_max_criteria: int = DEFAULT_PLAN_MAX_CRITERIA
     ci_branches: tuple[str, ...] | None = None
     ci_local_checks: tuple[str, ...] = ()
     ci_required_checks: tuple[str, ...] = ()
     ci_force_rerun_paths: tuple[str, ...] = DEFAULT_CI_FORCE_RERUN_PATHS
+    ci_local_gate: CheckCommand | None = None
     qa: QaConfig | None = None
     rule_engine: str = "off"
 
@@ -465,7 +467,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
     human_reviewers = _human_reviewers(data.get("human_reviewers"), findings)
     max_holders_per_path, exclusive_paths, required_checks = _feeder(data, findings, unknown)
     plan_max_lines, plan_max_criteria = _plan(data, findings, unknown)
-    ci_branches, ci_local_checks, ci_required_checks, ci_force_rerun_paths = _ci(
+    ci_branches, ci_local_checks, ci_required_checks, ci_force_rerun_paths, ci_local_gate = _ci(
         data, findings, unknown
     )
     qa, qa_findings = _qa(data, strict)
@@ -553,6 +555,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
         ci_local_checks=ci_local_checks,
         ci_required_checks=ci_required_checks,
         ci_force_rerun_paths=ci_force_rerun_paths,
+        ci_local_gate=ci_local_gate,
         qa=qa,
         rule_engine=rule_engine,
     )
@@ -629,7 +632,7 @@ def _review(
     data: dict,
     findings: list[Finding],
     unknown: str,
-) -> tuple[int | None, int | None, str | None, int | None, int, bool, PreReady | None, str, str, bool]:
+) -> tuple[int | None, int | None, str | None, int | None, int, bool, CheckCommand | None, str, str, bool]:
     if "review" not in data:
         findings.append(Finding("error", "missing required field 'review.rounds.low'"))
         findings.append(Finding("error", "missing required field 'review.rounds.high'"))
@@ -687,37 +690,36 @@ def _review(
         _followup_from_round(review, findings, unknown),
         _auto_extra_rounds(review, findings, unknown),
         _start_before_ci(review, findings, unknown),
-        _pre_ready(review, findings, unknown),
+        _command_spec(review, "pre_ready", "review.", PRE_READY_MAX_TIMEOUT, findings, unknown),
         _block_on(review, findings, unknown),
         _stop_on(review, findings, unknown),
         _verify_unavailable(review, findings, unknown),
     )
 
 
-def _pre_ready(review: dict, findings: list[Finding], unknown: str) -> PreReady | None:
-    if "pre_ready" not in review:
+def _command_spec(
+    section: dict, key: str, prefix: str, cap: int, findings: list[Finding], unknown: str
+) -> CheckCommand | None:
+    if key not in section:
         return None
-    value = review["pre_ready"]
+    name = f"{prefix}{key}"
+    value = section[key]
     if not isinstance(value, dict):
-        findings.append(Finding("error", "review.pre_ready must be a mapping"))
+        findings.append(Finding("error", f"{name} must be a mapping"))
         return None
-    findings.extend(_unknown(value, {"command", "timeout_seconds"}, "review.pre_ready", unknown))
+    findings.extend(_unknown(value, {"command", "timeout_seconds"}, name, unknown))
     command = value.get("command")
     timeout = value.get("timeout_seconds")
     ok = True
     if not isinstance(command, str) or not command.strip():
-        findings.append(Finding("error", "review.pre_ready.command must be a non-empty string"))
+        findings.append(Finding("error", f"{name}.command must be a non-empty string"))
         ok = False
-    if not is_strict_int(timeout) or not 1 <= timeout <= PRE_READY_MAX_TIMEOUT:
+    if not is_strict_int(timeout) or not 1 <= timeout <= cap:
         findings.append(
-            Finding(
-                "error",
-                "review.pre_ready.timeout_seconds must be an integer from 1 to "
-                f"{PRE_READY_MAX_TIMEOUT}",
-            )
+            Finding("error", f"{name}.timeout_seconds must be an integer from 1 to {cap}")
         )
         ok = False
-    return PreReady(command, int(timeout)) if ok else None
+    return CheckCommand(command, int(timeout)) if ok else None
 
 
 def _block_on(review: dict, findings: list[Finding], unknown: str) -> str:
@@ -1029,13 +1031,15 @@ def _plan(data: dict, findings: list[Finding], unknown: str) -> tuple[int, int]:
 
 def _ci(
     data: dict, findings: list[Finding], unknown: str
-) -> tuple[tuple[str, ...] | None, tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+) -> tuple[
+    tuple[str, ...] | None, tuple[str, ...], tuple[str, ...], tuple[str, ...], CheckCommand | None
+]:
     if "ci" not in data:
-        return None, (), (), DEFAULT_CI_FORCE_RERUN_PATHS
+        return None, (), (), DEFAULT_CI_FORCE_RERUN_PATHS, None
     value = data["ci"]
     if not isinstance(value, dict):
         findings.append(Finding("error", "ci must be a mapping"))
-        return None, (), (), DEFAULT_CI_FORCE_RERUN_PATHS
+        return None, (), (), DEFAULT_CI_FORCE_RERUN_PATHS, None
     findings.extend(_unknown(value, _CI_KEYS, "ci", "error"))
     branches = _ci_branches(value, findings)
     checks = value.get("local_checks", [])
@@ -1050,7 +1054,8 @@ def _ci(
     if rerun is None:
         findings.append(Finding("error", "ci.force_rerun_paths must be a list"))
     rerun_paths = _path_list(rerun, "ci.force_rerun_paths", findings)
-    return branches, tuple(str(item) for item in checks), required, rerun_paths
+    gate = _command_spec(value, "local_gate", "ci.", LOCAL_GATE_MAX_TIMEOUT, findings, "error")
+    return branches, tuple(str(item) for item in checks), required, rerun_paths, gate
 
 
 def _ci_branches(value: dict, findings: list[Finding]) -> tuple[str, ...] | None:
