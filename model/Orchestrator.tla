@@ -306,8 +306,6 @@ T1PPlanAutoSplit ==
   /\ counts' = [counts EXCEPT !.deaths = 0]
   /\ QaFollowsHead
 
-\* #1447. A stacked child whose parent closed or whose retarget failed waits
-\* in ship for a person (needs-attention) and starts no job.
 Unheld == flags.stack # "held" \/ "HoldGuard" \in Omit
 
 keep ==
@@ -780,13 +778,8 @@ RebaseReady ==
   /\ counts' = [counts EXCEPT !.gate = 0, !.deaths = 0, !.round = RebaseRound]
   /\ QaFollowsHead
 
-\* #1447 (SPEC 4.4). A stacked child the APPROVE covers waits in ship for its
-\* parent: no ship step leaves while its base is the parent's branch.
 StackWaits == state = "ship" /\ flags.covered /\ flags.stack = "parent"
 
-\* The parent closed unmerged (stack-parent-closed), or the retarget could
-\* not bound the child's commits, or its rebase or base edit failed
-\* (stack-retarget-failed). Needs attention; no job starts until a person acts.
 StackHold ==
   /\ StackWaits
   /\ flags' = [flags EXCEPT !.stack = "held"]
@@ -1200,8 +1193,6 @@ RebaseReviewsAtR ==
 ReopenHoldOnlyAtWork ==
   flags.reopenHold => state \in HandoffFrom
 
-\* SPEC 4.4. Only a hand merge or Max's hand-off puts a stacked child past
-\* ship.
 NoShipIntoParent ==
   state \in Covered /\ flags.stack # "none" => flags.byHand
 
@@ -1270,8 +1261,7 @@ ChartEdges ==
 \* every section 4.1 name. T1PPlanMapped is in the picture: a mapped plan may
 \* enter building. One risk cap. A CI-red streak and a job-death streak are
 \* not stacked, and the mapped plan does not replay those streaks. Max's extra
-\* round is drawn up to the fixing it starts. A stacked child (#1447) is drawn
-\* up to ship and its hold.
+\* round is drawn up to the fixing it starts.
 GatedFirstRoundToQaPark ==
   /\ configOk
   /\ counts = [c \in DOMAIN counts |-> 0]
