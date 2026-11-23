@@ -10,6 +10,7 @@ import pytest
 
 from lib.brief import brief_kind, render_brief
 from lib.brief.common import detail_of
+from lib.dispatch.rebase import conflict_files
 from lib.dispatch.types import CIResult
 from lib.orch_yml import Approvals
 from lib.queue import JobRequest
@@ -455,6 +456,31 @@ def test_a_rebase_conflict_records_the_outcome_with_its_files(tmp_path: Path, bo
         "Conflict: waiting on Max; files: lib/dispatch/questions.py, tests/test_rebase_kind.py",
         "claude-login",
     )
+
+
+ROOT_FILE_FORMATS = {
+    "prose": "Conflicts in `Makefile` and `Dockerfile`. Which side should I keep?\n",
+    "prose past refs and flags": (
+        "HEAD is back at `0123abc` after `git rebase --abort`; `--abort` ended the rebase onto "
+        "`origin/main` at `HEAD`. Conflicts in `Makefile` and `Dockerfile`.\n"
+    ),
+    "plain list": "Conflicted files:\n- Makefile\n- Dockerfile\n",
+    "bare lines": "Conflicted files:\nMakefile\nDockerfile\nThanks.\n",
+    "fenced": "```\nMakefile\nDockerfile\n```\nWhich side should I keep?\n",
+}
+
+
+@pytest.mark.parametrize("body", ROOT_FILE_FORMATS.values(), ids=ROOT_FILE_FORMATS.keys())
+def test_a_rebase_conflict_keeps_root_files_without_a_dot(tmp_path: Path, body: str) -> None:
+    flow, _ = conflicted(tmp_path, QUESTIONS + body)
+
+    assert decisions(flow)[-1][3] == "Conflict: waiting on Max; files: Makefile, Dockerfile"
+
+
+def test_conflict_files_keeps_backticked_root_files() -> None:
+    body = "Conflicts in `Makefile` and `Dockerfile`. Which side should I keep?"
+
+    assert conflict_files(body) == ("Makefile", "Dockerfile")
 
 
 def test_a_question_after_an_ordinary_fix_records_no_conflict(tmp_path: Path) -> None:

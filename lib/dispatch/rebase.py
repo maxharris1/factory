@@ -25,11 +25,18 @@ _FENCE = re.compile(r"^\s*(?:```|~~~)")
 _ALONE = re.compile(r"`?([^`\s]+)`?")
 _BACKTICKED = re.compile(r"`([^`\s]+)`")
 _PATH_LIKE = re.compile(r"/|\w\.\w")
+_NOT_A_FILE = re.compile(r"-.*|[0-9a-f]{7,40}|\w*HEAD[~^\d]*|.*[.,;:!?]")
 
 
-def conflict_files(body: str) -> tuple[str, ...]:
+def conflict_files(body: str, base: str = "main") -> tuple[str, ...]:
+    refs = {base, f"origin/{base}"}
+
+    def named(span: str) -> bool:
+        return span not in refs and _NOT_A_FILE.fullmatch(span) is None
+
     files = []
     fenced = False
+    in_run = False
     for line in body.splitlines():
         if _FENCE.match(line):
             fenced = not fenced
@@ -37,10 +44,15 @@ def conflict_files(body: str) -> tuple[str, ...]:
         listed = not fenced and _LIST_MARKER.match(line) is not None
         text = line.strip() if fenced else _LIST_MARKER.sub("", line, count=1).strip()
         alone = _ALONE.fullmatch(text)
-        if alone and (fenced or listed or text.startswith("`") or _PATH_LIKE.search(text)):
-            files.append(alone[1])
+        if alone and (
+            fenced or listed or in_run or text.startswith("`") or _PATH_LIKE.search(text)
+        ):
+            in_run = named(alone[1])
+            if in_run:
+                files.append(alone[1])
         elif not fenced:
-            files.extend(span for span in _BACKTICKED.findall(text) if _PATH_LIKE.search(span))
+            files.extend(span for span in _BACKTICKED.findall(text) if named(span))
+            in_run = text.endswith(":")
     return tuple(dict.fromkeys(files))
 
 
@@ -69,7 +81,8 @@ class RebaseMixin:
     ) -> None:
         if not rebase_fix_is_newest(connection, (ticket.repo.lower(), ticket.ticket_id)):
             return
-        files = ", ".join(conflict_files(parse_comment(comment.body).body))
+        body = parse_comment(comment.body).body
+        files = ", ".join(conflict_files(body, ticket.factory.base_branch))
         record_decisions(
             connection,
             ticket,
