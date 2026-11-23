@@ -4,7 +4,9 @@ A spool body `{id, actor, requested_at, target: "account", op: "set",
 account, field, expect, value}` sets `max_jobs` or `paused` on one declared
 account through lib/settings_apply.py's lock, backup, replace, restart and
 audit. Pause writes `paused: true`; resume deletes the line, keeping its
-comment.
+comment. A body with `op: "prepare"` or `op: "doctor"` names an `account`
+and a `device` instead of a field: either one prepares that pair's folder
+on the device, then runs the doctor, never editing machines.yml.
 """
 
 from __future__ import annotations
@@ -33,8 +35,6 @@ from lib.settings_apply import (
     _overlay_sets,
     _set_key,
 )
-
-OPS: Mapping[str, frozenset[str]] = MappingProxyType({"set": account_requests.OPS["set"]})
 
 
 def _is_max_jobs(value: object) -> bool:
@@ -65,20 +65,43 @@ class AccountRequest:
     value: object
 
 
-def parse(data: dict, stem: str) -> AccountRequest:
+@dataclass(frozen=True)
+class PairRequest:
+    target: ClassVar[str] = "account"
+    value: ClassVar[None] = None
+    id: str
+    actor: str
+    requested_at: str
+    op: str
+    account: str
+    device: str
+
+    @property
+    def field(self) -> str:
+        return self.op
+
+
+OPS: Mapping[str, tuple[frozenset[str], type[AccountRequest | PairRequest]]] = MappingProxyType({
+    op: (account_requests.OPS[op], request)
+    for op, request in (("set", AccountRequest), ("prepare", PairRequest), ("doctor", PairRequest))
+})
+
+
+def parse(data: dict, stem: str) -> AccountRequest | PairRequest:
     op = data.get("op")
     if not isinstance(op, str) or op not in OPS:
         raise BadRequest("bad-op")
-    if set(data) != COMMON_KEYS | OPS[op]:
+    keys, request = OPS[op]
+    if set(data) != COMMON_KEYS | keys:
         raise BadRequest("bad-keys")
-    for key in ("id", "actor", "requested_at", "account", "field"):
-        if not isinstance(data[key], str):
+    for key in ("id", "actor", "requested_at", "account", "field", "device"):
+        if key in data and not isinstance(data[key], str):
             raise BadRequest(f"bad-{key}")
     if data["id"] != stem:
         raise BadRequest("id-not-file-name")
     if REQUESTED_AT.fullmatch(data["requested_at"]) is None:
         raise BadRequest("bad-requested_at")
-    return AccountRequest(**{k: v for k, v in data.items() if k != "target"})
+    return request(**{k: v for k, v in data.items() if k != "target"})
 
 
 def edit_account_field(text: str, account: str, key: str, value: object) -> str | None:

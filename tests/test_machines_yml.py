@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -440,6 +441,19 @@ def test_missing_file_and_non_mapping(tmp_path: Path) -> None:
     assert errors(load_machines_yml(write(tmp_path, "- box\n"))[1]) == [
         "machines.yml must be a mapping"
     ]
+
+
+def test_a_pipe_loads_and_a_directory_is_not_found(tmp_path: Path) -> None:
+    read, written = os.pipe()
+    os.write(written, f"orch_host: box\ndevices:{BOX}".encode())
+    os.close(written)
+    try:
+        config, findings = load_machines_yml(Path(f"/dev/fd/{read}"))
+    finally:
+        os.close(read)
+    assert errors(findings) == []
+    assert [device.name for device in config.devices] == ["box"]
+    assert errors(load_machines_yml(tmp_path)[1]) == ["file not found"]
 
 
 @pytest.mark.parametrize(

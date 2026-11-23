@@ -38,7 +38,11 @@ not seen:
   when that would disable a device now holding a job), restarts them again
   and records `failed`.
 * A body with `target: "account"` is an account request (lib/account_settings.py)
-  and takes this same path, with its own checks and line edit.
+  and takes this same path, with its own checks and line edit. A prepare or
+  doctor request for one account on one device takes none of it: it runs
+  `orch accounts prepare` over the doctor's ssh path with this machines.yml
+  on stdin, then the doctor, and records the pair's
+  account_signins status before and after.
 * Every outcome is one AuditEntry line in `<state>/settings-audit.jsonl`. An
   id already there is never applied again, so a pass is safe to repeat.
 """
@@ -53,6 +57,7 @@ import json
 import os
 import pwd
 import re
+import shlex
 import shutil
 import sqlite3
 import stat
@@ -61,23 +66,24 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import AbstractContextManager, contextmanager
-from dataclasses import asdict, dataclass, fields
+from contextlib import AbstractContextManager, closing, contextmanager
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
-from lib import dashboard_push, heal, live_settings
+from lib import account_doctor, dashboard_push, heal, live_settings, self_deploy
 from lib.config_overlay import overlay_path, read_overlay
 from lib.dashboard_config import SettingsConfig, is_bot_login
 from lib.device_pool import slots_in_use
 from lib.load import is_strict_int
 from lib.machines_yml import Device, MachinesConfig, load_machines_yml
 from lib.orch_yml import load_orch_yml
+from lib.remote import _UNTRACE, PROBE_TIMEOUT_SECONDS, ByteTransport, SshTransport, _login
 from lib.wait import OWNING_BOTS
 
 if TYPE_CHECKING:
-    from lib.account_settings import AccountRequest
+    from lib.account_settings import AccountRequest, PairRequest
 
 ROOT = Path(__file__).resolve().parent.parent
 AUDIT_NAME = "settings-audit.jsonl"
@@ -95,6 +101,7 @@ FAILED = "failed"
 REQUEST_NAME = re.compile(r"^([A-Za-z0-9_-]{16,64})\.json$")
 REQUESTED_AT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 REQUEST_KEYS = frozenset({"id", "actor", "requested_at", "device", "field", "expect", "value"})
+PREPARE_PROG = "orch accounts prepare"
 
 
 def _is_bool(value: object) -> bool:
@@ -127,7 +134,7 @@ class BadRequest(ValueError):
     pass
 
 
-def parse_request(body: bytes, stem: str) -> SettingsRequest | AccountRequest:
+def parse_request(body: bytes, stem: str) -> SettingsRequest | AccountRequest | PairRequest:
     """The request in a spool file named `<stem>.json`; values are checked
     against FIELDS later, so a bad value is refused with its device named."""
     try:
@@ -609,12 +616,19 @@ class Applier:
     claims: ClaimLock
     run: heal.Runner = heal.run_service
     clock: Callable[[], float] = time.time
+    db: Path | None = None
+    transport: ByteTransport = field(default_factory=SshTransport)
+    repo: str | None = None
 
     @property
     def audit_path(self) -> Path:
         return self.state_dir / AUDIT_NAME
 
-    def apply(self, request: SettingsRequest | AccountRequest) -> AuditEntry:
+    def apply(self, request: SettingsRequest | AccountRequest | PairRequest) -> AuditEntry:
+        from lib.account_settings import PairRequest
+
+        if isinstance(request, PairRequest):
+            return self._apply_pair(request)
         try:
             with self.claims() as held:
                 old_bytes, new_text, previous = self._plan(request, held)
@@ -628,8 +642,8 @@ class Applier:
             return self._entry(request, REFUSED, None, "cannot read running jobs")
         return self._restart_all(request, old_bytes, mode, backup, previous, version)
 
-    def _entry(self, request: SettingsRequest | AccountRequest, result: str, previous: object,
-               error: str | None = None, **extra: object) -> AuditEntry:
+    def _entry(self, request: SettingsRequest | AccountRequest | PairRequest, result: str,
+               previous: object, error: str | None = None, **extra: object) -> AuditEntry:
         return AuditEntry(
             id=request.id, actor=_clip(request.actor), requested_at=request.requested_at,
             applied_at=heal.stamp(self.clock()), device=_clip(request.device),
@@ -638,10 +652,13 @@ class Applier:
             account=_clip(request.account), **extra,
         )
 
-    def _plan(self, request: SettingsRequest | AccountRequest,
-              held: Held) -> tuple[bytes, str, object]:
+    def _approve(self, request: SettingsRequest | AccountRequest | PairRequest) -> None:
         if request.actor.casefold() != self.approver.casefold() or is_bot_login(request.actor):
             raise Refused("not-approver")
+
+    def _plan(self, request: SettingsRequest | AccountRequest,
+              held: Held) -> tuple[bytes, str, object]:
+        self._approve(request)
         old_bytes = self.machines.read_bytes()
         old, _ = load_machines_yml(self.machines)
         if old is None:
@@ -657,6 +674,58 @@ class Applier:
         if _comments(new_text) != _comments(text):
             raise Refused("the edit changed a comment", previous)
         return old_bytes, new_text, previous
+
+    def _apply_pair(self, request: PairRequest) -> AuditEntry:
+        try:
+            config, device, harness = self._pair(request)
+        except Refused as refusal:
+            return self._entry(request, REFUSED, None, refusal.error)
+        previous = error = None
+        try:
+            with closing(sqlite3.connect(self.db, timeout=30, isolation_level=None)) as connection:
+                account_doctor.ensure_table(connection)
+                previous = _signin(connection, request)
+                error = self._prepare(request, device, harness)
+                account_doctor.run(connection, config, self.transport, self.clock(), self.repo)
+                new = _signin(connection, request)
+        except sqlite3.Error as exc:
+            error = "; ".join(filter(None, (error, f"doctor: {type(exc).__name__}")))
+            return self._entry(request, FAILED, previous, error)
+        entry = self._entry(request, FAILED if error else APPLIED, previous, error)
+        return replace(entry, new=_clip(new))
+
+    def _pair(self, request: PairRequest) -> tuple[MachinesConfig, Device, str]:
+        self._approve(request)
+        config, _ = load_machines_yml(self.machines)
+        if config is None:
+            raise Refused("machines.yml is invalid")
+        account = config.account(request.account)
+        if account is None:
+            raise Refused("unknown-account")
+        device = config.device(request.device)
+        if device is None:
+            raise Refused("unknown-device")
+        if request.account not in config.accounts_on(device.name, account.harness):
+            raise Refused(f"{request.account} is not signed in on {device.name}")
+        if self.db is None or not self.db.is_file():
+            raise Refused("no orch.db to record the doctor in")
+        return config, device, account.harness
+
+    def _prepare(self, request: PairRequest, device: Device, harness: str) -> str | None:
+        unreachable = account_doctor.no_ssh_path(device, harness)
+        if unreachable is not None:
+            return unreachable
+        command = shlex.join([f"{device.factory_root_for(harness)}/bin/orch", "accounts", "prepare",
+                              "--device", device.name, "--account", request.account,
+                              "--machines", "/dev/stdin"])
+        exchanged = self.transport.exchange(
+            account_doctor.ssh_argv(device, harness,
+                                    _login(f"{_UNTRACE}exec {command}", "orch-accounts-prepare", ())),
+            timeout=PROBE_TIMEOUT_SECONDS, input=self.machines.read_bytes())
+        if exchanged.code == 0:
+            return None
+        said = _orch_lines_only(exchanged.stderr)
+        return f"prepare exited {exchanged.code}" + (f": {_clip(said[-1])}" if said else "")
 
     def _plan_device(self, request: SettingsRequest, old: MachinesConfig, text: str,
                      held: Held) -> tuple[str, object]:
@@ -764,6 +833,17 @@ class Applier:
         return tuple(done), "; ".join(failures) or None
 
 
+def _orch_lines_only(stderr: str) -> list[str]:
+    return [line for line in stderr.splitlines() if line.startswith(f"{PREPARE_PROG}:")]
+
+
+def _signin(connection: sqlite3.Connection, request: PairRequest) -> str | None:
+    row = connection.execute(
+        f"SELECT status FROM {account_doctor.TABLE} WHERE account = ? AND device = ?",
+        (request.account, request.device)).fetchone()
+    return None if row is None else row[0]
+
+
 def run_pass(applier: Applier, spool: Spool, owner: str) -> list[AuditEntry]:
     """Apply each request in the spool whose id is not in the audit log."""
     done = audited_ids(applier.audit_path)
@@ -789,7 +869,9 @@ def run_pass(applier: Applier, spool: Spool, owner: str) -> list[AuditEntry]:
 
 
 def describe(entry: AuditEntry) -> str:
-    subject = f"account {entry.account}" if entry.target == "account" else entry.device
+    subject = entry.device
+    if entry.target == "account":
+        subject = f"account {entry.account}" + (f"@{entry.device}" if entry.device else "")
     text = (f"settings: {entry.id} {entry.result} {subject}.{entry.field} "
             f"{json.dumps(entry.previous)} -> {json.dumps(entry.new)}")
     if entry.error:
@@ -852,6 +934,7 @@ def main(argv: list[str], *, environ: Mapping[str, str] | None = None,
             machines=args.machines, state_dir=state_dir, deploy=args.deploy,
             approver=settings.approver, environ=scrubbed_env(environ, orch_config),
             restart=restart, pending=pending, claims=claim_lock(db), clock=clock,
+            db=db, repo=self_deploy.own_repo(ROOT),
         )
         try:
             entries = run_pass(applier, spool_for(settings, orch_config.dashboard.push),
