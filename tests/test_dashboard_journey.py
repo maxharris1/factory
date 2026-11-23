@@ -163,7 +163,7 @@ HOPS = {
     "building": 3,
     "fixing": 2,
     "review": 2,
-    "capped": 4,
+    "capped": 3,
     "waiting-max": 2,
     "ship": 1,
     "updating": 2,
