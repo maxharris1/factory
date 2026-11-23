@@ -3,8 +3,7 @@ enabled, slot_max, harnesses, held slots, drain state and its recent change
 results from the settings audit log. Signed in through the #563 flow
 (`ghAuth` in common.py), each card gets a toggle for enabled and drain and a
 slot_max input that POST /api/settings; the orch host applies the queued
-request (lib/settings_apply.py). The Accounts panel gets an add form and, on
-each editable account, max_jobs, devices, pause, remove, prepare and doctor."""
+request (lib/settings_apply.py)."""
 
 from __future__ import annotations
 
