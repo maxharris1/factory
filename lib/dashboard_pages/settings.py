@@ -3,20 +3,35 @@ enabled, slot_max, harnesses, held slots, drain state and its recent change
 results from the settings audit log. Signed in through the #563 flow
 (`ghAuth` in common.py), each card gets a toggle for enabled and drain and a
 slot_max input that POST /api/settings; the orch host applies the queued
-request (lib/settings_apply.py)."""
+request (lib/settings_apply.py).
+
+Under Devices, the read-only Accounts panel (#1363) draws one card per
+status.json accounts[] entry (lib/dashboard_accounts.py): its settings, usage
+against the headroom floor, running jobs, each device it is signed in on with
+the account doctor's status, and its recent account change results. A device
+whose sign-in is not ok shows the manual sign-in command for that device's
+bot and harness."""
 
 from __future__ import annotations
 
 import json
+import math
+import time
 
 from lib.dashboard_pages.common import _chip, _e, _panel, _span
 
 RESULT_TONE = {"applied": "ok", "pending": "warn", "refused": "warn", "failed": "bad", "superseded": "muted",
                "other": "muted"}
-RESULTS_PER_DEVICE = 5
+RESULTS_PER_CARD = 5
 QUEUED = "queued (applies within ~2 min)"
 READ_ONLY = "read-only: sign-in is not available here"
 WAITING = "waiting for the poller's next cycle"
+NO_CHANGES = "no changes yet"
+SIGN_IN_TONE = {"ok": "ok", "mismatch": "warn", "signed-out": "bad", "unreachable": "warn"}
+UNCHECKED = "unchecked"
+ACCOUNT_READ_ONLY = {"default": "read-only: default account", "external": "read-only: external account"}
+NOT_SIGNED_IN = "not signed in on any device"
+NO_ACCOUNTS = "no accounts: machines.yml lists none"
 
 
 def drain_state(row: dict) -> tuple[str, str]:
@@ -37,10 +52,53 @@ def device_facts(row: dict) -> list[tuple[str, str, str]]:
     ]
 
 
-def device_results(snapshot: dict, name: str) -> list[dict]:
+def _recent(snapshot: dict, keep) -> list[dict]:
     rows = (snapshot.get("settings") or {}).get("results") or []
-    return [r for r in reversed(rows)
-            if r.get("device") == name and r.get("target") != "account"][:RESULTS_PER_DEVICE]
+    return [r for r in reversed(rows) if keep(r)][:RESULTS_PER_CARD]
+
+
+def device_results(snapshot: dict, name: str) -> list[dict]:
+    return _recent(snapshot, lambda r: r.get("device") == name and r.get("target") != "account")
+
+
+def account_results(snapshot: dict, account_id: str) -> list[dict]:
+    return _recent(snapshot, lambda r: r.get("target") == "account" and r.get("account") == account_id)
+
+
+def percent(value: float | None) -> str:
+    # Half up, as the script's Math.floor(v * 100 + 0.5), so both draw the same digit.
+    return "—" if value is None else f"{math.floor(value * 100 + 0.5)}%"
+
+
+def headroom_fact(account: dict) -> tuple[str, str]:
+    headroom, floor = account.get("headroom"), account["floor"]
+    if headroom is not None and headroom < floor:
+        return f"{percent(headroom)} · below floor {percent(floor)}", "bad"
+    return f"{percent(headroom)} · floor {percent(floor)}", ""
+
+
+def running_line(account: dict) -> str:
+    jobs = account.get("running") or []
+    return ", ".join(
+        (f"{job['ticket']} " if job.get("ticket") else "") + f"{job['kind']} on {job['device']}" for job in jobs
+    ) or "none"
+
+
+def account_facts(account: dict) -> list[tuple[str, str, str]]:
+    return [
+        ("harness", account["harness"], ""),
+        ("max_jobs", "—" if account.get("max_jobs") is None else str(account["max_jobs"]), ""),
+        ("paused", "yes" if account.get("paused") else "no", "warn" if account.get("paused") else ""),
+        ("5h used", percent(account.get("five_hour_used")), ""),
+        ("7d used", percent(account.get("seven_day_used")), ""),
+        ("headroom", *headroom_fact(account)),
+        ("running", running_line(account), ""),
+    ]
+
+
+def sign_in_label(entry: dict) -> str:
+    login = entry.get("login")
+    return f"sign in as {login} on {entry['device']}: " if login else f"sign in on {entry['device']}: "
 
 
 def _value(value: object) -> str:
@@ -70,26 +128,29 @@ def _class(cls: str) -> str:
     return f' class="{cls}"' if cls else ""
 
 
+def _facts(facts: list[tuple[str, str, str]]) -> str:
+    rows = "".join(f"<div><dt>{_e(label)}</dt><dd{_class(cls)}>{_e(text)}</dd></div>" for label, text, cls in facts)
+    return f'<dl class="st-facts">{rows}</dl>'
+
+
+def _results(results: list[dict]) -> str:
+    if not results:
+        return f'<p class="empty">{_e(NO_CHANGES)}</p>'
+    return '<ul class="st-results">' + "".join(
+        '<li class="st-res">' + _chip(r["result"], RESULT_TONE.get(r["result"], "muted"))
+        + _span("st-what", result_line(r))
+        + (_span("st-err", r["error"]) if r.get("error") else "")
+        + (_span(*status) if (status := status_line(r)) else "") + "</li>"
+        for r in results
+    ) + "</ul>"
+
+
 def _card(snapshot: dict, row: dict) -> str:
     where = _chip("local · orch host", "ok") if row.get("local") else _chip("remote")
-    facts = "".join(
-        f"<div><dt>{_e(label)}</dt><dd{_class(cls)}>{_e(text)}</dd></div>" for label, text, cls in device_facts(row)
-    )
-    results = device_results(snapshot, row["name"])
-    listing = (
-        '<ul class="st-results">' + "".join(
-            '<li class="st-res">' + _chip(r["result"], RESULT_TONE.get(r["result"], "muted"))
-            + _span("st-what", result_line(r))
-            + (_span("st-err", r["error"]) if r.get("error") else "")
-            + (_span(*status) if (status := status_line(r)) else "") + "</li>"
-            for r in results
-        ) + "</ul>"
-        if results else '<p class="empty">no changes yet</p>'
-    )
     return (
         f'<article class="st-card" data-device="{_e(row["name"])}">'
         f'<h3>{_span("st-name", row["name"])}{where}</h3>'
-        f'<dl class="st-facts">{facts}</dl>{listing}</article>'
+        f'{_facts(device_facts(row))}{_results(device_results(snapshot, row["name"]))}</article>'
     )
 
 
@@ -104,16 +165,57 @@ def _settings(snapshot: dict) -> str:
     return _panel("settings", "Devices", inner, count=f"{len(devices)} devices")
 
 
+def _sign_in(entry: dict) -> str:
+    status = entry.get("status")
+    checked = entry.get("checked_at")
+    same = entry.get("same_login_as") or []
+    command = entry.get("command")
+    return (
+        f'<li class="ac-dev" data-device="{_e(entry["device"])}">{_span("ac-name", entry["device"])}'
+        + _chip(status or UNCHECKED, SIGN_IN_TONE.get(status, "muted"))
+        + _span(None, entry.get("auth_method")) + _span(None, entry.get("subscription_type"))
+        + (_span("ac-when", "checked " + time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(checked)))
+           if checked is not None else "")
+        + (_span(None, "same login as " + ", ".join(same)) if same else "")
+        + (f'<span class="ac-sign">{_e(sign_in_label(entry))}<code class="ac-cmd">{_e(command)}</code></span>'
+           if command is not None else "")
+        + "</li>"
+    )
+
+
+def _account_card(snapshot: dict, account: dict) -> str:
+    reason = ACCOUNT_READ_ONLY.get(account.get("read_only"))
+    entries = account.get("signed_in_on") or []
+    devices = (
+        '<ul class="ac-devs">' + "".join(_sign_in(entry) for entry in entries) + "</ul>"
+        if entries else f'<p class="empty">{_e(NOT_SIGNED_IN)}</p>'
+    )
+    return (
+        f'<article class="ac-card" data-account="{_e(account["id"])}">'
+        f'<h3>{_span("st-name", account["id"])}{_chip(reason) if reason else ""}</h3>'
+        f'{_facts(account_facts(account))}{devices}{_results(account_results(snapshot, account["id"]))}</article>'
+    )
+
+
+def _accounts(snapshot: dict) -> str:
+    accounts = snapshot.get("accounts") or []
+    inner = (
+        '<div class="st-grid">' + "".join(_account_card(snapshot, account) for account in accounts) + "</div>"
+        if accounts else f'<p class="empty">{_e(NO_ACCOUNTS)}</p>'
+    )
+    return _panel("accounts", "Accounts", inner, count=f"{len(accounts)} accounts")
+
+
 CSS = """\
 #settings{grid-column:1/-1}
 #settings .st-note{margin:0 0 12px;color:var(--muted);font:12px/1.5 var(--mono)}
 .st-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
-.st-card{display:flex;flex-direction:column;gap:10px;padding:12px;background:var(--panel-hi);border:1px solid var(--line)}
-.st-card h3{display:flex;align-items:center;gap:8px;margin:0;font:600 15px/1.2 var(--mono);color:var(--text)}
+:is(.st-card,.ac-card){display:flex;flex-direction:column;gap:10px;padding:12px;background:var(--panel-hi);border:1px solid var(--line)}
+:is(.st-card,.ac-card) h3{display:flex;align-items:center;gap:8px;margin:0;font:600 15px/1.2 var(--mono);color:var(--text)}
 .st-facts{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:0;font:12px/1.5 var(--mono)}
 .st-facts div{display:contents}
 .st-facts dt{color:var(--muted)}.st-facts dd{margin:0;color:var(--text)}
-.st-facts dd.warn{color:var(--warn)}.st-facts dd.ok{color:var(--ok)}
+.st-facts dd.warn{color:var(--warn)}.st-facts dd.ok{color:var(--ok)}.st-facts dd.bad{color:var(--bad)}
 .st-results{display:flex;flex-direction:column;gap:4px;margin:0;padding:0;list-style:none;font:12px/1.5 var(--mono);color:var(--text-2)}
 .st-res{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}
 .st-err,.st-out.bad{color:var(--bad)}.st-out.ok{color:var(--ok)}
@@ -129,6 +231,12 @@ CSS = """\
 :is(.st-auth,.st-ctl) :is(button,input):focus-visible{outline:2px solid var(--brand);outline-offset:2px}
 .st-auth code{font:600 16px var(--mono);letter-spacing:.1em;color:var(--accent)}
 .st-auth a{color:var(--accent)}
+#accounts{grid-column:1/-1}
+.ac-devs{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none;font:12px/1.5 var(--mono);color:var(--text-2)}
+.ac-dev{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}
+.ac-name{color:var(--text)}.ac-when{color:var(--muted)}
+.ac-sign{flex-basis:100%}
+.ac-cmd{font:12px var(--mono);color:var(--accent);overflow-wrap:anywhere}
 """
 
 
@@ -153,9 +261,34 @@ _SCRIPT = r"""
     return (r.field || '—') + ' ' + stValue(r.previous) + ' → ' + stValue(r.new) + ' · ' + (r.actor || '—') +
       ' · ' + (r.applied_at || r.requested_at || '—');
   }
+  function stRecent(d, keep) { return ((d.settings || {}).results || []).filter(keep).reverse().slice(0, ST.perCard); }
   function stResults(d, name) {
-    var rows = ((d.settings || {}).results || []).filter(function (r) { return r.device === name && r.target !== 'account'; });
-    return rows.reverse().slice(0, ST.perDevice);
+    return stRecent(d, function (r) { return r.device === name && r.target !== 'account'; });
+  }
+  function stFactsList(card, facts) {
+    var dl = add(card, el('dl', 'st-facts'));
+    facts.forEach(function (f) {
+      var row = add(dl, el('div'));
+      add(row, el('dt', null, f[0]));
+      add(row, el('dd', f[2] || null, f[1]));
+    });
+  }
+  function stList(card, rows) {
+    if (!rows.length) { add(card, el('p', 'empty', ST.noChanges)); return; }
+    var ul = add(card, el('ul', 'st-results'));
+    rows.forEach(function (r) {
+      var li = add(ul, el('li', 'st-res'));
+      add(li, chip(r.result, ST.tone[r.result] || 'muted'));
+      add(li, el('span', 'st-what', stLine(r)));
+      if (r.error) add(li, el('span', 'st-err', r.error));
+      if (r.result === 'superseded') {
+        add(li, el('span', 'st-sup', 'superseded by ' + r.superseded_by));
+      } else if (r.result === 'pending' && r.waiting) {
+        add(li, el('span', 'st-err', ST.waiting));
+      } else if (r.result === 'pending' && (r.pending || []).length) {
+        add(li, el('span', 'st-err', 'restart pending: ' + r.pending.join(', ')));
+      }
+    });
   }
   function stSend(c, field, expect, value) {
     if (c.busy) return;
@@ -224,29 +357,9 @@ _SCRIPT = r"""
     var h = add(card, el('h3'));
     add(h, el('span', 'st-name', x.name));
     add(h, x.local ? chip('local · orch host', 'ok') : chip('remote'));
-    var facts = add(card, el('dl', 'st-facts'));
-    stFacts(x).forEach(function (f) {
-      var row = add(facts, el('div'));
-      add(row, el('dt', null, f[0]));
-      add(row, el('dd', f[2] || null, f[1]));
-    });
+    stFactsList(card, stFacts(x));
     if (GH.on && GH.login) add(card, stControls(x));
-    var rows = stResults(d, x.name);
-    if (!rows.length) { add(card, el('p', 'empty', 'no changes yet')); return card; }
-    var ul = add(card, el('ul', 'st-results'));
-    rows.forEach(function (r) {
-      var li = add(ul, el('li', 'st-res'));
-      add(li, chip(r.result, ST.tone[r.result] || 'muted'));
-      add(li, el('span', 'st-what', stLine(r)));
-      if (r.error) add(li, el('span', 'st-err', r.error));
-      if (r.result === 'superseded') {
-        add(li, el('span', 'st-sup', 'superseded by ' + r.superseded_by));
-      } else if (r.result === 'pending' && r.waiting) {
-        add(li, el('span', 'st-err', ST.waiting));
-      } else if (r.result === 'pending' && (r.pending || []).length) {
-        add(li, el('span', 'st-err', 'restart pending: ' + r.pending.join(', ')));
-      }
-    });
+    stList(card, stResults(d, x.name));
     return card;
   }
   function renderSettings(d) {
@@ -261,8 +374,68 @@ _SCRIPT = r"""
     var grid = add(root, el('div', 'st-grid'));
     devices.forEach(function (x) { add(grid, stCard(d, x)); });
   }
+  // #1363's read-only Accounts panel, the twin of _accounts.
+  function acPct(v) { return v === null || v === undefined ? '—' : Math.floor(v * 100 + 0.5) + '%'; }
+  function acHeadroom(a) {
+    var h = a.headroom;
+    if (h !== null && h !== undefined && h < a.floor) return [acPct(h) + ' · below floor ' + acPct(a.floor), 'bad'];
+    return [acPct(h) + ' · floor ' + acPct(a.floor), ''];
+  }
+  function acRunning(a) {
+    return (a.running || []).map(function (j) {
+      return (j.ticket ? j.ticket + ' ' : '') + j.kind + ' on ' + j.device;
+    }).join(', ') || 'none';
+  }
+  function acFacts(a) {
+    return [['harness', a.harness, ''], ['max_jobs', stValue(a.max_jobs), ''],
+            ['paused', a.paused ? 'yes' : 'no', a.paused ? 'warn' : ''],
+            ['5h used', acPct(a.five_hour_used), ''], ['7d used', acPct(a.seven_day_used), ''],
+            ['headroom'].concat(acHeadroom(a)), ['running', acRunning(a), '']];
+  }
+  function acSignIn(ul, x) {
+    var li = add(ul, el('li', 'ac-dev'));
+    li.setAttribute('data-device', x.device);
+    add(li, el('span', 'ac-name', x.device));
+    add(li, chip(x.status || ST.unchecked, ST.signIn[x.status] || 'muted'));
+    add(li, el('span', null, stValue(x.auth_method)));
+    add(li, el('span', null, stValue(x.subscription_type)));
+    if (x.checked_at !== null && x.checked_at !== undefined) {
+      add(li, el('span', 'ac-when', 'checked ' + new Date(x.checked_at * 1000).toISOString().slice(0, 19) + 'Z'));
+    }
+    if ((x.same_login_as || []).length) add(li, el('span', null, 'same login as ' + x.same_login_as.join(', ')));
+    if (x.command !== null && x.command !== undefined) {
+      var label = x.login ? 'sign in as ' + x.login + ' on ' + x.device + ': ' : 'sign in on ' + x.device + ': ';
+      add(add(li, el('span', 'ac-sign', label)), el('code', 'ac-cmd', x.command));
+    }
+  }
+  function acCard(d, a) {
+    var card = el('article', 'ac-card');
+    card.setAttribute('data-account', a.id);
+    var h = add(card, el('h3'));
+    add(h, el('span', 'st-name', a.id));
+    if (ST.accountReadOnly[a.read_only]) add(h, chip(ST.accountReadOnly[a.read_only]));
+    stFactsList(card, acFacts(a));
+    var on = a.signed_in_on || [];
+    if (on.length) {
+      var ul = add(card, el('ul', 'ac-devs'));
+      on.forEach(function (x) { acSignIn(ul, x); });
+    } else {
+      add(card, el('p', 'empty', ST.notSignedIn));
+    }
+    stList(card, stRecent(d, function (r) { return r.target === 'account' && r.account === a.id; }));
+    return card;
+  }
+  function renderAccounts(d) {
+    var accounts = d.accounts || [];
+    var root = panel('accounts', 'Accounts', accounts.length + ' accounts');
+    if (!root) return;
+    if (!accounts.length) { add(root, el('p', 'empty', ST.noAccounts)); return; }
+    var grid = add(root, el('div', 'st-grid'));
+    accounts.forEach(function (a) { add(grid, acCard(d, a)); });
+  }
 """
 SCRIPT = _SCRIPT.replace("__ST__", json.dumps(
-    {"tone": RESULT_TONE, "perDevice": RESULTS_PER_DEVICE, "queued": QUEUED, "readOnly": READ_ONLY,
-     "waiting": WAITING}
+    {"tone": RESULT_TONE, "perCard": RESULTS_PER_CARD, "queued": QUEUED, "readOnly": READ_ONLY,
+     "waiting": WAITING, "noChanges": NO_CHANGES, "signIn": SIGN_IN_TONE, "unchecked": UNCHECKED,
+     "accountReadOnly": ACCOUNT_READ_ONLY, "notSignedIn": NOT_SIGNED_IN, "noAccounts": NO_ACCOUNTS}
 ))

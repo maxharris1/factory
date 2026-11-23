@@ -134,6 +134,7 @@ def test_each_signed_in_device_carries_the_doctor_status_and_a_sign_in_command_w
             "checked_at": NOW - 300,
             "same_login_as": ["claude-default"],
             "command": f"CLAUDE_CONFIG_DIR={CLAUDE_B_PC} claude auth login",
+            "login": "claude-bot",
         },
         {
             "device": "mac",
@@ -143,6 +144,7 @@ def test_each_signed_in_device_carries_the_doctor_status_and_a_sign_in_command_w
             "checked_at": NOW - 300,
             "same_login_as": [],
             "command": f"CLAUDE_CONFIG_DIR={CLAUDE_B_MAC} claude auth login",
+            "login": "claude-bot",
         },
     ]
     default = accounts["claude-default"]["signed_in_on"]
@@ -276,6 +278,7 @@ def test_a_device_that_stops_taking_work_keeps_its_account_sign_in_and_running_j
     assert [(a["id"], a["signed_in_on"], a["running"]) for a in accounts] == [(
         "claude-default",
         [{"device": "box", "status": "signed-out", "auth_method": "none", "subscription_type": None,
-          "checked_at": NOW - 300, "same_login_as": [], "command": "env -u CLAUDE_CONFIG_DIR claude auth login"}],
+          "checked_at": NOW - 300, "same_login_as": [], "command": "env -u CLAUDE_CONFIG_DIR claude auth login",
+          "login": "claude-bot"}],
         [{"ticket": "17", "kind": "build", "device": "box"}],
     )]
