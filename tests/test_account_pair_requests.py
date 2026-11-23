@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import sqlite3
 import sys
 from pathlib import Path
@@ -8,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from lib import account_doctor, heal, settings_apply
+from lib.machines_yml import load_machines_yml
 from lib.remote import SshTransport
 from lib.settings_apply import Applier, LocalSpool, run_pass
 from tests.test_account_doctor import World
@@ -23,7 +25,9 @@ class Box:
         world.declare("claude-b", "claude-c")
         text = world.machines.read_text(encoding="utf-8").replace("/srv/factory", str(ROOT))
         world.machines.write_text(text, encoding="utf-8")
-        (world.bin / "python3").symlink_to(sys.executable)
+        python = world.bin / "python3"
+        python.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
+        python.chmod(0o755)
         world.profile("export LOGNAME=claude-bot USER=claude-bot\n")
         sqlite3.connect(world.db).close()
         self.machines = world.machines
@@ -101,18 +105,46 @@ def test_prepare_runs_orch_over_ssh_as_the_bot_with_machines_on_stdin_then_the_d
     box.untouched()
 
 
-def test_doctor_runs_no_prepare_and_records_the_pairs_status_before_and_after(box: Box) -> None:
+def test_doctor_prepares_the_pair_before_the_doctor_and_records_its_status(box: Box) -> None:
+    rid = box.request("doctor")
+
+    (entry,) = box.run()
+
+    calls = box.world.ssh.calls()
+    (call,) = box.prepare_calls()
+    assert calls[0] == call and len(calls) > 1, "one prepare over ssh, then the doctor's probes"
+    assert (call["alias"], call["user"]) == ("pc-claude-bot", "claude-bot")
+    assert f"{ROOT}/bin/orch {PREPARE}" in call["script"]
+    assert (box.world.device_home / ".factory-accounts" / "claude-c").is_dir()
+    assert (entry.id, entry.field, entry.previous, entry.new, entry.result, entry.error) == (
+        rid, "doctor", None, "signed-out", "applied", None)
+    assert len(box.audit()) == 1
+    box.untouched()
+
+
+def test_doctor_records_the_pairs_status_before_and_after(box: Box) -> None:
     box.request("doctor", account="claude-b")
     box.request("doctor", account="claude-b")
 
     first, second = box.run()
 
-    assert box.prepare_calls() == []
+    assert len(box.prepare_calls()) == 2
     assert (first.field, first.previous, first.new, first.result) == ("doctor", None, "ok", "applied")
     assert (second.previous, second.new) == ("ok", "ok")
     assert len(box.audit()) == 2
     assert box.world.statuses()[("claude-b", "pc")] == "ok"
     box.untouched()
+
+
+def test_the_devices_python_over_ssh_runs_in_this_interpreters_environment(box: Box) -> None:
+    config, _ = load_machines_yml(box.machines)
+    script = "exec bash -lc " + shlex.quote("""python3 -c 'print("prefix=" + __import__("sys").prefix)'""")
+
+    exchanged = SshTransport().exchange(
+        account_doctor.ssh_argv(config.device("pc"), "claude", script), timeout=30)
+
+    assert exchanged.code == 0, exchanged.stderr
+    assert exchanged.stdout.decode().rpartition("prefix=")[2].strip() == sys.prefix
 
 
 def test_a_prepare_the_device_refuses_records_failed_and_still_runs_the_doctor(box: Box) -> None:

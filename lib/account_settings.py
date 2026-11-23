@@ -5,9 +5,8 @@ account, field, expect, value}` sets `max_jobs` or `paused` on one declared
 account through lib/settings_apply.py's lock, backup, replace, restart and
 audit. Pause writes `paused: true`; resume deletes the line, keeping its
 comment. A body with `op: "prepare"` or `op: "doctor"` names an `account`
-and a `device` instead of a field: it prepares that pair's folder on the
-device and runs the doctor, or runs the doctor alone, never editing
-machines.yml.
+and a `device` instead of a field: either one prepares that pair's folder
+on the device, then runs the doctor, never editing machines.yml.
 """
 
 from __future__ import annotations

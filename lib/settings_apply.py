@@ -41,7 +41,7 @@ not seen:
   and takes this same path, with its own checks and line edit. A prepare or
   doctor request for one account on one device takes none of it: it runs
   `orch accounts prepare` over the doctor's ssh path with this machines.yml
-  on stdin (prepare only), then the doctor, and records the pair's
+  on stdin, then the doctor, and records the pair's
   account_signins status before and after.
 * Every outcome is one AuditEntry line in `<state>/settings-audit.jsonl`. An
   id already there is never applied again, so a pass is safe to repeat.
@@ -685,8 +685,7 @@ class Applier:
             with closing(sqlite3.connect(self.db, timeout=30, isolation_level=None)) as connection:
                 account_doctor.ensure_table(connection)
                 previous = _signin(connection, request)
-                if request.op == "prepare":
-                    error = self._prepare(request, device, harness)
+                error = self._prepare(request, device, harness)
                 account_doctor.run(connection, config, self.transport, self.clock(), self.repo)
                 new = _signin(connection, request)
         except sqlite3.Error as exc:
