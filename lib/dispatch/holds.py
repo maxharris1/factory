@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import replace
 
-from lib.dispatch.constants import _NOT_FINISHED
+from lib.dispatch.constants import _NOT_FINISHED, OkReading
 from lib.dispatch.helpers import _base_update_key, _is_full_sha, _matching_head, ship_mode
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, ShipError, TrackedTicket
@@ -259,15 +259,22 @@ class HoldsMixin:
         decision = self._hold_decision(ticket, head)
         return decision.unread is not None or bool(decision.reasons)
 
-    def _hold_ok_outcome(self, ticket: TrackedTicket, comment: Comment) -> str:
+    def _read_ok(self, ticket: TrackedTicket, comment: Comment) -> OkReading | None:
+        """None while a hold input is unread: the ok stays unhandled and is
+        read again next poll."""
         hold = ticket.factory.hold
         assert hold is not None
-        if (
+        if not (
             comment.author.casefold() == hold.approver.casefold()
             and self._may_approve(hold.approver)
         ):
-            return "hold-ok"
-        return "rejected-hold-ok-author"
+            return "rejected-hold-ok-author"
+        if ticket.current_head is None:
+            return None
+        decision = self._hold_decision(ticket, ticket.current_head)
+        if decision.unread is not None:
+            return None
+        return "hold-ok" if decision.reasons else "ok-no-hold"
 
     def _may_approve(self, login: str) -> bool:
         """A Max-only approval (#122): a trusted_logins key while the

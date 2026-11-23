@@ -2794,3 +2794,34 @@ def test_the_run_log_opens_by_key_and_stays_open_through_a_live_redraw(tmp_path:
     redrawn = views["redrawn"]
     assert redrawn["open"] is True and redrawn["metaOpen"] == [True, False] and all(redrawn["rows"]), redrawn
     assert views["closed"]["open"] is False and not any(views["closed"]["rows"]), views["closed"]
+
+
+# --- #1418: each ok's outcome shows on its ticket page ----------------------------------------------
+
+
+def _with_oks(tmp_path: Path, address: str, outcomes: list[tuple[str, str]]) -> dict:
+    from lib.dashboard import collect_snapshot
+    from tests.test_dashboard import seeded
+    from tests.test_dashboard_layout import _history
+
+    repo, _, ticket_id = address.partition("#")
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        _history(connection)
+        connection.executemany(
+            "INSERT INTO handled_comments (repo, ticket_id, comment_id, outcome) VALUES (?, ?, ?, ?)",
+            [(repo, ticket_id, comment_id, outcome) for comment_id, outcome in outcomes],
+        )
+    return collect_snapshot(db, log, now=NOW)
+
+
+@needs_node
+def test_each_ok_outcome_shows_on_its_ticket_page(tmp_path: Path) -> None:
+    address = LIVE["running"][0]
+    outcomes = [("ok-1", "hold-ok"), ("approve-1", "merged"), ("ok-2", "ok-no-hold"), ("ok-3", "rejected-hold-ok-author")]
+    snapshot = _with_oks(tmp_path, address, outcomes)
+    for render, view in _both(tmp_path, snapshot, address).items():
+        chips = re.findall(r'<span class="chip muted ok">([^<]*)</span>', view)
+        assert chips == ["ok: rejected-hold-ok-author", "ok: ok-no-hold", "ok: hold-ok"], render
+    other = _both(tmp_path, snapshot, LIVE["queued"][0])
+    assert all('class="chip muted ok"' not in view for view in other.values())

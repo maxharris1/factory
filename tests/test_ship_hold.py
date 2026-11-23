@@ -572,6 +572,69 @@ def test_an_ok_posted_before_the_approve_at_the_same_head_also_clears(
     assert outcome == "hold-ok"
 
 
+def ok_outcome(queue: SQLiteJobQueue, comment_id: str = "ok-1") -> str | None:
+    with queue.connect() as connection:
+        row = connection.execute(
+            "SELECT outcome FROM handled_comments WHERE comment_id = ?", (comment_id,)
+        ).fetchone()
+    return None if row is None else str(row[0])
+
+
+@pytest.mark.parametrize("ship", ["merge", "handoff"])
+def test_an_ok_on_an_unheld_pr_is_ok_no_hold(tmp_path: Path, ship: str) -> None:
+    dispatcher, queue, actions = setup(tmp_path)
+    ready(dispatcher, queue)
+
+    dispatcher.process(snapshot(ok(HEAD), factory=hold_factory(ship=ship)))
+
+    assert ok_outcome(queue) == "ok-no-hold"
+    assert actions.merges == []
+
+
+@pytest.mark.parametrize(
+    "held",
+    [{"labels": ("factory:hold",)}, {"files": ("src/view/Board.tsx",)}],
+    ids=["label", "paths"],
+)
+def test_an_ok_on_a_held_pr_is_hold_ok(tmp_path: Path, held: dict) -> None:
+    dispatcher, queue, actions = setup(tmp_path)
+    ready(dispatcher, queue)
+
+    dispatcher.process(snapshot(ok(HEAD), **held))
+
+    assert ok_outcome(queue) == "hold-ok"
+    assert actions.merges == []
+
+
+@pytest.mark.parametrize(
+    "unread",
+    [{"labels": None}, {"files": None}, {"events": None}],
+    ids=["labels", "files", "events"],
+)
+def test_an_ok_with_an_unread_hold_input_stays_unhandled(
+    tmp_path: Path, unread: dict
+) -> None:
+    dispatcher, queue, actions = setup(tmp_path)
+    ready(dispatcher, queue)
+
+    dispatcher.process(snapshot(ok(HEAD), **unread))
+    assert ok_outcome(queue) is None
+
+    dispatcher.process(snapshot(ok(HEAD)))
+    assert ok_outcome(queue) == "ok-no-hold"
+
+
+def test_an_ok_from_another_login_is_still_rejected_without_reading_the_hold(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue, actions = setup(tmp_path)
+    ready(dispatcher, queue)
+
+    dispatcher.process(snapshot(ok(HEAD, author="claude-login"), labels=None))
+
+    assert ok_outcome(queue) == "rejected-hold-ok-author"
+
+
 def test_an_ok_at_a_stale_head_does_not_merge(tmp_path: Path) -> None:
     actions = FakeReviewActions({HEAD: "1" * 40, NEW_HEAD: "2" * 40})
     dispatcher, queue, actions = setup(tmp_path, actions)

@@ -601,6 +601,10 @@ def _ticket_tracker(row: dict, tail: str) -> str:
     return _span("tracker", text) if text else ""
 
 
+def _ok_chips(ticket: dict | None) -> str:
+    return "".join(_chip(f"ok: {outcome}", "muted ok") for outcome in (ticket or {}).get("ok_outcomes", ()))
+
+
 def _ticket_hero(found: dict, model: dict, spec: dict) -> str:
     row = found["row"]
     motion = _motion(row, model)
@@ -614,6 +618,7 @@ def _ticket_hero(found: dict, model: dict, spec: dict) -> str:
         + HERO_LINES[line]["chip"](model)
         + _ticket_tracker(row, spec["tail"])
         + _trouble(row)
+        + _ok_chips(found["ticket"])
     )
     return _hero(row, model, motion, strip, title, spec["tiles"], line)
 
@@ -2218,6 +2223,7 @@ _SCRIPT = r"""
     add(art, hero(c, strip, tileLabel(r), function (title) {
       trackerSpan(title, r, spec.tail);
       troubleChips(title, r);
+      ((found.ticket || {}).ok_outcomes || []).forEach(function (o) { add(title, chip('ok: ' + o, 'muted ok')); });
     }, found.ticket, spec.tiles, line));
     (spec.lead || []).forEach(function (name) { add(art, SECTIONS[name](c)); });
     detailCols(art, c, spec.sections);

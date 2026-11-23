@@ -211,7 +211,9 @@ class CommentsMixin:
                 continue
             kind = fields["kind"]
             if kind == "ok" and _holds(ticket):
-                outcome = self._hold_ok_outcome(ticket, comment)
+                outcome = self._read_ok(ticket, comment)
+                if outcome is None:
+                    continue
                 if outcome.startswith("rejected-"):
                     self._wake_comment_problem(ticket, comment, "rejected", outcome)
                 self._mark_handled(ticket, comment.id, outcome)

@@ -200,6 +200,7 @@ from lib.dispatch.constants import (
     CI_STALE_REASON,
     CI_WAIT_REASONS,
     HANDED_OFF_EXTERNALLY,
+    OK_OUTCOMES,
 )
 from lib.ci_lane import ci_lane
 from lib.dispatch.types import CHECK_FAILED
@@ -2162,6 +2163,13 @@ def _read_db(
     if "handled_comments" in tables:
         handled = _handled(connection, tables)
         verdicts = [_verdict_row(sources, row, now) for row in handled[:RECENT_VERDICTS]]
+        oks: dict[tuple[str, str], list[str]] = {}
+        for row in handled:
+            if row["outcome"] in OK_OUTCOMES:
+                oks.setdefault((str(row["repo"]).casefold(), str(row["ticket_id"])), []).append(row["outcome"])
+        for item, key in ticket_rows:
+            if key in oks:
+                item["ok_outcomes"] = oks[key]
 
     budget = {"deferrals": 0, "exhausted": 0, "rate_limited": 0}
     if "poll_deferrals" in tables:
