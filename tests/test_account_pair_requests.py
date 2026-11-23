@@ -385,7 +385,7 @@ def test_signout_is_refused_while_the_pair_holds_a_running_job(box: Box) -> None
         yield settings_apply.Held(running=lambda config: {"pc": 1},
                                   commit_version=lambda machines: None,
                                   pairs=lambda config: [RunningPair("job-1", "claude-b", "pc", NOW)],
-                                  hold=lambda account, device, now: None)
+                                  hold=lambda account, device, owner, now: True)
 
     box.applier = replace(box.applier, claims=busy)
     rid = box.request("signout", account="claude-b")
@@ -416,7 +416,7 @@ def test_a_running_job_on_another_device_or_account_does_not_refuse_a_signout(bo
                                   commit_version=lambda machines: None,
                                   pairs=lambda config: [RunningPair("job-1", "claude-c", "pc", NOW),
                                                         RunningPair("job-2", "claude-b", "lap", NOW)],
-                                  hold=lambda account, device, now: None)
+                                  hold=lambda account, device, owner, now: True)
 
     box.applier = replace(box.applier, claims=busy)
     box.request("signout", account="claude-b")
@@ -618,9 +618,20 @@ def test_a_doctor_pass_during_the_logout_does_not_give_the_pair_back_to_placemen
     assert ("claude-b", "pc") not in placed, placed
 
 
+def test_a_signout_lock_table_from_before_owners_still_reserves_by_owner() -> None:
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+    connection.execute("CREATE TABLE signout_locks (account TEXT NOT NULL, device TEXT NOT NULL, "
+                       "since REAL NOT NULL, PRIMARY KEY (account, device))")
+    connection.execute("INSERT INTO signout_locks VALUES ('claude-b', 'pc', ?)", (NOW,))
+
+    assert not account_doctor.reserve_pair(connection, "claude-b", "pc", "signin-1", NOW + 60)
+    assert account_doctor.reserve_pair(connection, "claude-c", "pc", "signin-1", NOW + 60)
+    assert account_doctor.signing_out(connection, NOW + 60) == {("claude-b", "pc"), ("claude-c", "pc")}
+
+
 def test_a_signout_lock_left_by_a_crashed_applier_lapses() -> None:
     connection = sqlite3.connect(":memory:", isolation_level=None)
-    account_doctor.lock_signout(connection, "claude-b", "pc", NOW)
+    account_doctor.reserve_pair(connection, "claude-b", "pc", "signout-1", NOW)
 
     assert ("claude-b", "pc") in account_doctor.signing_out(connection, NOW + 60)
     assert ("claude-b", "pc") not in account_doctor.signing_out(

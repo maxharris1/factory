@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS {SIGNOUTS} (
     account TEXT NOT NULL,
     device TEXT NOT NULL,
     since REAL NOT NULL,
+    owner TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (account, device)
 )
 """
@@ -527,15 +528,32 @@ def held(connection: sqlite3.Connection) -> frozenset[tuple[str, str]]:
     return frozenset(_holds(connection))
 
 
-def lock_signout(connection: sqlite3.Connection, account: str, device: str, now: float) -> None:
+def _signouts(connection: sqlite3.Connection) -> None:
     connection.execute(_SIGNOUTS_SCHEMA)
-    connection.execute(f"INSERT OR REPLACE INTO {SIGNOUTS} (account, device, since) VALUES (?, ?, ?)",
-                       (account, device, now))
+    if "owner" not in {row[1] for row in connection.execute(f"PRAGMA table_info({SIGNOUTS})")}:
+        connection.execute(f"ALTER TABLE {SIGNOUTS} ADD COLUMN owner TEXT NOT NULL DEFAULT ''")
 
 
-def unlock_signout(connection: sqlite3.Connection, account: str, device: str) -> None:
-    connection.execute(_SIGNOUTS_SCHEMA)
-    connection.execute(f"DELETE FROM {SIGNOUTS} WHERE account = ? AND device = ?", (account, device))
+def reserve_pair(connection: sqlite3.Connection, account: str, device: str, owner: str, now: float) -> bool:
+    _signouts(connection)
+    taken = connection.execute(
+        f"INSERT INTO {SIGNOUTS} (account, device, since, owner) VALUES (?1, ?2, ?3, ?4) "
+        "ON CONFLICT(account, device) DO UPDATE SET since = excluded.since, owner = excluded.owner "
+        "WHERE owner = excluded.owner OR since <= ?5",
+        (account, device, now, owner, now - SIGNOUT_LEASE_SECONDS))
+    return taken.rowcount == 1
+
+
+def renew_pair(connection: sqlite3.Connection, account: str, device: str, owner: str, now: float) -> None:
+    _signouts(connection)
+    connection.execute(f"UPDATE {SIGNOUTS} SET since = ? WHERE account = ? AND device = ? AND owner = ?",
+                       (now, account, device, owner))
+
+
+def release_pair(connection: sqlite3.Connection, account: str, device: str, owner: str) -> None:
+    _signouts(connection)
+    connection.execute(f"DELETE FROM {SIGNOUTS} WHERE account = ? AND device = ? AND owner = ?",
+                       (account, device, owner))
 
 
 def signing_out(connection: sqlite3.Connection, now: float) -> frozenset[tuple[str, str]]:

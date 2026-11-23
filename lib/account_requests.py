@@ -19,5 +19,6 @@ OPS: Mapping[str, frozenset[str]] = MappingProxyType({
     "doctor": frozenset({"device"}),
     "signout": frozenset({"device"}),
 })
+BROKER_OPS: Mapping[str, frozenset[str]] = MappingProxyType({"signin": frozenset({"device"})})
 SET_FIELDS = frozenset({"max_jobs", "signed_in_on", "paused"})
 REMOVE_EXPECT_KEYS = frozenset({"harness", "max_jobs", "paused", "signed_in_on"})
