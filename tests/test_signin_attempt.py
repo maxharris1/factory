@@ -169,8 +169,10 @@ class Attempts:
 
     def drop(self, rid: str, kind: str, body: str = "") -> Path:
         path = self.relay / f"{rid}.{kind}"
-        path.write_text(body, encoding="utf-8")
-        path.chmod(0o640)
+        temp = self.relay / f".{path.name}.tmp"
+        temp.write_text(body, encoding="utf-8")
+        temp.chmod(0o640)
+        temp.replace(path)
         return path
 
     def finish(self) -> None:
