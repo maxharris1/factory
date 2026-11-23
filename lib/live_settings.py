@@ -39,10 +39,9 @@ before account switches existed has no say on accounts.
 of them the poller acted on, with `adopted_digest` the digest of the
 switches it adopted. The settings applier records `written` right after its
 write as the change's `version`; the change is applied once `adopted`
-reaches it, the adopted switches hold the requested value
-(`Live.adopted_holds`; both read by the dashboard through `peek`) and every
-waiter it names has recorded `seen` at that version, which a claim does only
-when placement uses exactly the adopted switches (`Live.places_by_adopted`).
+reaches it, the adopted switches hold the requested value and every waiter
+it names has recorded `seen` at that version, which a claim does only when
+placement uses exactly the adopted switches (`Live.places_by_adopted`).
 """
 
 from __future__ import annotations
@@ -93,6 +92,7 @@ class AccountSwitch:
         return AccountSwitch(self.paused or other.paused, min(caps) if caps else None)
 
 
+_ACCOUNT_FIELDS = tuple(item.name for item in fields(AccountSwitch))
 ACCOUNT_CLOSED = AccountSwitch(paused=True, max_jobs=0)
 ACCOUNT_OPEN = AccountSwitch(paused=False, max_jobs=None)
 _IMPLICIT = frozenset(default_account(harness) for harness in HARNESSES)
@@ -116,6 +116,7 @@ class Live:
     seen: Mapping[str, int] = field(default_factory=dict)
     adopted_switches: Mapping[str, Switch] = field(default_factory=dict)
     accounts: Mapping[str, AccountSwitch] = field(default_factory=dict)
+    adopted_accounts: Mapping[str, AccountSwitch] = field(default_factory=dict)
 
     def placement_config(self, config: MachinesConfig) -> MachinesConfig:
         devices = []
@@ -140,6 +141,10 @@ class Live:
     def adopted_holds(self, device: str, name: str, value: object) -> bool:
         switch = self.adopted_switches.get(device)
         return switch is not None and name in _FIELDS and getattr(switch, name) == value
+
+    def adopted_account_holds(self, account: str, name: str, value: object) -> bool:
+        switch = self.adopted_accounts.get(account)
+        return switch is not None and name in _ACCOUNT_FIELDS and getattr(switch, name) == value
 
     def places_by_adopted(self) -> bool:
         return self.adopted > 0 and _digest(self.switches, self.accounts) == self.adopted_digest
@@ -184,7 +189,8 @@ class _Row:
             accounts[name] = switch
         accounts = _declared(accounts)
         return Live(switches, self.written, self.adopted, self.adopted_digest,
-                    adopted_switches=self.adopted_switches, accounts=accounts)
+                    adopted_switches=self.adopted_switches, accounts=accounts,
+                    adopted_accounts=self.adopted_accounts or {})
 
 
 EMPTY = _Row({}, {}, written=0, adopted=0, adopted_digest="", sources={})

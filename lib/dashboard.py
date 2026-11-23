@@ -2545,7 +2545,12 @@ def _every_service_uses(pending: object, version: int, live: live_settings.Live 
 
 
 def _adopted_new(row: dict, live: live_settings.Live) -> bool:
-    device, name = row["device"], row["field"]
+    name = row["field"]
+    if row["target"] == "account":
+        account = row["account"]
+        return (isinstance(account, str) and isinstance(name, str)
+                and live.adopted_account_holds(account, name, row["new"]))
+    device = row["device"]
     return (isinstance(device, str) and isinstance(name, str)
             and live.adopted_holds(device, name, row["new"]))
 
