@@ -16,6 +16,7 @@ from pathlib import Path
 from lib import job_detail
 from lib.dispatcher import CIResult, Comment, Dispatcher, LabelEvent, TicketRef, TrackedTicket
 from lib.factory_md import FactoryConfig, HoldConfig
+from lib.orch_yml import Approvals
 from lib.queue import Job, SQLiteJobQueue
 from lib.update_check import UpdateClass
 from tests.test_dispatcher import (
@@ -84,6 +85,7 @@ class Board:
         hold: HoldConfig | None = None,
         classifier=None,
         trusted_logins=TRUSTED_LOGINS,
+        approvals: Approvals | None = None,
     ):
         self.now = [100.0]
         self.actions = BoardActions(self)
@@ -106,6 +108,7 @@ class Board:
             path,
             self.queue,
             trusted_logins=trusted_logins,
+            approvals=approvals,
             review_actions=self.actions,
             grok_delivery=self.grok,
             update_classifier=default_classifier if classifier is None else classifier,
