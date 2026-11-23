@@ -27,7 +27,9 @@ Every long-running part writes one heartbeat row every BEAT_SECONDS (15):
   the reason "port held by another owner: PORT on HOST". When the tunnel host
   is this machine, deploy/linear-webhook-service.sh runs no tunnel and removes
   the held record (#934), so the row is up from the listener's own 405 like
-  any reachable tunnel.
+  any reachable tunnel;
+* `signin-broker`: `orch accounts signin-broker`, expected only when
+  orch.yml sets `dashboard.settings.relay`.
 
 A row (`_COLUMNS`) is one per process: the key holds the pid, so one waiter
 exiting never removes another's row. Every value is an allowlisted name, a
@@ -164,7 +166,8 @@ TUNNEL = "tunnel"
 DASHBOARD = "dashboard"
 DASHBOARD_PUSH = "dashboard-push"
 DEVICE_PROBE = "device-probe"
-COMPONENTS = (POLLER, WAITER, LISTENER, TUNNEL, DASHBOARD, DASHBOARD_PUSH, DEVICE_PROBE)
+SIGNIN_BROKER = "signin-broker"
+COMPONENTS = (POLLER, WAITER, LISTENER, TUNNEL, DASHBOARD, DASHBOARD_PUSH, DEVICE_PROBE, SIGNIN_BROKER)
 # Checks of a target, not liveness of a process: the newest check decides.
 CHECKS = (DEVICE_PROBE, TUNNEL, DASHBOARD_PUSH)
 
@@ -298,7 +301,7 @@ def factory_version(root: Path = ROOT) -> str:
 
 
 LOADED_VERSION = factory_version()
-CODE_COMPONENTS = frozenset({"poller", "waiter", "linear-listener"})
+CODE_COMPONENTS = frozenset({POLLER, WAITER, LISTENER, SIGNIN_BROKER})
 
 
 # --- writing ---------------------------------------------------------------------------
@@ -1283,7 +1286,8 @@ def expected_components(machines: MachinesConfig | None, orch: OrchConfig | None
     (unless orch.yml lists its harness in `refused_harnesses`) and each probed
     device when machines.yml is known; the Linear listener when orch.yml has
     `linear_webhook`, and its tunnel when that sets `public_url`; the
-    dashboard writer when orch.yml pushes the dashboard."""
+    dashboard writer when orch.yml pushes the dashboard; the sign-in broker
+    when orch.yml sets `dashboard.settings.relay`."""
     host = orch_host(machines)
     slots = [Slot(POLLER, (host,))]
     covers = {POLLER}
@@ -1299,13 +1303,15 @@ def expected_components(machines: MachinesConfig | None, orch: OrchConfig | None
                 slots.append(Slot(WAITER, devices, bot))
         slots.extend(Slot(DEVICE_PROBE, (t.device,)) for t in probe_targets(machines))
     if orch is not None:
-        covers |= {LISTENER, TUNNEL, DASHBOARD}
+        covers |= {LISTENER, TUNNEL, DASHBOARD, SIGNIN_BROKER}
         if orch.linear_webhook is not None:
             slots.append(Slot(LISTENER, (host,)))
             if orch.linear_webhook.public_url:
                 slots.append(Slot(TUNNEL, (host,)))
         if orch.dashboard.push.transport != "none":
             slots.append(Slot(DASHBOARD, (host,)))
+        if orch.dashboard.settings is not None and orch.dashboard.settings.relay is not None:
+            slots.append(Slot(SIGNIN_BROKER, (host,)))
     return Expected(tuple(slots), frozenset(covers))
 
 

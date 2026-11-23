@@ -11,7 +11,10 @@ exactly one audit line, a refusal or failure before launch included.
 
 from __future__ import annotations
 
+import argparse
+import os
 import shlex
+import signal
 import sqlite3
 import sys
 import threading
@@ -21,14 +24,16 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from lib import account_doctor, heal
+from lib import account_doctor, heal, health, self_deploy, settings_apply
 from lib.account_settings import PairRequest
-from lib.machines_yml import Device
+from lib.machines_yml import Device, orch_host
+from lib.orch_yml import load_orch_yml
 from lib.remote import _UNTRACE, PROBE_TIMEOUT_SECONDS, SSH_UNREACHABLE, ByteTransport, SshTransport, _login
 from lib.settings_apply import (
     AUDIT_NAME,
     FAILED,
     REFUSED,
+    ROOT,
     AuditEntry,
     BadRequest,
     ClaimLock,
@@ -46,7 +51,7 @@ from lib.settings_apply import (
     resolve_pair,
     untrusted,
 )
-from lib.signin_relay import Relay
+from lib.signin_relay import Relay, relay_for
 
 POLL_SECONDS = 2.0
 MAX_CONCURRENT = 2
@@ -86,6 +91,10 @@ class Broker:
     spawn: Callable[[Callable[[], None]], object] = _thread
     _attempts: dict[tuple[str, str], Attempt] = field(default_factory=dict, init=False, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _running: int = field(default=0, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._idle = threading.Condition(self._lock)
 
     @property
     def audit_path(self) -> Path:
@@ -120,6 +129,16 @@ class Broker:
                 print(f"signin broker: {detail}", file=sys.stderr)
             stop.wait(POLL_SECONDS)
 
+    def drain(self) -> None:
+        while True:
+            with self._idle:
+                if self._idle.wait_for(lambda: self._running == 0, POLL_SECONDS):
+                    return
+            try:
+                self._refresh_holds()
+            except sqlite3.Error as exc:
+                print(f"signin broker: {type(exc).__name__}", file=sys.stderr)
+
     def _intake(self, listing: SpoolListing, item: SpoolFile, stem: str) -> AuditEntry | None:
         reason = untrusted(listing, item, self.owner)
         if reason is None:
@@ -136,10 +155,20 @@ class Broker:
             attempt = self._admit(request, previous)
         except Refused as refusal:
             return self._close(self._entry(request, REFUSED, previous, refusal.error))
+        with self._lock:
+            self._running += 1
         self.spawn(lambda: self._run(attempt))
         return None
 
     def _run(self, attempt: Attempt) -> None:
+        try:
+            self._attempt(attempt)
+        finally:
+            with self._idle:
+                self._running -= 1
+                self._idle.notify_all()
+
+    def _attempt(self, attempt: Attempt) -> None:
         try:
             error = self._prepare(attempt)
         except Refused as refusal:
@@ -267,3 +296,59 @@ class Broker:
         except (SpoolError, OSError) as exc:
             print(f"signin broker: publish: {type(exc).__name__}", file=sys.stderr)
         return entry
+
+
+def main(argv: list[str]) -> int:
+    from lib import signin_attempt
+
+    parser = argparse.ArgumentParser(prog="orch accounts signin-broker")
+    parser.add_argument("--state", type=Path)
+    parser.add_argument("--db", type=Path)
+    parser.add_argument("--machines", type=Path, default=ROOT / "machines.yml")
+    parser.add_argument("--orch", type=Path, default=ROOT / "orch.yml")
+    parser.add_argument("--once", action="store_true")
+    args = parser.parse_args(argv)
+    orch_config, findings = load_orch_yml(args.orch, allow_placeholders=True)
+    if orch_config is None:
+        error = next((f.message for f in findings if f.severity == "error"), "invalid")
+        print(f"signin broker: {args.orch.name}: {error}", file=sys.stderr)
+        return 1
+    settings = orch_config.dashboard.settings
+    try:
+        relay = relay_for(settings, orch_config.dashboard.push) if settings is not None else None
+    except SpoolError as exc:
+        print(f"signin broker: {exc}", file=sys.stderr)
+        return 1
+    if relay is None:
+        print("dashboard sign-in is off")
+        return 0
+    state_dir = args.state or Path(os.environ.get("ORCH_STATE_DIR")
+                                   or Path.home() / ".local/state/factory")
+    state_dir.mkdir(parents=True, exist_ok=True)
+    db = args.db or Path(os.environ.get("ORCH_DB") or state_dir / "orch.db")
+    stop = threading.Event()
+    runner = signin_attempt.Runner(relay=relay, machines=args.machines, db=db,
+                                   repo=self_deploy.own_repo(ROOT), stop=stop)
+    broker = Broker(relay, args.machines, db, state_dir, approver=settings.approver,
+                    owner=settings.spool_owner, launch=runner.run,
+                    claims=settings_apply.claim_lock(db))
+    machines_config = health.load_machines(args.machines)
+    beater = health.Beater(db, health.SIGNIN_BROKER, devices=[orch_host(machines_config)],
+                           store=health.HealthStore(db, devices=health.known_devices(machines_config)))
+    if threading.current_thread() is threading.main_thread():
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(signum, lambda *_: stop.set())
+    code = 0
+    with beater:
+        if args.once:
+            beater.beat_now()
+            try:
+                broker.tick()
+            except (SpoolError, OSError) as exc:
+                print(f"signin broker: {exc if isinstance(exc, SpoolError) else type(exc).__name__}",
+                      file=sys.stderr)
+                code = 1
+        else:
+            broker.serve(stop)
+        broker.drain()
+    return code
