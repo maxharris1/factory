@@ -133,8 +133,8 @@ Prepare runs `<factory_root>/bin/orch accounts prepare --device <device>
 --account <id> --machines /dev/stdin` on the device. It goes over the
 doctor's ssh path as the harness's login there, with the orch host's
 `machines.yml` on stdin. A full doctor pass follows. Run doctor does the
-same: it prepares the pair first, then runs the doctor pass. Neither edits `machines.yml`, writes a backup or restarts
-anything.
+same: it prepares the pair first, then runs the doctor pass. Neither edits
+`machines.yml`, writes a backup or restarts anything.
 
 Each writes one result. Its field is the op, and its previous and new
 values are the pair's sign-in status before and after. A prepare that fails

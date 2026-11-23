@@ -2433,7 +2433,8 @@ cannot reach the orch host, and the orch host's credentials stay there:
    prepare --device <device> --account <id> --machines /dev/stdin` from the
    device's `factory_root` over the doctor's ssh path, with this
    `machines.yml` on stdin, then runs a doctor pass. Doctor does the same:
-   it prepares the pair before the pass. Each records the pair's sign-in status before and after.
+   it prepares the pair before the pass. Each records the pair's sign-in
+   status before and after.
 
 Setup, by Max: create the spool as an absolute directory, not a symlink,
 owned by the dashboard user with mode 0755; the account the push SSH logs in
