@@ -4,8 +4,11 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 from lib.dashboard import collect_snapshot, render_pages
 from tests import test_dashboard_layout as layout
+from tests import test_dashboard_settings as test_settings
 from tests.test_dashboard_accounts import NOW, world
 from tests.test_dashboard_layout import BAR, HARNESS, _no_script, _section, _text, needs_node
 
@@ -206,3 +209,187 @@ def test_script_draws_no_accounts_like_the_server(tmp_path: Path) -> None:
     out = _run(tmp_path / "run", snapshot)
     server = _panel(snapshot)
     assert out["html"]["accounts"] == server[server.index(">") + 1:server.rindex("<")]
+
+
+SIGNED_IN = {"signed_in": True, "login": "maxharris1", "csrf": "csrf-value"}
+QUEUED = "queued (applies within ~2 min)"
+SET_ACTION = (
+    "    } else if (kind === 'set') {\n"
+    "      const node = pick(arg.pick);\n"
+    "      if (!node) throw new Error('nothing to set: ' + JSON.stringify(arg));\n"
+    "      Object.assign(node, arg.props);\n"
+    "      fire(node, 'change');\n"
+    "      steps.push({set: arg});\n"
+)
+
+
+SCOPED_PICK = ("function pick(spec) {\n  return find(body,", "function pick(spec) {\n  return find(spec.within ? pick(spec.within) || new Node('none') : body,")
+
+
+def _session_harness(session: dict, reply: dict | None = None) -> str:
+    harness = test_settings._harness(session, reply)
+    marker = "    } else if (kind === 'key') {\n"
+    assert marker in harness and SCOPED_PICK[0] in harness
+    return harness.replace(marker, SET_ACTION + marker).replace(*SCOPED_PICK)
+
+
+def _signed_in(tmp_path: Path, actions: list | None = None, reply: dict | None = None) -> dict:
+    snapshot = _snapshot(tmp_path)
+    html = render_pages(snapshot)["settings.html"]
+    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    return layout.run_harness(tmp_path / "run", _session_harness(SIGNED_IN, reply), script, snapshot, "settings",
+                              BAR + ["settings", "accounts"], actions or [])
+
+
+def _posts(out: dict) -> list[dict]:
+    return [step["body"] for step in out["steps"] if "post" in step]
+
+
+def _add_form(markup: str) -> str:
+    start = markup.index('data-form="add"')
+    return markup[start:markup.index('role="status"', start)]
+
+
+def _boxes(markup: str) -> list[str]:
+    return re.findall(r'type="checkbox" data-device="([^"]+)"', markup)
+
+
+ADD = {"attr": {"data-form": "add"}}
+CLAUDE_B = {"attr": {"data-account": "claude-b"}}
+
+
+def _click(within: dict, op: str, **attr: str) -> list:
+    return ["click", {"within": within, "attr": {"data-op": op, **attr}}]
+
+
+def _set(within: dict, props: dict, **attr: str) -> list:
+    return ["set", {"pick": {"within": within, "attr": attr}, "props": props}]
+
+
+@needs_node
+def test_signed_out_the_accounts_panel_has_no_controls(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    html = render_pages(snapshot)["settings.html"]
+    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    out = layout.run_harness(tmp_path / "run", _session_harness({"signed_in": False}), script, snapshot,
+                             "settings", BAR + ["settings", "accounts"], [])
+    accounts = out["html"]["accounts"]
+    assert "Sign in with GitHub" in out["text"]["settings"]
+    for needle in ("st-ctl", "<button", "<input", "<select", "data-op"):
+        assert needle not in accounts
+    server = _panel(snapshot)
+    assert accounts == server[server.index(">") + 1:server.rindex("<")]
+
+
+@needs_node
+def test_signed_in_the_panel_has_the_add_form_and_each_editable_card_its_controls(tmp_path: Path) -> None:
+    accounts = _signed_in(tmp_path)["html"]["accounts"]
+    form = _add_form(accounts)
+    assert 'data-field="id"' in form
+    assert re.findall(r"<option[^>]*>([^<]*)</option>", form) == ["claude", "codex", "cursor"]
+    assert 'type="number" min="1" max="64" data-field="max_jobs"' in form
+    assert _boxes(form) == ["box", "pc", "mac"]
+    assert ">Add account</button>" in form
+    claude_b = _card(accounts, "claude-b")
+    assert 'type="number" min="1" max="64" data-field="max_jobs"' in claude_b
+    assert 'data-op="max_jobs"' in claude_b and 'data-op="signed_in_on"' in claude_b
+    assert _boxes(claude_b) == ["box", "pc", "mac"]
+    assert 'data-op="paused" aria-pressed="true">Resume</button>' in claude_b
+    assert 'data-op="remove"' in claude_b
+    assert re.findall(r'data-op="prepare" data-pair="([^"]+)"', claude_b) == ["pc", "mac"]
+    assert re.findall(r'data-op="doctor" data-pair="([^"]+)"', claude_b) == ["pc", "mac"]
+    for read_only in ("claude-default", "codex-default", "ext-grok"):
+        assert "st-ctl" not in _card(accounts, read_only)
+
+
+@needs_node
+def test_the_add_form_lists_only_devices_that_run_the_chosen_harness(tmp_path: Path) -> None:
+    out = _signed_in(tmp_path, [_set(ADD, {"value": "codex"}, **{"data-field": "harness"})])
+    assert _boxes(_add_form(out["html"]["accounts"])) == ["box", "pc"]
+    out = _signed_in(tmp_path / "cursor", [_set(ADD, {"value": "cursor"}, **{"data-field": "harness"})])
+    assert _boxes(_add_form(out["html"]["accounts"])) == []
+
+
+ACCEPTED = {"status": 202, "body": {"id": "x" * 22}}
+CONTROLS = {
+    "add": (
+        [_set(ADD, {"value": "claude-c"}, **{"data-field": "id"}),
+         _set(ADD, {"value": "codex"}, **{"data-field": "harness"}),
+         _set(ADD, {"value": "3"}, **{"data-field": "max_jobs"}),
+         _set(ADD, {"checked": True}, **{"data-device": "pc"}),
+         _click(ADD, "add")],
+        {"target": "account", "op": "add", "account": "claude-c", "harness": "codex", "max_jobs": 3,
+         "signed_in_on": ["pc"]},
+        None,
+    ),
+    "max_jobs": (
+        [_set(CLAUDE_B, {"value": "4"}, **{"data-field": "max_jobs"}), _click(CLAUDE_B, "max_jobs")],
+        {"target": "account", "op": "set", "account": "claude-b", "field": "max_jobs", "expect": 2, "value": 4},
+        "claude-b",
+    ),
+    "signed_in_on": (
+        [_set(CLAUDE_B, {"checked": True}, **{"data-device": "box"}),
+         _set(CLAUDE_B, {"checked": False}, **{"data-device": "mac"}),
+         _click(CLAUDE_B, "signed_in_on")],
+        {"target": "account", "op": "set", "account": "claude-b", "field": "signed_in_on",
+         "expect": ["pc", "mac"], "value": ["box", "pc"]},
+        "claude-b",
+    ),
+    "paused": (
+        [_click(CLAUDE_B, "paused")],
+        {"target": "account", "op": "set", "account": "claude-b", "field": "paused", "expect": True, "value": False},
+        "claude-b",
+    ),
+    "remove": (
+        [_click(CLAUDE_B, "remove")],
+        {"target": "account", "op": "remove", "account": "claude-b",
+         "expect": {"harness": "claude", "max_jobs": 2, "paused": True, "signed_in_on": ["pc", "mac"]}},
+        "claude-b",
+    ),
+    "prepare": (
+        [_click(CLAUDE_B, "prepare", **{"data-pair": "mac"})],
+        {"target": "account", "op": "prepare", "account": "claude-b", "device": "mac"},
+        "claude-b",
+    ),
+    "doctor": (
+        [_click(CLAUDE_B, "doctor", **{"data-pair": "pc"})],
+        {"target": "account", "op": "doctor", "account": "claude-b", "device": "pc"},
+        "claude-b",
+    ),
+}
+
+
+def _where(accounts: str, card: str | None) -> str:
+    return _card(accounts, card) if card else accounts[accounts.index('data-form="add"'):accounts.index("st-grid")]
+
+
+@needs_node
+@pytest.mark.parametrize("control", list(CONTROLS))
+def test_each_control_posts_its_body_and_shows_queued_on_its_card(tmp_path: Path, control: str) -> None:
+    actions, body, card = CONTROLS[control]
+    out = _signed_in(tmp_path, actions, ACCEPTED)
+    assert _posts(out) == [body]
+    accounts = out["html"]["accounts"]
+    assert f'<div class="st-out ok" role="status">{QUEUED}</div>' in _where(accounts, card)
+    assert accounts.count(QUEUED) == 1
+
+
+@needs_node
+@pytest.mark.parametrize("control", list(CONTROLS))
+@pytest.mark.parametrize("status,error", [(409, "changed"), (403, "read-only")])
+def test_each_control_shows_the_error_on_its_card(tmp_path: Path, control: str, status: int, error: str) -> None:
+    actions, body, card = CONTROLS[control]
+    out = _signed_in(tmp_path, actions, {"status": status, "body": {"error": error}})
+    assert _posts(out) == [body]
+    accounts = out["html"]["accounts"]
+    assert f'<div class="st-out bad" role="status">error: {error}</div>' in _where(accounts, card)
+    assert accounts.count(f"error: {error}") == 1
+
+
+@needs_node
+@pytest.mark.parametrize("value", ["0", "65", "two", ""])
+def test_a_bad_max_jobs_shows_bad_value_without_posting(tmp_path: Path, value: str) -> None:
+    out = _signed_in(tmp_path, [_set(CLAUDE_B, {"value": value}, **{"data-field": "max_jobs"}),
+                                _click(CLAUDE_B, "max_jobs")], ACCEPTED)
+    assert _posts(out) == []
+    assert '<div class="st-out bad" role="status">error: bad-value</div>' in _card(out["html"]["accounts"], "claude-b")
