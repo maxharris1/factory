@@ -69,14 +69,20 @@ class Repo:
         return self.git(*args[1:])
 
 
-def _retarget(repo: Repo, shas: dict[str, str]) -> dict[str, str]:
-    merge_base = repo.run_documented(_command("Retarget.", "git merge-base <"), shas)
-    feed = shas["parent-head-at-feed"]
-    if repo.is_ancestor(feed, merge_base):
-        old_base = merge_base
-    elif repo.is_ancestor(feed, shas["old-head"]):
-        old_base = feed
-    else:
+def _old_base(repo: Repo, shas: dict[str, str]) -> str | None:
+    own = repo.run_documented(_command("Retarget.", "git rev-list <old-head> --not "), shas).split()
+    for parent_head in shas["parent-heads"].split():
+        candidate = repo.run_documented(_command("Retarget.", "git merge-base <"), {**shas, "parent-head": parent_head})
+        listed = repo.run_documented(_command("Retarget.", "git rev-list <old-head> ^"), {**shas, "old-base": candidate})
+        if listed.split() == own:
+            return candidate
+    return None
+
+
+def _retarget(repo: Repo, shas: dict[str, str], parent_heads: list[str]) -> dict[str, str]:
+    shas = {**shas, "parent-heads": " ".join(parent_heads)}
+    old_base = _old_base(repo, shas)
+    if old_base is None:
         pytest.fail("the documented rule fails closed on a history it should retarget")
     shas = {**shas, "old-base": old_base}
     repo.run_documented(_command("Retarget.", "git rebase --onto "), shas)
@@ -109,7 +115,8 @@ def test_scoped_review_skips_a_later_parent_commit(tmp_path):
 
     shas = _retarget(
         repo,
-        {"old-head": child, "parent-head-at-feed": p1, "parent-head-at-merge": p2, "new-base": new_base},
+        {"old-head": child, "new-base": new_base},
+        [p1, p2],
     )
 
     _assert_range_diff_names_only_the_child(repo, shas)
@@ -127,7 +134,8 @@ def test_scoped_review_skips_a_rewritten_parent(tmp_path):
 
     shas = _retarget(
         repo,
-        {"old-head": child, "parent-head-at-feed": p1, "parent-head-at-merge": rewritten, "new-base": new_base},
+        {"old-head": child, "new-base": new_base},
+        [p1, rewritten, p1],
     )
 
     assert shas["old-base"] == p1
@@ -167,3 +175,45 @@ def test_ci_fallback_is_keyed_on_an_unchanged_head():
     ]
     assert len(entries) == 1, entries
     assert "merge commit" not in entries[0].lower()
+
+
+def test_scoped_review_skips_a_parent_update_the_child_merged_in(tmp_path):
+    repo = Repo(tmp_path / "repo")
+    p1, _ = _parent_and_child(repo)
+    repo.git("switch", "-q", "parent")
+    p2 = repo.commit("parent-v2", "f.txt", _edit(LINES, 50, "parent"))
+    repo.git("switch", "-q", "child")
+    repo.git("merge", "-q", "--no-ff", "--no-edit", "parent")
+    old_head = repo.head()
+    repo.git("switch", "-q", "parent")
+    repo.git("reset", "-q", "--soft", "main")
+    repo.git("commit", "-q", "-m", "parent-rewritten")
+    rewritten = repo.head()
+    new_base = repo.squash_into_main("parent")
+
+    shas = _retarget(
+        repo,
+        {"old-head": old_head, "new-base": new_base},
+        [p1, rewritten, p2],
+    )
+
+    assert shas["old-base"] == p2
+    _assert_range_diff_names_only_the_child(repo, shas)
+
+
+def test_retarget_fails_closed_when_the_child_merged_two_parent_rewrites(tmp_path):
+    repo = Repo(tmp_path / "repo")
+    p1, _ = _parent_and_child(repo)
+    repo.git("switch", "-q", "parent")
+    p2 = repo.commit("parent-v2", "f.txt", _edit(LINES, 50, "parent"))
+    repo.git("switch", "-q", "child")
+    repo.git("merge", "-q", "--no-ff", "--no-edit", "parent")
+    repo.git("switch", "-q", "parent")
+    repo.git("reset", "-q", "--hard", p1)
+    rewritten = repo.commit("parent-v2-rewritten", "f.txt", _edit(LINES, 40, "parent"))
+    repo.git("switch", "-q", "child")
+    repo.git("merge", "-q", "--no-ff", "--no-edit", "parent")
+
+    shas = {"old-head": repo.head(), "parent-heads": " ".join([p1, rewritten, p2])}
+
+    assert _old_base(repo, shas) is None
