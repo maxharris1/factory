@@ -13,6 +13,10 @@ backup, replace, restart and audit:
 
 No change may drop an account, or an account's device, that holds a running
 job, and a failed restart never restores a file that would.
+
+A body with `op: "prepare"` or `op: "doctor"` names an `account` and a
+`device` instead: either one prepares that pair's folder on the device, then
+runs the doctor, never editing machines.yml.
 """
 
 from __future__ import annotations
@@ -48,8 +52,8 @@ from lib.settings_apply import (
 )
 
 ADD_KEYS = ("harness", "max_jobs", "signed_in_on")
+PAIR_OPS = frozenset({"prepare", "doctor"})
 _HEAD = re.compile(r"^accounts:(?P<empty>[ 	]*\[\])?(?P<rest>[ 	]*(?:#.*)?)$")
-
 
 def _is_max_jobs(value: object) -> bool:
     return is_strict_int(value) and 1 <= value <= SLOT_MAX_LIMIT
@@ -90,19 +94,37 @@ class AccountRequest:
     value: object
 
 
-def parse(data: dict, stem: str) -> AccountRequest:
+@dataclass(frozen=True)
+class PairRequest:
+    target: ClassVar[str] = "account"
+    value: ClassVar[None] = None
+    id: str
+    actor: str
+    requested_at: str
+    op: str
+    account: str
+    device: str
+
+    @property
+    def field(self) -> str:
+        return self.op
+
+
+def parse(data: dict, stem: str) -> AccountRequest | PairRequest:
     op = data.get("op")
-    if not isinstance(op, str) or op not in OPS:
+    if not isinstance(op, str) or (op not in OPS and op not in PAIR_OPS):
         raise BadRequest("bad-op")
-    if set(data) != COMMON_KEYS | OPS[op].keys:
+    if set(data) != COMMON_KEYS | account_requests.OPS[op]:
         raise BadRequest("bad-keys")
-    for key in ("id", "actor", "requested_at", "account"):
-        if not isinstance(data[key], str):
+    for key in ("id", "actor", "requested_at", "account", "device"):
+        if key in data and not isinstance(data[key], str):
             raise BadRequest(f"bad-{key}")
     if data["id"] != stem:
         raise BadRequest("id-not-file-name")
     if REQUESTED_AT.fullmatch(data["requested_at"]) is None:
         raise BadRequest("bad-requested_at")
+    if op in PAIR_OPS:
+        return PairRequest(**{k: v for k, v in data.items() if k != "target"})
     field, expect, value = OPS[op].request(data)
     if not isinstance(field, str):
         raise BadRequest("bad-field")

@@ -296,12 +296,16 @@ def is_placeholder(value: object) -> bool:
     return isinstance(value, str) and value.startswith(PLACEHOLDER_PREFIX)
 
 
+def _readable_stream_or_file(path: Path) -> bool:
+    return path.exists() and not path.is_dir()
+
+
 def load_machines_yml(
     path: Path,
     *,
     overlay: bool = True,
 ) -> tuple[MachinesConfig | None, list[Finding]]:
-    if not path.is_file():
+    if not _readable_stream_or_file(path):
         return None, [Finding("error", "file not found")]
     text = path.read_text(encoding="utf-8")
     try:
