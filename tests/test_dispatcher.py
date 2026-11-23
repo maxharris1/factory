@@ -6656,6 +6656,279 @@ def test_a_queued_job_times_out_a_full_wait_after_its_device_backoff_ends(
     assert state() == "failed"
 
 
+LOW_MEMORY = ("MemTotal: 33554432 kB\nMemAvailable: 2097152 kB\n", "some avg10=0.00 total=0\n")
+AMPLE_MEMORY = ("MemTotal: 33554432 kB\nMemAvailable: 33554432 kB\n", "some avg10=0.00 total=0\n")
+LOW_REASON = "memory-wait: MemAvailable 2.0 GiB < 8 GiB"
+
+
+def _memory_dispatcher(
+    tmp_path: Path, now: list[float], readings: dict[str, tuple[str, str]]
+) -> tuple[Dispatcher, SQLiteJobQueue, DevicePool, list[str]]:
+    from lib.device_monitor import DeviceMonitor
+    from tests.test_remote_start import FakeTransport
+
+    config = MachinesConfig(
+        devices=(
+            Device(name="pc", slot_max=1, harnesses={"claude": "claude-bot"}, local=True),
+            Device(name="box", slot_max=1, harnesses={"codex": "codex-bot"}, local=True),
+        )
+    )
+    path = tmp_path / "d.db"
+    queue = SQLiteJobQueue(path, clock=lambda: now[0])
+    pool = DevicePool(queue, config)
+    lines: list[str] = []
+    dispatcher = Dispatcher(
+        path,
+        queue,
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+        devices=DeviceMonitor(
+            pool, config, FakeTransport(), memory=lambda device, _on_host: readings[device.name]
+        ),
+        log=lines.append,
+    )
+    return dispatcher, queue, pool, lines
+
+
+def _queue_build(queue: SQLiteJobQueue, number: int, recipient: str = "claude") -> Job:
+    return queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id=str(number),
+            action="build",
+            recipient=recipient,
+            source_comment_id=f"go-{number}",
+            timeout_seconds=60,
+        ),
+        dedupe_key=f"build:{number}",
+    )
+
+
+def _memory_waits(queue: SQLiteJobQueue, job_id: str) -> list[str]:
+    with queue.connect() as connection:
+        return [
+            str(row[0])
+            for row in connection.execute(
+                "SELECT detail FROM job_events WHERE job_id = ? AND event = 'memory-wait'",
+                (job_id,),
+            )
+        ]
+
+
+def _state(queue: SQLiteJobQueue, job_id: str) -> str:
+    with queue.connect() as connection:
+        return str(connection.execute("SELECT state FROM jobs WHERE id = ?", (job_id,)).fetchone()[0])
+
+
+def test_a_job_waiting_only_on_memory_held_devices_stays_queued_and_records_one_memory_wait(
+    tmp_path: Path,
+) -> None:
+    now = [0.0]
+    readings = {"pc": LOW_MEMORY, "box": AMPLE_MEMORY}
+    dispatcher, queue, _, lines = _memory_dispatcher(tmp_path, now, readings)
+    waiting = _queue_build(queue, 1)
+    control = _queue_build(queue, 2, recipient="codex")
+
+    for second in range(60, 11 * 60, 60):
+        now[0] = second
+        dispatcher.reconcile_jobs()
+        assert _state(queue, waiting.id) == "queued", f"left the queue at {second}s"
+
+    [detail] = _memory_waits(queue, waiting.id)
+    assert "pc" in detail and LOW_REASON in detail
+    job_lines = [line for line in lines if line.startswith("job ") and ": memory-wait: " in line]
+    assert len(job_lines) == 1 and waiting.id[:8] in job_lines[0]
+    assert _memory_waits(queue, control.id) == []
+
+
+def test_a_memory_waiting_job_is_placed_once_the_reading_recovers(tmp_path: Path) -> None:
+    now = [0.0]
+    readings = {"pc": LOW_MEMORY, "box": AMPLE_MEMORY}
+    dispatcher, queue, pool, _ = _memory_dispatcher(tmp_path, now, readings)
+    waiting = _queue_build(queue, 1)
+
+    for second in (60, 120, 180, 240):
+        now[0] = second
+        dispatcher.reconcile_jobs()
+    assert pool.claim("claude") is None
+
+    readings["pc"] = AMPLE_MEMORY
+    now[0] = 300
+    dispatcher.reconcile_jobs()
+
+    claimed = pool.claim("claude")
+    assert claimed is not None and claimed[0].id == waiting.id and claimed[1].device == "pc"
+    assert claimed[0].request.attempt == 1
+    assert len(_memory_waits(queue, waiting.id)) == 1
+
+
+def test_a_memory_held_device_that_is_also_backed_off_records_no_memory_wait(
+    tmp_path: Path,
+) -> None:
+    from lib.device_pool import UNREACHABLE_BACKOFF_SECONDS, back_off
+
+    now = [0.0]
+    dispatcher, queue, _, _ = _memory_dispatcher(tmp_path, now, {"pc": LOW_MEMORY, "box": AMPLE_MEMORY})
+    waiting = _queue_build(queue, 1)
+    with queue.connect() as connection:
+        back_off(connection, "pc", until=UNREACHABLE_BACKOFF_SECONDS, reason="preflight-unreachable")
+
+    for second in (60, 120, 180):
+        now[0] = second
+        dispatcher.reconcile_jobs()
+
+    assert _state(queue, waiting.id) == "queued"
+    assert _memory_waits(queue, waiting.id) == []
+
+
+def test_a_job_behind_a_full_slot_on_a_memory_held_device_records_no_memory_wait(
+    tmp_path: Path,
+) -> None:
+    now = [0.0]
+    readings = {"pc": AMPLE_MEMORY, "box": AMPLE_MEMORY}
+    dispatcher, queue, pool, _ = _memory_dispatcher(tmp_path, now, readings)
+    running = _queue_build(queue, 1)
+    claimed = pool.claim("claude")
+    assert claimed is not None and claimed[0].id == running.id
+    waiting = _queue_build(queue, 2)
+    readings["pc"] = LOW_MEMORY
+
+    for second in (60, 120, 180):
+        now[0] = second
+        queue.heartbeat(running.id, owner="claude")
+        dispatcher.reconcile_jobs()
+
+    assert _state(queue, waiting.id) == "queued"
+    assert _memory_waits(queue, waiting.id) == []
+
+
+CODEX_BOX = """\
+devices:
+  - name: box
+    local: true
+    drain: {drain}
+    slot_max: {slots}
+    harnesses: {{codex: codex-bot}}
+"""
+
+
+def _live_memory_dispatcher(
+    tmp_path: Path, now: list[float], readings: dict[str, tuple[str, str]]
+) -> tuple[Dispatcher, SQLiteJobQueue, DevicePool, Path]:
+    from lib import live_settings
+    from lib.device_monitor import DeviceMonitor
+    from tests.test_remote_start import FakeTransport
+
+    machines = tmp_path / "machines.yml"
+    machines.write_text(CODEX_BOX.format(drain="false", slots=2), encoding="utf-8")
+    path = tmp_path / "d.db"
+    queue = SQLiteJobQueue(path, clock=lambda: now[0])
+    with queue.connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        _, config = live_settings.adopted(connection, machines)
+        connection.commit()
+    pool = DevicePool(queue, config, machines_path=machines)
+    dispatcher = Dispatcher(
+        path,
+        queue,
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+        devices=DeviceMonitor(
+            pool,
+            config,
+            FakeTransport(),
+            machines_path=machines,
+            memory=lambda device, _on_host: readings[device.name],
+        ),
+        log=lambda line: None,
+    )
+    return dispatcher, queue, pool, machines
+
+
+def _request_settings(queue: SQLiteJobQueue, tmp_path: Path, *, drain: bool, slots: int) -> None:
+    from lib import live_settings
+
+    requested = tmp_path / "settings" / "machines.yml"
+    requested.parent.mkdir()
+    requested.write_text(CODEX_BOX.format(drain=str(drain).lower(), slots=slots), encoding="utf-8")
+    with queue.connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        live_settings.requested(connection, requested)
+        connection.commit()
+
+
+def test_a_job_behind_a_live_slot_limit_on_a_memory_held_device_records_no_memory_wait(
+    tmp_path: Path,
+) -> None:
+    now = [0.0]
+    readings = {"box": AMPLE_MEMORY}
+    dispatcher, queue, pool, _ = _live_memory_dispatcher(tmp_path, now, readings)
+    running = _queue_build(queue, 1, recipient="codex")
+    claimed = pool.claim("codex")
+    assert claimed is not None and claimed[0].id == running.id
+    waiting = _queue_build(queue, 2, recipient="codex")
+    _request_settings(queue, tmp_path, drain=False, slots=1)
+    readings["box"] = LOW_MEMORY
+
+    for second in (60, 120, 180):
+        now[0] = second
+        queue.heartbeat(running.id, owner="codex")
+        dispatcher.reconcile_jobs()
+
+    assert _state(queue, waiting.id) == "queued"
+    assert _memory_waits(queue, waiting.id) == []
+
+
+def test_a_job_behind_a_requested_drain_on_a_memory_held_device_records_no_memory_wait(
+    tmp_path: Path,
+) -> None:
+    now = [0.0]
+    dispatcher, queue, _, _ = _live_memory_dispatcher(tmp_path, now, {"box": LOW_MEMORY})
+    waiting = _queue_build(queue, 1, recipient="codex")
+    _request_settings(queue, tmp_path, drain=True, slots=2)
+
+    for second in (60, 120, 180):
+        now[0] = second
+        dispatcher.reconcile_jobs()
+
+    assert _state(queue, waiting.id) == "queued"
+    assert _memory_waits(queue, waiting.id) == []
+
+
+def test_a_job_while_project_pins_are_unknown_on_a_memory_held_device_records_no_memory_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lib.orch_yml import ProjectPins, load_orch_yml
+
+    monkeypatch.setenv("ORCH_NO_LOCAL_OVERLAY", "1")
+    now = [0.0]
+    dispatcher, queue, pool, _ = _live_memory_dispatcher(tmp_path, now, {"box": LOW_MEMORY})
+    orch = tmp_path / "orch.yml"
+    orch.write_text(
+        "poll_seconds: 30\nprojects:\n  - repo: owner/repo\n    devices: [box]\n"
+        "trusted_logins:\n  maxharris1: [grok-bot]\n",
+        encoding="utf-8",
+    )
+    config, findings = load_orch_yml(orch)
+    assert config is not None, findings
+    dispatcher.wake_routes = {project.repo.lower(): project for project in config.projects}
+    pool.pins = ProjectPins(orch)
+    orch.write_text("projects: [", encoding="utf-8")
+    waiting = _queue_build(queue, 1, recipient="codex")
+
+    for second in (60, 120, 180):
+        now[0] = second
+        dispatcher.reconcile_jobs()
+
+    assert _state(queue, waiting.id) == "queued"
+    assert _memory_waits(queue, waiting.id) == []
+    with queue.connect() as connection:
+        connection.execute("DELETE FROM device_memory_holds")
+    assert pool.claim("codex") is None
+
+
 ABANDONED = (
     "<!-- orch:v1 kind=answers from=grok-bot role=orchestrator state=abandoned -->\n"
     "Max dropped it.\n"

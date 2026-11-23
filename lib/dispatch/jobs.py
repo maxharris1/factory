@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lib import device_sync, job_detail, lane_limit, skill_preflight
+from lib.device_memory import MEMORY_WAIT
 from lib.device_pool import (
     UNREACHABLE_BACKOFF_SECONDS,
     account_loads,
@@ -16,6 +17,7 @@ from lib.device_pool import (
     backed_off_through,
     device_lost_detail,
     free_slots,
+    memory_holds,
     orphan_slot,
     placement_blocks,
     used_slots,
@@ -87,7 +89,7 @@ from lib.job_state import (
     unstarted_too_long,
     usage_limit_end,
 )
-from lib.machines_yml import orch_host
+from lib.machines_yml import Device, MachinesConfig, orch_host
 from lib.max_actions import may_hand_off
 from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES
 from lib.queue import (
@@ -114,6 +116,16 @@ class _LinkDrop:
     @property
     def spent(self) -> str:
         return f"link-drop on {self.detail} ({self.used} free requeues spent)"
+
+
+def _serving_devices(
+    config: MachinesConfig, harness: str, allowed: frozenset[str] | None
+) -> list[Device]:
+    if allowed is None:
+        return [device for device in config.devices if device.eligible(harness)]
+    return [
+        device for device in config.devices if device.name in allowed and harness in device.harnesses
+    ]
 
 
 def _harnesses_a_lagging_source_checkout_refuses_everywhere(
@@ -232,30 +244,54 @@ class JobsMixin:
                 connection, job, "handed-off", "Max handed the ticket off; no T6 retry", now
             )
 
-    def _no_free_slot(self) -> Callable[[Job], bool]:
-        config = getattr(self.devices, "config", None)
+    def _placement_config(self) -> MachinesConfig | None:
+        pool = getattr(self.devices, "pool", None)
+        if pool is not None:
+            return pool.placement_config()
+        return getattr(self.devices, "config", None)
+
+    def _no_free_slot(
+        self, config: MachinesConfig | None, *, memory: bool = True
+    ) -> Callable[[Job], bool]:
         if config is None:
             return lambda job: False
         used = used_slots(self.queue, config)
-        blocked = placement_blocks(self.queue, config, self._head())
+        blocked = placement_blocks(self.queue, config, self._head(), memory=memory)
         pins = self._pins()
 
         def full(job: Job) -> bool:
             harness = job.request.recipient
             allowed = pins.get(job.request.repo.lower())
-            if allowed is None:
-                serves = any(device.eligible(harness) for device in config.devices)
-            else:
-                serves = any(
-                    harness in device.harnesses for device in config.devices if device.name in allowed
-                )
             return (
                 harness in HARNESSES
-                and serves
+                and bool(_serving_devices(config, harness, allowed))
                 and free_slots(config, harness, used, blocked, allowed=allowed) == 0
             )
 
         return full
+
+    def _memory_wait(self, config: MachinesConfig | None) -> Callable[[Job], str | None]:
+        pool = getattr(self.devices, "pool", None)
+        unknown_pins = pool is not None and pool.pins() is None
+        holds = {} if config is None or unknown_pins else memory_holds(self.queue)
+        if not holds:
+            return lambda job: None
+        full = self._no_free_slot(config)
+        full_apart_from_memory = self._no_free_slot(config, memory=False)
+        pins = self._pins()
+
+        def waiting(job: Job) -> str | None:
+            if job.state != "queued" or not full(job) or full_apart_from_memory(job):
+                return None
+            harness = job.request.recipient
+            held = ", ".join(
+                f"{device.name} ({holds[device.name]})"
+                for device in _serving_devices(config, harness, pins.get(job.request.repo.lower()))
+                if device.name in holds
+            )
+            return f"queued; every free {harness} slot is on a memory-held device: {held}"
+
+        return waiting
 
     def _account_held(self) -> Callable[[Job], bool]:
         config = getattr(self.devices, "config", None)
@@ -372,7 +408,9 @@ class JobsMixin:
         self._check_job_states()
         self._close_abandoned_jobs()
         now = self.queue.now()
-        no_free_slot = self._no_free_slot()
+        placement = self._placement_config()
+        no_free_slot = self._no_free_slot(placement)
+        memory_wait = self._memory_wait(placement)
         account_held = self._account_held()
         lag_blocked = self._lag_blocked_recipients()
         serving = self._serving()
@@ -405,6 +443,10 @@ class JobsMixin:
                 and job.request.recipient in lag_blocked
                 and self._fail_lag_blocked_past_wait(job, now, paused.get(job.request.recipient, 0.0))
             ):
+                continue
+            detail = memory_wait(job)
+            if detail is not None:
+                self._record_job_event_once(job, MEMORY_WAIT, detail)
                 continue
             if now - waited_since >= job.request.timeout_seconds:
                 if job.state == "queued" and no_free_slot(job):
