@@ -1,0 +1,15 @@
+- **Decision:** An approver's `go` or `/go` that names `Overrule the finding` at a repeat, `capped` or stalled stop queues one review of the current head at the stopped round `r`. It does not only record the decision. In one transaction it records the decision and `overruled-finding`, sets `review_round` to `r - 1`, moves the ticket to `review` (source `overrule-review`), clears the paused step and queues the review, keyed `t1:<scope>:review:<go id>`. `cap_extra` does not move, and no fix is queued. This replaces the "queues nothing" half of #1328.
+- **When:** 2026-11-23, by Factory decided (technical), from the plan for #1413 that Max approved (choices 1 and 2)
+- **Source:** https://github.com/maxharris1/factory/pull/1414#issuecomment-7106633802, split to https://github.com/maxharris1/factory/issues/1420
+
+**Why a review and not a note.** After an overrule there is nothing left to fix, so `Another round` (which queues a fix) is the wrong release, and no existing comment releases a stop into a review only. Before this change the ticket sat at `waiting-max` or `capped` with nothing queued. The BLOCKED resume (`_queue_blocked_review`) and the `unsat=` resume already rerun a review at the same round, so the overrule follows them.
+
+**Why `r - 1`.** A repeat stop and a capped stop both store `review_round = r`, and a verdict is accepted only at `review_round + 1`. Stepping the round back one lets the re-review's verdict land on `r`, inside the cap, with no extra round raised. The overruled REVISE then counts the way an `unsat=` REVISE does, as a round that was never completed.
+
+**Duplicate verdicts.** The re-review runs at the same head and round as the overruled REVISE, so its REVISE has the same `from`, `role`, `round` and head. `_duplicate_verdict` skips an earlier verdict that an overrule released: one whose id is the `question_id` of a decision answered by a go with an `overruled-finding` row. Without that skip the new REVISE would be `duplicate-verdict` and the ticket would stay in `review` with nothing running.
+
+**Briefs.** The decision is in `decisions`, and the review job's detail is built in the same transaction, so the re-review's brief quotes it under the decided section. The reviewer is told not to block on the overruled finding again.
+
+**After the overrule.** The ticket is in `review`, so a later `/go` has nothing to release and is `slash-go-no-target`. A replay finds its `overruled-finding` row and queues nothing more. If the re-review blocks on the same rule again, the repeat stop runs as usual.
+
+**Model.** `model/Orchestrator.tla` gains `ApproverOverrule`: `capped` to `review` with the round stepped back one and `cap_extra` unchanged, and `model/chart.mmd` draws the arrow. The model has no separate repeat park (a repeat REVISE is drawn as `T3Revise`), so the `waiting-max` repeat case is covered by the tests in `tests/test_repeat.py`, not by TLC.

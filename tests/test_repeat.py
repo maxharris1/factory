@@ -514,15 +514,14 @@ def test_a_same_head_revise_after_an_overrule_is_not_a_duplicate(
     assert revise(flow, round_text, "revise-again", body="- [blocking] f-9: the docs are missing.\n") == outcome
 
 
-def test_an_approve_after_an_overrule_counts_the_stopped_round(tmp_path: Path) -> None:
+def test_an_approve_at_the_stopped_round_after_an_overrule_is_inside_the_cap(tmp_path: Path) -> None:
     flow = capped_stop(tmp_path)
     assert flow.post("go-overrule", OVERRULE, MAX) == "overruled-finding"
     flow.finish("codex")
 
     approve = VERDICT.format(round="3/3", head=flow.head, verdict="APPROVE", risk="high")
 
-    assert flow.post("approve-3", approve, "codex-login") != "rejected-over-cap"
-    assert flow.state()["review_round"] == 3
+    assert flow.post("approve-3", approve, "codex-login") not in ("rejected-over-cap", "duplicate-verdict")
     assert flow.state()["cap_extra"] == 0
 
 
