@@ -483,6 +483,66 @@ def test_pools_loaded_from_different_files_never_pass_the_accounts_switches_on_d
     assert total == placed, "the file's max_jobs and pause hold both pools together"
 
 
+BARE_CODEX = """\
+devices:
+  - name: box
+    local: true
+    slot_max: 8
+    harnesses: {codex: codex-bot}
+"""
+
+
+@pytest.mark.parametrize("restriction", ["paused: true", "max_jobs: 1"])
+@pytest.mark.parametrize("settings_file", ["same", "another-checkout"])
+def test_a_pause_or_cap_on_the_implicit_default_account_stops_a_pool_that_never_declared_it(
+    tmp_path: Path, restriction: str, settings_file: str
+) -> None:
+    machines = tmp_path / "machines.yml"
+    machines.write_text(BARE_CODEX, encoding="utf-8")
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 100.0)
+    pool = restarted(queue, machines)
+    poller_adopts(queue, machines)
+    enqueue(queue, "codex", "0")
+    assert pool.claim("codex") is not None
+    settings = machines
+    if settings_file == "another-checkout":
+        settings = tmp_path / "settings" / "machines.yml"
+        settings.parent.mkdir()
+
+    settings_writes(
+        queue, settings,
+        f"accounts:\n  - {{id: codex-default, harness: codex, {restriction}}}\n{BARE_CODEX}", at=1,
+    )
+    enqueue(queue, "codex", "1")
+
+    assert pool.claim("codex") is None, f"the cached pool honors the committed {restriction}"
+    poller_adopts(queue, machines)
+    assert pool.claim("codex") is None, "and still does after the poller adopts its own file"
+
+
+def test_a_settings_pin_written_before_account_switches_leaves_accounts_open_after_adopt(
+    tmp_path: Path,
+) -> None:
+    poller, settings = (tmp_path / name / "machines.yml" for name in ("poller", "settings"))
+    poller.parent.mkdir()
+    settings.parent.mkdir()
+    poller.write_text(account_file(max_jobs=2), encoding="utf-8")
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 100.0)
+    for n in range(3):
+        enqueue(queue, "claude", str(n))
+    poller_adopts(queue, poller)
+    settings_writes(queue, settings, account_file(max_jobs=2), at=1)
+    with queue.connect() as connection:
+        connection.execute(f"DROP TABLE {live_settings.ACCOUNT_TABLE}")
+
+    for _ in range(3):
+        poller_adopts(queue, poller)
+
+    assert placements(restarted(queue, poller), 3) == 2, (
+        "a pin from before account switches neither closes the account nor lifts its cap"
+    )
+
+
 def test_concurrent_claims_never_take_the_same_last_slot(tmp_path: Path) -> None:
     devices = (device("box", 2, "claude", "codex"),)
     pool, queue = make_pool(tmp_path, *devices)

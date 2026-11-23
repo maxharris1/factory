@@ -30,7 +30,7 @@ an account or lowers its max_jobs, stops the next claim in every process
 (#777). An enable, an undrain, a resume or a higher cap reaches placement
 once the poller's DeviceMonitor adopts the file and every machines.yml the
 row holds allows it, with no restart. Until the poller first adopts, every
-device and every declared account is closed.
+device is closed.
 
 A running harness job with no slot row (claimed without a device: an older
 `orch wait`, issue #90) counts as one slot on the box, so the box never runs

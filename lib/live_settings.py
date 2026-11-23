@@ -14,7 +14,10 @@ adopted is closed, so nothing is placed before the first adopt.
 
 Each declared account's `paused` and `max_jobs` ride the same row, kept in
 the sibling `account_live` table and written in the same transaction, with
-the same meet: paused if any side says so, and the lowest max_jobs.
+the same meet over every account any side names: paused if any side says so,
+and the lowest max_jobs. A side that does not name an account leaves an
+implicit `<harness>-default` one open and closes any other. An entry written
+before account switches existed has no say on accounts.
 
 * `recorded` runs inside every claim's BEGIN IMMEDIATE. When the caller's
   file changed since its entry was written, it replaces that entry. A
@@ -53,7 +56,8 @@ from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 
 from lib.config_overlay import overlay_path
-from lib.machines_yml import MachinesConfig, load_machines_yml
+from lib.machines_yml import Account, MachinesConfig, default_account, load_machines_yml
+from lib.schema import HARNESSES
 
 TABLE = "device_live"
 SEEN_TABLE = "device_live_seen"
@@ -90,6 +94,17 @@ class AccountSwitch:
 
 
 ACCOUNT_CLOSED = AccountSwitch(paused=True, max_jobs=0)
+ACCOUNT_OPEN = AccountSwitch(paused=False, max_jobs=None)
+_IMPLICIT = frozenset(default_account(harness) for harness in HARNESSES)
+
+
+def _absent(account_id: str) -> AccountSwitch:
+    return ACCOUNT_OPEN if account_id in _IMPLICIT else ACCOUNT_CLOSED
+
+
+def _declared(accounts: Mapping[str, AccountSwitch]) -> dict[str, AccountSwitch]:
+    return {name: switch for name, switch in accounts.items()
+            if not (name in _IMPLICIT and switch == ACCOUNT_OPEN)}
 
 
 @dataclass(frozen=True)
@@ -110,8 +125,13 @@ class Live:
                                    slot_max=switch.slot_max))
         accounts = []
         for account in config.accounts:
-            switch = self.accounts.get(account.id, ACCOUNT_CLOSED)
+            switch = self.accounts.get(account.id, _absent(account.id))
             accounts.append(replace(account, paused=switch.paused, max_jobs=switch.max_jobs))
+        declared = {account.id for account in config.accounts}
+        for name, switch in self.accounts.items():
+            if name in _IMPLICIT and name not in declared:
+                accounts.append(Account(name, name.removesuffix("-default"),
+                                        paused=switch.paused, max_jobs=switch.max_jobs))
         return replace(config, devices=tuple(devices), accounts=tuple(accounts))
 
     def is_applied(self, version: int) -> bool:
@@ -148,17 +168,21 @@ class _Row:
 
     def live(self) -> Live:
         switches = dict(self.adopted_switches)
-        accounts = dict(self.adopted_accounts or {})
         for source in self.sources.values():
             switches = {
                 name: switch.meet(source.switches.get(name, CLOSED))
                 for name, switch in switches.items()
             }
-            found = source.accounts or {}
-            accounts = {
-                name: switch.meet(found.get(name, ACCOUNT_CLOSED))
-                for name, switch in accounts.items()
-            }
+        sides = [self.adopted_accounts or {},
+                 *(source.accounts for source in self.sources.values()
+                   if source.accounts is not None)]
+        accounts = {}
+        for name in sorted(set().union(*sides)):
+            switch = ACCOUNT_OPEN
+            for side in sides:
+                switch = switch.meet(side.get(name, _absent(name)))
+            accounts[name] = switch
+        accounts = _declared(accounts)
         return Live(switches, self.written, self.adopted, self.adopted_digest,
                     adopted_switches=self.adopted_switches, accounts=accounts)
 
@@ -317,6 +341,7 @@ def _parsed_accounts(plain: Mapping[str, Mapping]) -> dict[str, AccountSwitch]:
 
 def _digest(switches: Mapping[str, Switch], accounts: Mapping[str, AccountSwitch]) -> str:
     plain: dict = _plain(switches)
+    accounts = _declared(accounts)
     if accounts:
         plain = {"devices": plain, "accounts": _plain_accounts(accounts)}
     encoded = json.dumps(plain, separators=(",", ":"))
