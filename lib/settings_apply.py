@@ -99,7 +99,6 @@ PENDING = "pending"
 REFUSED = "refused"
 FAILED = "failed"
 SIGNED_OUT = "signed-out"
-SIGNING_OUT = "signing out"
 
 REQUEST_NAME = re.compile(r"^([A-Za-z0-9_-]{16,64})\.json$")
 REQUESTED_AT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
@@ -605,7 +604,7 @@ def claim_lock(db: Path) -> ClaimLock:
                 return live.written
 
             def hold_pair(account: str, device: str, now: float) -> None:
-                account_doctor.hold(connection, account, device, "doctor", SIGNING_OUT, now)
+                account_doctor.lock_signout(connection, account, device, now)
                 connection.execute("COMMIT")
 
             yield Held(running=lambda config: slots_in_use(connection, config),
@@ -741,10 +740,13 @@ class Applier:
                     return self._entry(request, REFUSED, previous, "cannot read running jobs")
                 if busy:
                     return self._entry(request, REFUSED, previous, "running-job")
-                error = blocked or self._logout(
-                    device, harness, config.account_home(device.name, harness, request.account))
-                account_doctor.run(connection, config, self.transport, self.clock(), self.repo)
-                new = _signin(connection, request)
+                try:
+                    error = blocked or self._logout(
+                        device, harness, config.account_home(device.name, harness, request.account))
+                    account_doctor.run(connection, config, self.transport, self.clock(), self.repo)
+                    new = _signin(connection, request)
+                finally:
+                    account_doctor.unlock_signout(connection, request.account, device.name)
         except sqlite3.Error:
             return self._entry(request, FAILED, previous, "doctor-db")
         if error is None and new != "signed-out":

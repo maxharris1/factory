@@ -38,6 +38,8 @@ HOLDS = "signin_holds"
 REASON = "account-signin"
 INTERVAL_SECONDS = 30 * 60
 HELD_INTERVAL_SECONDS = 2 * 60
+SIGNOUTS = "signout_locks"
+SIGNOUT_LEASE_SECONDS = 10 * 60
 
 _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS {TABLE} (
@@ -60,6 +62,14 @@ CREATE TABLE IF NOT EXISTS {HOLDS} (
     seen REAL NOT NULL,
     source TEXT NOT NULL CHECK (source IN ('preflight','runtime','doctor')),
     reason TEXT NOT NULL,
+    PRIMARY KEY (account, device)
+)
+"""
+_SIGNOUTS_SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS {SIGNOUTS} (
+    account TEXT NOT NULL,
+    device TEXT NOT NULL,
+    since REAL NOT NULL,
     PRIMARY KEY (account, device)
 )
 """
@@ -523,6 +533,25 @@ def _holds(connection: sqlite3.Connection) -> dict[tuple[str, str], Hold]:
 
 def held(connection: sqlite3.Connection) -> frozenset[tuple[str, str]]:
     return frozenset(_holds(connection))
+
+
+def lock_signout(connection: sqlite3.Connection, account: str, device: str, now: float) -> None:
+    connection.execute(_SIGNOUTS_SCHEMA)
+    connection.execute(f"INSERT OR REPLACE INTO {SIGNOUTS} (account, device, since) VALUES (?, ?, ?)",
+                       (account, device, now))
+
+
+def unlock_signout(connection: sqlite3.Connection, account: str, device: str) -> None:
+    connection.execute(_SIGNOUTS_SCHEMA)
+    connection.execute(f"DELETE FROM {SIGNOUTS} WHERE account = ? AND device = ?", (account, device))
+
+
+def signing_out(connection: sqlite3.Connection, now: float) -> frozenset[tuple[str, str]]:
+    connection.execute(_SIGNOUTS_SCHEMA)
+    return frozenset(
+        (str(account), str(device))
+        for account, device in connection.execute(
+            f"SELECT account, device FROM {SIGNOUTS} WHERE since > ?", (now - SIGNOUT_LEASE_SECONDS,)))
 
 
 def newest_hold(connection: sqlite3.Connection) -> float | None:

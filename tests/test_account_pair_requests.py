@@ -478,6 +478,7 @@ def test_a_failed_signout_gives_the_pair_back_to_placement(box: Box) -> None:
     assert entry.result == "failed"
     with sqlite3.connect(box.world.db) as connection:
         assert ("claude-b", "pc") not in account_doctor.held(connection)
+        assert ("claude-b", "pc") not in account_doctor.signing_out(connection, NOW)
 
 
 def test_a_signout_on_a_device_with_a_placeholder_home_records_one_failed_line(box: Box) -> None:
@@ -578,3 +579,49 @@ def test_logout_script_unsets_every_token_variable_after_the_profile() -> None:
         assert set(unset.split()[1:]) >= tokens | {SECURE}
         assert inner.index("unset ") < inner.index(command)
         assert f"{HOME_VARIABLE[harness]}=/h/acct {command}" in inner
+
+
+def test_a_doctor_pass_during_the_logout_does_not_give_the_pair_back_to_placement(box: Box) -> None:
+    from dataclasses import replace
+
+    from lib.device_pool import DevicePool
+    from lib.queue import SQLiteJobQueue
+    from tests.test_device_pool import enqueue
+
+    logout = Logout(box, "claude")
+    assert box.world.doctor() == 0
+    config, _ = load_machines_yml(box.machines)
+    queue = SQLiteJobQueue(box.world.db, clock=lambda: NOW + 60)
+    pool = DevicePool(queue, config)
+    placed = []
+    transport = box.applier.transport
+
+    class DoctorThenClaimDuringLogout:
+        def exchange(self, argv, **kwargs):
+            if "orch-accounts-logout" in argv[-1]:
+                with sqlite3.connect(box.world.db, isolation_level=None) as connection:
+                    account_doctor.run(connection, config, transport, NOW + 30, None)
+                for key in ("first", "second", "third"):
+                    enqueue(queue, "claude", f"signout-doctor-race-{key}")
+                    claimed = pool.claim("claude")
+                    if claimed is not None:
+                        placed.append((claimed[1].account, claimed[1].device))
+            return transport.exchange(argv, **kwargs)
+
+    box.applier = replace(box.applier, transport=DoctorThenClaimDuringLogout())
+    box.request("signout", account="claude-b")
+
+    (entry,) = box.run()
+
+    assert len(logout.calls()) == 1 and entry.result == "signed-out"
+    assert placed, "the claims during the logout placed work elsewhere"
+    assert ("claude-b", "pc") not in placed, placed
+
+
+def test_a_signout_lock_left_by_a_crashed_applier_lapses() -> None:
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+    account_doctor.lock_signout(connection, "claude-b", "pc", NOW)
+
+    assert ("claude-b", "pc") in account_doctor.signing_out(connection, NOW + 60)
+    assert ("claude-b", "pc") not in account_doctor.signing_out(
+        connection, NOW + account_doctor.SIGNOUT_LEASE_SECONDS + 1)
