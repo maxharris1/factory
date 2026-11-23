@@ -81,7 +81,7 @@ def test_statechart_fetch_survives_github_rate_limit(tmp_path: Path) -> None:
     result = run_check(env)
 
     assert count.read_text().strip() == "3"
-    assert "1/8 phase 1 model" in result.stdout, result.stderr
+    assert "1/9 phase 1 model" in result.stdout, result.stderr
     assert "exited 3, expected 0" in result.stderr
 
 
@@ -125,9 +125,9 @@ breaks() {{
 }}
 case $cfg in
   Orchestrator.cfg)
-    printf '## Rules that hold\\nT1KindGo, T1PDecided, Phase1T9Off, HandoffCountsApprovedRound, ReopenHoldOnlyAtWork, ShipNeedsCoveredQa, QaResultFromRun\\n' > "$out/report.md" ;;
+    printf '## Rules that hold\\nT1KindGo, T1PDecided, Phase1T9Off, HandoffCountsApprovedRound, ReopenHoldOnlyAtWork, ShipNeedsCoveredQa, QaResultFromRun, RebaseDecided, RebaseSpendsNoRound\\n' > "$out/report.md" ;;
   OrchestratorAll.cfg)
-    printf '## Rules that hold\\nT9Decided\\n' > "$out/report.md" ;;
+    printf '## Rules that hold\\nT9Decided, RebaseDecided, RebaseSpendsNoRound\\n' > "$out/report.md" ;;
   chart.cfg) grep -v ': post-merge$' "$chart" > "$out/chart.mmd" ;;
   chart-all.cfg) cp "$chart" "$out/chart.mmd" ;;
   omit-t1.cfg) breaks T1KindGo '{t1_steps}' ;;
@@ -136,11 +136,13 @@ case $cfg in
 2. kind=go, queue plan: planning' ;;
   omit-ship-guard.cfg) breaks ShipPinnedToCoveredHead '1. ship = merge: merged' ;;
   omit-qa-guard.cfg) {qa_guard} ;;
+  omit-trb.cfg) {trb} ;;
 esac
 exit 0
 """
 
 QA_GUARD_BREAKS = "breaks ShipNeedsCoveredQa '1. ship = merge, QA covers the head: merged'"
+TRB_BREAKS = "breaks RebaseDecided '1. ready, CI green: review'"
 
 
 @pytest.mark.parametrize(
@@ -168,6 +170,7 @@ def test_check_sh_fails_when_the_break_trace_ends_elsewhere(
             chart=ROOT / "model" / "chart.mmd",
             t1_steps=t1_steps,
             qa_guard=QA_GUARD_BREAKS,
+            trb=TRB_BREAKS,
         ),
     )
     env["STATECHART"] = str(fake)
@@ -210,6 +213,46 @@ def test_check_sh_fails_when_the_qa_guard_fixture_does_not_break(
             chart=ROOT / "model" / "chart.mmd",
             t1_steps="1. brief and acceptance criteria posted: questions",
             qa_guard=qa_guard,
+            trb=TRB_BREAKS,
+        ),
+    )
+    env["STATECHART"] = str(fake)
+    env["TLA2TOOLS"] = str(tmp_path / "tla2tools.jar")
+
+    result = run_check(env)
+
+    assert result.returncode != 0
+    assert message in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("trb", "message"),
+    [
+        (
+            "printf '## Rules that hold\\nRebaseDecided\\n' > \"$out/report.md\"",
+            "omit-trb exited 0, expected 1",
+        ),
+        (
+            "breaks RebaseDecided '1. ready, CI green: building'",
+            "omit-trb counterexample did not end in review",
+        ),
+    ],
+    ids=["holds", "ends-elsewhere"],
+)
+def test_check_sh_fails_when_the_trb_fixture_does_not_break(
+    tmp_path: Path,
+    trb: str,
+    message: str,
+) -> None:
+    _bin_dir, env = sandbox(tmp_path)
+    fake = tmp_path / "statechart"
+    write_tool(
+        fake,
+        FAKE_STATECHART.format(
+            chart=ROOT / "model" / "chart.mmd",
+            t1_steps="1. brief and acceptance criteria posted: questions",
+            qa_guard=QA_GUARD_BREAKS,
+            trb=trb,
         ),
     )
     env["STATECHART"] = str(fake)

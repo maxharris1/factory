@@ -103,6 +103,7 @@ export const step = (action, from, to) => {
   if (action === "UpdateNonTrivial") return "non-trivial update, cross-family re-review";
   if (action === "UpdateRetry") return "update fails, one more update";
   if (action === "UpdateStuck") return "two failed updates (update-failed-2)";
+  if (action === "RebaseQueued") return "trusted kind=rebase, rebase-only fix";
   if (action === "LinearHandoff") return "Max moves the Linear issue to a handoff state";
   if (action === "LinearResume") return "Linear back to a started state, the prior state resumes";
   // Linear Done or Canceled settles any ticket past go (#749); the chart draws
