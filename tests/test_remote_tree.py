@@ -1115,14 +1115,25 @@ def test_every_generated_remote_script_parses_under_the_native_sh() -> None:
 
 
 def test_every_generated_remote_script_runs_under_the_native_sh(tmp_path: Path) -> None:
+    """#1379: the check scans every process on the host, so the target's tag is
+    its own; a parallel test's sleeper carrying it would read as a live worker."""
     gone, unsure = 0, 3
-    target = remote.RemoteTarget("pc", "pc", "claude-bot", str(tmp_path / "work"), "job", "a" * 32)
-    for name, script in generated_scripts(target).items():
-        inner = shlex.split(script)[3]
-        result = subprocess.run(
-            ["/bin/sh", "-c", inner], capture_output=True, text=True, timeout=60
-        )
-        print(f"{name}: exit {result.returncode} {result.stderr!r}")
-        assert result.returncode in (gone, unsure), (
-            f"{name}: exit {result.returncode} {result.stderr}"
-        )
+    target = remote.RemoteTarget(
+        "pc", "pc", "claude-bot", str(tmp_path / "work"), "job", uuid.uuid4().hex
+    )
+    sibling = subprocess.Popen(
+        ["env", f"ORCH_WORKER_TAG={'a' * 32}", "sleep", "300"], start_new_session=True
+    )
+    try:
+        for name, script in generated_scripts(target).items():
+            inner = shlex.split(script)[3]
+            result = subprocess.run(
+                ["/bin/sh", "-c", inner], capture_output=True, text=True, timeout=60
+            )
+            print(f"{name}: exit {result.returncode} {result.stderr!r}")
+            assert result.returncode in (gone, unsure), (
+                f"{name}: exit {result.returncode} {result.stderr}"
+            )
+    finally:
+        sibling.kill()
+        sibling.wait()
