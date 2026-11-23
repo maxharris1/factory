@@ -691,6 +691,60 @@ def _is_slot_max(value: object) -> bool:
 FIELDS = {"enabled": _is_bool, "drain": _is_bool, "slot_max": _is_slot_max}
 
 
+def _is_devices(value: object) -> bool:
+    return (isinstance(value, list) and all(isinstance(item, str) for item in value)
+            and len(set(value)) == len(value))
+
+
+def _is_max_jobs(value: object) -> bool:
+    return value is None or _is_slot_max(value)
+
+
+ACCOUNT_ID = re.compile(r"^(?!\.\.?$)[A-Za-z0-9._-]{1,64}$")
+ACCOUNT_HARNESSES = ("claude", "codex", "cursor", "external")
+DEFAULT_ACCOUNT_IDS = frozenset(
+    f"{harness}-default" for harness in ACCOUNT_HARNESSES if harness != "external"
+)
+ACCOUNT_REQUEST_KEYS = frozenset({"id", "actor", "requested_at", "target", "op", "account"})
+ACCOUNT_OPS = {
+    "add": frozenset({"harness", "max_jobs", "signed_in_on"}),
+    "set": frozenset({"field", "expect", "value"}),
+    "remove": frozenset({"expect"}),
+    "prepare": frozenset({"device"}),
+    "doctor": frozenset({"device"}),
+}
+ACCOUNT_FIELDS = {
+    "max_jobs": (_is_slot_max, _is_max_jobs),
+    "paused": (_is_bool, _is_bool),
+    "signed_in_on": (_is_devices, _is_devices),
+}
+REMOVE_EXPECT_KEYS = frozenset({"harness", "max_jobs", "paused", "signed_in_on"})
+
+
+def _is_account_view(value: object) -> bool:
+    return (isinstance(value, dict) and set(value) == REMOVE_EXPECT_KEYS
+            and value["harness"] in ACCOUNT_HARNESSES
+            and all(expect_ok(value[key]) for key, (_, expect_ok) in ACCOUNT_FIELDS.items()))
+
+
+ACCOUNT_SHAPES: dict[str, Callable[[dict], bool]] = {
+    "add": lambda p: (p["harness"] in ACCOUNT_HARNESSES and _is_slot_max(p["max_jobs"])
+                      and _is_devices(p["signed_in_on"])),
+    "set": lambda p: (ACCOUNT_FIELDS[p["field"]][0](p["value"])
+                      and ACCOUNT_FIELDS[p["field"]][1](p["expect"])),
+    "remove": lambda p: _is_account_view(p["expect"]),
+    "prepare": lambda p: isinstance(p["device"], str),
+    "doctor": lambda p: isinstance(p["device"], str),
+}
+ACCOUNT_DEVICES: dict[str, Callable[[dict], list]] = {
+    "add": lambda p: p["signed_in_on"],
+    "set": lambda p: p["value"] if p["field"] == "signed_in_on" else [],
+    "remove": lambda p: [],
+    "prepare": lambda p: [p["device"]],
+    "doctor": lambda p: [p["device"]],
+}
+
+
 def is_bot_login(login: str) -> bool:
     return login.endswith("[bot]") or BOT_USER.fullmatch(login.casefold()) is not None
 
@@ -711,6 +765,27 @@ def device_row(status: dict, device: object) -> dict:
         if isinstance(row, dict) and isinstance(device, str) and row.get("name") == device:
             return row
     raise ApiError(404, "not-in-snapshot")
+
+
+def account_row(status: dict, account: str) -> dict | None:
+    accounts = status.get("accounts")
+    for row in accounts if isinstance(accounts, list) else []:
+        if isinstance(row, dict) and row.get("id") == account:
+            return row
+    return None
+
+
+def account_view(row: dict) -> dict:
+    signed_in = row.get("signed_in_on")
+    return {
+        "harness": row.get("harness"),
+        "max_jobs": row.get("max_jobs"),
+        "paused": row.get("paused"),
+        "signed_in_on": frozenset(
+            entry["device"] for entry in (signed_in if isinstance(signed_in, list) else [])
+            if isinstance(entry, dict) and isinstance(entry.get("device"), str)
+        ),
+    }
 
 
 def applied_ids(status: dict) -> set[str]:
@@ -1096,6 +1171,8 @@ class SnapshotHandler(BaseHTTPRequestHandler):
     def _settings(self, actions: Actions, session: Session | None, payload: dict):
         assert session is not None
         require_approver(actions, session)
+        if payload.get("target") == "account":
+            return self._account_settings(session, payload)
         field = payload.get("field")
         valid = FIELDS.get(field) if isinstance(field, str) else None
         if valid is None:
@@ -1115,6 +1192,47 @@ class SnapshotHandler(BaseHTTPRequestHandler):
             "field": field,
             "expect": expect,
             "value": value,
+        }
+        self.server.spool.submit(request, applied_ids(status))  # type: ignore[attr-defined]
+        return 202, {"id": request["id"]}, []
+
+    def _account_settings(self, session: Session, payload: dict):
+        op = payload.get("op")
+        if not isinstance(op, str) or op not in ACCOUNT_OPS:
+            raise ApiError(400, "bad-op")
+        if set(payload) != {"target", "op", "account"} | ACCOUNT_OPS[op]:
+            raise ApiError(400, "bad-keys")
+        name, field = payload["account"], payload.get("field")
+        if not isinstance(name, str) or ACCOUNT_ID.fullmatch(name) is None:
+            raise ApiError(400, "bad-value")
+        if op == "set" and (not isinstance(field, str) or field not in ACCOUNT_FIELDS):
+            raise ApiError(400, "bad-field")
+        if not ACCOUNT_SHAPES[op](payload):
+            raise ApiError(400, "bad-value")
+        status = read_status(self.server.root_fd)  # type: ignore[attr-defined]
+        row = account_row(status, name)
+        if row is None and op != "add":
+            raise ApiError(404, "not-in-snapshot")
+        for device in ACCOUNT_DEVICES[op](payload):
+            device_row(status, device)
+        view = account_view(row) if row is not None else {}
+        if "device" in payload and payload["device"] not in view["signed_in_on"]:
+            raise ApiError(404, "not-in-snapshot")
+        if (row or {}).get("read_only") is not None or (op == "add" and (
+            payload["harness"] == "external" or name in DEFAULT_ACCOUNT_IDS
+        )):
+            raise ApiError(403, "read-only")
+        if op == "add" and row is not None:
+            raise ApiError(409, "exists")
+        claimed = {field: payload["expect"]} if op == "set" else payload.get("expect", {})
+        if any(view[key] != (frozenset(value) if isinstance(value, list) else value)
+               for key, value in claimed.items()):
+            raise ApiError(409, "changed")
+        request = {
+            "id": secrets.token_urlsafe(16),
+            "actor": session.login,
+            "requested_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            **payload,
         }
         self.server.spool.submit(request, applied_ids(status))  # type: ignore[attr-defined]
         return 202, {"id": request["id"]}, []
