@@ -16,6 +16,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import ClassVar
 
+from lib import account_requests
+from lib.account_requests import COMMON_KEYS
 from lib.load import is_strict_int
 from lib.machines_yml import EXTERNAL, Account, MachinesConfig, default_account
 from lib.schema import HARNESSES
@@ -32,10 +34,7 @@ from lib.settings_apply import (
     _set_key,
 )
 
-COMMON_KEYS = frozenset({"id", "actor", "requested_at", "target", "op", "account"})
-OPS: Mapping[str, frozenset[str]] = MappingProxyType(
-    {"set": frozenset({"field", "expect", "value"})}
-)
+OPS: Mapping[str, frozenset[str]] = MappingProxyType({"set": account_requests.OPS["set"]})
 
 
 def _is_max_jobs(value: object) -> bool:
