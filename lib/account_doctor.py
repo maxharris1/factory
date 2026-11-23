@@ -421,7 +421,10 @@ def judge(probes: Sequence[Probe], now: float) -> list[SignIn]:
     ]
 
 
-_LOGIN: dict[Harness, str] = {"claude": "claude auth login", "codex": "codex login"}
+_LOGIN: dict[Harness, tuple[tuple[str, ...], str]] = {
+    "claude": (("CLAUDE_CODE_OAUTH_TOKEN",), "claude auth login"),
+    "codex": ((), "codex login --device-auth"),
+}
 _THEN = ", then orch accounts doctor"
 _STEP: dict[Status, str] = {
     "signed-out": "sign in as {login} on {device}: {command}" + _THEN,
@@ -432,9 +435,15 @@ _TOKEN_STEP = "remove the token export from {login}'s login profile on {device}"
 
 
 def login_command(harness: Harness, home: str | None) -> str:
+    unset, login = _LOGIN[harness]
     variable = _STATUS[harness].home_variable
-    prefix = f"env -u {variable} " if home is None else f"{variable}={shlex.quote(home)} "
-    return prefix + _LOGIN[harness]
+    assign = ""
+    if home is None:
+        unset = (*unset, variable)
+    else:
+        assign = f"{variable}={shlex.quote(home)} "
+    env = "".join(f" -u {name}" for name in unset)
+    return (f"env{env} " if env else "") + assign + login
 
 
 def _step(row: SignIn, config: MachinesConfig) -> str:
