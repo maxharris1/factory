@@ -10,7 +10,9 @@ brief per job kind:
 * review: a `review` job (the cross-family reviewer);
 * merge-only: an `update-from-main` job (#130), or a `fix` job whose detail
   says `"kind": "merge-only"` (bring the base branch in by a merge commit,
-  nothing else).
+  nothing else);
+* rebase: a `fix` job whose detail says `"kind": "rebase"` (rebase onto the
+  base branch and push with a lease, never a merge).
 
 Each brief is rendered from the job row alone: repo, PR or ticket, head sha,
 round and cap, risk, the review rules (docs/SPEC.md section 8) in a review
@@ -33,9 +35,9 @@ not run `orch job done`. It ends its output with `ORCH-HANDOFF: <comment-id>`
 
 The package splits the renderer by part: `common` (job facts and the shared
 sections), `context` (factory.md), `rules`, `skills`, and one module per job
-(`plan`, `build`, `fix`, `review`, `merge_only`). `qa` renders the brief for
-one QA lane (#762), a cloud agent that drives the app live; it takes a lane's
-facts, not a job row, through `render_qa_brief`. tests/snapshots/brief holds
+(`plan`, `build`, `fix`, `review`, `merge_only`, `rebase`). `qa` renders the
+brief for one QA lane (#762), a cloud agent that drives the app live; it takes
+a lane's facts, not a job row, through `render_qa_brief`. tests/snapshots/brief holds
 one rendered brief per job kind and tests/snapshots/qa one per lane kind;
 regenerate both with `python tests/regenerate_brief_snapshots.py`, never by
 hand.
@@ -45,7 +47,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from lib.brief import build, fix, merge_only, plan, review, skills
+from lib.brief import build, fix, merge_only, plan, rebase, review, skills
 from lib.brief.qa import render_qa_brief
 from lib.brief.common import (
     BOTS,
@@ -81,7 +83,9 @@ __all__ = [
     "render_qa_brief",
 ]
 
-KINDS = ("implement", "fix", "review", "merge-only")
+KINDS = ("implement", "fix", "review", "merge-only", "rebase")
+
+_NO_ROUTER = ("merge-only", "rebase")
 
 _ACTION_KINDS = {
     "build": "implement",
@@ -97,9 +101,8 @@ def brief_kind(job: Job) -> str:
     kind = _ACTION_KINDS.get(action)
     if kind is None:
         raise BriefError(f"no standard brief for a {action!r} job")
-    if action == "fix" and detail_of(job).get("kind") == "merge-only":
-        return "merge-only"
-    return kind
+    named = detail_of(job).get("kind") if action == "fix" else None
+    return named if named in _NO_ROUTER else kind
 
 
 def render_brief(
@@ -130,19 +133,19 @@ def render_brief(
     role = "reviewer" if kind == "review" else "builder"
     router = (
         None
-        if kind == "merge-only"
+        if kind in _NO_ROUTER
         else skills.resolve(
             role, bot, factory_root, pin_root, action=job.request.action, ticket_type=facts["ticket_type"]
         )
     )
     decided = (
         decided_section(detail, reviewer=kind == "review")
-        if kind != "merge-only" and not isinstance(router, str)
+        if kind not in _NO_ROUTER and not isinstance(router, str)
         else None
     )
     ticket = (
         ticket_section(facts["ticket_text"], review=kind == "review", criteria_url=review.criteria_url(detail, facts))
-        if kind != "merge-only" and not isinstance(router, str)
+        if kind not in _NO_ROUTER and not isinstance(router, str)
         else None
     )
     if isinstance(router, str):
@@ -200,6 +203,8 @@ def _lead(job: Job, kind: str, facts: dict) -> Lead:
         return fix.lead(job, facts)
     if kind == "review":
         return review.lead(facts)
+    if kind == "rebase":
+        return rebase.lead(job, facts)
     return merge_only.lead(job, facts)
 
 
