@@ -12,6 +12,7 @@ from lib import account_settings, heal, live_settings, settings_apply
 from lib.live_settings import AccountSwitch
 from lib.queue import SQLiteJobQueue
 from lib.settings_apply import Applier, LocalSpool, run_pass
+from tests.pool_helpers import poller_adopts
 from tests.test_settings_apply import ALL, NOW, OWNER, Runner, changed_lines, holding
 
 MACHINES = """\
@@ -170,10 +171,11 @@ def test_resuming_deletes_the_paused_line(tmp_path: Path) -> None:
     assert backup.read_bytes() == box.original
 
 
-def test_the_live_row_takes_the_new_account_switch_under_the_claim_lock(tmp_path: Path) -> None:
+def test_a_pause_reaches_the_live_row_under_the_claim_lock(tmp_path: Path) -> None:
     db = tmp_path / "orch.db"
-    SQLiteJobQueue(db, clock=lambda: 100.0)
+    queue = SQLiteJobQueue(db, clock=lambda: 100.0)
     box = Box(tmp_path, claims=settings_apply.claim_lock(db))
+    poller_adopts(queue, box.machines)
     box.request(field="paused", expect=False, value=True)
 
     (entry,) = box.run()
