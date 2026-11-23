@@ -5,7 +5,7 @@ Every POLL_SECONDS it lists the settings spool through the relay
 seen. It re-checks the request against machines.yml, account_signins and
 running jobs, allows one attempt per pair and MAX_CONCURRENT in all,
 prepares the account's home on the device when it is missing, and hands the
-attempt to `launch` (lib/signin_attempt.py), which ends it with `finish`. Each request ends in
+attempt to `launch`, which ends it with `finish`. Each request ends in
 exactly one audit line, a refusal or failure before launch included.
 """
 

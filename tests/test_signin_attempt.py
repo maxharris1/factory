@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from lib import account_doctor, dashboard, dashboard_accounts, settings_apply, signin_attempt, signin_broker, signin_relay
-from lib.account_signin import KILL_GRACE_SECONDS, Outcome, kill_script, process_group, settle
+from lib.account_signin import KILL_GRACE_SECONDS, Outcome, kill_script, first_process_group, settle
 from lib.harness_env import ACCOUNT_ISOLATION
 from lib.machines_yml import load_machines_yml
 from lib.remote import SshTransport
@@ -471,10 +471,10 @@ def test_settle_table(end: str, outcome: Outcome, expected: Outcome) -> None:
 
 
 def test_only_the_first_group_marker_counts() -> None:
-    assert process_group(b"profile says hello\r\nORCH-SIGNIN-PGID 4242\r\nORCH-SIGNIN-PGID 1\n") == 4242
-    assert process_group(b"ORCH-SIGNIN-PGID \r\nhostile ORCH-SIGNIN-PGID 77\n") is None
-    assert process_group(b"ORCH-SIGNIN-PGID 1\n") is None
-    assert process_group(b"no marker") is None
+    assert first_process_group(b"profile says hello\r\nORCH-SIGNIN-PGID 4242\r\nORCH-SIGNIN-PGID 1\n") == 4242
+    assert first_process_group(b"ORCH-SIGNIN-PGID \r\nhostile ORCH-SIGNIN-PGID 77\n") is None
+    assert first_process_group(b"ORCH-SIGNIN-PGID 1\n") is None
+    assert first_process_group(b"no marker") is None
     with pytest.raises(ValueError):
         kill_script(1)
     assert f"-lt {KILL_GRACE_SECONDS}" in kill_script(4242)

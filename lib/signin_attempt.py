@@ -1,13 +1,7 @@
-"""One sign-in attempt, from the CLI's start to its audit line (#1384).
+"""One dashboard sign-in attempt, from the CLI's start to its audit line (#1384).
 
-The broker (lib/signin_broker.py) hands each admitted attempt to
-`Runner.run`. It records the doctor's view of the device's other accounts,
-starts the account's login over `ssh -tt` as the harness's bot, and keeps
-the CLI's output in memory only. Just the parsed URL and code reach
-`<id>.relay`. A pasted Claude code is typed once. The attempt ends on the
-CLI's exit, on expiry or on a cancel file; expiry and cancel kill the
-remote process group. The doctor then runs, `judge` decides, and the
-broker's `finish` writes the one audit line.
+The pty echoes the pasted code and the CLI prints whatever it likes, so its
+output stays in memory and only the parsed URL and code reach `<id>.relay`.
 """
 
 from __future__ import annotations
@@ -26,7 +20,7 @@ from typing import IO
 
 from lib import account_doctor, heal
 from lib.account_doctor import SignIn
-from lib.account_signin import End, Outcome, judge, kill_script, login_script, parse_output, process_group, settle
+from lib.account_signin import End, Outcome, first_process_group, judge, kill_script, login_script, parse_output, settle
 from lib.machines_yml import MachinesConfig, load_machines_yml
 from lib.remote import PROBE_TIMEOUT_SECONDS, ByteTransport, SshTransport
 from lib.settings_apply import AuditEntry, SpoolError
@@ -46,9 +40,7 @@ def _popen(argv: list[str]) -> subprocess.Popen:
     return subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
 
-class _Output:
-    """The CLI's output, newest OUTPUT_BYTES, held in memory and never written anywhere."""
-
+class _MemoryTail:
     def __init__(self, stream: IO[bytes]):
         self._data = bytearray()
         self._lock = threading.Lock()
@@ -97,7 +89,7 @@ class Runner:
         rid, harness = attempt.request.id, attempt.harness
         process = self.start(account_doctor.ssh_argv(
             attempt.device, harness, login_script(harness, attempt.home), tty=True))
-        output = _Output(process.stdout)
+        output = _MemoryTail(process.stdout)
         started = self.monotonic()
         prompt = group = None
         shown = typed = False
@@ -112,7 +104,7 @@ class Runner:
                 if self._take(rid, "cancel") is not None:
                     return "cancelled"
                 seen = output.bytes()
-                group = group or process_group(seen)
+                group = group or first_process_group(seen)
                 if prompt is None:
                     prompt = parse_output(harness, seen)
                     if prompt is None and now - started >= self.unrecognized_seconds:

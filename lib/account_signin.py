@@ -66,7 +66,6 @@ def judge(new: SignIn, before: Mapping[str, SignIn], after: Mapping[str, SignIn]
 
 
 def settle(end: End, outcome: Outcome) -> Outcome:
-    """The attempt's result: judge's, unless the attempt ended without the CLI's own exit."""
     if end == "exit" or outcome.result == "mismatch":
         return outcome
     if end in ("expired", "cancelled"):
@@ -102,8 +101,7 @@ def kill_script(pgid: int) -> str:
     return _login(inner, "orch-signin-kill", ())
 
 
-def process_group(output: bytes) -> int | None:
-    """The group login_script printed: only the first marker counts, since the CLI's output follows it."""
+def first_process_group(output: bytes) -> int | None:
     at = output.find(b"ORCH-SIGNIN-PGID ")
     found = None if at < 0 else PGID.match(output, at)
     return None if found is None or int(found[1]) < 2 else int(found[1])
