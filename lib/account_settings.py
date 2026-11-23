@@ -110,10 +110,8 @@ def parse(data: dict, stem: str) -> AccountRequest:
                           op=op, account=data["account"], field=field, expect=expect, value=value)
 
 
-def blocking_change(before: Sequence[Account], after: Sequence[Account],
+def running_job_blocker(before: Sequence[Account], after: Sequence[Account],
                     pairs: Sequence[RunningPair]) -> str | None:
-    """Why going from `before` to `after` would drop an account, or one of
-    its devices, that holds a running job; None when nothing does."""
     kept = {account.id: account for account in after}
     for account in before:
         held = [pair for pair in pairs if pair.account == account.id]
@@ -325,7 +323,7 @@ def plan(request: AccountRequest, old: MachinesConfig, text: str, machines: Path
         raise Refused("read-only")
     op = OPS[request.op]
     after, previous, edit = op.plan(request, old, machines)
-    reason = blocking_change(old.accounts, after, pairs(old))
+    reason = running_job_blocker(old.accounts, after, pairs(old))
     if reason is not None:
         raise Refused(reason, previous)
     new_text = edit(text)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -322,9 +323,7 @@ def test_a_failed_restart_after_an_add_restores_the_file(tmp_path: Path) -> None
     assert box.machines.read_bytes() == box.original
 
 
-class Slots:
-    """A real orch.db whose device_slots rows the claim lock reads."""
-
+class ClaimDb:
     def __init__(self, tmp_path: Path, box: Box):
         self.db = tmp_path / "orch.db"
         poller_adopts(SQLiteJobQueue(self.db, clock=lambda: 100.0), box.machines)
@@ -340,9 +339,7 @@ class Slots:
             connection.commit()
         finally:
             connection.close()
-        box.applier = box.applier.__class__(**{
-            **{f: getattr(box.applier, f) for f in box.applier.__dataclass_fields__},
-            "claims": settings_apply.claim_lock(self.db)})
+        box.applier = replace(box.applier, claims=settings_apply.claim_lock(self.db))
 
     def place(self, job: str, device: str, account: str | None, harness: str = "claude") -> None:
         connection = sqlite3.connect(self.db)
@@ -357,7 +354,7 @@ class Slots:
 
 def test_removing_a_paused_account_with_a_running_job_is_refused(tmp_path: Path) -> None:
     box = Box(tmp_path)
-    Slots(tmp_path, box).place("j-1", "pc", "spare")
+    ClaimDb(tmp_path, box).place("j-1", "pc", "spare")
     _remove(box)
 
     (entry,) = box.run()
@@ -375,7 +372,7 @@ LOGIN_SPARE = MACHINES.replace(
 def test_a_null_account_slot_counts_as_the_devices_login_account(tmp_path: Path) -> None:
     box = Box(tmp_path)
     _base(box, LOGIN_SPARE)
-    Slots(tmp_path, box).place("j-1", "pc", None)
+    ClaimDb(tmp_path, box).place("j-1", "pc", None)
     _remove(box, expect={**SPARE_SHOWN, "signed_in_on": []})
 
     (entry,) = box.run()
@@ -386,7 +383,7 @@ def test_a_null_account_slot_counts_as_the_devices_login_account(tmp_path: Path)
 
 def test_jobs_on_other_accounts_never_block_a_remove(tmp_path: Path) -> None:
     box = Box(tmp_path)
-    slots = Slots(tmp_path, box)
+    slots = ClaimDb(tmp_path, box)
     slots.place("j-1", "pc", None)
     slots.place("j-2", "box", "work")
     _remove(box)
@@ -399,7 +396,7 @@ def test_jobs_on_other_accounts_never_block_a_remove(tmp_path: Path) -> None:
 
 def test_dropping_a_device_whose_pair_holds_a_job_is_refused(tmp_path: Path) -> None:
     box = Box(tmp_path)
-    Slots(tmp_path, box).place("j-1", "pc", "spare")
+    ClaimDb(tmp_path, box).place("j-1", "pc", "spare")
     _devices(box, account="spare", expect=("pc",), value=())
 
     (entry,) = box.run()
@@ -411,7 +408,7 @@ def test_dropping_a_device_whose_pair_holds_a_job_is_refused(tmp_path: Path) -> 
 def test_dropping_an_idle_device_while_another_pair_runs_applies(tmp_path: Path) -> None:
     box = Box(tmp_path)
     _base(box, MACHINES.replace("signed_in_on: [box]", "signed_in_on: [box, pc]"))
-    Slots(tmp_path, box).place("j-1", "box", "work")
+    ClaimDb(tmp_path, box).place("j-1", "box", "work")
     _devices(box, expect=("box", "pc"), value=("box",))
 
     (entry,) = box.run()
@@ -424,7 +421,7 @@ def test_a_failed_restart_never_restores_a_file_that_drops_a_running_pair(
     tmp_path: Path,
 ) -> None:
     box = Box(tmp_path, codes=[0, 1])
-    Slots(tmp_path, box).place("j-1", "pc", "work")
+    ClaimDb(tmp_path, box).place("j-1", "pc", "work")
     _devices(box)
 
     (entry,) = box.run()
@@ -439,7 +436,7 @@ def test_a_failed_restart_never_restores_away_an_added_account_with_a_job(
     tmp_path: Path,
 ) -> None:
     box = Box(tmp_path, codes=[0, 1])
-    Slots(tmp_path, box).place("j-1", "box", "fresh", harness="codex")
+    ClaimDb(tmp_path, box).place("j-1", "box", "fresh", harness="codex")
     _add(box)
 
     (entry,) = box.run()
@@ -453,7 +450,7 @@ def test_a_failed_restart_never_restores_away_an_added_account_with_a_job(
 @pytest.mark.parametrize("send", [_add, _remove, _devices], ids=["add", "remove", "signed_in_on"])
 def test_an_adopted_add_remove_or_signed_in_on_reads_applied(tmp_path: Path, send) -> None:
     box = Box(tmp_path)
-    slots = Slots(tmp_path, box)
+    slots = ClaimDb(tmp_path, box)
     send(box)
     (entry,) = box.run()
     assert entry.result == "pending", entry

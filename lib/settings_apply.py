@@ -740,7 +740,7 @@ class Applier:
                     from lib import account_settings
 
                     before = self._parse(old_bytes.decode("utf-8"), None)
-                    reason = account_settings.blocking_change(now.accounts, before.accounts,
+                    reason = account_settings.running_job_blocker(now.accounts, before.accounts,
                                                               held.pairs(now))
                     if reason is not None:
                         return f"not restored: {reason}"
