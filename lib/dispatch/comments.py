@@ -216,6 +216,7 @@ class CommentsMixin:
                     continue
                 if outcome.startswith("rejected-"):
                     self._wake_comment_problem(ticket, comment, "rejected", outcome)
+                self._note_ok(ticket, comment, outcome)
                 self._mark_handled(ticket, comment.id, outcome)
                 continue
             if kind == "qa":

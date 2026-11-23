@@ -7,14 +7,35 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import Literal
 
-from lib.dispatch.constants import _NOT_FINISHED, OK_UNREAD, OkReading
-from lib.dispatch.helpers import _base_update_key, _is_full_sha, _matching_head, ship_mode
+from lib.dispatch.constants import (
+    _NOT_FINISHED,
+    OK_COVERED_STATES,
+    OK_UNREAD,
+    OK_WITHOUT_APPROVE,
+    TERMINAL_STATES,
+    OkReading,
+)
+from lib.dispatch.helpers import (
+    _base_update_key,
+    _comment_link,
+    _is_full_sha,
+    _matching_head,
+    _round_number,
+    ship_mode,
+)
+from lib.dispatch.ok_note import HeldStop, LatestVerdict, no_hold_body, ok_marker, other_head_body
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, ShipError, TrackedTicket
+from lib.handoff import parse_comment
 from lib.hold import HoldDecision, decide, ok_carries
 from lib.rule_engine import Escalate, Land, Wait
 
 _HELD_BASE_UPDATE = "held-base-update"
+
+
+def _ok_head(comment: Comment) -> str | None:
+    head = parse_comment(comment.body).as_dict().get("head")
+    return head if head is not None and _is_full_sha(head) else None
 
 
 class HoldsMixin:
@@ -198,7 +219,9 @@ class HoldsMixin:
     def _hold_decision(self, ticket: TrackedTicket, head: str) -> HoldDecision:
         return self._read_hold(ticket, head)[0]
 
-    def _read_hold(self, ticket: TrackedTicket, head: str) -> tuple[HoldDecision, bool]:
+    def _read_hold(
+        self, ticket: TrackedTicket, head: str, ok_head: str | None = None
+    ) -> tuple[HoldDecision, bool, bool]:
         hold = ticket.factory.hold
         assert hold is not None
         waited = False
@@ -235,7 +258,11 @@ class HoldsMixin:
         )
         if waited and decision.blocks and decision.unread is None:
             decision = replace(decision, unread="moved-head ci")
-        return decision, coverage_unread
+        if ok_head is None or not decision.reasons:
+            return decision, coverage_unread, False
+        waited = False
+        covered = covers(ok_head)
+        return decision, coverage_unread or waited, covered
 
     def _ok_carries(self, ticket: TrackedTicket, ok_head: str, head: str) -> bool | None:
         hold = ticket.factory.hold
@@ -283,10 +310,51 @@ class HoldsMixin:
             return "rejected-hold-ok-author"
         if ticket.current_head is None:
             return OK_UNREAD
-        decision, coverage_unread = self._read_hold(ticket, ticket.current_head)
+        decision, coverage_unread, covered = self._read_hold(
+            ticket, ticket.current_head, _ok_head(comment)
+        )
         if decision.unread is not None or coverage_unread:
             return OK_UNREAD
-        return "hold-ok" if decision.reasons else "ok-no-hold"
+        if not decision.reasons:
+            return "ok-no-hold"
+        return "hold-ok" if covered else "hold-ok-other-head"
+
+    def _note_ok(self, ticket: TrackedTicket, comment: Comment, outcome: OkReading) -> None:
+        head = ticket.current_head
+        if head is None:
+            return
+        actions = self._review_actions(ticket)
+        if outcome == "hold-ok-other-head":
+            body = other_head_body(comment, ok_head=_ok_head(comment), pr_head=head)
+            actions.comment_once(ticket, body, ok_marker(comment.id))
+            return
+        state = self._review_context(ticket)[0]
+        if outcome != "ok-no-hold" or state in OK_COVERED_STATES or state in TERMINAL_STATES:
+            return
+        latest = None
+        if (found := self._latest_review_verdict(ticket)) is not None:
+            verdict, fields = found
+            number = _round_number(fields.get("round"))
+            latest = LatestVerdict(
+                _comment_link(verdict),
+                fields.get("verdict", "?"),
+                fields.get("round", "?")
+                if number is None
+                else f"{number}/{self._effective_cap(ticket)}",
+            )
+        stop = None
+        if (held := self._held_stop(ticket)) is not None:
+            stop = HeldStop(held[0], self._stop_disputed(ticket, held[1], held[0]))
+        body = no_hold_body(comment, pr_head=head, state=state, latest=latest, stop=stop)
+        actions.comment_once(ticket, body, ok_marker(comment.id))
+        with self._connect() as connection:
+            self._flag_attention_once(
+                connection,
+                ticket.repo,
+                ticket.ticket_id,
+                OK_WITHOUT_APPROVE,
+                f"ok {_comment_link(comment)} moved nothing; no APPROVE covers head {head}",
+            )
 
     def _may_approve(self, login: str) -> bool:
         """A Max-only approval (#122): a trusted_logins key while the
