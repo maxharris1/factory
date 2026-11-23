@@ -12,10 +12,11 @@ from pathlib import Path
 
 import pytest
 
+from lib.dispatch.verdict.repeat import STOP_OPTIONS
 from lib.factory_md import HoldConfig
 from tests.test_approver_credential import MAX, AppFlow
-from tests.test_dispatcher import FakeReviewActions
-from tests.test_repeat import capped_stop, repeat_stop
+from tests.test_dispatcher import GO, FakeReviewActions, comment
+from tests.test_repeat import capped_stop, repeat_stop, stalled_stop, unsat_stop
 from tests.test_ship_hold import (
     HEAD,
     NEW_HEAD,
@@ -190,3 +191,56 @@ def test_an_ok_from_another_login_posts_no_note(tmp_path: Path) -> None:
 
     assert ok_outcome(queue) == "rejected-hold-ok-author"
     assert notes(actions) == []
+
+
+@pytest.mark.parametrize(
+    "make, stop",
+    [(repeat_stop, "repeat"), (capped_stop, "capped"), (stalled_stop, "stalled"), (unsat_stop, "unsat")],
+)
+def test_each_offered_stop_option_names_the_command_that_takes_it(
+    tmp_path: Path, make, stop: str
+) -> None:
+    flow = unheld(make(tmp_path))
+
+    assert ok_at(flow) == "ok-no-hold"
+
+    [note] = notes(flow.dispatcher.review_actions)
+    for option in STOP_OPTIONS[stop]:
+        assert f"{option.name}: {option.consequence}" in note
+
+
+def test_the_unsat_fix_round_the_note_offers_queues_a_fix(tmp_path: Path) -> None:
+    flow = unheld(unsat_stop(tmp_path))
+    assert ok_at(flow) == "ok-no-hold"
+
+    [note] = notes(flow.dispatcher.review_actions)
+    assert "Fix round: An approver's go with state=building" in note
+    assert "`/go` naming" not in note
+
+    assert flow.post("go-max", GO.format(state="building"), MAX) == "queued-fix"
+
+
+RETRY = "<!-- orch:v1 kind=retry from=grok-bot role=orchestrator -->\nRetry: the review job left no handoff.\n"
+
+
+def test_an_ok_on_a_stuck_ticket_names_the_retry_that_releases_it(tmp_path: Path) -> None:
+    dispatcher, queue, actions = setup(tmp_path)
+    ready(dispatcher, queue)
+    with queue.connect() as connection:
+        connection.execute("UPDATE jobs SET state = 'failed' WHERE action = 'review'")
+        connection.execute(
+            "UPDATE ticket_state SET stuck = 1, stuck_reason = 'no-handoff' WHERE ticket_id = '42'"
+        )
+        connection.commit()
+
+    dispatcher.process(snapshot(ok(HEAD)))
+
+    assert ok_outcome(queue) == "ok-no-hold"
+    [note] = notes(actions)
+    assert "`kind=retry`" in note and "`no-handoff`" in note
+    assert "APPROVE" not in note.split("Moves it forward:", 1)[1]
+    assert attention(queue)
+
+    retry = comment("retry-1", RETRY, author="grok-login", created_at=30)
+    dispatcher.process(snapshot(ok(HEAD), retry))
+    assert dispatcher._handled_outcome(snapshot(), "retry-1") == "queued-retry-review"

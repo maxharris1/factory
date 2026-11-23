@@ -56,19 +56,29 @@ def no_hold_body(
     state: str | None,
     latest: LatestVerdict | None,
     stop: HeldStop | None,
+    stuck: str | None,
 ) -> str:
     verdict = (
         "none yet"
         if latest is None
         else f"{latest.link} (`{latest.verdict}`, round `{latest.round}`)"
     )
-    if stop is None:
-        stop_line = "none"
+    stop_line = (
+        "none" if stop is None else _STOP_LABELS[stop.stop].format(ids=_ids(stop.finding_ids))
+    )
+    stuck_lines: tuple[str, ...] = ()
+    if stuck is not None:
+        stuck_lines = (f"- Stuck: `{stuck}`",)
+        moves = (
+            "a grok-bot `kind=retry` posted by a trusted login (e.g. via `orch retry`), "
+            f"which restarts the step stuck on `{stuck}`"
+        )
+    elif stop is None:
         moves = _MOVES_BY_STATE.get(state or "", _REVIEW)
     else:
-        stop_line = _STOP_LABELS[stop.stop].format(ids=_ids(stop.finding_ids))
-        names = ", ".join(option.name for option in STOP_OPTIONS[stop.stop])
-        moves = f"an approver's `/go` naming one of: {names}"
+        moves = "one of these options\n" + "\n".join(
+            f"  - {option.name}: {option.consequence}" for option in STOP_OPTIONS[stop.stop]
+        )
     return "\n".join(
         (
             ok_marker(ok.id),
@@ -77,6 +87,7 @@ def no_hold_body(
             "",
             f"- Latest verdict: {verdict}",
             f"- Stop: {stop_line}",
+            *stuck_lines,
             f"- Moves it forward: {moves}",
         )
     )

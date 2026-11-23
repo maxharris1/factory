@@ -345,7 +345,17 @@ class HoldsMixin:
         stop = None
         if (held := self._held_stop(ticket)) is not None:
             stop = HeldStop(held[0], self._stop_disputed(ticket, held[1], held[0]))
-        body = no_hold_body(comment, pr_head=head, state=state, latest=latest, stop=stop)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT stuck, stuck_reason FROM ticket_state WHERE repo = ? AND ticket_id = ?",
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+        stuck = None
+        if row is not None and row["stuck"]:
+            stuck = row["stuck_reason"] or "unrecorded reason"
+        body = no_hold_body(
+            comment, pr_head=head, state=state, latest=latest, stop=stop, stuck=stuck
+        )
         actions.comment_once(ticket, body, ok_marker(comment.id))
         with self._connect() as connection:
             self._flag_attention_once(

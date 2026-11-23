@@ -30,7 +30,8 @@ An `ok-no-hold` on a ticket outside `awaiting-ok`, `merge-queue`, `updating`, `h
 
 - the latest counted verdict, its verdict and its round against the effective cap, or "none yet";
 - the held repeat, cap, stall or unsat stop and its finding ids, or none;
-- what moves the ticket forward: at a stop, an approver's `/go` naming one of the stop's options; otherwise the next step for the workflow state (the reviewer's APPROVE in `review`, the builder's ready in `fixing` or `building`, an answer in `waiting-max`, an approver's `/go` in `blocked`).
+- the stuck reason, when the ticket is stuck;
+- what moves the ticket forward: on a stuck ticket, a trusted grok-bot `kind=retry` that restarts the stuck step, because a stuck ticket answers APPROVE and go with `ticket-stuck`; at a stop, each of the stop's options with the consequence the stop question gives it, which names the command that takes it (an unsat Fix round is a go with `state=building`, not a `/go` naming it); otherwise the next step for the workflow state (the reviewer's APPROVE in `review`, the builder's ready in `fixing` or `building`, an answer in `waiting-max`, an approver's `/go` in `blocked`).
 
 It also raises `ok-without-approve` needs-attention. `write_workflow_state` deletes that row when the ticket enters one of the states above or a terminal state. An ok in those states posts nothing. The note never carries `orch:v1`, so the poller never reads it as a handoff.
 
