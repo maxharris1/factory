@@ -9,6 +9,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from lib.factory_md import CheckCommand
 from lib.pre_ready import TAIL_CHARS, TAIL_LINES, check_environ, cut, run
 
@@ -157,7 +159,7 @@ def test_a_secret_in_the_output_is_redacted(tmp_path: Path) -> None:
 
     assert "ghp_abcdefghijklmnop" not in result.tail
     assert "user:pw" not in result.tail
-    assert result.tail.count("<secret>") == 1 and "<url>" in result.tail
+    assert result.tail == "<secret>\n[redacted-url]"
 
 
 def test_a_failing_check_redacts_its_tail(tmp_path: Path) -> None:
@@ -183,3 +185,38 @@ def test_a_secret_assignment_split_across_lines_is_redacted() -> None:
     tail = cut("API_KEY=\nsupersecretvalue\n" + "\n".join(str(n) for n in range(TAIL_LINES - 1)))
 
     assert "supersecretvalue" not in tail
+
+
+QUOTED_SECRETS = (
+    'password="first SYNTHETIC_VALUE"',
+    '{"api_key": "SYNTHETIC_VALUE"}',
+    "{'password': 'a b SYNTHETIC_VALUE'}",
+    '{"client_secret":"first SYNTHETIC_VALUE"}',
+    "secret: 'it\\'s SYNTHETIC_VALUE'",
+    'GH_TOKEN="x y SYNTHETIC_VALUE" next',
+    "password:\n  SYNTHETIC_VALUE",
+)
+
+
+@pytest.mark.parametrize("line", QUOTED_SECRETS)
+def test_a_quoted_or_structured_secret_is_redacted_whole(line: str) -> None:
+    assert "SYNTHETIC_VALUE" not in cut(line)
+
+
+@pytest.mark.parametrize("line", QUOTED_SECRETS)
+def test_a_quoted_secret_cut_by_the_character_limit_is_redacted_whole(line: str) -> None:
+    padded = line.replace("SYNTHETIC_VALUE", "w " * TAIL_CHARS + "SYNTHETIC_VALUE")
+
+    assert "SYNTHETIC_VALUE" not in cut(padded)
+
+
+@pytest.mark.parametrize("ending", ["exit 5", "sleep 30"])
+def test_a_failed_or_timed_out_check_redacts_quoted_secrets(tmp_path: Path, ending: str) -> None:
+    repo, head = checkout(tmp_path)
+    script = tmp_path / "secrets.txt"
+    script.write_text("\n".join(QUOTED_SECRETS) + "\n", encoding="utf-8")
+
+    result = run(CheckCommand(f"cat {script}; {ending}", 1), repo, head, dict(os.environ))
+
+    assert not result.passed
+    assert "first" not in result.tail and "SYNTHETIC_VALUE" not in result.tail

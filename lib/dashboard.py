@@ -339,9 +339,9 @@ _SECRET_ASSIGNMENT = re.compile(
     r"|credential|session|cookie|signature)"
     r"[A-Za-z0-9_\-]*)"
     r"([\"']?\s*[:=]\s*)"
-    # A JSON string (escapes allowed, closing quote optional when cut short),
-    # a single-quoted string, or a bare value.
-    r"(\"(?:[^\"\\\n]|\\.)*\"?|'[^'\n]*'?|[^\s,;}\]]+)"
+    # A quoted string (escapes allowed, closing quote optional when cut short)
+    # or a bare value.
+    r"(\"(?:[^\"\\\n]|\\.)*\"?|'(?:[^'\\\n]|\\.)*'?|[^\s,;}\]]+)"
 )
 _EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}")
 # 32+ token characters; _opaque keeps ones that read like names, not keys.

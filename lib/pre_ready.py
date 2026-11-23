@@ -11,10 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from lib.dispatch.errors_text import _redact
 from lib.factory_md import CheckCommand
 from lib.harness_env import harness_environ
 from lib.job_token import PROOF_ENV
+from lib.redact_output import redact_output
 
 if TYPE_CHECKING:
     from lib.orch_yml import Approvals
@@ -60,7 +60,7 @@ def check_environ(environ: Mapping[str, str], approvals: Approvals | None) -> di
 
 
 def cut(text: str) -> str:
-    lines = _redact(text).splitlines()
+    lines = redact_output(text).splitlines()
     kept = lines[-TAIL_LINES:]
     tail = "\n".join(kept)[-TAIL_CHARS:]
     if len(kept) == len(lines) and len(tail) == len("\n".join(kept)):
