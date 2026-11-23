@@ -49,6 +49,7 @@ WRITERS = {
     "t-blocked": "lib/dispatch/verdict/blocked.py",
     "waiting-max-qa": "lib/dispatch/qa.py",
     "retry": "lib/dispatch/retry.py",
+    "rebase-queued": "lib/dispatch/rebase.py",
     "linear-handoff": "lib/dispatch/linear_states.py",
     "linear-resume": "lib/dispatch/linear_states.py",
     "linear-done": "lib/dispatch/linear_states.py",

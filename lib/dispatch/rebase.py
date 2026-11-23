@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from lib.dispatch.decisions import Decision, record_decisions
-from lib.dispatch.helpers import _comment_link, _scope
+from lib.dispatch.helpers import _comment_link, _comment_order, _scope
 from lib.dispatch.retry import _harness_job_active
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
@@ -24,6 +24,24 @@ class RebaseStep:
 
 
 class RebaseMixin:
+    def _superseded_by_rebase(self, ticket: TrackedTicket, comment: Comment) -> bool:
+        with self._connect() as connection:
+            sources = {
+                row["source_comment_id"]
+                for row in connection.execute(
+                    """
+                    SELECT source_comment_id FROM jobs
+                    WHERE lower(repo) = ? AND ticket_id = ? AND dedupe_key LIKE 't-rebase:%'
+                    """,
+                    (ticket.repo.lower(), ticket.ticket_id),
+                )
+            }
+        return any(
+            _comment_order(comment) < _comment_order(rebase)
+            for rebase in ticket.comments
+            if rebase.id in sources
+        )
+
     def _t_rebase(
         self,
         ticket: TrackedTicket,

@@ -11,6 +11,7 @@ import pytest
 from lib.brief import brief_kind
 from lib.brief.common import detail_of
 from lib.orch_yml import Approvals
+from tests.merge_queue_support import READY
 from tests.test_lifecycle import HEADS, Flow, jobs, outcome
 
 REBASE = "<!-- orch:v1 kind=rebase from=grok-bot role=orchestrator -->\nRebase onto the base.\n"
@@ -226,3 +227,49 @@ def test_the_decision_names_the_project_base(tmp_path: Path) -> None:
     assert flow.post("rebase-42", REBASE, "grok-login") == "queued-rebase"
 
     assert [row[3] for row in decisions(flow)] == ["Rebase onto origin/dev queued"]
+
+
+def ready_waiting_on_ci(tmp_path: Path) -> Flow:
+    flow = Flow(tmp_path)
+    assert flow.go() == "queued-build"
+    flow.finish("claude", f"ready-{HEADS[1][:6]}")
+    assert flow.ready(HEADS[1]) == "queued-review"
+    flow.finish("codex", "revise-1/3")
+    assert flow.revise("1/3") == "queued-review-fix"
+    flow.finish("claude", f"ready-{HEADS[2][:6]}")
+    flow.ci = "pending"
+    assert flow.ready(HEADS[2]) is None
+    assert flow.queue.outstanding() == ()
+    assert flow.post("rebase-42", REBASE, "grok-login") == "queued-rebase"
+    return flow
+
+
+@pytest.mark.parametrize("claim_rebase", [False, True])
+def test_a_ready_waiting_on_ci_does_not_overtake_the_rebase(
+    tmp_path: Path, claim_rebase: bool
+) -> None:
+    flow = ready_waiting_on_ci(tmp_path)
+    if claim_rebase:
+        assert flow.queue.claim("claude") is not None
+    flow.ci = "success"
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert [job.request.action for job in flow.queue.outstanding()] == ["fix"]
+    assert detail_of(flow.queue.outstanding()[0])["kind"] == "rebase"
+    assert flow.state()["workflow_state"] == "fixing"
+    assert outcome(flow.queue, f"ready-{HEADS[2][:6]}") == "ready-superseded-by-rebase"
+
+
+def test_the_rebase_fix_ready_still_starts_review(tmp_path: Path) -> None:
+    flow = ready_waiting_on_ci(tmp_path)
+    flow.ci = "success"
+    flow.dispatcher.process(flow.snapshot())
+    flow.finish("claude", "ready-after-rebase")
+
+    assert flow.post("ready-after-rebase", READY.format(head=HEADS[2]), "claude-login") == (
+        "queued-review"
+    )
+
+    assert [job.request.action for job in flow.queue.outstanding()] == ["review"]
+    assert flow.state()["workflow_state"] == "review"
