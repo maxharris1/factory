@@ -28,11 +28,10 @@ _SignInRow = tuple[object, object, object, object, object]
 def _accounts(machines: MachinesConfig) -> list[Account]:
     ids: dict[str, None] = {}
     for device in machines.devices:
-        if device.enabled and not device.placeholder:
-            for harness in HARNESSES:
-                login = device.account_for(harness)
-                if login is not None:
-                    ids.setdefault(login)
+        for harness in HARNESSES:
+            login = device.account_for(harness)
+            if login is not None:
+                ids.setdefault(login)
     for declared in machines.accounts:
         ids.setdefault(declared.id)
     return [account for account_id in ids if (account := machines.account(account_id)) is not None]

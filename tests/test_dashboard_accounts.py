@@ -236,3 +236,46 @@ def test_a_database_without_jobs_slots_doctor_or_readings_lists_accounts_with_no
     assert accounts["claude-b"]["running"] == []
     assert accounts["claude-b"]["headroom"] is None
     assert [d["status"] for d in accounts["claude-b"]["signed_in_on"]] == [None, None]
+
+
+@pytest.mark.parametrize(("slots", "state"), [
+    ("1", "enabled: true"),
+    ("1", "enabled: false"),
+    ("1", "drain: true"),
+    ("REPLACE_WITH_SLOTS", "enabled: true"),
+])
+def test_a_device_that_stops_taking_work_keeps_its_account_sign_in_and_running_job(
+    tmp_path: Path, slots: str, state: str
+) -> None:
+    db = tmp_path / "orch.db"
+    make_db(db)
+    machines = tmp_path / "machines.yml"
+    machines.write_text(
+        f"devices:\n  - name: box\n    local: true\n    slot_max: {slots}\n    harnesses: {{claude: claude-bot}}\n"
+        f"    {state}\n",
+        encoding="utf-8",
+    )
+    config = config_of(machines)
+    with contextlib.closing(sqlite3.connect(db)) as connection, connection:
+        account_doctor.write(
+            connection,
+            (sign_in("claude-default", "box", "signed-out", account_doctor.NOT_LOGGED_IN, method="none",
+                     subscription=None),),
+            config, None, NOW - 300,
+        )
+        connection.execute(
+            "CREATE TABLE device_slots (job_id TEXT PRIMARY KEY, device TEXT NOT NULL, harness TEXT NOT NULL, "
+            "os_user TEXT NOT NULL, placed_at REAL NOT NULL, account TEXT)"
+        )
+        add_job(connection, "job-17", action="build", recipient="claude", state="running", ticket_id="17")
+        connection.execute("INSERT INTO device_slots VALUES (?, ?, ?, ?, ?, ?)",
+                           ("job-17", "box", "claude", "claude-bot", NOW - 120, "claude-default"))
+
+    accounts = collect_snapshot(db, tmp_path / "poll.log", now=NOW, machines_path=machines)["accounts"]
+
+    assert [(a["id"], a["signed_in_on"], a["running"]) for a in accounts] == [(
+        "claude-default",
+        [{"device": "box", "status": "signed-out", "auth_method": "none", "subscription_type": None,
+          "checked_at": NOW - 300, "same_login_as": [], "command": "env -u CLAUDE_CONFIG_DIR claude auth login"}],
+        [{"ticket": "17", "kind": "build", "device": "box"}],
+    )]
