@@ -276,6 +276,7 @@ The Mac's row appears once the Mac lists `claude` in `machines.yml`.
 | `signed-out` | `auth method not understood` | Claude names no auth method, or one the doctor does not know. | Run the Claude login again. |
 | `mismatch` | `same sign-in as account <ids>` | Another account's folder has the same Claude org and email. | Sign this account in to its own subscription. |
 | `mismatch` | `another sign-in on device <devices>` | This account has a different org and email on the named devices. | Sign the account in again on the device that has the wrong subscription. |
+| `mismatch` | `signing in changed account <ids>` | A dashboard sign-in of this account changed the named accounts' sign-in on the same device. | Sign this account in with the CLI command, then check the named accounts. |
 | `unreachable` | `device has install placeholders` | A device field still holds a `REPLACE_WITH_` value. | Fill in the device in `machines.yml`. |
 | `unreachable` | `no ssh_alias for <harness> on <device>` | The device has no ssh alias for that harness. | Set `ssh_alias` on the device. |
 | `unreachable` | `device unreachable over ssh` | ssh timed out after 60 seconds or exited 255. | Fix ssh to the device as the bot. |

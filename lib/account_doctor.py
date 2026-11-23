@@ -87,6 +87,7 @@ CODEX_API_KEY = "api key, not a ChatGPT sign-in"
 METHOD_NOT_UNDERSTOOD = "auth method not understood"
 SHARED_IDENTITY = "same sign-in as account {}"
 SPLIT_IDENTITY = "another sign-in on device {}"
+DISTURBED_ACCOUNT = "signing in changed account {}"
 PLACEHOLDER_DEVICE = "device has install placeholders"
 NO_SSH_ALIAS = "no ssh_alias for {} on {}"
 SSH_DOWN = "device unreachable over ssh"
@@ -303,8 +304,9 @@ def no_ssh_path(device: Device, harness: str) -> str | None:
     return None
 
 
-def ssh_argv(device: Device, harness: str, script: str) -> list[str]:
-    return [SSH_BINARY, *SSH_OPTIONS, "-l", device.login_for(harness), "--", device.ssh_alias_for(harness), script]
+def ssh_argv(device: Device, harness: str, script: str, *, tty: bool = False) -> list[str]:
+    return [SSH_BINARY, *SSH_OPTIONS, *(["-tt"] if tty else []), "-l", device.login_for(harness), "--",
+            device.ssh_alias_for(harness), script]
 
 
 def probe(transport: ByteTransport, config: MachinesConfig, device: Device, harness: Harness) -> list[Probe]:
@@ -620,6 +622,13 @@ def write(
         raise
 
 
+def observe(config: MachinesConfig, transport: ByteTransport, now: float) -> list[SignIn]:
+    pairs = [(device, harness) for device in config.devices for harness in _STATUS]
+    with ThreadPoolExecutor(max_workers=max(len(pairs), 1)) as pool:
+        probed = list(pool.map(lambda pair: probe(transport, config, *pair), pairs))
+    return judge([item for items in probed for item in items], now)
+
+
 def run(
     connection: sqlite3.Connection,
     config: MachinesConfig,
@@ -627,10 +636,7 @@ def run(
     now: float,
     repo: str | None,
 ) -> list[SignIn]:
-    pairs = [(device, harness) for device in config.devices for harness in _STATUS]
-    with ThreadPoolExecutor(max_workers=max(len(pairs), 1)) as pool:
-        probed = list(pool.map(lambda pair: probe(transport, config, *pair), pairs))
-    rows = judge([item for items in probed for item in items], now)
+    rows = observe(config, transport, now)
     write(connection, rows, config, repo, now)
     return rows
 

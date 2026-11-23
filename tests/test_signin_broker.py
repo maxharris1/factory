@@ -52,7 +52,7 @@ class Intake:
             worker.join(30)
         return entries
 
-    def launch(self, attempt: signin_broker.Attempt) -> None:
+    def launch(self, attempt: signin_broker.Attempt, finish=None) -> None:
         self.homes_at_launch.append(Path(attempt.home).is_dir())
         self.launched.append(attempt)
 
@@ -258,7 +258,7 @@ def test_at_most_two_signins_at_once(intake: Intake) -> None:
 
     intake.tick()
 
-    assert [attempt.request.id for attempt in intake.launched] == [first, second]
+    assert sorted(attempt.request.id for attempt in intake.launched) == sorted([first, second])
     assert signin_broker.MAX_CONCURRENT == 2
     (line,) = intake.lines()
     assert (line["id"], line["result"], line["error"]) == (third, "refused", "too-many")
@@ -457,7 +457,7 @@ def test_a_relay_error_before_launch_frees_the_pair_and_the_request_is_retried(
 def test_a_launch_that_raises_ends_the_attempt_with_one_failed_line(intake: Intake) -> None:
     intake.made("claude-c")
 
-    def broken(attempt: signin_broker.Attempt) -> None:
+    def broken(attempt: signin_broker.Attempt, finish) -> None:
         raise RuntimeError("no terminal")
 
     intake.broker = intake.make(launch=broken)

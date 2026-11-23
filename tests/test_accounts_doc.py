@@ -29,6 +29,7 @@ DETAILS = (
     account_doctor.METHOD_NOT_UNDERSTOOD,
     account_doctor.SHARED_IDENTITY,
     account_doctor.SPLIT_IDENTITY,
+    account_doctor.DISTURBED_ACCOUNT,
     account_doctor.PLACEHOLDER_DEVICE,
     account_doctor.NO_SSH_ALIAS,
     account_doctor.SSH_DOWN,
