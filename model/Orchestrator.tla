@@ -738,9 +738,6 @@ ReopenAfterHandoff ==
   /\ counts' = [counts EXCEPT !.round = @ + 1, !.deaths = 0, !.gate = 0]
   /\ QaFollowsHead
 
-\* #1404 (SPEC TRB). A trusted kind=rebase queues a rebase-only fix. The new
-\* head drops the approval. A ticket handed off before its first review has
-\* no cap yet, so the rebase draws it as ReopenAfterHandoff does.
 RebaseFrom == {
   "review", "fixing", "awaiting-ok", "capped", "handed-off", "merge-queue",
   "waiting-external"
@@ -1141,7 +1138,6 @@ HandoffCountsApprovedRound ==
 RebaseDecided ==
   state \in RebaseFrom => ENABLED RebaseQueued
 
-\* #1404. A rebase is not a review round: the round and the extra stay.
 RebaseSpendsNoRound ==
   [][RebaseQueued => counts'.round = counts.round /\ counts'.extra = counts.extra]_vars
 
@@ -1253,7 +1249,8 @@ ChartAbandoned ==
 \* fixing no other step reaches, and its every successor is a new state, so
 \* only rebases after a REVISE are drawn, to stay under statechart's
 \* 500-state drawing limit. The rebase in fixing is a self-loop the chart
-\* does not draw. The step is named by its effect, as ChartLinear names states.
+\* does not draw. Naming RebaseQueued here bounds nothing under TLC 1.7.4, so
+\* the constraint names the step's effect.
 ChartRebase ==
   (/\ state' = "fixing"
    /\ state \in RebaseFrom
