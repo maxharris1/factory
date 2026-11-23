@@ -105,8 +105,8 @@ REBASE_REJECTION_NOTES = {
     ),
     "rejected-rebase-no-pr": "the ticket has no PR head to rebase",
     "rejected-rebase-state": (
-        "the ticket is not in review, fixing, awaiting-ok, capped or handed-off;"
-        " nothing to rebase"
+        "the ticket is not in review, fixing, awaiting-ok, capped, handed-off,"
+        " merge-queue or waiting-external; nothing to rebase"
     ),
     "rejected-rebase-job-active": (
         "a job is already queued or running for the ticket; nothing to rebase"

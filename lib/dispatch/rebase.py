@@ -8,12 +8,25 @@ from dataclasses import dataclass
 
 from lib.dispatch.decisions import Decision, record_decisions
 from lib.dispatch.helpers import _comment_link, _comment_order, _scope
-from lib.dispatch.retry import _harness_job_active
+from lib.dispatch.retry import _harness_job_active, _newest_harness_job
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
+from lib.job_detail import as_object
 from lib.queue import JobRequest
 
-REBASE_FROM = frozenset({"review", "fixing", "awaiting-ok", "capped", "handed-off"})
+LEAVES_MERGE_QUEUE = frozenset({"merge-queue", "waiting-external"})
+REBASE_FROM = (
+    frozenset({"review", "fixing", "awaiting-ok", "capped", "handed-off"}) | LEAVES_MERGE_QUEUE
+)
+
+
+def rebase_fix_is_newest(connection: sqlite3.Connection, key: tuple[str, str]) -> bool:
+    job = _newest_harness_job(connection, key)
+    return (
+        job is not None
+        and job.request.action == "fix"
+        and (as_object(job.request.detail) or {}).get("kind") == "rebase"
+    )
 
 
 @dataclass(frozen=True)
@@ -57,7 +70,10 @@ class RebaseMixin:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             outcome, queued = self._rebase_in_transaction(connection, ticket, comment)
-            connection.commit()
+            if queued:
+                connection.commit()
+            else:
+                connection.rollback()
         if queued:
             self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
             self._write_state_label(ticket, "fixing")
@@ -87,6 +103,8 @@ class RebaseMixin:
         ).fetchone()
         if row is None or row["workflow_state"] not in REBASE_FROM:
             return "rejected-rebase-state", False
+        if row["workflow_state"] in LEAVES_MERGE_QUEUE:
+            self._clear_approval(connection, ticket, "rebase")
         if _harness_job_active(connection, key):
             return "rejected-rebase-job-active", False
         review_round = int(row["review_round"])
