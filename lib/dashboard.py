@@ -178,6 +178,7 @@ from lib import account_doctor, exposure
 from lib import health as component_health
 from lib import live_settings
 from lib.config_overlay import apply_overlay
+from lib.dashboard_accounts import read_accounts
 from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
 from lib.dashboard_flow import (
     JobStep,
@@ -853,6 +854,7 @@ def collect_snapshot(
         telemetry = read_telemetry(connection, now)  # issue #93
         rules = read_project_rules(connection)  # issue #152
         usage = read_usage(connection, now, machines)  # issue #151
+        accounts = read_accounts(connection, now, machines)
         live = live_settings.peek(connection)
         connection.execute("COMMIT")
     except sqlite3.Error as exc:
@@ -967,6 +969,7 @@ def collect_snapshot(
         "projects": _projects(orch, rules, now),
         "rules": rules_and_limits(chart),
         "usage": usage,
+        "accounts": accounts,
         RECORDS: records,
     }
     snapshot["ci_lane"] = ci_lane(snapshot)

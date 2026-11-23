@@ -89,7 +89,7 @@ _SIGNED_OUT = {
     "codex": re.compile(r"not logged in|401 Unauthorized|Please (?:log out and )?sign in again", re.IGNORECASE),
 }
 
-_SUBSCRIPTION = re.compile(r"[a-z][a-z0-9_]{0,23}")
+SUBSCRIPTION = re.compile(r"[a-z][a-z0-9_]{0,23}")
 _CODEX_LINES = (
     ("Logged in using ChatGPT", "chatgpt", True),
     ("Logged in using an API key", "api_key", True),
@@ -157,6 +157,10 @@ _RULES: dict[Harness, dict[str | None, _Rule]] = {
 
 
 _CLAUDE_METHODS = frozenset(_RULES["claude"]) | {"none"}
+AUTH_METHODS: dict[Harness, frozenset[str]] = {
+    "claude": _CLAUDE_METHODS | {"unknown"},
+    "codex": frozenset(method for _, method, _ in _CODEX_LINES if method is not None),
+}
 
 
 def _text(data: dict[str, object], key: str) -> str | None:
@@ -171,7 +175,7 @@ def _claude_method(value: object) -> str | None:
 
 
 def _subscription(value: object) -> str | None:
-    return value if isinstance(value, str) and _SUBSCRIPTION.fullmatch(value) else None
+    return value if isinstance(value, str) and SUBSCRIPTION.fullmatch(value) else None
 
 
 def _fingerprint(org: str | None, email: str | None) -> str | None:
@@ -420,15 +424,17 @@ def judge(probes: Sequence[Probe], now: float) -> list[SignIn]:
 _LOGIN: dict[Harness, str] = {"claude": "claude auth login", "codex": "codex login"}
 _THEN = ", then orch accounts doctor"
 _STEP: dict[Status, str] = {
-    "signed-out": "sign in as {login} on {device}: {home}{command}" + _THEN,
-    "mismatch": "sign {account} in to its own account as {login} on {device}: {home}{command}" + _THEN,
+    "signed-out": "sign in as {login} on {device}: {command}" + _THEN,
+    "mismatch": "sign {account} in to its own account as {login} on {device}: {command}" + _THEN,
     "unreachable": "fix ssh to {device} for {harness}" + _THEN,
 }
 _TOKEN_STEP = "remove the token export from {login}'s login profile on {device}" + _THEN
 
 
-def _home(variable: str, path: str | None) -> str:
-    return f"env -u {variable} " if path is None else f"{variable}={shlex.quote(path)} "
+def login_command(harness: Harness, home: str | None) -> str:
+    variable = _STATUS[harness].home_variable
+    prefix = f"env -u {variable} " if home is None else f"{variable}={shlex.quote(home)} "
+    return prefix + _LOGIN[harness]
 
 
 def _step(row: SignIn, config: MachinesConfig) -> str:
@@ -440,8 +446,7 @@ def _step(row: SignIn, config: MachinesConfig) -> str:
         device=row.device,
         harness=harness,
         login=config.device(row.device).login_for(harness),
-        home=_home(_STATUS[harness].home_variable, path),
-        command=_LOGIN[harness],
+        command=login_command(harness, path),
     )
 
 

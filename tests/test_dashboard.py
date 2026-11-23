@@ -613,6 +613,7 @@ def test_snapshot_shape(tmp_path: Path) -> None:
         "projects",  # per-project ship mode and round caps (#152)
         "rules",
         "usage",  # subscription headroom per bot account (#151)
+        "accounts",
         "ticket_records",
     }
     assert snapshot["feeder"] is None  # no backlog feeder has run on this database
