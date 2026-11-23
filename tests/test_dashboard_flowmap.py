@@ -131,7 +131,7 @@ def _overlap(a, b):
 def test_merge_queue_and_updating_wires_cross_no_other_node():
     ends = {"merge-queue", "updating"}
     edges = [(e["from"], e["to"]) for e in CHART["edges"] if {e["from"], e["to"]} & ends]
-    assert len(edges) == 11
+    assert len(edges) == 12
     for a, b in edges:
         for x, y in _cells(LAYOUT["routes"][f"{a}>{b}"]):
             for name, node in NODES.items():

@@ -357,7 +357,7 @@ def test_a_capped_ticket_lists_its_ways_out_from_the_chart(tmp_path: Path) -> No
         walk(connection, "92", ["intake", "building", "review", "capped"], NOW - 900)
     stopped = records(db, log, tmp_path)["maxharris1/cleffy#92"]["stopped"]
     assert stopped["ways_out"] == ways_out("capped")
-    assert {"to": "fixing", "label": "Max okays one more round"} in stopped["ways_out"]
+    assert {"to": "fixing", "label": "trusted kind=rebase, rebase-only fix or Max okays one more round"} in stopped["ways_out"]
     assert stopped["stopped_in"] == "review"
 
 

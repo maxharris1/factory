@@ -63,7 +63,7 @@ def test_fixture_visit_fields() -> None:
         "every acceptance criterion mapped",
         OFF_CHART,
         OFF_CHART,
-        "APPROVE on red CI, CI fix or REVISE, under the round cap",
+        "APPROVE on red CI, CI fix or REVISE, under the round cap or trusted kind=rebase, rebase-only fix",
         "CI red three times or job dies twice (T6)",
         OFF_CHART,
     ]
