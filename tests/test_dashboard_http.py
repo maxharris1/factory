@@ -1430,3 +1430,181 @@ def test_served_run_ids_are_exactly_the_ids_qa_storage_accepts(site: Path, get, 
         accepted = False
     status, _, _ = get(f"/qa/runs/{quote(run_id, safe='')}")
     assert status == (200 if accepted else 404)
+
+
+from lib import account_requests, machines_yml, settings_apply
+
+ACCOUNTS = [
+    {"id": "claude-max", "harness": "claude", "max_jobs": 2, "paused": False, "read_only": None,
+     "signed_in_on": [{"device": "box", "status": "ok"}, {"device": "pc-wsl-bots", "status": None}]},
+    {"id": "codex-pro", "harness": "codex", "max_jobs": None, "paused": True, "read_only": None,
+     "signed_in_on": [{"device": "box", "status": "missing"}]},
+    {"id": "claude-default", "harness": "claude", "max_jobs": None, "paused": False,
+     "read_only": "default", "signed_in_on": [{"device": "box", "status": "ok"}]},
+    {"id": "api-key", "harness": "external", "max_jobs": 1, "paused": False,
+     "read_only": "external", "signed_in_on": []},
+]
+CLAUDE_MAX = {"harness": "claude", "max_jobs": 2, "paused": False,
+              "signed_in_on": ["pc-wsl-bots", "box"]}
+
+
+@pytest.fixture
+def account_client(settings_client: Client, actions_site: Path) -> Client:
+    snapshot = {**SNAPSHOT, "accounts": ACCOUNTS}
+    (actions_site / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    return settings_client
+
+
+def account(client: Client, op: str, name: str, **fields):
+    return client.post("/api/settings", {"target": "account", "op": op, "account": name, **fields})
+
+
+ACCEPTED = [
+    ("add", "claude-team", {"harness": "claude", "max_jobs": 3, "signed_in_on": ["box"]}),
+    ("add", "cursor-1", {"harness": "cursor", "max_jobs": 64, "signed_in_on": []}),
+    ("set", "claude-max", {"field": "max_jobs", "expect": 2, "value": 5}),
+    ("set", "codex-pro", {"field": "max_jobs", "expect": None, "value": 1}),
+    ("set", "claude-max", {"field": "paused", "expect": False, "value": True}),
+    ("set", "codex-pro", {"field": "paused", "expect": True, "value": False}),
+    ("set", "claude-max", {"field": "signed_in_on", "expect": ["box", "pc-wsl-bots"],
+                           "value": ["box"]}),
+    ("remove", "codex-pro", {"expect": {"harness": "codex", "max_jobs": None, "paused": True,
+                                        "signed_in_on": ["box"]}}),
+    ("remove", "claude-max", {"expect": CLAUDE_MAX}),
+    ("prepare", "claude-max", {"device": "pc-wsl-bots"}),
+    ("doctor", "codex-pro", {"device": "box"}),
+]
+
+
+@pytest.mark.parametrize("op,name,fields", ACCEPTED)
+def test_the_approver_queues_exactly_the_account_request(
+    account_client: Client, spool: Path, op, name, fields
+) -> None:
+    status, answer = account(account_client, op, name, **fields)
+    assert status == 202 and set(answer) == {"id"}
+    (path,) = spool.iterdir()
+    assert path.name == f"{answer['id']}.json"
+    request = json.loads(path.read_text(encoding="utf-8"))
+    assert set(request) == account_requests.COMMON_KEYS | account_requests.OPS[op]
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", request.pop("requested_at"))
+    assert request == {"id": answer["id"], "actor": "maxharris1", "target": "account",
+                       "op": op, "account": name, **fields}
+
+
+REFUSED = [
+    ("rename", "claude-max", {}, 400, "bad-op"),
+    (None, "claude-max", {}, 400, "bad-op"),
+    (["set"], "claude-max", {}, 400, "bad-op"),
+    ("set", "claude-max", {"field": "max_jobs", "expect": 2}, 400, "bad-keys"),
+    ("set", "claude-max", {"field": "max_jobs", "expect": 2, "value": 3, "device": "box"},
+     400, "bad-keys"),
+    ("prepare", "claude-max", {"device": "box", "id": "chosen-by-the-page0"}, 400, "bad-keys"),
+    ("add", "claude-team", {"harness": "claude", "max_jobs": 3}, 400, "bad-keys"),
+    ("add", "..", {"harness": "claude", "max_jobs": 3, "signed_in_on": []}, 400, "bad-value"),
+    ("add", "has space", {"harness": "claude", "max_jobs": 3, "signed_in_on": []}, 400, "bad-value"),
+    ("add", "x" * 65, {"harness": "claude", "max_jobs": 3, "signed_in_on": []}, 400, "bad-value"),
+    ("add", "claude-team", {"harness": "gemini", "max_jobs": 3, "signed_in_on": []}, 400, "bad-value"),
+    ("add", "claude-team", {"harness": "claude", "max_jobs": 0, "signed_in_on": []}, 400, "bad-value"),
+    ("add", "claude-team", {"harness": "claude", "max_jobs": 65, "signed_in_on": []}, 400, "bad-value"),
+    ("add", "claude-team", {"harness": "claude", "max_jobs": True, "signed_in_on": []}, 400, "bad-value"),
+    ("add", "claude-team", {"harness": "claude", "max_jobs": 3, "signed_in_on": ["box", "box"]},
+     400, "bad-value"),
+    ("add", "claude-team", {"harness": "claude", "max_jobs": 3, "signed_in_on": "box"}, 400, "bad-value"),
+    ("set", 7, {"field": "max_jobs", "expect": 2, "value": 3}, 400, "bad-value"),
+    ("set", "claude-max", {"field": "harness", "expect": "claude", "value": "codex"}, 400, "bad-field"),
+    ("set", "claude-max", {"field": "max_jobs", "expect": 2, "value": 65}, 400, "bad-value"),
+    ("set", "claude-max", {"field": "max_jobs", "expect": 2, "value": None}, 400, "bad-value"),
+    ("set", "claude-max", {"field": "max_jobs", "expect": "2", "value": 3}, 400, "bad-value"),
+    ("set", "claude-max", {"field": "paused", "expect": 0, "value": True}, 400, "bad-value"),
+    ("set", "claude-max", {"field": "signed_in_on", "expect": ["box"], "value": [1]}, 400, "bad-value"),
+    ("remove", "claude-max", {"expect": {"harness": "claude"}}, 400, "bad-value"),
+    ("remove", "claude-max", {"expect": "claude-max"}, 400, "bad-value"),
+    ("prepare", "claude-max", {"device": None}, 400, "bad-value"),
+    ("set", "nobody", {"field": "max_jobs", "expect": 2, "value": 3}, 404, "not-in-snapshot"),
+    ("remove", "nobody", {"expect": CLAUDE_MAX}, 404, "not-in-snapshot"),
+    ("doctor", "nobody", {"device": "box"}, 404, "not-in-snapshot"),
+    ("add", "claude-team", {"harness": "claude", "max_jobs": 3, "signed_in_on": ["laptop"]},
+     404, "not-in-snapshot"),
+    ("set", "claude-max", {"field": "signed_in_on", "expect": ["box", "pc-wsl-bots"],
+                           "value": ["box", "laptop"]}, 404, "not-in-snapshot"),
+    ("prepare", "claude-max", {"device": "laptop"}, 404, "not-in-snapshot"),
+    ("prepare", "codex-pro", {"device": "pc-wsl-bots"}, 404, "not-in-snapshot"),
+    ("set", "claude-default", {"field": "max_jobs", "expect": None, "value": 3}, 403, "read-only"),
+    ("set", "api-key", {"field": "paused", "expect": False, "value": True}, 403, "read-only"),
+    ("remove", "claude-default", {"expect": {"harness": "claude", "max_jobs": None, "paused": False,
+                                             "signed_in_on": ["box"]}}, 403, "read-only"),
+    ("doctor", "claude-default", {"device": "box"}, 403, "read-only"),
+    ("add", "claude-default", {"harness": "claude", "max_jobs": 3, "signed_in_on": []}, 403, "read-only"),
+    ("add", "codex-default", {"harness": "codex", "max_jobs": 3, "signed_in_on": []}, 403, "read-only"),
+    ("add", "api-two", {"harness": "external", "max_jobs": 3, "signed_in_on": []}, 403, "read-only"),
+    ("set", "claude-max", {"field": "max_jobs", "expect": 3, "value": 4}, 409, "changed"),
+    ("set", "claude-max", {"field": "max_jobs", "expect": None, "value": 4}, 409, "changed"),
+    ("set", "codex-pro", {"field": "paused", "expect": False, "value": True}, 409, "changed"),
+    ("set", "claude-max", {"field": "signed_in_on", "expect": ["box"], "value": []}, 409, "changed"),
+    ("remove", "claude-max", {"expect": {**CLAUDE_MAX, "paused": True}}, 409, "changed"),
+    ("remove", "claude-max", {"expect": {**CLAUDE_MAX, "signed_in_on": ["box"]}}, 409, "changed"),
+    ("add", "claude-max", {"harness": "claude", "max_jobs": 3, "signed_in_on": []}, 409, "exists"),
+]
+
+
+@pytest.mark.parametrize("op,name,fields,status,code", REFUSED)
+def test_a_bad_or_stale_account_request_is_refused_and_writes_nothing(
+    account_client: Client, spool: Path, op, name, fields, status, code
+) -> None:
+    assert account(account_client, op, name, **fields) == (status, {"error": code})
+    assert list(spool.iterdir()) == []
+
+
+PREPARE = {"target": "account", "op": "prepare", "account": "claude-max", "device": "box"}
+
+
+def test_an_account_request_needs_a_session_csrf_and_origin(
+    account_client: Client, spool: Path
+) -> None:
+    for overrides, code in (({"X-Factory-CSRF": None}, "csrf"),
+                            ({"X-Factory-CSRF": "not-the-csrf"}, "csrf"),
+                            ({"Origin": "http://evil.example"}, "origin"),
+                            ({"Origin": None}, "origin")):
+        assert account_client.post("/api/settings", PREPARE, **overrides) == (403, {"error": code})
+    account_client.cookies.pop("factory_session")
+    assert account_client.post("/api/settings", PREPARE) == (401, {"error": "no-session"})
+    assert list(spool.iterdir()) == []
+
+
+@pytest.mark.parametrize("login", ["claude-bot", "someone-else", "maxharris1[bot]"])
+def test_an_account_request_from_a_non_approver_is_refused(
+    serve_actions, actions_site: Path, spool: Path, login: str
+) -> None:
+    (actions_site / "status.json").write_text(json.dumps({**SNAPSHOT, "accounts": ACCOUNTS}))
+    client = serve_actions(spool=spool)
+    _forge(client, login)
+    assert client.post("/api/settings", PREPARE) == (403, {"error": "not-approver"})
+    assert list(spool.iterdir()) == []
+
+
+@pytest.mark.parametrize("extra", [{}, {"target": "device"}])
+def test_a_device_request_spools_the_recorded_bytes(
+    account_client: Client, spool: Path, monkeypatch, extra
+) -> None:
+    monkeypatch.setattr(server_module.secrets, "token_urlsafe", lambda n: "recordedRequestId000000")
+    monkeypatch.setattr(server_module.time, "gmtime", lambda: time.struct_time(
+        (2026, 11, 22, 9, 30, 0, 6, 326, 0)))
+    status, answer = change(account_client, **extra)
+    assert (status, answer) == (202, {"id": "recordedRequestId000000"})
+    assert (spool / "recordedRequestId000000.json").read_bytes() == (
+        b'{"actor": "maxharris1", "device": "box", "expect": 6, "field": "slot_max", '
+        b'"id": "recordedRequestId000000", "requested_at": "2026-11-22T09:30:00Z", "value": 4}\n'
+    )
+
+
+def test_the_server_account_rules_match_lib() -> None:
+    assert server_module.ACCOUNT_OPS == account_requests.OPS
+    assert server_module.ACCOUNT_REQUEST_KEYS == account_requests.COMMON_KEYS
+    assert set(server_module.ACCOUNT_FIELDS) == account_requests.SET_FIELDS
+    assert server_module.REMOVE_EXPECT_KEYS == account_requests.REMOVE_EXPECT_KEYS
+    assert server_module.ACCOUNT_ID.pattern == machines_yml._ACCOUNT_ID.pattern
+    assert server_module.ACCOUNT_HARNESSES == machines_yml.ACCOUNT_HARNESSES
+    candidates = [*range(-2, 130), True, False, None, 4.0, "4"]
+    accepted = [value for value in candidates if server_module._is_slot_max(value)]
+    assert accepted == [v for v in candidates if settings_apply.FIELDS["slot_max"](v)]
+    assert accepted == list(range(1, settings_apply.SLOT_MAX_LIMIT + 1))
