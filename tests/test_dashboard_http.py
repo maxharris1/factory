@@ -1653,14 +1653,14 @@ def test_the_server_account_rules_match_lib() -> None:
     assert server_module.ACCOUNT_REQUEST_KEYS == account_requests.COMMON_KEYS
     assert set(server_module.ACCOUNT_FIELDS) == account_requests.SET_FIELDS
     assert server_module.REMOVE_EXPECT_KEYS == account_requests.REMOVE_EXPECT_KEYS
-    assert server_module.ACCOUNT_ID.pattern == machines_yml._ACCOUNT_ID.pattern
+    assert server_module.ACCOUNT_ID.pattern == machines_yml.ACCOUNT_ID.pattern
     assert server_module.ACCOUNT_HARNESSES == machines_yml.ACCOUNT_HARNESSES
     candidates = [*range(-2, 130), True, False, None, 4.0, "4"]
     accepted = [value for value in candidates if server_module._is_slot_max(value)]
     assert accepted == [v for v in candidates if settings_apply.FIELDS["slot_max"](v)]
     assert accepted == list(range(1, settings_apply.SLOT_MAX_LIMIT + 1))
     value_ok, expect_ok = server_module.ACCOUNT_FIELDS["max_jobs"]
-    lib_value_ok, lib_expect_ok = account_settings.FIELDS["max_jobs"]
+    lib_value_ok, lib_expect_ok, _ = account_settings.FIELDS["max_jobs"]
     assert [v for v in candidates if value_ok(v)] == [v for v in candidates if lib_value_ok(v)]
     assert [v for v in candidates if expect_ok(v)] == [v for v in candidates if lib_expect_ok(v)]
     assert server_module.DEFAULT_ACCOUNT_IDS == {
