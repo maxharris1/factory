@@ -301,7 +301,8 @@ def load_machines_yml(
     *,
     overlay: bool = True,
 ) -> tuple[MachinesConfig | None, list[Finding]]:
-    if not path.is_file():
+    # Not is_file(): `orch accounts prepare --machines /dev/stdin` reads a pipe.
+    if not path.exists() or path.is_dir():
         return None, [Finding("error", "file not found")]
     text = path.read_text(encoding="utf-8")
     try:
