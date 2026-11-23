@@ -28,6 +28,7 @@ class Intake:
         self.relay.chmod(0o770)
         self.launched: list[signin_broker.Attempt] = []
         self.homes_at_launch: list[bool] = []
+        self.workers: list[threading.Thread] = []
         self.broker = self.make()
 
     def make(self, **overrides: object) -> signin_broker.Broker:
@@ -35,10 +36,21 @@ class Intake:
             relay=signin_relay.LocalRelay(self.box.spool, self.relay), machines=self.box.machines,
             db=self.box.world.db, state_dir=self.box.state, approver="maxharris1", owner=OWNER,
             launch=self.launch, claims=settings_apply.claim_lock(self.box.world.db),
-            transport=SshTransport(), clock=lambda: NOW,
+            transport=SshTransport(), clock=lambda: NOW, spawn=self.spawn,
         )
         settings.update(overrides)
         return signin_broker.Broker(**settings)
+
+    def spawn(self, work) -> None:
+        worker = threading.Thread(target=work, daemon=True)
+        self.workers.append(worker)
+        worker.start()
+
+    def tick(self) -> list[settings_apply.AuditEntry]:
+        entries = self.broker.tick()
+        for worker in self.workers:
+            worker.join(30)
+        return entries
 
     def launch(self, attempt: signin_broker.Attempt) -> None:
         self.homes_at_launch.append(Path(attempt.home).is_dir())
@@ -77,8 +89,8 @@ def test_a_signin_for_a_declared_pair_is_launched_as_the_harness_with_its_home(i
     intake.made("claude-c")
     rid = intake.box.request("signin")
 
-    assert intake.broker.tick() == []
-    intake.broker.tick()
+    assert intake.tick() == []
+    intake.tick()
 
     (attempt,) = intake.launched
     assert (attempt.request.id, attempt.request.account, attempt.request.device) == (rid, "claude-c", "pc")
@@ -122,8 +134,8 @@ def test_a_request_machines_yml_does_not_allow_is_refused_with_one_line(
     intake.made("claude-b", "claude-c")
     rid = intake.box.request("signin", **change)
 
-    (entry,) = intake.broker.tick()
-    intake.broker.tick()
+    (entry,) = intake.tick()
+    intake.tick()
 
     assert intake.launched == []
     assert intake.box.prepare_calls() == []
@@ -145,8 +157,8 @@ def test_a_malformed_signin_is_refused_by_the_broker_with_one_line(
 ) -> None:
     rid = intake.box.request("signin", **extra)
 
-    intake.broker.tick()
-    intake.broker.tick()
+    intake.tick()
+    intake.tick()
 
     (line,) = intake.lines()
     assert (line["id"], line["result"], line["error"]) == (rid, "refused", error)
@@ -158,7 +170,7 @@ def test_a_signin_file_others_can_write_is_refused_by_the_broker(intake: Intake)
     rid = intake.box.request("signin")
     (intake.box.spool / f"{rid}.json").chmod(0o666)
 
-    intake.broker.tick()
+    intake.tick()
 
     (line,) = intake.lines()
     assert (line["id"], line["result"], line["error"]) == (rid, "refused", "untrusted-mode")
@@ -177,7 +189,7 @@ def test_a_pair_holding_a_running_job_is_refused(intake: Intake) -> None:
     intake.broker = intake.make(claims=busy)
     rid = intake.box.request("signin")
 
-    intake.broker.tick()
+    intake.tick()
 
     (line,) = intake.lines()
     assert (line["id"], line["result"], line["error"]) == (rid, "refused", "running-job")
@@ -196,7 +208,7 @@ def test_a_running_job_on_another_pair_does_not_refuse(intake: Intake) -> None:
     intake.broker = intake.make(claims=busy)
     intake.box.request("signin")
 
-    intake.broker.tick()
+    intake.tick()
 
     assert len(intake.launched) == 1
     assert intake.lines() == []
@@ -208,7 +220,7 @@ def test_a_pair_signing_out_is_refused(intake: Intake) -> None:
         account_doctor.lock_signout(connection, "claude-c", "pc", NOW)
     rid = intake.box.request("signin")
 
-    intake.broker.tick()
+    intake.tick()
 
     (line,) = intake.lines()
     assert (line["id"], line["result"], line["error"]) == (rid, "refused", "signing-out")
@@ -218,7 +230,7 @@ def test_the_refusal_records_the_pairs_doctor_status_before(intake: Intake) -> N
     assert intake.box.world.doctor() == 0
     rid = intake.box.request("signin", actor="someone-else")
 
-    intake.broker.tick()
+    intake.tick()
 
     (line,) = intake.lines()
     assert (line["id"], line["previous"], line["error"]) == (rid, "signed-out", "not-approver")
@@ -229,8 +241,8 @@ def test_one_signin_per_pair(intake: Intake) -> None:
     first = intake.box.request("signin")
     second = intake.box.request("signin")
 
-    intake.broker.tick()
-    intake.broker.tick()
+    intake.tick()
+    intake.tick()
 
     assert [attempt.request.id for attempt in intake.launched] == [first]
     (line,) = intake.lines()
@@ -244,7 +256,7 @@ def test_at_most_two_signins_at_once(intake: Intake) -> None:
     second = intake.box.request("signin", account="claude-c")
     third = intake.box.request("signin", account="codex-b")
 
-    intake.broker.tick()
+    intake.tick()
 
     assert [attempt.request.id for attempt in intake.launched] == [first, second]
     assert signin_broker.MAX_CONCURRENT == 2
@@ -255,12 +267,12 @@ def test_at_most_two_signins_at_once(intake: Intake) -> None:
 def test_a_finished_attempt_frees_its_pair_and_writes_one_line(intake: Intake) -> None:
     intake.made("claude-c")
     first = intake.box.request("signin")
-    intake.broker.tick()
+    intake.tick()
     (attempt,) = intake.launched
 
     entry = intake.broker.finish(attempt, "failed", "cli-exit", None)
     second = intake.box.request("signin")
-    intake.broker.tick()
+    intake.tick()
 
     assert [a.request.id for a in intake.launched] == [first, second]
     (line,) = intake.lines()
@@ -276,7 +288,7 @@ def test_prepare_runs_first_when_the_home_is_missing(intake: Intake) -> None:
     assert not intake.home("claude-c").exists()
     intake.box.request("signin")
 
-    intake.broker.tick()
+    intake.tick()
 
     (call,) = intake.box.prepare_calls()
     assert call["user"] == "claude-bot"
@@ -288,8 +300,8 @@ def test_a_prepare_that_fails_ends_the_attempt_with_one_failed_line(intake: Inta
     intake.box.world.profile("export LOGNAME=someone-else USER=someone-else\n")
     rid = intake.box.request("signin")
 
-    intake.broker.tick()
-    intake.broker.tick()
+    intake.tick()
+    intake.tick()
 
     assert intake.launched == []
     (line,) = intake.lines()
@@ -302,11 +314,162 @@ def test_an_unreachable_device_is_refused_before_any_prepare(intake: Intake) -> 
     intake.box.world.ssh.offline("pc-claude-bot").touch()
     rid = intake.box.request("signin")
 
-    intake.broker.tick()
+    intake.tick()
 
     (line,) = intake.lines()
     assert (line["id"], line["result"], line["error"]) == (rid, "refused", "unreachable")
     assert intake.box.prepare_calls() == []
+
+
+class _SlowFirstExchange:
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.real = SshTransport()
+
+    def exchange(self, argv, **kwargs):
+        if not self.entered.is_set():
+            self.entered.set()
+            self.release.wait(15)
+        return self.real.exchange(argv, **kwargs)
+
+
+def test_a_slow_home_probe_does_not_hold_up_the_next_signin(intake: Intake) -> None:
+    intake.box.world.declare("claude-b", "claude-c", "codex-b")
+    intake.made("claude-b", "claude-c")
+    slow = _SlowFirstExchange()
+    intake.broker = intake.make(transport=slow)
+    first = intake.box.request("signin", account="claude-b")
+    stop = threading.Event()
+    serving = threading.Thread(target=intake.broker.serve, args=(stop,), daemon=True)
+    serving.start()
+    try:
+        assert slow.entered.wait(5)
+        second = intake.box.request("signin", account="claude-c")
+        deadline = time.monotonic() + 5
+        while not intake.launched and time.monotonic() < deadline:
+            time.sleep(0.05)
+        launched_while_blocked = [attempt.request.id for attempt in intake.launched]
+    finally:
+        slow.release.set()
+        stop.set()
+        serving.join(10)
+        for worker in intake.workers:
+            worker.join(30)
+    assert launched_while_blocked == [second]
+    assert [attempt.request.id for attempt in intake.launched] == [second, first]
+
+
+def _job_queue(intake: Intake):
+    from lib import device_pool
+    from lib.machines_yml import load_machines_yml
+    from lib.queue import SQLiteJobQueue
+
+    intake.box.world.db.unlink()
+    queue = SQLiteJobQueue(intake.box.world.db, clock=lambda: NOW)
+    with queue.connect() as connection:
+        account_doctor.ensure_table(connection)
+        connection.execute("INSERT INTO account_signins (account, device, status, checked_at) VALUES (?, ?, ?, ?)",
+                           ("claude-c", "pc", "ok", NOW))
+    config, _ = load_machines_yml(intake.box.machines)
+    pool = device_pool.DevicePool(queue, config, pins=lambda: {"owner/repo": frozenset({"pc"})})
+    return queue, pool
+
+
+def _claimed_pair(pool) -> tuple[str, str] | None:
+    claim = pool.claim("claude", token_hash="synthetic-hash")
+    return None if claim is None else (claim[1].account, claim[1].device)
+
+
+def test_a_job_cannot_claim_the_pair_while_its_signin_runs(intake: Intake) -> None:
+    from lib.remote import Exchanged
+    from tests.test_pair_placement import enqueue
+
+    queue, pool = _job_queue(intake)
+    enqueue(queue, "job-during-probe")
+    claimed: list[tuple[str, str] | None] = []
+
+    class ClaimDuringProbe:
+        def exchange(self, argv, **kwargs):
+            claimed.append(_claimed_pair(pool))
+            return Exchanged(0, b"", "")
+
+    intake.broker = intake.make(transport=ClaimDuringProbe())
+    intake.box.request("signin")
+    intake.tick()
+    (attempt,) = intake.launched
+    assert claimed and ("claude-c", "pc") not in claimed
+    assert _claimed_pair(pool) != ("claude-c", "pc")
+
+    intake.broker.finish(attempt, "signed-in", None, "ok")
+    enqueue(queue, "job-after-signin")
+
+    assert _claimed_pair(pool) == ("claude-c", "pc")
+
+
+def test_the_pair_stays_held_for_a_signin_longer_than_the_signout_lease(intake: Intake) -> None:
+    intake.made("claude-c")
+    now = [NOW]
+    intake.broker = intake.make(clock=lambda: now[0])
+    intake.box.request("signin")
+    intake.tick()
+    (attempt,) = intake.launched
+
+    for _ in range(3):
+        now[0] += account_doctor.SIGNOUT_LEASE_SECONDS / 2
+        intake.tick()
+        with sqlite3.connect(intake.box.world.db) as connection:
+            assert ("claude-c", "pc") in account_doctor.signing_out(connection, now[0])
+
+    intake.broker.finish(attempt, "signed-in", None, "ok")
+    with sqlite3.connect(intake.box.world.db) as connection:
+        assert account_doctor.signing_out(connection, now[0]) == frozenset()
+
+
+@pytest.mark.parametrize("state", ["preparing", "launching"])
+def test_a_relay_error_before_launch_frees_the_pair_and_the_request_is_retried(
+    intake: Intake, state: str,
+) -> None:
+    if state == "launching":
+        intake.made("claude-c")
+    rid = intake.box.request("signin")
+    publish = intake.broker.relay.publish
+
+    def fail_once(request_id: str, view: dict) -> None:
+        if view.get("state") == state:
+            intake.broker.relay.publish = publish
+            raise settings_apply.SpoolError("temporary SSH publish failure")
+        publish(request_id, view)
+
+    intake.broker.relay.publish = fail_once
+    intake.tick()
+    assert intake.launched == []
+    with sqlite3.connect(intake.box.world.db) as connection:
+        assert account_doctor.signing_out(connection, NOW) == frozenset()
+
+    intake.tick()
+
+    assert [attempt.request.id for attempt in intake.launched] == [rid]
+    assert intake.lines() == []
+    assert intake.view(rid) == {"state": "launching"}
+
+
+def test_a_launch_that_raises_ends_the_attempt_with_one_failed_line(intake: Intake) -> None:
+    intake.made("claude-c")
+
+    def broken(attempt: signin_broker.Attempt) -> None:
+        raise RuntimeError("no terminal")
+
+    intake.broker = intake.make(launch=broken)
+    first = intake.box.request("signin")
+    intake.tick()
+    intake.box.request("signin")
+    intake.broker.launch = intake.launch
+    intake.tick()
+
+    (line,) = intake.lines()
+    assert (line["id"], line["result"], line["error"]) == (first, "failed", "launch: RuntimeError")
+    assert len(intake.launched) == 1
 
 
 def test_without_a_relay_directory_the_broker_has_nothing_to_serve(tmp_path: Path) -> None:

@@ -533,6 +533,11 @@ def lock_signout(connection: sqlite3.Connection, account: str, device: str, now:
                        (account, device, now))
 
 
+def renew_signout(connection: sqlite3.Connection, account: str, device: str, now: float) -> None:
+    connection.execute(_SIGNOUTS_SCHEMA)
+    connection.execute(f"UPDATE {SIGNOUTS} SET since = ? WHERE account = ? AND device = ?", (now, account, device))
+
+
 def unlock_signout(connection: sqlite3.Connection, account: str, device: str) -> None:
     connection.execute(_SIGNOUTS_SCHEMA)
     connection.execute(f"DELETE FROM {SIGNOUTS} WHERE account = ? AND device = ?", (account, device))
