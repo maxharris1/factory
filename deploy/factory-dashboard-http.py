@@ -1021,7 +1021,6 @@ MAX_VIEW = 4096
 MAX_SIGNINS = 8
 ATTEMPT_SECONDS = 20 * 60
 SWEEP_SECONDS = 5
-# Mirrors lib/account_signin.py _ALLOW; tests/test_dashboard_http.py checks they match.
 SIGNIN_URLS = {
     "claude": re.compile(r"https://claude\.com/cai/oauth/authorize(?:\?[A-Za-z0-9._~%&=+-]*)?"),
     "codex": re.compile(r"https://auth\.openai\.com/codex/device"),
@@ -1035,10 +1034,6 @@ SIGNIN_ERROR = re.compile(r"[A-Za-z0-9 :._-]{1,80}")
 
 
 class RelayDir:
-    """The sign-in relay directory, pinned like the spool. The broker
-    publishes `<id>.relay` here and takes the `<id>.code` and `<id>.cancel`
-    files this server writes."""
-
     def __init__(self, path: Path):
         self.fd = open_root(path)
 
@@ -1108,9 +1103,6 @@ class SignInAttempt:
 
 
 class SignIns:
-    """The sign-in attempts this process started, each bound to the session
-    that started it."""
-
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.attempts: dict[str, SignInAttempt] = {}
@@ -1152,9 +1144,7 @@ def _fullmatch(pattern: re.Pattern[str], value: object) -> bool:
     return isinstance(value, str) and pattern.fullmatch(value) is not None
 
 
-def signin_view(harness: str, view: dict | None) -> dict:
-    """What the page may see of the broker's view: each field re-checked,
-    every other key dropped."""
+def sanitized_signin_view(harness: str, view: dict | None) -> dict:
     view = view or {}
     state, expires, result = view.get("state"), view.get("expires_at"), view.get("result")
     return {
@@ -1245,7 +1235,7 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         except ApiError as exc:
             self._json(exc.status, exc.body)
             return
-        self._json(200, signin_view(attempt.harness, relay.read_view(rid)))
+        self._json(200, sanitized_signin_view(attempt.harness, relay.read_view(rid)))
 
     def _read_json(self) -> dict:
         content_type = self.headers.get("Content-Type", "").split(";")[0].strip().lower()
