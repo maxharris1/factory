@@ -455,7 +455,8 @@ Full report: <link>
 
 The review brief gives the reviewer this form and calls it exact: the criteria by `ac-<n>` as `- ac-<n>: <state>. Owner: <review|qa>. <evidence>.`, then one numbered item per finding, `[blocking] f-<n>. Rule: <the rule it breaks>. <file:line>. <repro>.`, with the tag first. The tags are `[blocking]`, `[minor]` and, while follow-ups are filed (section 8), `[follow-up]`; under `review.block_on: user-impact` `[minor]` is not used. From round 2 an item `[closed] f-<n>. <what shows it closed>.` closes an earlier finding. The dispatcher reads the tag, the id and the `Rule:` sentence to carry a finding into later rounds (`lib/evidence/findings.py`). The verdict ends with one non-blocking line, `Could delete: <...>. Size: <lines changed> vs the plan's estimate of <estimate>.`, without the estimate when the plan has none (issue #1023). `tests/test_handoff.py` parses every fenced handoff example in this file.
 
-Comment kinds: `brief`, `questions`, `answers`, `go`, `plan`, `ready`, `verdict`, `ok`, `decline`, `done`, `stuck`, `retry`, `qa`.
+Comment kinds: `brief`, `questions`, `answers`, `go`, `plan`, `ready`, `verdict`, `ok`, `decline`, `done`, `stuck`, `retry`, `qa`, `rebase`.
+A `rebase` comment parses, but the dispatcher does not route it yet (#1404 part 2).
 
 Max may also post three plain commands with no `orch:v1` header:
 

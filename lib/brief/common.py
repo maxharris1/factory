@@ -131,6 +131,7 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
     head = job.request.head if isinstance(job.request.head, str) else detail.get("head")
     pr = _pr_number(detail.get("pr_number"))
     base = detail.get("base_branch")
+    branch = detail.get("gitBranchName")
     verify = detail.get("verify_skill")
     verify = verify if isinstance(verify, str) and (verify == "none" or _SKILL.fullmatch(verify)) else None
     reviewer = detail.get("reviewer_harness")
@@ -170,6 +171,7 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
         "qa_criteria": _qa_criteria(detail) if job.request.action == "review" else None,
         "ticket": job.request.ticket_id if _TICKET.fullmatch(job.request.ticket_id) else None,
         "base": base if isinstance(base, str) and _BRANCH.fullmatch(base) else None,
+        "branch": branch if isinstance(branch, str) and _BRANCH.fullmatch(branch) else None,
         "no_ci_base": no_ci_base if isinstance(no_ci_base, str) and _BRANCH.fullmatch(no_ci_base) else None,
         "local_checks": _check_labels(detail.get("local_checks")),
         "verify": verify,
@@ -357,6 +359,8 @@ def job_section(job: Job, bot: str, kind: str, facts: dict, remote_device: str |
         + (
             "Near it, post the verdict you can support, or a `questions` handoff. "
             if kind == "review"
+            else "Near it, take the conflict steps above: push nothing and post `questions`. "
+            if kind == "rebase"
             else "Near it, push what you have and post `questions`. "
         )
         + "Past it, `orch job run` stops you and the job fails `wall-clock`.",

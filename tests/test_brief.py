@@ -116,11 +116,12 @@ CASES = [
     ("fix", "claude", {"instruction": "https://github.com/owner/repo/pull/42#issuecomment-7"}, "fix"),
     ("review", "codex", {"round": "2/3"}, "review"),
     ("fix", "claude", {"kind": "merge-only"}, "merge-only"),
+    ("fix", "claude", {"kind": "rebase", "gitBranchName": "factory/issue-42"}, "rebase"),
 ]
 
 
-def test_the_four_kinds() -> None:
-    assert KINDS == ("implement", "fix", "review", "merge-only")
+def test_the_five_kinds() -> None:
+    assert KINDS == ("implement", "fix", "review", "merge-only", "rebase")
 
 
 @pytest.mark.parametrize(("action", "recipient", "extra", "kind"), CASES)
