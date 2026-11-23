@@ -1115,10 +1115,12 @@ def test_every_generated_remote_script_parses_under_the_native_sh() -> None:
 
 
 def test_every_generated_remote_script_runs_under_the_native_sh(tmp_path: Path) -> None:
-    """#1379: the check scans every process on the host, so a parallel test's
-    sleeper carrying the same tag would read as this target's live worker."""
+    """#1379: the check scans every process on the host, so the target's tag is
+    its own; a parallel test's sleeper carrying it would read as a live worker."""
     gone, unsure = 0, 3
-    target = remote.RemoteTarget("pc", "pc", "claude-bot", str(tmp_path / "work"), "job", "a" * 32)
+    target = remote.RemoteTarget(
+        "pc", "pc", "claude-bot", str(tmp_path / "work"), "job", uuid.uuid4().hex
+    )
     sibling = subprocess.Popen(
         ["env", f"ORCH_WORKER_TAG={'a' * 32}", "sleep", "300"], start_new_session=True
     )
