@@ -10,6 +10,6 @@
 
 **Briefs.** The decision is in `decisions`, and the review job's detail is built in the same transaction, so the re-review's brief quotes it under the decided section. The reviewer is told not to block on the overruled finding again.
 
-**After the overrule.** The ticket is in `review`, so a later `/go` has nothing to release and is `slash-go-no-target`. A replay finds its `overruled-finding` row and queues nothing more. If the re-review blocks on the same rule again, the repeat stop runs as usual.
+**After the overrule.** The ticket is in `review`, so a later `/go` has nothing to release and is `slash-go-no-target`. A replay finds its `overruled-finding` row and queues nothing more, but it writes the `review` label again, so a label write that failed after the commit is repaired on the next poll. If the re-review blocks on the same rule again, the repeat stop runs as usual.
 
 **Model.** `model/Orchestrator.tla` gains `ApproverOverrule`: `capped` to `review` with the round stepped back one and `cap_extra` unchanged, and `model/chart.mmd` draws the arrow. The model has no separate repeat park (a repeat REVISE is drawn as `T3Revise`), so the `waiting-max` repeat case is covered by the tests in `tests/test_repeat.py`, not by TLC.
