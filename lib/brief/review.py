@@ -239,6 +239,7 @@ def lead(facts: dict) -> Lead:
                     if later_round
                     else []
                 ),
+                *([_rebased_step(facts["rebase"], base, head)] if facts["rebased"] else []),
             ]
         ),
         gate,
@@ -311,6 +312,20 @@ def _bar_step(variant: bool) -> str:
         "changed, or a shipped doc this PR made wrong. Mark every other finding `[follow-up]`, not `[blocking]`. "
         "A problem the base already has does not block unless the PR copies it or newly reaches it."
         + (" A variant of a rule an earlier round already raised is also `[follow-up]`." if variant else "")
+    )
+
+
+def _rebased_step(rebase: dict | None, base: str, head: str) -> str:
+    range_diff = (
+        f"`git range-diff {rebase['reviewed_base']}..{rebase['last_reviewed_head']} {rebase['base']}..{head}`"
+        if rebase is not None
+        else "`git range-diff` from the last reviewed head"
+    )
+    return (
+        f"Rebase review. This head is a rebase-only fix: it rebases the last reviewed head onto `{base}` and "
+        f"changes no behavior on purpose. Review the range-diff: {range_diff}. Every finding open in the last "
+        "verdict stays open. Carry each forward under its `f-<n>` id and list none as `[closed]`, since a rebase "
+        "does not fix a finding."
     )
 
 

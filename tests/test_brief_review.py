@@ -175,6 +175,7 @@ def merge_update_task(verify: str, block_on: str = "user-impact") -> str:
         "stop_on": "rounds",
         "update": {"last_reviewed_head": "a" * 40, "merge": "b" * 40, "commits": []},
         "rebase": None,
+        "rebased": False,
         "size_flag": None,
         "start_before_ci": False,
         "no_ci_base": None,
@@ -310,6 +311,28 @@ def test_a_size_flag_is_one_step_that_never_blocks() -> None:
 def test_no_valid_size_flag_leaves_the_steps_unchanged(size_flag: object) -> None:
     assert sized_review_steps(size_flag) == sized_review_steps(None)
     assert not any("Size flag" in step for step in sized_review_steps(size_flag))
+
+
+def rebased_review_steps(source: str | None) -> list[str]:
+    action, recipient, attempt, head, extra = snapshots.CASES["review-rebased"]
+    job = snapshots._job(action, recipient, attempt, head, {**extra, "source": source})
+    context, findings = parse_factory_context(snapshots.FACTORY_MD)
+    assert context is not None, findings
+    return steps(render_brief(job, bot="codex-bot", context=context, factory_root=snapshots.BOX_FACTORY_ROOT))
+
+
+def test_a_rebase_review_carries_every_open_finding_forward() -> None:
+    [step] = [step for step in rebased_review_steps("rebase") if "rebase-only fix" in step]
+
+    assert "changes no behavior on purpose" in step
+    assert f"`git range-diff {'e' * 40}..{'a' * 40} {'f' * 40}..{snapshots.HEAD}`" in step
+    assert "Every finding open in the last verdict stays open" in step
+    assert "list none as `[closed]`" in step
+
+
+@pytest.mark.parametrize("source", [None, "unannounced-green-head"])
+def test_a_review_from_any_other_source_has_no_rebase_step(source: str | None) -> None:
+    assert not any("rebase-only fix" in step for step in rebased_review_steps(source))
 
 
 SKILL = Path(__file__).resolve().parents[1] / "skills/factory/factory-reviewer/SKILL.md"

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from lib.dispatch.decisions import Decision, record_decisions
 from lib.dispatch.helpers import _comment_link, _comment_order, _scope
@@ -56,13 +56,7 @@ def conflict_files(body: str, base: str = "main") -> tuple[str, ...]:
     return tuple(dict.fromkeys(files))
 
 
-def rebase_fix_is_newest(connection: sqlite3.Connection, key: tuple[str, str]) -> bool:
-    job = _newest_harness_job(connection, key)
-    return (
-        job is not None
-        and job.request.action == "fix"
-        and (as_object(job.request.detail) or {}).get("kind") == "rebase"
-    )
+APPROVAL = ("approved_head", "approved_at", "approve_comment_id")
 
 
 @dataclass(frozen=True)
@@ -70,6 +64,29 @@ class RebaseStep:
     from_state: str
     from_head: str
     round: int
+    approved_head: str | None = None
+    approved_at: float | None = None
+    approve_comment_id: str | None = None
+
+    @property
+    def review_round(self) -> int:
+        return self.round if self.from_state == "capped" else self.round + 1
+
+    def block(self) -> dict[str, object]:
+        return {name: value for name, value in asdict(self).items() if value is not None}
+
+    def approval(self) -> dict[str, object]:
+        return {name: getattr(self, name) for name in APPROVAL if getattr(self, name) is not None}
+
+
+def newest_rebase(connection: sqlite3.Connection, key: tuple[str, str]) -> RebaseStep | None:
+    job = _newest_harness_job(connection, key)
+    if job is None or job.request.action != "fix":
+        return None
+    detail = as_object(job.request.detail) or {}
+    if detail.get("kind") != "rebase":
+        return None
+    return RebaseStep(**detail["rebase"])
 
 
 class RebaseMixin:
@@ -79,7 +96,7 @@ class RebaseMixin:
         ticket: TrackedTicket,
         comment: Comment,
     ) -> None:
-        if not rebase_fix_is_newest(connection, (ticket.repo.lower(), ticket.ticket_id)):
+        if newest_rebase(connection, (ticket.repo.lower(), ticket.ticket_id)) is None:
             return
         body = parse_comment(comment.body).body
         files = ", ".join(conflict_files(body, ticket.factory.base_branch))
@@ -160,14 +177,18 @@ class RebaseMixin:
         key = (ticket.repo.lower(), ticket.ticket_id)
         row = connection.execute(
             """
-            SELECT workflow_state, review_round, generation FROM ticket_state
+            SELECT workflow_state, review_round, generation, approved_head, approved_at,
+                approve_comment_id
+            FROM ticket_state
             WHERE repo = ? AND ticket_id = ?
             """,
             key,
         ).fetchone()
         if row is None or row["workflow_state"] not in REBASE_FROM:
             return "rejected-rebase-state", False
+        cleared = {}
         if row["workflow_state"] in LEAVES_MERGE_QUEUE:
+            cleared = {name: row[name] for name in APPROVAL}
             self._clear_approval(connection, ticket, "rebase")
         if _harness_job_active(connection, key):
             return "rejected-rebase-job-active", False
@@ -191,7 +212,7 @@ class RebaseMixin:
                     head=head,
                     round_number=review_round + 1,
                     cap=self._effective_cap(ticket, connection),
-                    rebase_step=RebaseStep(row["workflow_state"], head, review_round),
+                    rebase_step=RebaseStep(row["workflow_state"], head, review_round, **cleared),
                     connection=connection,
                 ),
             ),

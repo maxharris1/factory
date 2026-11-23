@@ -85,7 +85,7 @@ stateDiagram-v2
   s5 --> s10: answer, same step resumes
   s5 --> s16: approver's building go on an unsat= REVISE, fix round or answer, same step resumes
   s17 --> s10: head changed and the patch differs
-  s17 --> s16: REVISE, under the round cap or trusted kind=rebase, rebase-only fix or PR dirty or behind, base update
+  s17 --> s16: REVISE, under the round cap or PR dirty or behind, base update or trusted kind=rebase, rebase-only fix
   s17 --> s5: REVISE with unsat=, the criterion goes to Max
   s17 --> s12: approver's OK at the head, ship = handoff, finish_line ready-for-review or Max hands it off (answers state=handed-off)
   s17 --> s18: approver's OK at the head, finish_line merge
