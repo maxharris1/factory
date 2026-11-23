@@ -351,7 +351,6 @@ Log = Callable[[str], None]
 
 # -- intake template (#204) ----------------------------------------------------
 
-_FENCE = re.compile(r"^\s*(```|~~~)")
 _HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
 _SECTION_HEADING = r"^(?:\*\*|__)?{name}(?:\*\*|__)?:?$"
 _SECTIONS = {
@@ -369,7 +368,13 @@ _UNBOUNDED = re.compile(
 _LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s*)?(.*)$")
 _FIELD = r"^\s*(?:[-*+]\s+)?(?:\*\*|__)?\s*{name}\s*(?:\*\*|__)?\s*:\s*(?:\*\*|__)?\s*(?P<value>.*?)\s*$"
 _RISK_LINE = re.compile(_FIELD.format(name=r"risk"), re.IGNORECASE)
-_TARGET_LINE = re.compile(_FIELD.format(name=r"target\s+branch"), re.IGNORECASE)
+_TARGET_LINE = re.compile(
+    r"^\s*(?:[-*+]\s+)?(?P<open>\*\*|__)?\s*target\s+branch\s*(?P<close>\*\*|__)?\s*:\s*(?P<value>.*?)\s*$",
+    re.IGNORECASE,
+)
+_TARGET_BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9_./-]{0,199}")
+_TARGET_REFUSED = re.compile(r"\.\.|//|/\.|\.lock(?:/|$)|[./]$")
+_EMPHASIZED = re.compile(r"^(\*\*|__|\*|_)(?P<inner>.+)\1$")
 _PLAN_LINE = re.compile(_FIELD.format(name=r"plan\s+first(?:\s*\(yes\s*/\s*no\))?"), re.IGNORECASE)
 _DEPENDS_LINE = re.compile(_FIELD.format(name=r"depends\s+on"), re.IGNORECASE)
 _TYPE_LINE = re.compile(_FIELD.format(name=r"type"), re.IGNORECASE)
@@ -423,23 +428,13 @@ class IntakeTemplate:
 
 
 def _unfenced(body: str) -> list[str]:
-    indented = {
+    code = {
         index
         for token in _MARKDOWN.parse(body or "")
-        if token.type == "code_block" and token.map
+        if token.type in ("code_block", "fence") and token.map
         for index in range(*token.map)
     }
-    lines: list[str] = []
-    fenced = False
-    for index, line in enumerate((body or "").splitlines()):
-        if index in indented:
-            continue
-        if _FENCE.match(line):
-            fenced = not fenced
-            continue
-        if not fenced:
-            lines.append(line)
-    return lines
+    return [line for index, line in enumerate((body or "").splitlines()) if index not in code]
 
 
 def _field(lines: Sequence[str], pattern: re.Pattern[str]) -> str | None:
@@ -450,12 +445,27 @@ def _field(lines: Sequence[str], pattern: re.Pattern[str]) -> str | None:
     return None
 
 
+def _is_target_branch(value: str) -> bool:
+    return _TARGET_BRANCH.fullmatch(value) is not None and not _TARGET_REFUSED.search(value)
+
+
+def _target_value(match: re.Match[str]) -> str:
+    value, mark = match["value"], match["open"]
+    if mark and not match["close"]:
+        if value.startswith(mark):
+            value = value[len(mark):].strip()
+        elif value.endswith(mark):
+            value = value[: -len(mark)].strip()
+    if _is_target_branch(value):
+        return value
+    wrapped = _EMPHASIZED.match(value)
+    if wrapped and _is_target_branch(wrapped["inner"]):
+        return wrapped["inner"]
+    return value
+
+
 def _target_branch(lines: Sequence[str], head: str | None) -> tuple[str | None, Defect | None]:
-    values = [
-        match.group("value").strip("*_ ").strip()
-        for match in map(_TARGET_LINE.match, lines)
-        if match
-    ]
+    values = [_target_value(match) for match in map(_TARGET_LINE.match, lines) if match]
     if not values:
         return None, None
     if len(values) > 1:
@@ -463,7 +473,7 @@ def _target_branch(lines: Sequence[str], head: str | None) -> tuple[str | None, 
     (value,) = values
     if value.lower() == "default":
         return None, None
-    if not _BRANCH.fullmatch(value) or ".." in value:
+    if not _is_target_branch(value):
         return None, Defect("bad-target-branch", f"`Target branch: {value}` is not a plain branch name")
     if value == head:
         return None, Defect("bad-target-branch", f"`Target branch: {value}` is the ticket's own head branch")

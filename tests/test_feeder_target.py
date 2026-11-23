@@ -172,3 +172,60 @@ def test_no_line_records_project_and_opens_on_todays_base(tmp_path: Path, extra)
     assert [(repo, sha) for repo, sha, _ in github.commits] == [(HOME, BASE_SHA)]
     row = rows(tmp_path / "orch.db")["7"]
     assert (row["base_branch"], row["target_source"]) == ("main", "project")
+
+
+LOOKALIKE = "release_"
+LOOKALIKE_SHA = "d" * 40
+NEIGHBOUR = "release"
+NEIGHBOUR_SHA = "a" * 40
+FENCED_TARGET = f"\n````markdown\n```\nTarget branch: {NEIGHBOUR}\n````\n"
+
+
+def github_with_lookalikes(repo: str) -> FakeGitHub:
+    github = FakeGitHub()
+    github.branches[(repo, LOOKALIKE)] = LOOKALIKE_SHA
+    github.branches[(repo, NEIGHBOUR)] = NEIGHBOUR_SHA
+    return github
+
+
+def fed_base(tmp_path: Path, tracker: str, text: str) -> tuple[str, str]:
+    repo = HOME if tracker == "github" else LINEAR_REPO
+    github = github_with_lookalikes(repo)
+    if tracker == "github":
+        feeder, _, _, _ = make_feeder(tmp_path, github=github)
+        github.issues[HOME] = [issue(7, body=text, template=False)]
+        head = "factory/issue-7"
+    else:
+        linear = FakeLinear()
+        feeder, _, _, _ = make_feeder(
+            tmp_path, orch=LINEAR_ORCH, github=github, linear=linear, factory_text=LINEAR_FACTORY_MD
+        )
+        ticket = linear_ticket(text)
+        linear.issues = [ticket]
+        head = ticket.branch
+    assert len(feeder.feed_once().fed) == 1
+    ((_, sha, _),) = github.commits
+    return pull_on(github, head)["base"], sha
+
+
+@pytest.mark.parametrize("tracker", ["github", "linear"])
+def test_a_target_with_a_trailing_underscore_opens_on_that_branch(tmp_path: Path, tracker: str) -> None:
+    assert fed_base(tmp_path, tracker, targeted(f"Target branch: {LOOKALIKE}")) == (LOOKALIKE, LOOKALIKE_SHA)
+
+
+@pytest.mark.parametrize("tracker", ["github", "linear"])
+def test_a_fenced_target_leaves_todays_base(tmp_path: Path, tracker: str) -> None:
+    base, _ = fed_base(tmp_path, tracker, body() + FENCED_TARGET)
+    assert base != NEIGHBOUR
+
+
+def test_a_starred_target_is_refused_and_wakes_once(tmp_path: Path) -> None:
+    feeder, _, github, _ = make_feeder(tmp_path)
+    github.issues[HOME] = [issue(7, body=targeted("Target branch: release*"), template=False)]
+
+    for _ in range(2):
+        assert feeder.feed_once().refused == 1
+
+    assert nothing_written(github)
+    (wake,) = wakes(tmp_path)
+    assert json.loads(wake["detail"])["defects"] == ["bad-target-branch"]

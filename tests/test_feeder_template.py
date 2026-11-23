@@ -1101,3 +1101,40 @@ def test_a_fenced_target_branch_is_an_example() -> None:
     template = parse_intake(body(extra="```\nTarget branch: a..b\nTarget branch: feature/x\n```"), ())
     assert template.target_branch is None
     assert template.defects == ()
+
+
+@pytest.mark.parametrize(
+    ("line", "branch"),
+    [("Target branch: release_", "release_"), ("Target branch: feature/__x__", "feature/__x__"),
+     ("Target branch: **release_**", "release_"), ("Target branch: *release*", "release"),
+     ("Target branch: _release_", "release"), ("**Target branch:** release_", "release_"),
+     ("**Target branch: release_**", "release_"), ("__Target branch__: release_", "release_")],
+)
+def test_a_target_branch_keeps_its_punctuation_inside_markdown_emphasis(line: str, branch: str) -> None:
+    template = parse_intake(body(extra=line), ())
+    assert (template.target_branch, template.defects) == (branch, ())
+
+
+@pytest.mark.parametrize(
+    "value", ["release*", "*release", "rel*ea*se", "**release*", "release\\_", "release.", "x.lock", "a//b"],
+)
+def test_a_target_branch_markdown_cannot_hide_a_bad_character(value: str) -> None:
+    template = parse_intake(body(extra=f"Target branch: {value}"), ())
+    assert [defect.code for defect in template.defects] == ["bad-target-branch"]
+    assert template.target_branch is None
+
+
+@pytest.mark.parametrize(
+    "example",
+    ["````markdown\n```\nTarget branch: release\n````", "```\n~~~\nTarget branch: release\n```",
+     "~~~~\n~~~\nTarget branch: release\n~~~~", "> ```\n> Target branch: release\n> ```",
+     "- item\n\n  ```\n  Target branch: release\n  ```"],
+)
+def test_a_target_branch_inside_any_fence_is_an_example(example: str) -> None:
+    template = parse_intake(body() + "\n" + example + "\n", ())
+    assert (template.target_branch, template.defects) == (None, ())
+
+
+def test_a_target_branch_after_a_closed_long_fence_still_counts() -> None:
+    template = parse_intake(body(extra="````\n```\n````\nTarget branch: release"), ())
+    assert (template.target_branch, template.defects) == ("release", ())
