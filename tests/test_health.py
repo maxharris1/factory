@@ -103,13 +103,15 @@ TUNNEL_URL = "https://box.example.ts.net/linear-webhook"
 
 
 def orch(*, listener: bool = False, push: bool = False, public_url: str | None = TUNNEL_URL,
-         refused: tuple[str, ...] = (), alert_minutes: int = 30) -> SimpleNamespace:
+         refused: tuple[str, ...] = (), alert_minutes: int = 30,
+         settings: SimpleNamespace | None = None) -> SimpleNamespace:
     """What lib/health.py, and the snapshot's projects (#152), read of an OrchConfig."""
     return SimpleNamespace(
         projects=(),
         linear_webhook=SimpleNamespace(public_url=public_url, tunnel_alert_minutes=alert_minutes)
         if listener else None,
-        dashboard=SimpleNamespace(push=SimpleNamespace(transport="ssh" if push else "none")),
+        dashboard=SimpleNamespace(push=SimpleNamespace(transport="ssh" if push else "none"),
+                                  settings=settings),
         refused_harnesses=refused,
         qa=SimpleNamespace(max_cloud_lanes=2),
     )
@@ -1674,6 +1676,27 @@ def test_the_tunnel_is_expected_only_with_a_public_url(tmp_path: Path) -> None:
     assert {s.component for s in without.slots} >= {"linear-listener"}
     assert "tunnel" not in {s.component for s in without.slots}
     assert "tunnel" in {s.component for s in with_url.slots}
+
+
+@pytest.mark.parametrize("settings, expected", [
+    (None, False),
+    (SimpleNamespace(relay=None), False),
+    (SimpleNamespace(relay="/home/dash/signin-relay"), True),
+])
+def test_signin_broker_expected_only_with_a_relay(
+    tmp_path: Path, settings: SimpleNamespace | None, expected: bool,
+) -> None:
+    machines = machines_config(tmp_path)
+    registry = health.expected_components(machines, orch(settings=settings))
+    slots = [s for s in registry.slots if s.component == "signin-broker"]
+    assert slots == ([health.Slot("signin-broker", ("box",))] if expected else [])
+
+    db, _ = make_db(tmp_path)
+    health.Beater(db, "signin-broker", devices=["box"], store=store(db), log=lambda line: None).beat_now()
+    report = health.build_report(health.read_heartbeats(db) or (), NOW, expected=registry)
+    (broker,) = [c for c in report.components if c.component == "signin-broker"]
+    assert (broker.device, broker.state, broker.configured) == ("box", "up", expected)
+    assert broker not in report.down
 
 
 def test_heartbeats_record_the_commit_the_process_loaded(tmp_path: Path) -> None:

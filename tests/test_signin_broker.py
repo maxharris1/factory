@@ -3,21 +3,27 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import signal
 import sqlite3
 import stat
+import subprocess
+import sys
 import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+import yaml
 
-from lib import account_doctor, cli, settings_apply, signin_broker, signin_relay
+from lib import account_doctor, cli, health, settings_apply, signin_broker, signin_relay
 from lib.device_pool import RunningPair
+from lib.machines_yml import load_machines_yml
 from lib.remote import SshTransport
 from tests.test_account_doctor import World
 from tests.test_account_pair_requests import Box
-from tests.test_settings_apply import NOW, OWNER
+from tests.test_settings_apply import NOW, OWNER, ROOT
+from tests.test_signin_attempt import Attempts
 
 
 class Intake:
@@ -729,3 +735,81 @@ def test_a_signin_cannot_take_the_pair_from_a_live_signout(intake: Intake) -> No
         assert ("claude-c", "pc") in account_doctor.signing_out(connection, NOW)
         account_doctor.release_pair(connection, "claude-c", "pc", "signout-1")
         assert account_doctor.signing_out(connection, NOW) == frozenset()
+
+
+def _orch_yml(tmp_path: Path, spool: Path, relay: Path | None) -> Path:
+    data = yaml.safe_load((ROOT / "orch.yml").read_text(encoding="utf-8"))
+    settings = {"spool": str(spool), "spool_owner": OWNER, "approver": "maxharris1"}
+    if relay is not None:
+        settings["relay"] = str(relay)
+    data["dashboard"] = {"settings": settings}
+    path = tmp_path / "orch-signin.yml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    return path
+
+
+def _brokers(db: Path) -> list[health.Heartbeat]:
+    return [beat for beat in health.read_heartbeats(db) or () if beat.component == "signin-broker"]
+
+
+@pytest.mark.parametrize("settings", [False, True])
+def test_main_without_relay_exits_off(tmp_path: Path, capsys: pytest.CaptureFixture[str],
+                                      settings: bool) -> None:
+    orch = _orch_yml(tmp_path, tmp_path / "spool", None) if settings else ROOT / "orch.yml"
+    db = tmp_path / "orch.db"
+
+    code = signin_broker.main(["--state", str(tmp_path / "state"), "--orch", str(orch), "--db", str(db)])
+
+    out = capsys.readouterr()
+    assert (code, out.out, out.err) == (0, "dashboard sign-in is off\n", "")
+    assert health.read_heartbeats(db) is None
+
+
+def test_main_once_ticks_and_beats(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                   capsys: pytest.CaptureFixture[str]) -> None:
+    attempts = Attempts(tmp_path, monkeypatch)
+    attempts.mode("ok", codex_b=b"Logged in using ChatGPT\n")
+    (attempts.side / "approved").touch()
+    rid = attempts.box.request("signin", account="codex-b")
+
+    code = signin_broker.main([
+        "--once", "--state", str(tmp_path), "--orch", str(_orch_yml(tmp_path, attempts.box.spool, attempts.relay)),
+        "--machines", str(attempts.world.machines), "--db", str(attempts.world.db),
+    ])
+
+    assert code == 0, capsys.readouterr().err
+    (line,) = attempts.lines(rid)
+    assert (line["field"], line["account"], line["result"], line["error"]) == ("signin", "codex-b", "ok", None)
+    assert attempts.view(rid) == {"result": "ok", "error": None}
+    config, _ = load_machines_yml(attempts.world.machines)
+    (beat,) = _brokers(attempts.world.db)
+    assert (beat.device, beat.bot, beat.version) == (config.orch_host, "", health.LOADED_VERSION)
+    assert beat.last_seen is not None
+
+
+def test_orch_accounts_signin_broker_serves_and_beats_until_sigterm(tmp_path: Path) -> None:
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    relay = tmp_path / "relay"
+    relay.mkdir()
+    db = tmp_path / "orch.db"
+    broker = subprocess.Popen(
+        [str(ROOT / "bin" / "orch"), "accounts", "signin-broker", "--state", str(tmp_path / "state"),
+         "--orch", str(_orch_yml(tmp_path, spool, relay)), "--db", str(db)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.monotonic() + 30
+        while not _brokers(db) and broker.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert broker.poll() is None, broker.communicate()
+        (beat,) = _brokers(db)
+        assert (beat.pid, beat.stopped_at) == (broker.pid, None)
+        broker.send_signal(signal.SIGTERM)
+        out, err = broker.communicate(timeout=30)
+    finally:
+        if broker.poll() is None:
+            broker.kill()
+            broker.wait()
+    assert broker.returncode == 0, err
+    (beat,) = _brokers(db)
+    assert beat.stopped_at is not None

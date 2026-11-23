@@ -208,7 +208,7 @@ commands:
   retry            ask the dispatcher to restart a stuck ticket (kind=retry)
   trace            read-only: every job attempt on a ticket and its handoff verdict
   usage            per-account usage readings: migrate orch.db, record an external reading (#772)
-  accounts         prepare a bot's account folders, check every sign-in (issue #1065)
+  accounts         prepare account folders, check sign-ins, run the dashboard sign-in broker
 
 check-config [--orch PATH] [--machines PATH] [--factory [owner/name=]PATH ...]
              [--allow-placeholders] [--digest]
@@ -593,6 +593,17 @@ accounts doctor [--db PATH] [--machines PATH] [--json]
   $ORCH_DB, --machines to the checkout's machines.yml. Exits 0 after a
   pass whatever the statuses, 2 on a config error, 1 when the database
   cannot be written.
+
+accounts signin-broker [--state DIR] [--db PATH] [--machines PATH] [--orch PATH] [--once]
+  Take the dashboard's sign-in requests from the settings spool through
+  dashboard.settings.relay and run each admitted attempt to one audit
+  line. Prints "dashboard sign-in is off" and exits 0 when orch.yml sets
+  no relay. Beats as the signin-broker health component until SIGTERM or
+  SIGINT; --once makes one pass, running admitted attempts to the end.
+  --state defaults to $ORCH_STATE_DIR or ~/.local/state/factory, --db to
+  $ORCH_DB or orch.db in the state dir. Exits 1 on an invalid orch.yml, a
+  relay host ssh -G names no user for, or a --once pass that cannot read
+  the spool; a serving broker logs spool errors and retries.
 """
 
 
@@ -2921,6 +2932,10 @@ def _usage(argv: list[str]) -> int:
 
 
 def _accounts(argv: list[str]) -> int:
+    if argv[:1] == ["signin-broker"]:
+        from lib import signin_broker
+
+        return signin_broker.main(argv[1:])
     parser = _Parser(prog="orch accounts", add_help=True, allow_abbrev=False)
     commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
     prepare = commands.add_parser("prepare", allow_abbrev=False)
