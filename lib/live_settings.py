@@ -39,11 +39,9 @@ before account switches existed has no say on accounts.
 of them the poller acted on, with `adopted_digest` the digest of the
 switches it adopted. The settings applier records `written` right after its
 write as the change's `version`; the change is applied once `adopted`
-reaches it, the adopted switches hold the requested value
-(`Live.adopted_holds`, or `Live.adopted_account_holds` for an account; both
-read by the dashboard through `peek`) and every waiter it names has recorded
-`seen` at that version, which a claim does only when placement uses exactly
-the adopted switches (`Live.places_by_adopted`).
+reaches it, the adopted switches hold the requested value and every waiter
+it names has recorded `seen` at that version, which a claim does only when
+placement uses exactly the adopted switches (`Live.places_by_adopted`).
 """
 
 from __future__ import annotations
