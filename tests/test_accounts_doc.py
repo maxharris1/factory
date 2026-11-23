@@ -171,3 +171,23 @@ def test_the_1066_decision_note_records_the_three_defaults() -> None:
                    "read-only"):
         assert phrase in note, phrase
     assert "decisions/1066-settings-accounts.md" in settings_section()
+
+
+def test_run_doctor_is_documented_as_preparing_the_pair_first() -> None:
+    apply_pair = next(
+        node for node in ast.walk(ast.parse((ROOT / "lib" / "settings_apply.py").read_text(encoding="utf-8")))
+        if isinstance(node, ast.FunctionDef) and node.name == "_apply_pair"
+    )
+    calls = {node.func.attr for node in ast.walk(apply_pair)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)}
+    ops_read = [node for node in ast.walk(apply_pair) if isinstance(node, ast.Attribute) and node.attr == "op"]
+    assert "_prepare" in calls and ops_read == []
+
+    row = next(line for line in settings_section().splitlines() if line.startswith("| `doctor` |"))
+    assert "as Prepare does" in row
+    prose = {path: " ".join((ROOT / path).read_text(encoding="utf-8").split())
+             for path in ("docs/ACCOUNTS.md", "README.md", "docs/SPEC.md")}
+    assert "Run doctor does the same: it prepares the pair first" in prose["docs/ACCOUNTS.md"]
+    assert "Doctor does the same: it prepares the pair before the pass" in prose["README.md"]
+    assert "`prepare` and `doctor` each run `orch accounts prepare` for the pair" in prose["docs/SPEC.md"]
+    assert [path for path, text in prose.items() if "Doctor runs only the" in text or "doctor runs only" in text] == []

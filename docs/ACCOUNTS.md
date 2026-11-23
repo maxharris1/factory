@@ -49,7 +49,7 @@ and writes the request to the settings spool. The card then shows
 | `set` | `field`, `expect`, `value` | Apply max_jobs, Apply devices, Pause or Resume | Sets one `field`, which is `max_jobs` (1 to 64), `signed_in_on` (a list of devices) or `paused` (true or false). `expect` is the value the card showed. Pause writes `paused: true`. Resume deletes the line. |
 | `remove` | `expect` | Remove | Deletes the account's block and keeps its comments. `expect` is the account as the card showed it, with `harness`, `max_jobs`, `paused` and `signed_in_on`. |
 | `prepare` | `device` | Prepare | Makes the account's folder on `device`, then runs the doctor. It edits nothing. |
-| `doctor` | `device` | Run doctor | Runs the doctor. It edits nothing. |
+| `doctor` | `device` | Run doctor | Makes the account's folder on `device`, as Prepare does, then runs the doctor. It edits nothing. |
 
 ### Refusals by the server
 
@@ -132,8 +132,8 @@ the devices every side lists.
 Prepare runs `<factory_root>/bin/orch accounts prepare --device <device>
 --account <id> --machines /dev/stdin` on the device. It goes over the
 doctor's ssh path as the harness's login there, with the orch host's
-`machines.yml` on stdin. A full doctor pass follows. Run doctor runs only
-the doctor pass. Neither edits `machines.yml`, writes a backup or restarts
+`machines.yml` on stdin. A full doctor pass follows. Run doctor does the
+same: it prepares the pair first, then runs the doctor pass. Neither edits `machines.yml`, writes a backup or restarts
 anything.
 
 Each writes one result. Its field is the op, and its previous and new
