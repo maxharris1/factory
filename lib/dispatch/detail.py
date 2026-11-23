@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from collections.abc import Sequence
@@ -27,7 +28,7 @@ from lib.dispatch.helpers import (
 )
 from lib.dispatch.retry import _harness_job_active
 from lib.dispatch.types import CIResult, Comment, TrackedTicket
-from lib.grok_delivery import GrokDeliveryError
+from lib.grok_delivery import GrokDeliveryError, wake_body
 from lib.handoff import HandoffError, parse_comment
 from lib.max_actions import wait_facts, wait_of
 from lib.queue import Job, JobRequest, job_from_row
@@ -72,10 +73,16 @@ class DetailMixin:
                             self._queue_inbox_post(job, inbox)
                         except Exception as exc:
                             self._record_job_error(job, exc, prefix="driver-inbox:")
-                    receipt = self.grok_delivery.deliver(
-                        job,
-                        logical_key=_grok_logical_key(job),
-                    )
+                    logical_key = _grok_logical_key(job)
+                    receipt = self.grok_delivery.deliver(job, logical_key=logical_key)
+                    if self.log is not None:
+                        request = job.request
+                        digest = hashlib.sha256(wake_body(job, logical_key)).hexdigest()
+                        self.log(
+                            f"wake delivered: job={job.id} repo={request.repo} "
+                            f"ticket={request.ticket_id} action={request.action} "
+                            f"attempt={request.attempt} body_sha256={digest}"
+                        )
                 if not isinstance(receipt, str) or not receipt:
                     raise ValueError("Grok delivery receipt must be a non-empty string")
                 self.queue.finish(
