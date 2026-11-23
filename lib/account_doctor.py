@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
 from lib import attention, lane_limit
-from lib.harness_env import account_tokens, harness_env
+from lib.harness_env import ACCOUNT_ISOLATION, account_tokens, harness_env
 from lib.machines_yml import Device, MachinesConfig
 from lib.remote import (
     _UNTRACE,
@@ -38,6 +38,8 @@ HOLDS = "signin_holds"
 REASON = "account-signin"
 INTERVAL_SECONDS = 30 * 60
 HELD_INTERVAL_SECONDS = 2 * 60
+SIGNOUTS = "signout_locks"
+SIGNOUT_LEASE_SECONDS = 10 * 60
 
 _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS {TABLE} (
@@ -60,6 +62,14 @@ CREATE TABLE IF NOT EXISTS {HOLDS} (
     seen REAL NOT NULL,
     source TEXT NOT NULL CHECK (source IN ('preflight','runtime','doctor')),
     reason TEXT NOT NULL,
+    PRIMARY KEY (account, device)
+)
+"""
+_SIGNOUTS_SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS {SIGNOUTS} (
+    account TEXT NOT NULL,
+    device TEXT NOT NULL,
+    since REAL NOT NULL,
     PRIMARY KEY (account, device)
 )
 """
@@ -433,6 +443,7 @@ _LOGIN: dict[Harness, tuple[tuple[str, ...], str]] = {
     "claude": (("CLAUDE_CODE_OAUTH_TOKEN",), "claude auth login"),
     "codex": ((), "codex login --device-auth"),
 }
+_LOGOUT: dict[Harness, str] = {"claude": "claude auth logout", "codex": "codex logout"}
 _THEN = ", then orch accounts doctor"
 _STEP: dict[Status, str] = {
     "signed-out": "sign in as {login} on {device}: {command}" + _THEN,
@@ -452,6 +463,13 @@ def login_command(harness: Harness, home: str | None) -> str:
         assign = f"{variable}={shlex.quote(home)} "
     env = "".join(f" -u {name}" for name in unset)
     return (f"env{env} " if env else "") + assign + login
+
+
+def logout_script(harness: Harness, home: str) -> str:
+    tokens = " ".join(name for isolation in ACCOUNT_ISOLATION.values() for name in isolation.tokens)
+    inner = (f"{_UNTRACE}unset {tokens} CLAUDE_SECURESTORAGE_CONFIG_DIR; exec env "
+             f"{_STATUS[harness].home_variable}={shlex.quote(home)} {_LOGOUT[harness]} </dev/null >/dev/null 2>&1")
+    return _login(inner, "orch-accounts-logout", ())
 
 
 def _step(row: SignIn, config: MachinesConfig) -> str:
@@ -515,6 +533,25 @@ def _holds(connection: sqlite3.Connection) -> dict[tuple[str, str], Hold]:
 
 def held(connection: sqlite3.Connection) -> frozenset[tuple[str, str]]:
     return frozenset(_holds(connection))
+
+
+def lock_signout(connection: sqlite3.Connection, account: str, device: str, now: float) -> None:
+    connection.execute(_SIGNOUTS_SCHEMA)
+    connection.execute(f"INSERT OR REPLACE INTO {SIGNOUTS} (account, device, since) VALUES (?, ?, ?)",
+                       (account, device, now))
+
+
+def unlock_signout(connection: sqlite3.Connection, account: str, device: str) -> None:
+    connection.execute(_SIGNOUTS_SCHEMA)
+    connection.execute(f"DELETE FROM {SIGNOUTS} WHERE account = ? AND device = ?", (account, device))
+
+
+def signing_out(connection: sqlite3.Connection, now: float) -> frozenset[tuple[str, str]]:
+    connection.execute(_SIGNOUTS_SCHEMA)
+    return frozenset(
+        (str(account), str(device))
+        for account, device in connection.execute(
+            f"SELECT account, device FROM {SIGNOUTS} WHERE since > ?", (now - SIGNOUT_LEASE_SECONDS,)))
 
 
 def newest_hold(connection: sqlite3.Connection) -> float | None:

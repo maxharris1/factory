@@ -332,6 +332,8 @@ def account_loads(
             )
         )
     signed_out = account_doctor.held(connection) if _has_table(connection, account_doctor.HOLDS) else frozenset()
+    if _has_table(connection, account_doctor.SIGNOUTS):
+        signed_out |= account_doctor.signing_out(connection, now)
     return AccountLoads(running, frozenset(held), frozenset(closed), score, signed_in, signed_out, running_on)
 
 

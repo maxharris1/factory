@@ -14,9 +14,10 @@ backup, replace, restart and audit:
 No change may drop an account, or an account's device, that holds a running
 job, and a failed restart never restores a file that would.
 
-A body with `op: "prepare"` or `op: "doctor"` names an `account` and a
-`device` instead: either one prepares that pair's folder on the device, then
-runs the doctor, never editing machines.yml.
+A body with `op: "prepare"`, `op: "doctor"` or `op: "signout"` names an
+`account` and a `device` instead: prepare and doctor prepare that pair's folder
+on the device, signout runs the harness logout there, and each then runs the
+doctor, never editing machines.yml.
 """
 
 from __future__ import annotations
@@ -52,7 +53,7 @@ from lib.settings_apply import (
 )
 
 ADD_KEYS = ("harness", "max_jobs", "signed_in_on")
-PAIR_OPS = frozenset({"prepare", "doctor"})
+PAIR_OPS = frozenset({"prepare", "doctor", "signout"})
 _HEAD = re.compile(r"^accounts:(?P<empty>[ 	]*\[\])?(?P<rest>[ 	]*(?:#.*)?)$")
 
 def _is_max_jobs(value: object) -> bool:

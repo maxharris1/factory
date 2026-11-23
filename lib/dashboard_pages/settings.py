@@ -13,7 +13,8 @@ import time
 
 from lib.dashboard_pages.common import _chip, _e, _panel, _span
 
-RESULT_TONE = {"applied": "ok", "pending": "warn", "refused": "warn", "failed": "bad", "superseded": "muted",
+RESULT_TONE = {"applied": "ok", "pending": "warn", "ok": "ok", "signed-out": "muted", "mismatch": "warn",
+               "expired": "warn", "cancelled": "muted", "refused": "warn", "failed": "bad", "superseded": "muted",
                "other": "muted"}
 RESULTS_PER_CARD = 5
 QUEUED = "queued (applies within ~2 min)"
@@ -101,7 +102,8 @@ def _value(value: object) -> str:
 
 
 def result_line(row: dict) -> str:
-    return (f"{row.get('field') or '—'} {_value(row.get('previous'))} → {_value(row.get('new'))}"
+    where = f" on {row['device']}" if row.get("target") == "account" and row.get("device") else ""
+    return (f"{row.get('field') or '—'}{where} {_value(row.get('previous'))} → {_value(row.get('new'))}"
             f" · {row.get('actor') or '—'} · {row.get('applied_at') or row.get('requested_at') or '—'}")
 
 
@@ -259,7 +261,8 @@ _SCRIPT = r"""
   }
   function stValue(v) { return v === null || v === undefined ? '—' : String(v); }
   function stLine(r) {
-    return (r.field || '—') + ' ' + stValue(r.previous) + ' → ' + stValue(r.new) + ' · ' + (r.actor || '—') +
+    var where = r.target === 'account' && r.device ? ' on ' + r.device : '';
+    return (r.field || '—') + where + ' ' + stValue(r.previous) + ' → ' + stValue(r.new) + ' · ' + (r.actor || '—') +
       ' · ' + (r.applied_at || r.requested_at || '—');
   }
   function stRecent(d, keep) { return ((d.settings || {}).results || []).filter(keep).reverse().slice(0, ST.perCard); }
@@ -439,7 +442,8 @@ _SCRIPT = r"""
               expect: {harness: a.harness, max_jobs: a.max_jobs, paused: a.paused, signed_in_on: acDevices(a)}};
     },
     prepare: function (c, device) { return {op: 'prepare', account: c.a.id, device: device}; },
-    doctor: function (c, device) { return {op: 'doctor', account: c.a.id, device: device}; }
+    doctor: function (c, device) { return {op: 'doctor', account: c.a.id, device: device}; },
+    signout: function (c, device) { return {op: 'signout', account: c.a.id, device: device}; }
   };
   function acDisable(c) { c.buttons.concat(c.pairButtons).forEach(function (b) { b.disabled = c.busy; }); }
   function acSend(c, body) {
@@ -550,6 +554,7 @@ _SCRIPT = r"""
         add(row, el('span', 'ac-name', device));
         acButton(c, c.pairButtons, row, 'Prepare', 'prepare', device);
         acButton(c, c.pairButtons, row, 'Run doctor', 'doctor', device);
+        acButton(c, c.pairButtons, row, 'Sign out', 'signout', device);
       });
     }
     acDisable(c);

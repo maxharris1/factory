@@ -153,6 +153,45 @@ def test_each_card_shows_its_last_five_account_results_newest_first(tmp_path: Pa
     assert '<p class="empty">no changes yet</p>' in _card(panel, "claude-default")
 
 
+SIGNOUTS = [
+    _change(10, "claude-b", "signout", "ok", "signed-out", device="pc", result="signed-out"),
+    _change(11, "claude-b", "signout", "ok", "ok", device="pc", result="failed", error="logout-exit"),
+    _change(12, "claude-b", "signout", "ok", None, device="mac", result="refused", error="running-job"),
+]
+
+
+def _history(card: str) -> list[tuple[str, str, str]]:
+    return re.findall(r'<li class="st-res"><span class="chip ?([^"]*)">([^<]*)</span>'
+                      r'<span class="st-what">([^<]*)</span>', card)
+
+
+def test_the_card_history_shows_each_signout_result(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path, [*AUDIT, *SIGNOUTS])
+    assert [row["result"] for row in snapshot["settings"]["results"][-3:]] == ["signed-out", "failed", "refused"]
+    card = _card(_panel(snapshot), "claude-b")
+    assert _history(card)[:3] == [
+        ("warn", "refused", "signout on mac ok → — · maxharris1 · 2026-11-17T10:12:30Z"),
+        ("bad", "failed", "signout on pc ok → ok · maxharris1 · 2026-11-17T10:11:30Z"),
+        ("muted", "signed-out", "signout on pc ok → signed-out · maxharris1 · 2026-11-17T10:10:30Z"),
+    ]
+    assert re.findall(r'<span class="st-err">([^<]*)</span>', card)[:2] == ["running-job", "logout-exit"]
+
+
+@needs_node
+def test_script_draws_the_signout_history_like_the_server(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path, [*AUDIT, *SIGNOUTS])
+    out = _run(tmp_path / "run", snapshot)
+    server = _panel(snapshot)
+    assert out["html"]["accounts"] == server[server.index(">") + 1:server.rindex("<")]
+
+
+def test_audit_results_carry_every_signin_and_signout_result() -> None:
+    from lib.dashboard import AUDIT_RESULTS
+
+    assert set(AUDIT_RESULTS) >= {"ok", "signed-out", "mismatch", "expired", "cancelled", "failed", "refused",
+                                  "applied", "pending"}
+
+
 def test_each_pair_that_is_not_ok_shows_its_documented_sign_in_command(tmp_path: Path) -> None:
     panel = _panel(_snapshot(tmp_path))
     commands = {
@@ -299,6 +338,7 @@ def test_signed_in_the_panel_has_the_add_form_and_each_editable_card_its_control
     assert 'data-op="remove"' in claude_b
     assert re.findall(r'data-op="prepare" data-pair="([^"]+)"', claude_b) == ["pc", "mac"]
     assert re.findall(r'data-op="doctor" data-pair="([^"]+)"', claude_b) == ["pc", "mac"]
+    assert re.findall(r'data-op="signout" data-pair="([^"]+)">Sign out</button>', claude_b) == ["pc", "mac"]
     for read_only in ("claude-default", "codex-default", "ext-grok"):
         assert "st-ctl" not in _card(accounts, read_only)
 
@@ -355,6 +395,11 @@ CONTROLS = {
     "doctor": (
         [_click(CLAUDE_B, "doctor", **{"data-pair": "pc"})],
         {"target": "account", "op": "doctor", "account": "claude-b", "device": "pc"},
+        "claude-b",
+    ),
+    "signout": (
+        [_click(CLAUDE_B, "signout", **{"data-pair": "mac"})],
+        {"target": "account", "op": "signout", "account": "claude-b", "device": "mac"},
         "claude-b",
     ),
 }

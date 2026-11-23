@@ -1473,6 +1473,7 @@ ACCEPTED = [
     ("remove", "claude-max", {"expect": CLAUDE_MAX}),
     ("prepare", "claude-max", {"device": "pc-wsl-bots"}),
     ("doctor", "codex-pro", {"device": "box"}),
+    ("signout", "claude-max", {"device": "pc-wsl-bots"}),
 ]
 
 
@@ -1534,6 +1535,9 @@ REFUSED = [
     ("remove", "claude-default", {"expect": {"harness": "claude", "max_jobs": None, "paused": False,
                                              "signed_in_on": ["box"]}}, 403, "read-only"),
     ("doctor", "claude-default", {"device": "box"}, 403, "read-only"),
+    ("signout", "claude-default", {"device": "box"}, 403, "read-only"),
+    ("signout", "claude-max", {"device": "laptop"}, 404, "not-in-snapshot"),
+    ("signout", "claude-max", {"device": ["box"]}, 400, "bad-value"),
     ("add", "claude-default", {"harness": "claude", "max_jobs": 3, "signed_in_on": []}, 403, "read-only"),
     ("add", "codex-default", {"harness": "codex", "max_jobs": 3, "signed_in_on": []}, 403, "read-only"),
     ("add", "api-two", {"harness": "external", "max_jobs": 3, "signed_in_on": []}, 403, "read-only"),
@@ -1588,6 +1592,7 @@ DECLARED_DEFAULT_VIEW = {"harness": "claude", "max_jobs": 2, "paused": False,
     ("remove", {"expect": DECLARED_DEFAULT_VIEW}),
     ("prepare", {"device": "box"}),
     ("doctor", {"device": "box"}),
+    ("signout", {"device": "box"}),
 ])
 def test_a_declared_default_account_is_refused_and_writes_nothing(
     account_client: Client, actions_site: Path, spool: Path, op, fields
