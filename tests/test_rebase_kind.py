@@ -400,11 +400,11 @@ CONFLICT = (
 ANSWERS = "<!-- orch:v1 kind=answers from=grok-bot role=orchestrator -->\nKeep main's side.\n"
 
 
-def conflicted(tmp_path: Path) -> tuple[Flow, dict]:
+def conflicted(tmp_path: Path, body: str = CONFLICT) -> tuple[Flow, dict]:
     flow = in_review(tmp_path)
     assert flow.post("rebase-42", REBASE, "grok-login") == "queued-rebase"
     rebase = detail_of(flow.finish("claude", "conflict-1"))["rebase"]
-    assert flow.post("conflict-1", CONFLICT, "claude-login") == "waiting-max"
+    assert flow.post("conflict-1", body, "claude-login") == "waiting-max"
     return flow, rebase
 
 
@@ -423,8 +423,30 @@ def test_a_rebase_conflict_parks_on_max_at_the_unchanged_head(tmp_path: Path) ->
     assert wake["head"] == HEADS[1]
 
 
-def test_a_rebase_conflict_records_the_outcome_with_its_files(tmp_path: Path) -> None:
-    flow, _ = conflicted(tmp_path)
+QUESTIONS = "<!-- orch:v1 kind=questions from=claude-bot role=builder -->\n"
+CONFLICT_FORMATS = {
+    "dash bullets": CONFLICT,
+    "star bullets": "Conflicted files:\n* `lib/dispatch/questions.py`\n* `tests/test_rebase_kind.py`\n",
+    "dotted numbers": "Conflicted files:\n1. lib/dispatch/questions.py\n2. tests/test_rebase_kind.py\n",
+    "paren numbers": (
+        "Conflicted files:\n1) `lib/dispatch/questions.py`\n2) `tests/test_rebase_kind.py`\n"
+        "Which side should I keep?\n"
+    ),
+    "prose": (
+        "HEAD is back at `0123abc`. The rebase onto `main` stopped in "
+        "`lib/dispatch/questions.py` and `tests/test_rebase_kind.py`. Which side should I keep?\n"
+    ),
+    "fenced name-only output": (
+        "`git diff --name-only --diff-filter=U` printed:\n\n```\n"
+        "lib/dispatch/questions.py\ntests/test_rebase_kind.py\n```\n\nWhich side should I keep?\n"
+    ),
+    "bare lines": "Conflicted files:\nlib/dispatch/questions.py\ntests/test_rebase_kind.py\nThanks.\n",
+}
+
+
+@pytest.mark.parametrize("body", CONFLICT_FORMATS.values(), ids=CONFLICT_FORMATS.keys())
+def test_a_rebase_conflict_records_the_outcome_with_its_files(tmp_path: Path, body: str) -> None:
+    flow, _ = conflicted(tmp_path, body if body.startswith("<!--") else QUESTIONS + body)
 
     assert decisions(flow)[-1] == (
         "conflict-1",

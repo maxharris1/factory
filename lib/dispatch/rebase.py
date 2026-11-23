@@ -20,20 +20,27 @@ LEAVES_MERGE_QUEUE = frozenset({"merge-queue", "waiting-external"})
 REBASE_FROM = (
     frozenset({"review", "fixing", "awaiting-ok", "capped", "handed-off"}) | LEAVES_MERGE_QUEUE
 )
-_LIST_ITEM = re.compile(r"^\s*(?:[-*]|\d+\.)\s+(.+?)\s*$")
-_BACKTICKED = re.compile(r"`([^`]+)`")
+_LIST_MARKER = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+_FENCE = re.compile(r"^\s*(?:```|~~~)")
+_ALONE = re.compile(r"`?([^`\s]+)`?")
+_BACKTICKED = re.compile(r"`([^`\s]+)`")
+_PATH_LIKE = re.compile(r"/|\w\.\w")
 
 
 def conflict_files(body: str) -> tuple[str, ...]:
     files = []
+    fenced = False
     for line in body.splitlines():
-        item = _LIST_ITEM.match(line)
-        if item is None:
+        if _FENCE.match(line):
+            fenced = not fenced
             continue
-        span = _BACKTICKED.search(item[1])
-        path = span[1] if span else item[1]
-        if not any(character.isspace() for character in path):
-            files.append(path)
+        listed = not fenced and _LIST_MARKER.match(line) is not None
+        text = line.strip() if fenced else _LIST_MARKER.sub("", line, count=1).strip()
+        alone = _ALONE.fullmatch(text)
+        if alone and (fenced or listed or text.startswith("`") or _PATH_LIKE.search(text)):
+            files.append(alone[1])
+        elif not fenced:
+            files.extend(span for span in _BACKTICKED.findall(text) if _PATH_LIKE.search(span))
     return tuple(dict.fromkeys(files))
 
 
