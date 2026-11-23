@@ -9,7 +9,8 @@ service script with a fixed argv:
 
 * poller: deploy/poller-service.sh restart (which runs deploy/run-poller.sh);
 * waiter: deploy/waiter-service.sh <bot> restart;
-* Linear listener and tunnel: deploy/linear-webhook-service.sh restart.
+* Linear listener and tunnel: deploy/linear-webhook-service.sh restart;
+* sign-in broker: deploy/signin-broker-service.sh restart.
 
 Self-heal never sends a signal itself. The waiter service stops only its
 supervisor and that bot's `orch wait --autostart`, and each job's
@@ -21,7 +22,8 @@ Per component (its health label), in order:
 
 1. Only a component on this device that the registry expects and whose
    service this account owns (an autostart flag in ~/.config/factory:
-   poller-autostart, waiter-autostart-<bot>, linear-webhook-autostart) is
+   poller-autostart, waiter-autostart-<bot>, linear-webhook-autostart,
+   signin-broker-autostart) is
    considered, so one account never acts on another user's services.
 2. A component held stopped (its *.stopped marker) is skipped: self-heal
    never overrides an operator's stop.
@@ -32,7 +34,8 @@ Per component (its health label), in order:
 3. A component restarted under SETTLE_SECONDS ago is left to come up.
 4. Down: restart. Stale code (its heartbeat names another commit than the
    checkout): restart once idle. The Linear listener is busy while a
-   delivery is under REQUEST_DEADLINE_SECONDS old; the poller (at its cycle
+   delivery is under REQUEST_DEADLINE_SECONDS old, and the sign-in broker
+   while a signout_locks row is under its lease; the poller (at its cycle
    boundary) and a waiter (outside a claim) stop at a safe point themselves.
 5. Backoff: a successful stale-code restart is a version update. It does
    not use the budget when the component was seen running the commit of
@@ -90,7 +93,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TextIO
 
-from lib import health
+from lib import account_doctor, health
 from lib.grok_delivery import GrokDeliveryError, WebhookResult, authorization, send_webhook
 from lib.linear_webhook import REQUEST_DEADLINE_SECONDS
 from lib.machines_yml import orch_host
@@ -108,6 +111,8 @@ STATE_NAME = "self-heal.state.json"
 
 POLLER_SERVICE = "poller"
 LISTENER_SERVICE = "linear-webhook"
+SIGNIN_BROKER_SERVICE = "signin-broker"
+HOST_SERVICES = (POLLER_SERVICE, LISTENER_SERVICE, SIGNIN_BROKER_SERVICE)
 
 RESTART = "restart"
 SKIP = "skip"
@@ -125,12 +130,14 @@ Poster = Callable[[str, str, bytes, float], WebhookResult]
 @dataclass(frozen=True)
 class Facts:
     """This host: its device, the services this account owns and holds
-    stopped, and whether the Linear listener is mid-delivery."""
+    stopped, whether the Linear listener is mid-delivery, and whether a
+    sign-in or sign-out holds an account pair."""
 
     device: str
     owned: frozenset[str] = frozenset()
     held: frozenset[str] = frozenset()
     listener_busy: bool = False
+    signin_busy: bool = False
     # When each bot's drain marker was written (its mtime).
     drain_since: Mapping[str, float] = field(default_factory=dict)
     # The commit each bot's waiter acknowledged draining for, when its ack
@@ -166,29 +173,26 @@ class KeyState:
 def service_of(component: str, bot: str) -> str | None:
     """The service id that restarts a component, or None (the dashboard
     writer and device probes have none)."""
-    if component == health.POLLER:
-        return POLLER_SERVICE
-    if component == health.WAITER and bot in health.OWNING_BOTS:
-        return f"waiter:{bot}"
-    if component in (health.LISTENER, health.TUNNEL):
-        return LISTENER_SERVICE
-    return None
+    if component == health.WAITER:
+        return f"waiter:{bot}" if bot in health.OWNING_BOTS else None
+    return {
+        health.POLLER: POLLER_SERVICE,
+        health.LISTENER: LISTENER_SERVICE,
+        health.TUNNEL: LISTENER_SERVICE,
+        health.SIGNIN_BROKER: SIGNIN_BROKER_SERVICE,
+    }.get(component)
 
 
 def service_argv(service: str, deploy: Path) -> list[str]:
-    if service == POLLER_SERVICE:
-        return [str(deploy / "poller-service.sh"), "restart"]
-    if service == LISTENER_SERVICE:
-        return [str(deploy / "linear-webhook-service.sh"), "restart"]
+    if service in HOST_SERVICES:
+        return [str(deploy / f"{service}-service.sh"), "restart"]
     bot = service.split(":", 1)[1]
     return [str(deploy / "waiter-service.sh"), bot, "restart"]
 
 
 def service_log(service: str, state_dir: Path) -> Path:
-    if service == POLLER_SERVICE:
-        return state_dir / "poller-service.log"
-    if service == LISTENER_SERVICE:
-        return state_dir / "linear-webhook-service.log"
+    if service in HOST_SERVICES:
+        return state_dir / f"{service}-service.log"
     return state_dir / f"waiter-{service.split(':', 1)[1]}-service.log"
 
 
@@ -273,6 +277,9 @@ def decide(
             continue
         if item.get("state") != health.DOWN and service == LISTENER_SERVICE and facts.listener_busy:
             actions.append(act(DEFER, "stale code, busy with a delivery"))
+            continue
+        if item.get("state") != health.DOWN and service == SIGNIN_BROKER_SERVICE and facts.signin_busy:
+            actions.append(act(DEFER, "stale code, a sign-in or sign-out holds a pair"))
             continue
         if item.get("state") != health.DOWN and service.startswith("waiter:"):
             bot = service.split(":", 1)[1]
@@ -575,12 +582,8 @@ orch heal devices [--state DIR] [--db PATH] [--checkout DIR] [--machines PATH]
 
 def facts_for(device: str, config_dir: Path, state_dir: Path, db: Path | None,
               now: float) -> Facts:
-    owned: set[str] = set()
-    held: set[str] = set()
-    if (config_dir / "poller-autostart").is_file():
-        owned.add(POLLER_SERVICE)
-    if (config_dir / "linear-webhook-autostart").is_file():
-        owned.add(LISTENER_SERVICE)
+    owned = {service for service in HOST_SERVICES if (config_dir / f"{service}-autostart").is_file()}
+    held = {service for service in HOST_SERVICES if (state_dir / f"{service}.stopped").exists()}
     drains: dict[str, float] = {}
     acked: dict[str, str] = {}
     for bot in health.OWNING_BOTS:
@@ -595,28 +598,29 @@ def facts_for(device: str, config_dir: Path, state_dir: Path, db: Path | None,
                 acked[bot] = ack
         if (state_dir / f"waiter-{bot}.stopped").exists():
             held.add(f"waiter:{bot}")
-    if (state_dir / "poller.stopped").exists():
-        held.add(POLLER_SERVICE)
-    if (state_dir / "linear-webhook.stopped").exists():
-        held.add(LISTENER_SERVICE)
-    return Facts(device, frozenset(owned), frozenset(held), _listener_busy(db, now),
-                 drains, acked)
+    delivery = _read_row(db, "SELECT last_received_at FROM linear_webhook_health WHERE id = 1")
+    pair = _read_row(db, f"SELECT 1 FROM {account_doctor.SIGNOUTS} WHERE since > ? LIMIT 1",
+                     (now - account_doctor.SIGNOUT_LEASE_SECONDS,))
+    return Facts(
+        device, frozenset(owned), frozenset(held),
+        listener_busy=bool(delivery and delivery[0] is not None
+                           and now - float(delivery[0]) < REQUEST_DEADLINE_SECONDS),
+        signin_busy=pair is not None,
+        drain_since=drains, drain_acked=acked,
+    )
 
 
-def _listener_busy(db: Path | None, now: float) -> bool:
+def _read_row(db: Path | None, sql: str, args: Sequence = ()) -> tuple | None:
     if db is None or not db.is_file():
-        return False
+        return None
     try:
         connection = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
         try:
-            row = connection.execute(
-                "SELECT last_received_at FROM linear_webhook_health WHERE id = 1"
-            ).fetchone()
+            return connection.execute(sql, args).fetchone()
         finally:
             connection.close()
     except sqlite3.Error:
-        return False
-    return bool(row and row[0] is not None and now - float(row[0]) < REQUEST_DEADLINE_SECONDS)
+        return None
 
 
 def _webhook(orch_path: Path | None) -> Webhook:

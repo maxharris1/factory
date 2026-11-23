@@ -198,6 +198,9 @@ unset factory_waiter_flag factory_waiter_bot
 if [ -f "\${HOME}/.config/factory/linear-webhook-autostart" ] && [ -x "${LINEAR_SERVICE}" ]; then
     ("${LINEAR_SERVICE}" ensure >>"${STATE}/linear-webhook-service.log" 2>&1 &)
 fi
+if [ -f "\${HOME}/.config/factory/signin-broker-autostart" ] && [ -x "${ROOT}/deploy/signin-broker-service.sh" ]; then
+    ("${ROOT}/deploy/signin-broker-service.sh" ensure >>"${STATE}/signin-broker-service.log" 2>&1 &)
+fi
 # Self-heal loop (deploy/self-heal.sh install-autostart, #107), where no
 # systemd user timer runs it.
 if [ -f "\${HOME}/.config/factory/self-heal-autostart" ] && [ -x "${ROOT}/deploy/self-heal.sh" ]; then

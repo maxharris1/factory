@@ -1636,8 +1636,8 @@ stale code, with no LLM and no tokens. Every 2 minutes `deploy/self-heal.sh
 once` pipes `orch health --json` into `orch heal --health-json -`
 (`lib/heal.py`). For each component on this device, it acts only when this
 account owns the component's service, which is marked by an autostart flag
-in `~/.config/factory`: `poller-autostart`, `waiter-autostart-<bot>` or
-`linear-webhook-autostart`. A waiter runs as its own bot user, so each
+in `~/.config/factory`: `poller-autostart`, `waiter-autostart-<bot>`,
+`linear-webhook-autostart` or `signin-broker-autostart`. A waiter runs as its own bot user, so each
 account heals only its own services. It restarts through the component's own
 service script and never sends a signal itself:
 
@@ -1649,6 +1649,13 @@ service script and never sends a signal itself:
   run` has its own session and keeps running.
 - the Linear listener or its tunnel: `deploy/linear-webhook-service.sh
   restart`. For stale code it waits until no delivery is in flight.
+- the sign-in broker (`orch accounts signin-broker`):
+  `deploy/signin-broker-service.sh restart`. A down broker restarts at once.
+  For stale code it waits until no `signout_locks` row is live, so no
+  sign-in or sign-out is cut off mid-attempt. The script keeps one broker per
+  state directory: the broker holds `signin-broker.lock` for its whole life.
+  `install-autostart` writes `signin-broker-autostart`, and the generated
+  `profile.sh` then runs `ensure` in each bot shell.
 
 The rules for each component:
 

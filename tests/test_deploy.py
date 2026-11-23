@@ -1328,7 +1328,7 @@ def test_profile_hook_starts_nothing_outside_the_host_pid_namespace(
     )
     config = tmp_path / ".config/factory"
     for flag in ["poller-autostart", "waiter-autostart-claude-bot", "self-heal-autostart",
-                 "linear-webhook-autostart"]:
+                 "linear-webhook-autostart", "signin-broker-autostart"]:
         (config / flag).touch()
     state = tmp_path / ".local/state/factory"
     pidfiles = {state / "poller.pid": "1599489\n", state / "waiter-claude-bot.pid": "1667506\n"}
@@ -1380,6 +1380,32 @@ def test_profile_hook_still_runs_in_the_recorded_host_namespace(tmp_path: Path) 
         deadline = time.monotonic() + 10
         while not log.exists():
             assert time.monotonic() < deadline, "the hook did not run poller-service.sh ensure"
+            time.sleep(0.1)
+    finally:
+        reap_home(tmp_path)
+
+
+def test_profile_hook_ensures_the_signin_broker_when_its_autostart_is_on(tmp_path: Path) -> None:
+    environment = _install_environment(tmp_path, "venv")
+    assert _install(environment).returncode == 0
+    (tmp_path / ".config/factory/self-heal-autostart").unlink()
+    (tmp_path / ".config/factory/signin-broker-autostart").touch()
+    env = _profile_env(tmp_path)
+    env.pop("ORCH_JOB_PROOF", None)
+    env.pop("CODEX_SANDBOX", None)
+    env["ORCH_PROC_DIR"] = str(_fake_proc(tmp_path, "4484", os.readlink("/proc/self/ns/pid")))
+
+    try:
+        sourced = subprocess.run(
+            ["bash", "-c", "set -e; . deploy/profile.sh; printf ok"], cwd=ROOT, env=env,
+            text=True, capture_output=True, timeout=30, check=False,
+        )
+
+        assert sourced.returncode == 0 and sourced.stdout == "ok", sourced.stderr
+        log = tmp_path / ".local/state/factory/signin-broker-service.log"
+        deadline = time.monotonic() + 10
+        while not log.exists():
+            assert time.monotonic() < deadline, "the hook did not run signin-broker-service.sh ensure"
             time.sleep(0.1)
     finally:
         reap_home(tmp_path)
