@@ -40,6 +40,7 @@ INTERVAL_SECONDS = 30 * 60
 HELD_INTERVAL_SECONDS = 2 * 60
 SIGNOUTS = "signout_locks"
 SIGNOUT_LEASE_SECONDS = 10 * 60
+FENCES = "signin_fences"
 
 _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS {TABLE} (
@@ -72,6 +73,12 @@ CREATE TABLE IF NOT EXISTS {SIGNOUTS} (
     since REAL NOT NULL,
     owner TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (account, device)
+)
+"""
+_FENCES_SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS {FENCES} (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    since REAL NOT NULL
 )
 """
 _HOLD = (f"INSERT INTO {HOLDS} (account, device, since, seen, source, reason) VALUES (?1, ?2, ?3, ?3, ?4, ?5) "
@@ -564,6 +571,27 @@ def signing_out(connection: sqlite3.Connection, now: float) -> frozenset[tuple[s
         (str(account), str(device))
         for account, device in connection.execute(
             f"SELECT account, device FROM {SIGNOUTS} WHERE since > ?", (now - SIGNOUT_LEASE_SECONDS,)))
+
+
+def fence_signins(connection: sqlite3.Connection, now: float) -> bool:
+    """Stop the broker admitting sign-ins, unless a sign-in or sign-out already
+    holds a pair. The caller supplies the transaction."""
+    if signing_out(connection, now):
+        return False
+    connection.execute(_FENCES_SCHEMA)
+    connection.execute(f"INSERT OR REPLACE INTO {FENCES} (id, since) VALUES (1, ?)", (now,))
+    return True
+
+
+def unfence_signins(connection: sqlite3.Connection) -> None:
+    connection.execute(_FENCES_SCHEMA)
+    connection.execute(f"DELETE FROM {FENCES}")
+
+
+def signins_fenced(connection: sqlite3.Connection, now: float) -> bool:
+    connection.execute(_FENCES_SCHEMA)
+    return connection.execute(f"SELECT 1 FROM {FENCES} WHERE since > ?",
+                              (now - SIGNOUT_LEASE_SECONDS,)).fetchone() is not None
 
 
 def newest_hold(connection: sqlite3.Connection) -> float | None:

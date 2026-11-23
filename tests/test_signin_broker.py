@@ -235,6 +235,21 @@ def test_a_pair_signing_out_is_refused(intake: Intake) -> None:
     assert (line["id"], line["result"], line["error"]) == (rid, "refused", "signing-out")
 
 
+def test_a_signin_is_refused_while_heal_restarts_the_broker(intake: Intake) -> None:
+    intake.made("claude-c")
+    with closing(sqlite3.connect(intake.box.world.db, isolation_level=None)) as connection:
+        assert account_doctor.fence_signins(connection, NOW)
+    rid = intake.box.request("signin")
+
+    intake.tick()
+
+    (line,) = intake.lines()
+    assert (line["id"], line["result"], line["error"]) == (rid, "refused", "broker-restarting")
+    assert intake.launched == []
+    with closing(sqlite3.connect(intake.box.world.db, isolation_level=None)) as connection:
+        assert account_doctor.signing_out(connection, NOW) == frozenset()
+
+
 def test_the_refusal_records_the_pairs_doctor_status_before(intake: Intake) -> None:
     assert intake.box.world.doctor() == 0
     rid = intake.box.request("signin", actor="someone-else")

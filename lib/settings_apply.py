@@ -598,6 +598,7 @@ class Held:
     commit_version: Callable[[Path], int | None]
     pairs: Callable[[MachinesConfig], list[RunningPair]]
     hold: Callable[[str, str, str, float], bool]
+    fenced: Callable[[float], bool] = lambda now: False
 
 
 def approve(request: SettingsRequest | AccountRequest | PairRequest, approver: str) -> None:
@@ -675,7 +676,8 @@ def claim_lock(db: Path) -> ClaimLock:
             yield Held(running=lambda config: slots_in_use(connection, config),
                        commit_version=commit_version,
                        pairs=lambda config: running_pairs(connection, config),
-                       hold=hold_pair)
+                       hold=hold_pair,
+                       fenced=lambda now: account_doctor.signins_fenced(connection, now))
         finally:
             connection.close()
 

@@ -35,8 +35,10 @@ Per component (its health label), in order:
 4. Down: restart. Stale code (its heartbeat names another commit than the
    checkout): restart once idle. The Linear listener is busy while a
    delivery is under REQUEST_DEADLINE_SECONDS old, and the sign-in broker
-   while a signout_locks row is under its lease; the poller (at its cycle
-   boundary) and a waiter (outside a claim) stop at a safe point themselves.
+   while a signout_locks row is under its lease (rechecked as it restarts,
+   under a signin_fences row that stops it admitting sign-ins meanwhile);
+   the poller (at its cycle boundary) and a waiter (outside a claim) stop
+   at a safe point themselves.
 5. Backoff: a successful stale-code restart is a version update. It does
    not use the budget when the component was seen running the commit of
    its previous update; otherwise it counts. Down restarts, failed restart
@@ -88,7 +90,8 @@ import sqlite3
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import closing, contextmanager, nullcontext, suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TextIO
@@ -119,6 +122,7 @@ SKIP = "skip"
 DEFER = "defer"
 DRAIN = "drain"
 ESCALATE = "escalate"
+SIGNIN_HELD = "stale code, a sign-in or sign-out holds a pair"
 DRAIN_ESCALATE_SECONDS = 2 * 60 * 60
 ACK_POLLS = 20
 ACK_POLL_SECONDS = 0.5
@@ -130,14 +134,15 @@ Poster = Callable[[str, str, bytes, float], WebhookResult]
 @dataclass(frozen=True)
 class Facts:
     """This host: its device, the services this account owns and holds
-    stopped, whether the Linear listener is mid-delivery, and whether a
-    sign-in or sign-out holds an account pair."""
+    stopped, whether the Linear listener is mid-delivery, whether a
+    sign-in or sign-out holds an account pair, and the orch DB that says so."""
 
     device: str
     owned: frozenset[str] = frozenset()
     held: frozenset[str] = frozenset()
     listener_busy: bool = False
     signin_busy: bool = False
+    db: Path | None = None
     # When each bot's drain marker was written (its mtime).
     drain_since: Mapping[str, float] = field(default_factory=dict)
     # The commit each bot's waiter acknowledged draining for, when its ack
@@ -279,7 +284,7 @@ def decide(
             actions.append(act(DEFER, "stale code, busy with a delivery"))
             continue
         if item.get("state") != health.DOWN and service == SIGNIN_BROKER_SERVICE and facts.signin_busy:
-            actions.append(act(DEFER, "stale code, a sign-in or sign-out holds a pair"))
+            actions.append(act(DEFER, SIGNIN_HELD))
             continue
         if item.get("state") != health.DOWN and service.startswith("waiter:"):
             bot = service.split(":", 1)[1]
@@ -511,32 +516,43 @@ def heal(
     child_env = {k: v for k, v in environ.items() if k not in webhook.secret_names}
     done: dict[str, int] = {}
     draining = {a.service.split(":", 1)[1] for a in actions if a.kind == DRAIN}
-    for action in actions:
+
+    def note(action: Action, key: KeyState) -> None:
+        line = f"{action.kind} {action.label} ({action.reason})"
+        if key.last != line:
+            log(line)
+        key.last = line
+
+    for index, action in enumerate(actions):
         key = states.setdefault(action.label, KeyState())
         if action.kind in (SKIP, DEFER, DRAIN):
-            note = f"{action.kind} {action.label} ({action.reason})"
-            if key.last != note:
-                log(note)
-            key.last = note
+            note(action, key)
             continue
         if action.kind == ESCALATE:
             continue
-        key.last = None
         if dry_run:
+            key.last = None
             log(f"would restart {action.label} ({action.reason})")
             continue
         if action.service not in done:
             env = dict(child_env)
             if action.service == POLLER_SERVICE:
                 env["ORCH_POLL_STOP_WAIT"] = POLLER_STOP_WAIT
-            started = clock()
-            code = run(service_argv(action.service, deploy), env,
-                       service_log(action.service, state_dir))
+            fenced = action.service == SIGNIN_BROKER_SERVICE and action.state != health.DOWN
+            with _signin_fence(facts.db, now) if fenced else nullcontext(True) as admitted:
+                if not admitted:
+                    actions[index] = replace(action, kind=DEFER, reason=SIGNIN_HELD)
+                    note(actions[index], key)
+                    continue
+                started = clock()
+                code = run(service_argv(action.service, deploy), env,
+                           service_log(action.service, state_dir))
             done[action.service] = code
             log(f"restart {action.label} ({action.reason}) exit={code} "
                 f"{clock() - started:.1f}s")
         else:
             log(f"restart {action.label} ({action.reason}) with {action.service}")
+        key.last = None
         _record_restart(key, action, version, done[action.service], now)
     if report.get("known") and not dry_run:
         for service in facts.owned:
@@ -566,6 +582,29 @@ def heal(
         key.failures = _recent(key.failures, now)
     save_state(state_dir / STATE_NAME, states)
     return actions
+
+
+@contextmanager
+def _signin_fence(db: Path | None, now: float) -> Iterator[bool]:
+    """Whether the stale broker may restart: no sign-in or sign-out holds a
+    pair, and the broker admits none until the restart ends. Fails closed."""
+    if db is None or not db.is_file():
+        yield True
+        return
+    try:
+        with closing(sqlite3.connect(db, timeout=30, isolation_level=None)) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            fenced = account_doctor.fence_signins(connection, now)
+            connection.execute("COMMIT")
+    except sqlite3.Error:
+        fenced = False
+    try:
+        yield fenced
+    finally:
+        if fenced:
+            with suppress(sqlite3.Error), closing(
+                    sqlite3.connect(db, timeout=30, isolation_level=None)) as connection:
+                account_doctor.unfence_signins(connection)
 
 
 # --- orch heal -------------------------------------------------------------------------------
@@ -606,6 +645,7 @@ def facts_for(device: str, config_dir: Path, state_dir: Path, db: Path | None,
         listener_busy=bool(delivery and delivery[0] is not None
                            and now - float(delivery[0]) < REQUEST_DEADLINE_SECONDS),
         signin_busy=pair is not None,
+        db=db,
         drain_since=drains, drain_acked=acked,
     )
 
