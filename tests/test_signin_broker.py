@@ -184,7 +184,7 @@ def test_a_pair_holding_a_running_job_is_refused(intake: Intake) -> None:
     def busy():
         yield settings_apply.Held(running=lambda config: {"pc": 1}, commit_version=lambda machines: None,
                                   pairs=lambda config: [RunningPair("job-1", "claude-c", "pc", NOW)],
-                                  hold=lambda account, device, now: None)
+                                  hold=lambda account, device, owner, now: True)
 
     intake.broker = intake.make(claims=busy)
     rid = intake.box.request("signin")
@@ -203,7 +203,7 @@ def test_a_running_job_on_another_pair_does_not_refuse(intake: Intake) -> None:
     def busy():
         yield settings_apply.Held(running=lambda config: {"pc": 1}, commit_version=lambda machines: None,
                                   pairs=lambda config: [RunningPair("job-1", "claude-b", "pc", NOW)],
-                                  hold=lambda account, device, now: None)
+                                  hold=lambda account, device, owner, now: True)
 
     intake.broker = intake.make(claims=busy)
     intake.box.request("signin")
@@ -217,7 +217,7 @@ def test_a_running_job_on_another_pair_does_not_refuse(intake: Intake) -> None:
 def test_a_pair_signing_out_is_refused(intake: Intake) -> None:
     intake.made("claude-c")
     with sqlite3.connect(intake.box.world.db) as connection:
-        account_doctor.lock_signout(connection, "claude-c", "pc", NOW)
+        account_doctor.reserve_pair(connection, "claude-c", "pc", "signout-1", NOW)
     rid = intake.box.request("signin")
 
     intake.tick()
@@ -666,3 +666,66 @@ def test_check_config_refuses_a_relay_that_is_not_a_plain_absolute_path(
 ) -> None:
     assert _check(tmp_path, TRUSTED + f"    relay: {relay}\n") != 0
     assert "dashboard.settings.relay must be an absolute path" in capsys.readouterr().err
+
+
+def test_a_signout_cannot_take_the_pair_from_a_live_signin(intake: Intake, monkeypatch: pytest.MonkeyPatch) -> None:
+    from lib.device_pool import DevicePool
+    from lib.machines_yml import load_machines_yml
+    from lib.queue import SQLiteJobQueue
+    from tests.test_pair_placement import enqueue, limit
+
+    box = intake.box
+    box.world.db.unlink()
+    queue = SQLiteJobQueue(box.world.db, clock=lambda: NOW)
+    config, _ = load_machines_yml(box.machines)
+    pool = DevicePool(queue, config, pins=lambda: {"owner/repo": frozenset({"pc"})})
+    limit(queue, "claude-default")
+    limit(queue, "claude-c")
+    assert box.world.doctor() == 0
+    entered, release = threading.Event(), threading.Event()
+
+    def probe(self, *args):
+        entered.set()
+        assert release.wait(15)
+        return False
+
+    monkeypatch.setattr(signin_broker.Broker, "_home_missing", probe)
+    signin = box.request("signin", account="claude-b")
+    intake.broker.tick()
+    try:
+        assert entered.wait(2)
+        signout = box.request("signout", account="claude-b")
+        (entry,) = box.run()
+        intake.broker.tick()
+        with sqlite3.connect(box.world.db) as connection:
+            holds = account_doctor.signing_out(connection, NOW)
+        enqueue(queue, "after-signout-during-signin")
+        claimed = pool.claim("claude")
+    finally:
+        release.set()
+        for worker in intake.workers:
+            worker.join(5)
+
+    assert (entry.id, entry.result, entry.error) == (signout, "refused", "signing-in")
+    assert ("claude-b", "pc") in holds
+    assert claimed is None or (claimed[1].account, claimed[1].device) != ("claude-b", "pc")
+    assert [attempt.request.id for attempt in intake.launched] == [signin]
+
+
+def test_a_signin_cannot_take_the_pair_from_a_live_signout(intake: Intake) -> None:
+    intake.made("claude-c")
+    with sqlite3.connect(intake.box.world.db, isolation_level=None) as connection:
+        assert account_doctor.reserve_pair(connection, "claude-c", "pc", "signout-1", NOW)
+    rid = intake.box.request("signin")
+
+    intake.tick()
+
+    (line,) = intake.lines()
+    assert (line["id"], line["result"], line["error"]) == (rid, "refused", "signing-out")
+    with sqlite3.connect(intake.box.world.db, isolation_level=None) as connection:
+        assert ("claude-c", "pc") in account_doctor.signing_out(connection, NOW)
+        assert not account_doctor.reserve_pair(connection, "claude-c", "pc", "signin-2", NOW)
+        account_doctor.release_pair(connection, "claude-c", "pc", "signin-2")
+        assert ("claude-c", "pc") in account_doctor.signing_out(connection, NOW)
+        account_doctor.release_pair(connection, "claude-c", "pc", "signout-1")
+        assert account_doctor.signing_out(connection, NOW) == frozenset()

@@ -81,7 +81,7 @@ def holding(running: dict[str, int]):
         yield settings_apply.Held(running=lambda config: running,
                                   commit_version=lambda machines: None,
                                   pairs=lambda config: [],
-                                  hold=lambda account, device, now: None)
+                                  hold=lambda account, device, owner, now: True)
 
     return lock
 

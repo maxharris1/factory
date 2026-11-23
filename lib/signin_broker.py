@@ -194,31 +194,31 @@ class Broker:
                 raise Refused("attempt-live")
             if len(self._attempts) >= MAX_CONCURRENT:
                 raise Refused("too-many")
-        with closing(sqlite3.connect(self.db, timeout=30, isolation_level=None)) as connection:
-            if _pair(request) in account_doctor.signing_out(connection, self.clock()):
-                raise Refused("signing-out")
         attempt = Attempt(request, harness, device, home, previous)
         try:
             with self.claims() as held:
                 busy = _pair(request) in {(pair.account, pair.device) for pair in held.pairs(config)}
-                if not busy:
-                    held.hold(*_pair(request), self.clock())
+                taken = not busy and held.hold(*_pair(request), request.id, self.clock())
+                if taken:
                     with self._lock:
                         self._attempts[_pair(request)] = attempt
         except sqlite3.Error:
             raise Refused("cannot read running jobs") from None
         if busy:
             raise Refused("running-job")
+        if not taken:
+            raise Refused("signing-out")
         return attempt
 
     def _refresh_holds(self) -> None:
         if not self._attempts or not self.db.is_file():
             return
         with self._lock:
-            pairs = list(self._attempts)
+            attempts = list(self._attempts.values())
         with closing(sqlite3.connect(self.db, timeout=30, isolation_level=None)) as connection:
-            for account, device in pairs:
-                account_doctor.renew_signout(connection, account, device, self.clock())
+            for attempt in attempts:
+                account_doctor.renew_pair(connection, *_pair(attempt.request), attempt.request.id,
+                                             self.clock())
 
     def _release(self, attempt: Attempt) -> None:
         with self._lock:
@@ -232,7 +232,7 @@ class Broker:
             return
         try:
             with closing(sqlite3.connect(self.db, timeout=30, isolation_level=None)) as connection:
-                account_doctor.unlock_signout(connection, *_pair(attempt.request))
+                account_doctor.release_pair(connection, *_pair(attempt.request), attempt.request.id)
         except sqlite3.Error as exc:
             print(f"signin broker: {type(exc).__name__}", file=sys.stderr)
 

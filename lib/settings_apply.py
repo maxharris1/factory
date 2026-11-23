@@ -597,7 +597,7 @@ class Held:
     running: Callable[[MachinesConfig], Mapping[str, int]]
     commit_version: Callable[[Path], int | None]
     pairs: Callable[[MachinesConfig], list[RunningPair]]
-    hold: Callable[[str, str, float], None]
+    hold: Callable[[str, str, str, float], bool]
 
 
 def approve(request: SettingsRequest | AccountRequest | PairRequest, approver: str) -> None:
@@ -646,7 +646,7 @@ def prepare_pair(transport: ByteTransport, machines: Path, device: Device, harne
 
 ClaimLock = Callable[[], AbstractContextManager[Held]]
 NO_DATABASE = Held(running=lambda config: {}, commit_version=lambda machines: None,
-                   pairs=lambda config: [], hold=lambda account, device, now: None)
+                   pairs=lambda config: [], hold=lambda account, device, owner, now: True)
 
 
 def claim_lock(db: Path) -> ClaimLock:
@@ -667,9 +667,10 @@ def claim_lock(db: Path) -> ClaimLock:
                     return None
                 return live.written
 
-            def hold_pair(account: str, device: str, now: float) -> None:
-                account_doctor.lock_signout(connection, account, device, now)
+            def hold_pair(account: str, device: str, owner: str, now: float) -> bool:
+                taken = account_doctor.reserve_pair(connection, account, device, owner, now)
                 connection.execute("COMMIT")
+                return taken
 
             yield Held(running=lambda config: slots_in_use(connection, config),
                        commit_version=commit_version,
@@ -794,19 +795,21 @@ class Applier:
                     with self.claims() as held:
                         busy = any(pair.account == request.account and pair.device == device.name
                                    for pair in held.pairs(config))
-                        if not busy and blocked is None:
-                            held.hold(request.account, device.name, self.clock())
+                        taken = busy or blocked is not None or held.hold(
+                            request.account, device.name, request.id, self.clock())
                 except sqlite3.Error:
                     return self._entry(request, REFUSED, previous, "cannot read running jobs")
                 if busy:
                     return self._entry(request, REFUSED, previous, "running-job")
+                if not taken:
+                    return self._entry(request, REFUSED, previous, "signing-in")
                 try:
                     error = blocked or self._logout(
                         device, harness, config.account_home(device.name, harness, request.account))
                     account_doctor.run(connection, config, self.transport, self.clock(), self.repo)
                     new = _signin(connection, request)
                 finally:
-                    account_doctor.unlock_signout(connection, request.account, device.name)
+                    account_doctor.release_pair(connection, request.account, device.name, request.id)
         except sqlite3.Error:
             return self._entry(request, FAILED, previous, "doctor-db")
         if error is None and new != "signed-out":
