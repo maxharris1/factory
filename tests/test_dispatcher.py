@@ -8636,7 +8636,7 @@ def test_705_ac1_a_ready_job_done_accepted_while_the_pr_was_frozen_is_reviewed_a
 ) -> None:
     import time
 
-    from lib.factory_md import PreReady
+    from lib.factory_md import CheckCommand
     from lib.job_token import PROOF_ENV
     from tests.handoff_store import serve
     from tests.pool_helpers import CLAIM_PROOF
@@ -8675,7 +8675,7 @@ def test_705_ac1_a_ready_job_done_accepted_while_the_pr_was_frozen_is_reviewed_a
 
     def pr(head: str, *, closed: bool, commits: int) -> TrackedTicket:
         value = _pr_705(ready, head=head, closed=closed, commits=commits)
-        return replace(value, factory=replace(value.factory, pre_ready=PreReady("true", 30)))
+        return replace(value, factory=replace(value.factory, pre_ready=CheckCommand("true", 30)))
 
     dispatcher.process(pr(BASE_705, closed=True, commits=0))
     assert actions.reopened == ["42"]

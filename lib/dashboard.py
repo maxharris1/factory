@@ -333,15 +333,18 @@ _KNOWN_TOKEN = re.compile(
     r"|eyJ[A-Za-z0-9_\-]{8,}(?:\.[A-Za-z0-9_\-]+)*"
     r")"
 )
-_SECRET_ASSIGNMENT = re.compile(
-    r"(?i)\b([A-Za-z0-9_\-]*"
+SECRET_NAME = (
+    r"[A-Za-z0-9_\-]*"
     r"(?:token|secret|passw(?:or)?d|passphrase|pwd|api[_\-]?key|key|auth"
     r"|credential|session|cookie|signature)"
-    r"[A-Za-z0-9_\-]*)"
+    r"[A-Za-z0-9_\-]*"
+)
+_SECRET_ASSIGNMENT = re.compile(
+    rf"(?i)\b({SECRET_NAME})"
     r"([\"']?\s*[:=]\s*)"
-    # A JSON string (escapes allowed, closing quote optional when cut short),
-    # a single-quoted string, or a bare value.
-    r"(\"(?:[^\"\\\n]|\\.)*\"?|'[^'\n]*'?|[^\s,;}\]]+)"
+    # A quoted string (escapes allowed, closing quote optional when cut short)
+    # or a bare value.
+    r"(\"(?:[^\"\\\n]|\\.)*\"?|'(?:[^'\\\n]|\\.)*'?|[^\s,;}\]]+)"
 )
 _EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}")
 # 32+ token characters; _opaque keeps ones that read like names, not keys.

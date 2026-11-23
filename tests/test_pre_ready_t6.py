@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from lib.dispatcher import CIResult, TrackedTicket
-from lib.factory_md import PreReady
+from lib.factory_md import CheckCommand
 from lib.queue import PRE_READY_FAILED, Job, JobRequest, SQLiteJobQueue
 from tests.test_dispatcher import READY, comment, handled_outcome, setup, ticket
 
@@ -56,7 +56,7 @@ def _ready(comment_id: str) -> TrackedTicket:
 
 def _with_pre_ready(snapshot: TrackedTicket) -> TrackedTicket:
     return replace(
-        snapshot, factory=replace(snapshot.factory, pre_ready=PreReady("make check", 60))
+        snapshot, factory=replace(snapshot.factory, pre_ready=CheckCommand("make check", 60))
     )
 
 

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from lib.factory_md import PreReady, load_factory_md
+from lib.factory_md import CheckCommand, load_factory_md
 from lib.pre_ready import check_environ, run
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -52,7 +52,7 @@ def test_the_gate_passes_when_path_python3_is_not_the_install_venv(tmp_path: Pat
     steps = gate_steps(config.pre_ready.command)
     quick = [step for step in steps if not step.endswith(FULL_FAST_SUITE)]
     assert quick and len(quick) < len(steps)
-    spec = PreReady(" && ".join(quick), config.pre_ready.timeout_seconds)
+    spec = CheckCommand(" && ".join(quick), config.pre_ready.timeout_seconds)
 
     result = run(spec, checkout, head, check_environ(caller, None))
 
