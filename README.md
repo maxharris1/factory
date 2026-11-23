@@ -1928,6 +1928,15 @@ unchanged. `lib/harness_env.py` `ACCOUNT_ISOLATION` is the one table that
 names these variables.
 To sign an account in on each device, follow [docs/ACCOUNTS.md](docs/ACCOUNTS.md).
 
+The Accounts panel on the Settings page (issue #1066) adds and removes
+accounts, pauses and resumes them, and sets `max_jobs` and `signed_in_on`,
+with no hand edit of `machines.yml`. It also runs `orch accounts prepare`
+and the doctor for one account on one device. Remove needs the account
+paused with no running job, and keeps its folder. Default and external
+accounts are read-only. "Manage accounts from Settings" in
+[docs/ACCOUNTS.md](docs/ACCOUNTS.md) has the requests, the refusals and when
+each change takes effect.
+
 The older device value `{bot: <bot user>, account: <id>}` still loads and
 means that account is the device's own login. `orch check-config` reports
 it as deprecated. Still, keep {bot, account} until account placement
@@ -2365,10 +2374,11 @@ on or off and set `slot_max` (1 to 64). Drain is the safe way to take a
 device out of placement; turning `enabled` off on a device that holds a
 running job is refused with "drain it first". That check and the file write
 hold orch.db's write lock, and every claim reads the file under the same
-lock, so no job lands in between. The file only narrows a running process
-live (disable, drain, a lower `slot_max`); enabling, clearing drain or a
-higher `slot_max` takes effect when the poller or waiter restarts on the new
-file (fast live enable is #852).
+lock, so no job lands in between. Placement reads these switches from the
+shared settings row (#852). A disable, a drain or a lower `slot_max` reaches
+every claim at once. An enable, a cleared drain or a higher `slot_max` waits
+until the poller adopts the new file. The same page's Accounts panel manages
+usage accounts ("Usage accounts" above).
 
 The dashboard server never edits `machines.yml` or runs a script. It
 cannot reach the orch host, and the orch host's credentials stay there:
@@ -2382,9 +2392,11 @@ cannot reach the orch host, and the orch host's credentials stay there:
    `target: "account"` instead names an `op` (`add`, `set`, `remove`,
    `prepare` or `doctor`) and an `account`. It is refused before anything
    is written for a bad op, keys or value (400), an account or device not
-   in `status.json` (404), a `<harness>-default` account (declared or not)
+   in `status.json` (404), a `prepare` or `doctor` device the account is
+   not signed in on (404), a `<harness>-default` account (declared or not)
    or an external account (403), or a stale `expect` or existing id (409).
-   A `max_jobs` value must be 1-64; its `expect` may be any declared value. Without the
+   A `max_jobs` value must be 1-64; its `expect` may be any declared value.
+   [docs/ACCOUNTS.md](docs/ACCOUNTS.md) lists every op and code. Without the
    variable, `/api/settings` is 404; setting it without
    `DASHBOARD_GITHUB_CLIENT_ID` is a configuration error. At most 20
    requests wait at once.
@@ -2410,6 +2422,18 @@ cannot reach the orch host, and the orch host's credentials stay there:
    `settings-audit.jsonl` in the state dir (actor, request and apply times,
    device, field, previous and new values, result, error, backup), and the
    next push shows it on the page. An id is never applied twice.
+   An account request takes the same path with its own checks. It is
+   refused for a default or external account, an unknown account or device,
+   a device that does not list the harness, a key set in
+   `machines.local.yml`, a stale `expect`, or no change. A remove also
+   needs the account paused (`not-paused`) with no running job on any
+   device. No edit may drop a device where the account runs a job, and a
+   failed restart never restores a file that would. A `prepare` or `doctor`
+   request makes no edit, backup or restart. Prepare runs `orch accounts
+   prepare --device <device> --account <id> --machines /dev/stdin` from the
+   device's `factory_root` over the doctor's ssh path, with this
+   `machines.yml` on stdin, then runs a doctor pass. Doctor runs only the
+   pass. Each records the pair's sign-in status before and after.
 
 Setup, by Max: create the spool as an absolute directory, not a symlink,
 owned by the dashboard user with mode 0755; the account the push SSH logs in

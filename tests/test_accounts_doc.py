@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 from typing import get_args
 
 import pytest
 
-from lib import account_doctor
+from lib import account_doctor, account_requests
 
 ROOT = Path(__file__).resolve().parents[1]
 DOC = ROOT / "docs" / "ACCOUNTS.md"
+DECISION = ROOT / "docs" / "decisions" / "1066-settings-accounts.md"
 
 COMMANDS = (
     "orch accounts prepare",
@@ -100,3 +102,72 @@ def test_the_printed_sign_in_command_is_the_documented_one(harness: str, documen
 ])
 def test_the_device_login_runs_the_documented_command_without_a_folder(harness: str, expected: str) -> None:
     assert account_doctor.login_command(harness, None) == expected
+
+
+def settings_section() -> str:
+    return doc().partition("## Manage accounts from Settings")[2].split("\n## ", 1)[0]
+
+
+@pytest.mark.parametrize("op", sorted(account_requests.OPS))
+def test_the_settings_op_table_gives_each_op_its_keys(op: str) -> None:
+    row = next((line for line in settings_section().splitlines() if line.startswith(f"| `{op}` |")), "")
+    keys = set(account_requests.OPS[op])
+    keys |= account_requests.SET_FIELDS if op == "set" else set()
+    keys |= account_requests.REMOVE_EXPECT_KEYS if op == "remove" else set()
+
+    assert [key for key in sorted(keys) if f"`{key}`" not in row] == []
+
+
+def refusals(path: Path, raiser: str, scopes: frozenset[str] | None) -> set[tuple[object, ...]]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found = set()
+    for scope in ast.walk(tree):
+        if not isinstance(scope, ast.FunctionDef) or (scopes is not None and scope.name not in scopes):
+            continue
+        for call in ast.walk(scope):
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == raiser:
+                args = []
+                for arg in call.args:
+                    if not isinstance(arg, ast.Constant):
+                        break
+                    args.append(arg.value)
+                if args:
+                    found.add(tuple(args))
+    return found
+
+
+SERVER_SCOPES = frozenset({
+    "_read_json", "_session", "require_approver", "_account_settings", "device_row", "submit", "_write",
+})
+
+
+@pytest.mark.parametrize("path, raiser, scopes", [
+    ("deploy/factory-dashboard-http.py", "ApiError", SERVER_SCOPES),
+    ("lib/account_settings.py", "Refused", None),
+    ("lib/settings_apply.py", "Refused", frozenset({"_approve", "_plan", "_pair"})),
+])
+def test_every_refusal_an_account_request_can_meet_is_named(
+    path: str, raiser: str, scopes: frozenset[str] | None
+) -> None:
+    lines = settings_section().splitlines()
+
+    def named(refusal: tuple[object, ...]) -> bool:
+        *status, code = refusal
+        return any(f"`{code}`" in line and all(line.startswith(f"| {s} |") for s in status) for line in lines)
+
+    found = refusals(ROOT / path, raiser, scopes)
+
+    assert found
+    assert sorted(refusal for refusal in found if not named(refusal)) == []
+
+
+def test_the_1066_decision_note_records_the_three_defaults() -> None:
+    assert DECISION.is_file()
+    note = DECISION.read_text(encoding="utf-8")
+
+    for field in ("- **Decision:**", "- **When:**", "- **Source:**"):
+        assert note.count(field) == 3, field
+    for phrase in ("`paused`", "running job", "`~/.factory-accounts/<id>`", "`<harness>-default`", "`external`",
+                   "read-only"):
+        assert phrase in note, phrase
+    assert "decisions/1066-settings-accounts.md" in settings_section()
