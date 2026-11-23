@@ -7,7 +7,7 @@ import sqlite3
 from collections.abc import Mapping, Sequence
 
 from lib.approver_commands import SlashQa, parse_slash_go, parse_slash_qa
-from lib.dispatch.constants import FINISHED_STATES, WATCHED_STATES
+from lib.dispatch.constants import FINISHED_STATES, OK_UNREAD, WATCHED_STATES
 from lib.dispatch.errors_text import safe_ship_error
 from lib.dispatch.helpers import (
     _acted_verdict,
@@ -212,7 +212,7 @@ class CommentsMixin:
             kind = fields["kind"]
             if kind == "ok" and _holds(ticket):
                 outcome = self._read_ok(ticket, comment)
-                if outcome is None:
+                if outcome == OK_UNREAD:
                     continue
                 if outcome.startswith("rejected-"):
                     self._wake_comment_problem(ticket, comment, "rejected", outcome)

@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import replace
+from typing import Literal
 
-from lib.dispatch.constants import _NOT_FINISHED, OkReading
+from lib.dispatch.constants import _NOT_FINISHED, OK_UNREAD, OkReading
 from lib.dispatch.helpers import _base_update_key, _is_full_sha, _matching_head, ship_mode
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, ShipError, TrackedTicket
@@ -259,9 +260,9 @@ class HoldsMixin:
         decision = self._hold_decision(ticket, head)
         return decision.unread is not None or bool(decision.reasons)
 
-    def _read_ok(self, ticket: TrackedTicket, comment: Comment) -> OkReading | None:
-        """None while a hold input is unread: the ok stays unhandled and is
-        read again next poll."""
+    def _read_ok(
+        self, ticket: TrackedTicket, comment: Comment
+    ) -> OkReading | Literal["unread"]:
         hold = ticket.factory.hold
         assert hold is not None
         if not (
@@ -270,10 +271,10 @@ class HoldsMixin:
         ):
             return "rejected-hold-ok-author"
         if ticket.current_head is None:
-            return None
+            return OK_UNREAD
         decision = self._hold_decision(ticket, ticket.current_head)
         if decision.unread is not None:
-            return None
+            return OK_UNREAD
         return "hold-ok" if decision.reasons else "ok-no-hold"
 
     def _may_approve(self, login: str) -> bool:

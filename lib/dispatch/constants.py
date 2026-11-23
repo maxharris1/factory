@@ -16,6 +16,7 @@ CI_BASE_RED: Final = "ci-base-red"
 CIHold = Literal["ci-rerun", "ci-base-red"]
 OkReading = Literal["hold-ok", "ok-no-hold", "rejected-hold-ok-author"]
 OK_OUTCOMES: tuple[OkReading, ...] = get_args(OkReading)
+OK_UNREAD: Final = "unread"
 CI_WAIT_REASONS = ("ci-pending", "approved-ci-pending", CI_RERUN, CI_INFRA_WAIT, CI_BASE_RED)
 CI_RERUN_SETTLE_SECONDS = 900.0
 CI_INFRA_WAIT_SECONDS = 1800.0

@@ -2796,9 +2796,6 @@ def test_the_run_log_opens_by_key_and_stays_open_through_a_live_redraw(tmp_path:
     assert views["closed"]["open"] is False and not any(views["closed"]["rows"]), views["closed"]
 
 
-# --- #1418: each ok's outcome shows on its ticket page ----------------------------------------------
-
-
 def _with_oks(tmp_path: Path, address: str, outcomes: list[tuple[str, str]]) -> dict:
     from lib.dashboard import collect_snapshot
     from tests.test_dashboard import seeded
