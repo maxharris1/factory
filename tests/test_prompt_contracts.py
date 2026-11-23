@@ -448,7 +448,7 @@ def rules_section(text: str) -> str:
     return text.split("\n## Rules\n", 1)[1].split("\n## ", 1)[0]
 
 
-BUILDER_KINDS = ("plan", "build", "fix", "ci-fix", "merge-only")
+BUILDER_KINDS = ("plan", "build", "fix", "ci-fix", "merge-only", "rebase")
 
 
 def wording_no_follow_up_fixes() -> None:
@@ -576,7 +576,7 @@ def test_every_absolute_path_a_brief_names_is_pinned_and_present(kind: str) -> N
     box, remote = rendered((kind,))
     remote_root = f"/home/{CASES[kind][1]}-bot/factory"
     named = assert_pinned_under(box, BOX_ROOT) + assert_pinned_under(remote, remote_root)
-    assert named or kind == "merge-only"
+    assert named or kind in ("merge-only", "rebase")
 
 
 def test_the_pin_check_skips_quoted_input_but_not_the_brief_text() -> None:
