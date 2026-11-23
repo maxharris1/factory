@@ -19,13 +19,14 @@ def redact_output(text: str) -> str:
 def _spanning_secret() -> re.Pattern[str]:
     """A secret's value as a shell or a parser reads it: a quoted string
     through its closing quote, newlines included, or to the end when it
-    never closes, and a bare value through backslash-newline continuations."""
+    never closes, a dangling escape included, and a bare value through
+    backslash-newline continuations."""
     from lib.dashboard import SECRET_NAME
 
     return re.compile(
         rf"(?i)\b({SECRET_NAME}[\"']?\s*[:=]\s*)"
-        r"(\$?\"(?:[^\"\\]|\\.)*(?:\"|\Z)"
-        r"|\$?'(?:[^'\\]|\\.)*(?:'|\Z)"
+        r"(\$?\"(?:[^\"\\]|\\.?)*(?:\"|\Z)"
+        r"|\$?'(?:[^'\\]|\\.?)*(?:'|\Z)"
         r"|(?:[^\s\"'\\]|\\.)*\\\n(?:[^\s\\]|\\.)*)",
         re.DOTALL,
     )

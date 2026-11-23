@@ -206,6 +206,35 @@ QUOTED_SECRETS = (
 )
 
 
+UNTERMINATED_AT_END_OF_OUTPUT = tuple(
+    f"{name}{quote}first\nSYNTHETIC_VALUE{escape}"
+    for name in ("password=", "export API_KEY=", '{"token": ')
+    for quote in ('"', "'", '$"', "$'")
+    for escape in ("", "\\", "\\\\", "\\\\\\")
+)
+
+
+@pytest.mark.parametrize("text", UNTERMINATED_AT_END_OF_OUTPUT)
+def test_an_unterminated_quoted_secret_at_the_end_of_output_is_redacted_whole(text: str) -> None:
+    assert "SYNTHETIC_VALUE" not in cut(text)
+
+
+@pytest.mark.parametrize("ending", ["exit 1", "sleep 3"])
+@pytest.mark.parametrize("continuations", [1, TAIL_LINES + 5])
+def test_a_check_ending_mid_escape_in_a_quoted_secret_redacts_it_whole(
+    tmp_path: Path, ending: str, continuations: int
+) -> None:
+    repo, head = checkout(tmp_path)
+    value = "\n".join(f"part{n}" for n in range(continuations))
+    text = f'password="{value}\nSYNTHETIC_VALUE' + chr(92)
+    command = "printf %s " + shlex.quote(text) + "; " + ending
+
+    result = run(CheckCommand(command, 1), repo, head, {"PATH": "/usr/bin:/bin"})
+
+    assert not result.passed
+    assert "SYNTHETIC_VALUE" not in result.tail and "part0" not in result.tail
+
+
 def test_a_bare_secret_continued_by_a_backslash_newline_is_redacted_whole() -> None:
     assert cut("PASSWORD=first\\\nSYNTHETIC_VALUE next") == "<secret> next"
 
