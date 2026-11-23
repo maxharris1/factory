@@ -8,10 +8,11 @@ from pathlib import Path
 
 import pytest
 
+from lib.dispatch.types import RetryableStateError
 from lib.update_check import RebaseScope
 from tests.merge_queue_support import Board, sha
 from tests.test_dispatcher import READY, VERDICT
-from tests.test_lifecycle import HEADS, Flow, jobs
+from tests.test_lifecycle import HEADS, Flow, jobs, outcome
 from tests.test_rebase_kind import REBASE, in_review, set_state
 
 
@@ -171,3 +172,91 @@ def test_a_noop_rebase_from_the_merge_queue_restores_the_approval(tmp_path: Path
     assert row["workflow_state"] == "merge-queue"
     assert {column: row[column] for column in approval} == approval
     assert len(board.jobs()) == before
+
+
+def test_a_rebase_review_is_queued_after_the_cap_was_lowered(tmp_path: Path) -> None:
+    flow = Flow(tmp_path)
+    capped_at_cap(flow)
+    flow.factory = replace(flow.factory, rounds_high=2)
+    assert rebase_then_ready(flow, HEADS[4]) == "queued-review"
+    assert newest_review(flow)["round"] == "3/2"
+    assert flow.state()["cap_extra"] == 0
+
+
+def test_a_rebase_review_reusing_round_one_carries_the_range_diff(tmp_path: Path) -> None:
+    flow = Flow(tmp_path, rounds_high=1)
+    assert flow.go() == "queued-build"
+    flow.finish("claude", f"ready-{HEADS[1][:6]}")
+    assert flow.ready(HEADS[1]) == "queued-review"
+    flow.finish("codex", "revise-1/1")
+    assert flow.revise("1/1") == "capped-review"
+    flow.dispatcher.rebase_classifier = lambda *args: RebaseScope(HEADS[1], HEADS[4], HEADS[5])
+    assert rebase_then_ready(flow, HEADS[2]) == "queued-review"
+    assert newest_review(flow).get("rebase") == {
+        "last_reviewed_head": HEADS[1],
+        "reviewed_base": HEADS[4],
+        "base": HEADS[5],
+    }
+
+
+def test_a_noop_ready_naming_a_head_the_pr_left_is_stale(tmp_path: Path) -> None:
+    flow = Flow(tmp_path)
+    flow.hand_off_at(2)
+    old_head = flow.head
+    assert flow.post("rebase-42", REBASE, "grok-login") == "queued-rebase"
+    flow.finish("claude", "ready-after-rebase")
+    flow.head = HEADS[4]
+    ready = READY.format(head=old_head)
+    assert flow.post("ready-after-rebase", ready, "claude-login") == "stale-ready-head"
+    assert flow.state()["workflow_state"] != "handed-off"
+    assert flow.state()["approved_head"] is None
+
+
+def test_a_noop_restore_finishes_after_a_failed_label_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flow = Flow(tmp_path)
+    capped_at_cap(flow)
+    assert flow.post("rebase-42", REBASE, "grok-login") == "queued-rebase"
+    flow.finish("claude", "ready-after-rebase")
+    original = flow.actions.set_state
+    failures, written = ["capped"], []
+
+    def fail_once(ticket, state):
+        if state in failures:
+            failures.remove(state)
+            raise RuntimeError("transient state label failure")
+        written.append(state)
+        return original(ticket, state)
+
+    monkeypatch.setattr(flow.actions, "set_state", fail_once)
+    with pytest.raises(RetryableStateError):
+        flow.post("ready-after-rebase", READY.format(head=flow.head), "claude-login")
+    for _ in range(3):
+        flow.dispatcher.process(flow.snapshot())
+    assert outcome(flow.queue, "ready-after-rebase") == "rebase-noop"
+    assert written[-1] == "capped"
+    assert flow.state()["workflow_state"] == "capped"
+
+
+@pytest.mark.parametrize("policy", [{"auto_extra_rounds": 1}, {"stop_on": "convergence"}])
+def test_an_ordinary_review_after_a_rebase_review_takes_the_extra_round(
+    tmp_path: Path, policy: dict
+) -> None:
+    flow = Flow(tmp_path)
+    flow.factory = replace(flow.factory, **policy)
+    handed_off_with_falling_blockers(flow)
+    assert rebase_then_ready(flow, HEADS[4]) == "queued-review"
+    flow.finish("codex", "revise-3/3")
+    assert revise_with(flow, 3, ["f-9"]) == "capped-review"
+    go = (
+        "<!-- orch:v1 kind=go from=grok-bot role=orchestrator state=building -->\n"
+        "Overrule the finding: f-9. Accepted.\n"
+    )
+    assert flow.post("go-overrule", go, "grok-login") == "overruled-finding"
+    assert newest_review(flow).get("source") is None
+    flow.finish("codex", "revise-overrule")
+    body = VERDICT.format(round="3/3", head=flow.head, verdict="REVISE", risk="high")
+    body += "- [blocking] f-10: new issue.\n"
+    assert flow.post("revise-overrule", body, "codex-login") == "queued-review-fix"
+    assert flow.state()["cap_extra"] == 1

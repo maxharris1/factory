@@ -25,17 +25,19 @@ from lib.queue import JobRequest
 
 
 def _rebase_review(connection: sqlite3.Connection, ticket: TrackedTicket, round_number: int) -> bool:
-    return any(
-        _detail_round_number(row["detail"]) == round_number
+    row = connection.execute(
+        """
+        SELECT head, detail FROM jobs
+        WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
+        ORDER BY rowid DESC LIMIT 1
+        """,
+        (ticket.repo.lower(), ticket.ticket_id),
+    ).fetchone()
+    return (
+        row is not None
+        and _detail_round_number(row["detail"]) == round_number
         and _detail_field(row["detail"], "source") == "rebase"
         and _matching_head(str(row["head"] or ""), ticket.current_head) is not None
-        for row in connection.execute(
-            """
-            SELECT head, detail FROM jobs
-            WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
-            """,
-            (ticket.repo.lower(), ticket.ticket_id),
-        )
     )
 
 

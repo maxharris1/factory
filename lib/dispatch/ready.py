@@ -203,8 +203,6 @@ class ReadyMixin:
                 self._flag_ready_after_cap(ticket, comment, reported_head)
                 return True, "ready-after-cap"
         elif state == "fixing" and (rebase := self._reviewed_rebase(ticket)) is not None:
-            if _matching_head(reported_head, rebase.from_head) is not None:
-                return self._rebase_noop(ticket, rebase)
             reentry = rebase.review_round - 1
         if state == "awaiting-ok" and ticket.current_head is not None:
             held = self._red_ci_approval_covering(ticket, reported_head)
@@ -234,6 +232,8 @@ class ReadyMixin:
                 return True, "rejected-ready-at-base"
             ticket = fresh
             self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
+        if rebase is not None and _matching_head(head, rebase.from_head) is not None:
+            return self._rebase_noop(ticket, rebase)
         answered = self._verdict_after(
             ticket,
             comment,
@@ -1226,6 +1226,7 @@ class ReadyMixin:
         return rebase
 
     def _rebase_noop(self, ticket: TrackedTicket, rebase: RebaseStep) -> tuple[bool, str]:
+        self._write_state_label(ticket, rebase.from_state)
         with self._connect() as connection:
             write_workflow_state(
                 connection,
@@ -1237,7 +1238,6 @@ class ReadyMixin:
                 also=rebase.approval(),
             )
             connection.commit()
-        self._write_state_label(ticket, rebase.from_state)
         return True, "rebase-noop"
 
     def _verdict_after(
@@ -1438,7 +1438,7 @@ class ReadyMixin:
         nothing queued, past the cap."""
         _state, completed_rounds = self._review_context(ticket)
         review_round = completed_rounds + 1
-        if review_round > self._effective_cap(ticket):
+        if source != "rebase" and review_round > self._effective_cap(ticket):
             self.flag_attention(
                 ticket.repo,
                 ticket.ticket_id,
@@ -1469,7 +1469,7 @@ class ReadyMixin:
                     source=source,
                     rebase=(
                         self._rebase_scope(ticket, comment, head, review_round)
-                        if review_round > 1 and update is None
+                        if (review_round > 1 or source == "rebase") and update is None
                         else None
                     ),
                     size_flag=self._size_flag(ticket),
