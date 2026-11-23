@@ -714,10 +714,11 @@ class Browser:
         # Chrome will not size a window below 500px wide.
         self.call("Emulation.setDeviceMetricsOverride", width=width, height=height, deviceScaleFactor=1, mobile=False)
         self.call("Page.navigate", url=page.as_uri())
-        self.eval("""new Promise(function (done) { (function wait() {
+        state = self.eval("""new Promise(function (done) { (function wait() {
           var link = document.getElementById('link');
-          if (link && / live/.test(' ' + link.className)) document.fonts.ready.then(function () { done(true); });
+          if (link && !/ boot/.test(' ' + link.className)) document.fonts.ready.then(function () { done(link.className); });
           else setTimeout(wait, 50); })(); })""")
+        assert state == "link live", f"the page settled on {state!r}, not 'link live'"
 
     def screenshot(self, path: Path, width: int, full_page: bool = True) -> None:
         if full_page:

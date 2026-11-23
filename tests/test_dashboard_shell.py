@@ -287,9 +287,8 @@ def test_the_strip_is_one_36px_row_at_every_count_and_width_in_a_browser(base: d
         for count in (1, 2, 3, 16, 50):
             snapshot = _with(base, _items(base, count))
             snapshot["attention"]["items"][0]["detail"] = "a detail far too long for one row " * 12
-            html = _page_with_status_stub(_now(snapshot), "index.html")
             for width in (700, 1100, 1440):
-                browser.open(html, width)
+                browser.open(_page_with_status_stub(_now(snapshot), "index.html"), width)
                 got = browser.eval(STRIP)
                 where = (count, width)
                 assert got["strip"] == 36, where
@@ -306,13 +305,12 @@ def test_the_strip_is_one_36px_row_at_every_count_and_width_in_a_browser(base: d
                     assert got["tally"] is True, f"a long detail must not squeeze the tally: {where}"
                 assert (got["sideways"], got["moving"]) == (False, 0), where
             for width in (375, 699):
-                browser.open(html, width)
+                browser.open(_page_with_status_stub(_now(snapshot), "index.html"), width)
                 got = browser.eval(STRIP)
                 assert (got["row"], got["phone"], got["strip"]) == (None, 36, 36), (count, width)
                 assert (got["sideways"], got["moving"]) == (False, 0), (count, width)
-        html = _page_with_status_stub(_now(_with(base, _items(base, 16))), "activity.html")
         for width in (375, 1440):
-            browser.open(html, width)
+            browser.open(_page_with_status_stub(_now(_with(base, _items(base, 16))), "activity.html"), width)
             got = browser.eval(STRIP)
             assert (got["here"], got["strip"], got["row"], got["phone"]) == (36, 36, None, None), width
             assert got["moving"] == 0, width
@@ -352,11 +350,10 @@ def _collected(tmp_path: Path, tickets: list[tuple[str, str, str]]) -> dict:
 def test_both_worst_items_stay_inside_the_row_with_long_collected_subjects(tmp_path: Path, case: str) -> None:
     snapshot = _collected(tmp_path, COLLECTED[case])
     assert len(snapshot["attention"]["items"]) == len(COLLECTED[case])
-    html = _page_with_status_stub(snapshot, "index.html")
     browser = Browser()
     try:
         for width in (700, 1100, 1440):
-            browser.open(html, width)
+            browser.open(_page_with_status_stub(_now(snapshot), "index.html"), width)
             got = browser.eval(STRIP)
             where = (case, width)
             assert got["strip"] == 36, where
@@ -703,14 +700,13 @@ def _phone_fit(snapshot: dict) -> dict:
 
 @needs_chrome
 def test_the_status_line_is_one_row_at_every_width_in_a_browser(base: dict) -> None:
-    html = _page_with_status_stub(_now(_phone_fit(base)), "index.html")
     browser = Browser()
     try:
         for width, segs, padding in (
                 (1440, WIDE, "6px 9px"), (1280, WIDE, "6px 9px"), (1100, WIDE, "6px 9px"),
                 (1099, NARROW, "6px 9px"), (800, NARROW, "6px 9px"),
                 (700, NARROW, "6px 9px"), (699, NARROW, "6px 7px"), (375, NARROW, "6px 7px")):
-            browser.open(html, width)
+            browser.open(_page_with_status_stub(_now(_phone_fit(base)), "index.html"), width)
             browser.eval("scrollTo(0, document.documentElement.scrollHeight)")
             line = browser.eval(LINE)
             assert line["segs"] == segs, width
@@ -947,7 +943,6 @@ def test_main_keeps_the_ticket_box_model() -> None:
 
 @needs_chrome
 def test_main_grows_past_1600px_only_on_wide_screens_in_a_browser(base: dict) -> None:
-    html = _page_with_status_stub(_now(_phone_fit(base)), "index.html")
     probe = """(() => {
         const main = document.querySelector('main'), box = main.getBoundingClientRect();
         const width = sel => document.querySelector(sel).getBoundingClientRect().width;
@@ -958,7 +953,7 @@ def test_main_grows_past_1600px_only_on_wide_screens_in_a_browser(base: dict) ->
     lanes, tiles = {}, {}
     try:
         for width in (375, 699, 1440, 1600, 1700, 1920, 2560, 3840):
-            browser.open(html, width)
+            browser.open(_page_with_status_stub(_now(_phone_fit(base)), "index.html"), width)
             got = browser.eval(probe)
             expected = width if width <= 1600 else min(2400, max(1600, round(0.9 * width)))
             assert round(got["width"]) == expected, (width, got)
@@ -970,6 +965,17 @@ def test_main_grows_past_1600px_only_on_wide_screens_in_a_browser(base: dict) ->
         browser.close()
     assert lanes[2560] > lanes[1600], lanes
     assert tiles[2560] > tiles[1600] and tiles[1920] > tiles[1600], tiles
+
+
+@needs_chrome
+@pytest.mark.timeout(30)
+def test_opening_a_page_that_settles_stale_fails_at_once_naming_the_link_state(base: dict) -> None:
+    browser = Browser()
+    try:
+        with pytest.raises(AssertionError, match="link stale"):
+            browser.open(_page_with_status_stub(_now(_phone_fit(base), 60), "index.html"), 1440)
+    finally:
+        browser.close()
 
 
 def test_topbar_markup_follows_the_artboard(base: dict) -> None:
@@ -1855,11 +1861,10 @@ def _stale_fit(base: dict, age: float) -> dict:
 @needs_chrome
 @pytest.mark.parametrize("fresh", ["live", "stale", "lost"])
 def test_each_width_form_per_freshness_state_in_a_browser(base: dict, fresh: str) -> None:
-    html = _fresh_page(_stale_fit(base, STALE_AGE if fresh == "stale" else 0))
     browser = Browser()
     try:
         for width, padding in ((1440, "6px 9px"), (1100, "6px 9px"), (1099, "6px 9px"), (699, "6px 7px"), (375, "6px 7px")):
-            _open(browser, html, width, fresh)
+            _open(browser, _fresh_page(_stale_fit(base, STALE_AGE if fresh == "stale" else 0)), width, fresh)
             line, form = browser.eval(LINE), browser.eval(FORM)
             assert (line["rows"], line["height"], line["sideways"], line["floor"]) == (1, 32, False, True), (fresh, width)
             assert line["padding"] == padding, (fresh, width)
