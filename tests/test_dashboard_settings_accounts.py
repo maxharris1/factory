@@ -480,7 +480,28 @@ ROUTER = (
 )
 SNAP_ACTION = (
     "    } else if (kind === 'snap') {\n"
-    "      steps.push({snap: arg, html: ids.accounts.children.map(c => c.html()).join('')});\n"
+    "      const at = document.activeElement;\n"
+    "      steps.push({snap: arg, html: ids.accounts.children.map(c => c.html()).join(''),\n"
+    "        focus: at ? {field: at.getAttribute('data-field'), op: at.getAttribute('data-op'), value: at.value,\n"
+    "          selection: [at.selectionStart, at.selectionEnd]} : null});\n"
+    "    } else if (kind === 'focus') {\n"
+    "      const node = pick(arg.pick);\n"
+    "      if (!node) throw new Error('nothing to focus: ' + JSON.stringify(arg));\n"
+    "      node.focus();\n"
+    "      Object.assign(node, arg.props);\n"
+    "      steps.push({focus: arg});\n"
+)
+DETACH_BLURS = (
+    "  replaceChildren(...kids) { this.children.forEach(c => { c.parentNode = null; });\n",
+    "  replaceChildren(...kids) { this.children.forEach(c => { c.parentNode = null; });\n"
+    "    if (focusedNode && !focusedNode.isConnected) focusedNode = null;\n",
+)
+FOCUS_MOVES_CARET = (
+    "  focus() { global.document.activeElement = this; }\n",
+    "  focus() { if (this.tagName === 'input' && global.document.activeElement !== this) {\n"
+    "      this.selectionStart = this.selectionEnd = String(this.value || '').length; }\n"
+    "    global.document.activeElement = this; }\n"
+    "  setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }\n",
 )
 SETTLED = (
     "setTimeout(() => {\n  act(JSON.parse(actionsText));\n",
@@ -500,10 +521,11 @@ def _relay_harness(account_signin: bool | None, replies: list) -> str:
              f"    Promise.resolve({json.dumps(session)})}});\n" + ROUTER)
     marker = "  if (url !== 'status.json' || opts.cache !== 'no-store') throw new Error('bad fetch ' + url);"
     key = "    } else if (kind === 'key') {\n"
-    for needle in (marker, key, SCOPED_PICK[0], SETTLED[0]):
+    for needle in (marker, key, SCOPED_PICK[0], SETTLED[0], DETACH_BLURS[0], FOCUS_MOVES_CARET[0]):
         assert needle in HARNESS
     return (f"const replies = {json.dumps(replies)};\n" + HARNESS.replace(marker, stubs + marker)
-            .replace(key, SET_ACTION + SNAP_ACTION + key).replace(*SCOPED_PICK).replace(*SETTLED))
+            .replace(key, SET_ACTION + SNAP_ACTION + key).replace(*SCOPED_PICK).replace(*SETTLED)
+            .replace(*DETACH_BLURS).replace(*FOCUS_MOVES_CARET))
 
 
 def _relay(tmp_path: Path, actions: list, replies: list | tuple = (), *, account_signin: bool | None = True,
@@ -728,3 +750,38 @@ def test_signing_out_of_github_stops_the_polling(tmp_path: Path) -> None:
     assert ("POST", "/api/signout", {}) in _requests(out)
     assert len(_gets(out)) == 1
     assert "ac-signin" not in out["html"]["accounts"]
+
+
+def _focus(within: dict, props: dict | None = None, **attr: str) -> list:
+    return ["focus", {"pick": {"within": within, "attr": attr}, "props": props or {}}]
+
+
+def _focused(out: dict, name: str) -> dict | None:
+    return next(step["focus"] for step in out["steps"] if step.get("snap") == name)
+
+
+@needs_node
+def test_polling_keeps_focus_and_selection_in_the_code_field(tmp_path: Path) -> None:
+    typing = _focus(CLAUDE_B, {"value": "partial-code", "selectionStart": 3, "selectionEnd": 7},
+                    **{"data-field": "signin-code"})
+    out = _relay(tmp_path, [SIGN_IN_MAC, TICK, typing, ["snap", "before"], TICK, ["snap", "tick"],
+                            TICK, ["snap", "changed"]],
+                 [START, _view(url=CLAUDE_URL, expires_at=LOADED_AT + 600), _view(url=CLAUDE_URL,
+                                                                                  expires_at=LOADED_AT + 600),
+                  _view(state="verifying", url=CLAUDE_URL, expires_at=LOADED_AT + 600)])
+    field = {"field": "signin-code", "op": None, "value": "partial-code", "selection": [3, 7]}
+    assert _focused(out, "before") == field
+    assert _focused(out, "tick") == field
+    assert _focused(out, "changed") == field
+    assert "verifying" in _text(_signin(_card(_snap(out, "changed"), "claude-b")))
+
+
+@needs_node
+@pytest.mark.parametrize("op", ["signin-code", "signin-cancel"])
+def test_polling_keeps_focus_on_the_panel_buttons(tmp_path: Path, op: str) -> None:
+    out = _relay(tmp_path, [SIGN_IN_MAC, TICK, _focus(CLAUDE_B, **{"data-op": op}), TICK, ["snap", "tick"],
+                            TICK, ["snap", "changed"]],
+                 [START, _view(url=CLAUDE_URL), _view(url=CLAUDE_URL), _view(state="verifying", url=CLAUDE_URL)])
+    for name in ("tick", "changed"):
+        focus = _focused(out, name)
+        assert focus is not None and focus["op"] == op, name

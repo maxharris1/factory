@@ -481,10 +481,34 @@ _SCRIPT = r"""
   }
   function acPanel(c) {
     var s = c.signin;
+    var v = s && s.view || {};
+    var key = s && JSON.stringify([s.id, s.done, s.sent, v.state, v.url, v.code, v.expires_at]);
+    if (key === c.panelKey) {
+      if (c.left) c.left.textContent = acLeft(v.expires_at);
+      return;
+    }
+    c.panelKey = key;
+    acKeepFocus(c, function () { acDraw(c, s, v); });
+  }
+  function acKeepFocus(c, redraw) {
+    var active = document.activeElement;
+    var n = active;
+    while (n && n !== c.signinSlot) n = n.parentNode;
+    if (!n) { redraw(); return; }
+    var start = active.selectionStart, end = active.selectionEnd, op = active.getAttribute('data-op');
+    redraw();
+    var target = active.isConnected ? active : c.panelButtons.filter(function (b) {
+      return b.getAttribute('data-op') === op;
+    })[0];
+    if (!target || document.activeElement === target) return;
+    target.focus({preventScroll: true});
+    if (target === active && typeof start === 'number') active.setSelectionRange(start, end);
+  }
+  function acDraw(c, s, v) {
     c.panelButtons = [];
+    c.left = null;
     c.signinSlot.replaceChildren();
     if (!s) return;
-    var v = s.view || {};
     var p = acAttrs(add(c.signinSlot, el('div', 'ac-signin')), {'data-signin': s.device});
     var row = add(p, el('div', 'gh-row'));
     add(row, el('span', 'ac-name', s.device));
@@ -496,7 +520,7 @@ _SCRIPT = r"""
         a.textContent = url;
       }
       if (s.harness === 'codex' && v.code) add(row, el('code', 'ac-code', String(v.code)));
-      if (v.expires_at) add(row, el('span', 'ac-when', acLeft(v.expires_at)));
+      if (v.expires_at) c.left = add(row, el('span', 'ac-when', acLeft(v.expires_at)));
       acButton(c, c.panelButtons, row, 'Cancel', 'signin-cancel', null, function () { acCancel(c, s); });
       if (s.harness === 'claude' && s.sent) add(p, el('span', null, 'code sent'));
       else if (s.harness === 'claude') {
@@ -572,7 +596,7 @@ _SCRIPT = r"""
   }
   function acBase(label, op) {
     var c = {root: el('div', 'st-ctl'), busy: false, boxes: [], boxKey: undefined, buttons: [], pairButtons: [],
-             panelButtons: [], signin: null};
+             panelButtons: [], signin: null, panelKey: null, left: null};
     c.fields = add(c.root, el('div', 'gh-row'));
     c.max = acAttrs(el('input'), {type: 'number', min: '1', max: '64', 'data-field': 'max_jobs'});
     var row = add(c.root, el('div', 'gh-row'));
