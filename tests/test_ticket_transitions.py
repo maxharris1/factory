@@ -44,6 +44,7 @@ WRITERS = {
     "cap-resume": "lib/dispatch/caps/resume.py",
     "handoff-reopen": "lib/dispatch/caps/resume.py",
     "blocked-resume": "lib/dispatch/caps/resume.py",
+    "overrule-review": "lib/dispatch/caps/resume.py",
     "unsat-fix": "lib/dispatch/caps/resume.py",
     "t-blocked": "lib/dispatch/verdict/blocked.py",
     "waiting-max-qa": "lib/dispatch/qa.py",

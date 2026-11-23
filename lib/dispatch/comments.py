@@ -408,9 +408,29 @@ class CommentsMixin:
                 and other.get("round") == fields.get("round")
                 and _matching_head(other.get("head") or "", head) is not None
                 and _acted_verdict(self._handled_outcome(ticket, earlier.id))
+                and not self._released_by_overrule(ticket, earlier.id)
             ):
                 return True
         return False
+
+    def _released_by_overrule(self, ticket: TrackedTicket, verdict_id: str) -> bool:
+        with self._connect() as connection:
+            return (
+                connection.execute(
+                    """
+                    SELECT 1 FROM decisions
+                    JOIN review_events
+                      ON review_events.repo = decisions.repo
+                     AND review_events.ticket_id = decisions.ticket_id
+                     AND review_events.comment_id = decisions.answer_id
+                    WHERE decisions.repo = ? AND decisions.ticket_id = ?
+                      AND decisions.question_id = ?
+                      AND review_events.outcome = 'overruled-finding'
+                    """,
+                    (ticket.repo.lower(), ticket.ticket_id, verdict_id),
+                ).fetchone()
+                is not None
+            )
 
     def _handled_outcome(self, ticket: TrackedTicket, comment_id: str) -> str | None:
         with self._connect() as connection:

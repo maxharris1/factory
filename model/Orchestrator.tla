@@ -691,6 +691,16 @@ MaxGoAfterBlocked ==
   /\ counts' = [counts EXCEPT !.deaths = 0]
   /\ QaFollowsHead
 
+\* #1420. The round steps back one so the re-review counts the stopped round.
+ApproverOverrule ==
+  /\ state = "capped"
+  /\ counts.round >= 1
+  /\ state' = "review"
+  /\ keep
+  /\ flags' = flags
+  /\ counts' = [counts EXCEPT !.round = @ - 1, !.deaths = 0]
+  /\ QaFollowsHead
+
 \* #611. TLC bounds extra at 1, so a second extra round this way is not modeled.
 T1UnsatFix ==
   /\ state = "waiting-max"
@@ -961,7 +971,7 @@ Factory ==
   \/ T8Ok \/ T8Decline \/ T8DeclineStuck
   \/ T9PostMerge \/ MergedDone \/ T9Pass \/ T9Fail
   \/ MaxOkAnotherRound \/ MaxGoAfterBlocked \/ ReenterAfterHandoff \/ MergeObserved
-  \/ T1UnsatFix
+  \/ T1UnsatFix \/ ApproverOverrule
   \/ MaxOkAfterHandoff \/ ReopenAfterHandoff
   \/ T4ShipQueue \/ QueueMerge \/ QueueConflict \/ QueueClosed
   \/ QueueGoPlan \/ QueueGoBuild
@@ -1164,6 +1174,7 @@ ChartEdges ==
        ENABLED T1PPlanGapStuck /\ ENABLED T1PPlanMapped /\ ENABLED T1PPlanOverSize
        /\ ENABLED T1PPlanAutoSplit
   /\ state = "capped" => ENABLED MaxOkAnotherRound
+  /\ state = "capped" /\ counts.round >= 1 => ENABLED ApproverOverrule
   /\ state = "blocked" => ENABLED MaxGoAfterBlocked
 
 \* Drawing bound for the Mermaid chart. The full configs explore every interleaving.

@@ -83,6 +83,7 @@ export const step = (action, from, to) => {
   if (action === "MaxOkAnotherRound") return "Max okays one more round";
   if (action === "MaxOkAfterHandoff") return "approver's go at the cap, one more round";
   if (action === "MaxGoAfterBlocked") return "approver's go, fresh review at the same round";
+  if (action === "ApproverOverrule") return "approver's go names Overrule the finding, review at the same round";
   if (action === "T1UnsatFix") return "approver's building go on an unsat= REVISE, fix round";
   if (action === "ReenterAfterHandoff") return "trusted ready at a new head, within the effective cap";
   if (action === "ReopenAfterHandoff") return "approver's building go within the cap, reopen";

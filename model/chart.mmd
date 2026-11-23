@@ -110,6 +110,7 @@ stateDiagram-v2
   s14 --> s5: QA environment fails twice at one head
   s21 --> s15: two failed updates (update-failed-2)
   s10 --> s22: REVISE at the cap
+  s22 --> s10: approver's go names Overrule the finding, review at the same round
   s22 --> s12: Max hands it off (answers state=handed-off)
   s22 --> s20: Max moves the Linear issue to a handoff state
   s22 --> s16: Max okays one more round

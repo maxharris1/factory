@@ -31,7 +31,8 @@ class StopOption:
 _SPLIT = StopOption("Split", "Close this PR and file smaller tickets. No more rounds run here.")
 OVERRULE = StopOption(
     "Overrule the finding",
-    "An approver's /go that names this option records the decision. No fix is queued and no round runs. "
+    "An approver's /go that names this option records the decision and queues one review of the current head "
+    "at this round. No fix is queued and no round is spent. "
     "Later briefs quote the decision, so the reviewer does not block on it again.",
 )
 _CAPPED_OPTIONS = (
