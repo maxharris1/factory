@@ -458,3 +458,330 @@ def test_an_account_named_like_an_object_property_gets_its_controls(tmp_path: Pa
     assert _posts(out) == [{"target": "account", "op": "set", "account": name, "field": "paused",
                             "expect": True, "value": False}]
     assert f'<div class="st-out ok" role="status">{QUEUED}</div>' in _card(accounts, name)
+
+
+SIGNIN_ID = "sgn-0123456789abcdefgh"
+LOADED_AT = 1800000003
+CLAUDE_URL = "https://claude.com/cai/oauth/authorize?state=s1"
+CODEX_URL = "https://auth.openai.com/codex/device"
+REMIND = "Paste a code only from a sign-in you just started here. Never paste a code someone sent you."
+START = ("POST", "/api/accounts/signin", 202, {"id": SIGNIN_ID})
+SIGN_IN_MAC = _click(CLAUDE_B, "signin", **{"data-pair": "mac"})
+TICK = ["advance", 1]
+ROUTER = (
+    "  if (url === '/api/settings' || url === '/api/signout' || url.startsWith('/api/accounts/')) {\n"
+    "    const method = opts.method || 'GET';\n"
+    "    steps.push({req: method, url, body: opts.body === undefined ? null : JSON.parse(opts.body),\n"
+    "      csrf: opts.headers['X-Factory-CSRF'] === undefined ? null : opts.headers['X-Factory-CSRF']});\n"
+    "    const at = replies.findIndex(r => r[0] === method && r[1] === url.split('?')[0]);\n"
+    "    const [, , code, answer] = at < 0 ? [0, 0, 599, {error: 'unstubbed'}] : replies.splice(at, 1)[0];\n"
+    "    return Promise.resolve({ok: code < 300, status: code, json: () => Promise.resolve(answer)});\n"
+    "  }\n"
+)
+SNAP_ACTION = (
+    "    } else if (kind === 'snap') {\n"
+    "      const at = document.activeElement;\n"
+    "      steps.push({snap: arg, html: ids.accounts.children.map(c => c.html()).join(''),\n"
+    "        focus: at ? {field: at.getAttribute('data-field'), op: at.getAttribute('data-op'), value: at.value,\n"
+    "          selection: [at.selectionStart, at.selectionEnd]} : null});\n"
+    "    } else if (kind === 'focus') {\n"
+    "      const node = pick(arg.pick);\n"
+    "      if (!node) throw new Error('nothing to focus: ' + JSON.stringify(arg));\n"
+    "      node.focus();\n"
+    "      Object.assign(node, arg.props);\n"
+    "      steps.push({focus: arg});\n"
+)
+DETACH_BLURS = (
+    "  replaceChildren(...kids) { this.children.forEach(c => { c.parentNode = null; });\n",
+    "  replaceChildren(...kids) { this.children.forEach(c => { c.parentNode = null; });\n"
+    "    if (focusedNode && !focusedNode.isConnected) focusedNode = null;\n",
+)
+FOCUS_MOVES_CARET = (
+    "  focus() { global.document.activeElement = this; }\n",
+    "  focus() { if (this.tagName === 'input' && global.document.activeElement !== this) {\n"
+    "      this.selectionStart = this.selectionEnd = String(this.value || '').length; }\n"
+    "    global.document.activeElement = this; }\n"
+    "  setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }\n",
+)
+SETTLED = (
+    "setTimeout(() => {\n  act(JSON.parse(actionsText));\n",
+    "setTimeout(async () => {\n  for (const action of JSON.parse(actionsText)) {\n"
+    "    act([action]);\n    await new Promise(resolve => setTimeout(resolve, 0));\n  }\n",
+)
+
+
+def _view(**fields: object) -> tuple:
+    return ("GET", "/api/accounts/signin", 200, {"state": "awaiting-code", "url": None, "code": None,
+                                                 "expires_at": None, "result": None, "error": None, **fields})
+
+
+def _relay_harness(account_signin: bool | None, replies: list) -> str:
+    session = {**SIGNED_IN, **({} if account_signin is None else {"account_signin": account_signin})}
+    stubs = ("  if (url === '/api/session') return Promise.resolve({ok: true, status: 200, json: () =>\n"
+             f"    Promise.resolve({json.dumps(session)})}});\n" + ROUTER)
+    marker = "  if (url !== 'status.json' || opts.cache !== 'no-store') throw new Error('bad fetch ' + url);"
+    key = "    } else if (kind === 'key') {\n"
+    for needle in (marker, key, SCOPED_PICK[0], SETTLED[0], DETACH_BLURS[0], FOCUS_MOVES_CARET[0]):
+        assert needle in HARNESS
+    return (f"const replies = {json.dumps(replies)};\n" + HARNESS.replace(marker, stubs + marker)
+            .replace(key, SET_ACTION + SNAP_ACTION + key).replace(*SCOPED_PICK).replace(*SETTLED)
+            .replace(*DETACH_BLURS).replace(*FOCUS_MOVES_CARET))
+
+
+def _relay(tmp_path: Path, actions: list, replies: list | tuple = (), *, account_signin: bool | None = True,
+           snapshot: dict | None = None) -> dict:
+    snapshot = snapshot or _snapshot(tmp_path)
+    html = render_pages(snapshot)["settings.html"]
+    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    return layout.run_harness(tmp_path / "run", _relay_harness(account_signin, list(replies)), script, snapshot,
+                              "settings", BAR + ["settings", "accounts"], actions)
+
+
+def _requests(out: dict) -> list[tuple]:
+    return [(step["req"], step["url"], step["body"]) for step in out["steps"] if "req" in step]
+
+
+def _gets(out: dict) -> list[str]:
+    return [url for method, url, _ in _requests(out) if method == "GET"]
+
+
+def _snap(out: dict, name: str) -> str:
+    return next(step["html"] for step in out["steps"] if step.get("snap") == name)
+
+
+def _signin(markup: str) -> str:
+    start = markup.index('<div class="ac-signin"')
+    return markup[start:markup.index('<div class="st-out', start)]
+
+
+def _codex_b(tmp_path: Path) -> dict:
+    snapshot = _snapshot(tmp_path)
+    next(a for a in snapshot["accounts"] if a["id"] == "claude-b")["harness"] = "codex"
+    return snapshot
+
+
+def test_the_server_markup_keeps_the_cli_fallback_and_has_no_sign_in(tmp_path: Path) -> None:
+    claude_b = _card(_panel(_snapshot(tmp_path)), "claude-b")
+    assert re.findall(r'<code class="ac-cmd">([^<]*)</code>', claude_b) == [CLAUDE_B_PC, CLAUDE_B_MAC]
+    for needle in ("<button", "ac-signin", "data-op"):
+        assert needle not in claude_b
+
+
+@needs_node
+def test_with_the_relay_each_signed_in_device_has_sign_in_and_sign_out(tmp_path: Path) -> None:
+    accounts = _relay(tmp_path, [])["html"]["accounts"]
+    claude_b = _card(accounts, "claude-b")
+    assert re.findall(r'data-op="signin" data-pair="([^"]+)">Sign in</button>', claude_b) == ["pc", "mac"]
+    assert re.findall(r'data-op="signout" data-pair="([^"]+)">Sign out</button>', claude_b) == ["pc", "mac"]
+    for read_only in ("claude-default", "codex-default", "ext-grok"):
+        assert "data-op" not in _card(accounts, read_only)
+    codex = _card(_relay(tmp_path / "codex", [], snapshot=_codex_b(tmp_path / "codex"))["html"]["accounts"],
+                  "claude-b")
+    assert re.findall(r'data-op="signin" data-pair="([^"]+)"', codex) == ["pc", "mac"]
+
+
+@needs_node
+def test_a_cursor_account_has_no_sign_in_button(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    next(a for a in snapshot["accounts"] if a["id"] == "claude-b")["harness"] = "cursor"
+    claude_b = _card(_relay(tmp_path, [], snapshot=snapshot)["html"]["accounts"], "claude-b")
+    assert 'data-op="signin"' not in claude_b
+    assert re.findall(r'data-op="signout" data-pair="([^"]+)"', claude_b) == ["pc", "mac"]
+
+
+@needs_node
+@pytest.mark.parametrize("account_signin", [False, None], ids=["off", "absent"])
+def test_without_the_relay_the_cli_command_is_the_only_route(tmp_path: Path, account_signin: bool | None) -> None:
+    accounts = _relay(tmp_path, [], account_signin=account_signin)["html"]["accounts"]
+    assert 'data-op="signin"' not in accounts
+    claude_b = _card(accounts, "claude-b")
+    assert re.findall(r'data-op="signout" data-pair="([^"]+)">Sign out</button>', claude_b) == ["pc", "mac"]
+    assert re.findall(r'<code class="ac-cmd">([^<]*)</code>', claude_b) == [CLAUDE_B_PC, CLAUDE_B_MAC]
+    assert re.findall(r'<code class="ac-cmd">([^<]*)</code>', _card(accounts, "codex-default")) == [CODEX_PC]
+
+
+@needs_node
+def test_sign_in_posts_the_pair_and_the_claude_panel_shows_link_countdown_cancel_paste_and_reminder(
+        tmp_path: Path) -> None:
+    expires = LOADED_AT + 1 + 600
+    out = _relay(tmp_path, [SIGN_IN_MAC, TICK, ["snap", "first"], TICK],
+                 [START, _view(url=CLAUDE_URL, expires_at=expires)])
+    requests = [step for step in out["steps"] if "req" in step]
+    assert (requests[0]["req"], requests[0]["url"], requests[0]["body"], requests[0]["csrf"]) == (
+        "POST", "/api/accounts/signin", {"account": "claude-b", "device": "mac"}, "csrf-value")
+    assert (requests[1]["req"], requests[1]["url"], requests[1]["body"], requests[1]["csrf"]) == (
+        "GET", f"/api/accounts/signin?id={SIGNIN_ID}", None, "csrf-value")
+    first = _signin(_card(_snap(out, "first"), "claude-b"))
+    assert first.startswith('<div class="ac-signin" data-signin="mac">')
+    assert "awaiting-code" in _text(first)
+    link = f'<a class="ac-link" href="{CLAUDE_URL}" rel="noopener noreferrer" target="_blank">{CLAUDE_URL}</a>'
+    assert link in first
+    assert "10:00 left" in _text(first)
+    assert 'data-op="signin-cancel">Cancel</button>' in first
+    assert re.search(r'<input[^>]*data-field="signin-code"[^>]*>', first)
+    assert 'autocomplete="off"' in first
+    assert 'data-op="signin-code">Send</button>' in first
+    assert f'<p class="ac-remind">{REMIND}</p>' in first
+    assert "ac-code" not in first
+    assert "9:59 left" in _text(_signin(_card(out["html"]["accounts"], "claude-b")))
+
+
+@needs_node
+def test_a_codex_sign_in_shows_the_link_and_the_code_and_no_paste_field(tmp_path: Path) -> None:
+    out = _relay(tmp_path, [SIGN_IN_MAC, TICK],
+                 [START, _view(state="awaiting-approval", url=CODEX_URL, code="ABCD-1234",
+                               expires_at=LOADED_AT + 1 + 900)],
+                 snapshot=_codex_b(tmp_path))
+    panel = _signin(_card(out["html"]["accounts"], "claude-b"))
+    assert f'<a class="ac-link" href="{CODEX_URL}" rel="noopener noreferrer" target="_blank">' in panel
+    assert '<code class="ac-code">ABCD-1234</code>' in panel
+    assert "15:00 left" in _text(panel)
+    assert 'data-op="signin-cancel"' in panel
+    assert "signin-code" not in panel
+    assert f'<p class="ac-remind">{REMIND}</p>' in panel
+
+
+@needs_node
+def test_a_pasted_code_is_sent_once_and_the_field_reads_code_sent(tmp_path: Path) -> None:
+    code_field = _set(CLAUDE_B, {"value": " abc#123 "}, **{"data-field": "signin-code"})
+    out = _relay(tmp_path, [SIGN_IN_MAC, TICK, code_field, _click(CLAUDE_B, "signin-code")],
+                 [START, _view(url=CLAUDE_URL), ("POST", "/api/accounts/signin/code", 202, {})])
+    assert _requests(out)[-1] == ("POST", "/api/accounts/signin/code", {"id": SIGNIN_ID, "code": "abc#123"})
+    panel = _signin(_card(out["html"]["accounts"], "claude-b"))
+    assert "code sent" in _text(panel)
+    assert "signin-code" not in panel
+
+
+@needs_node
+def test_a_refused_code_shows_the_error_and_keeps_the_field(tmp_path: Path) -> None:
+    code_field = _set(CLAUDE_B, {"value": "abc"}, **{"data-field": "signin-code"})
+    out = _relay(tmp_path, [SIGN_IN_MAC, TICK, code_field, _click(CLAUDE_B, "signin-code")],
+                 [START, _view(url=CLAUDE_URL), ("POST", "/api/accounts/signin/code", 409, {"error": "code-used"})])
+    card = _card(out["html"]["accounts"], "claude-b")
+    assert '<div class="st-out bad" role="status">error: code-used</div>' in card
+    assert 'data-field="signin-code"' in _signin(card)
+
+
+@needs_node
+def test_cancel_posts_the_attempt_and_the_cancelled_result_ends_the_panel(tmp_path: Path) -> None:
+    out = _relay(tmp_path, [SIGN_IN_MAC, TICK, _click(CLAUDE_B, "signin-cancel"), TICK],
+                 [START, _view(url=CLAUDE_URL), ("POST", "/api/accounts/signin/cancel", 202, {}),
+                  _view(state="verifying", result="cancelled")])
+    assert ("POST", "/api/accounts/signin/cancel", {"id": SIGNIN_ID}) in _requests(out)
+    panel = _signin(_card(out["html"]["accounts"], "claude-b"))
+    assert "sign-in cancelled" in _text(panel)
+    assert "signin-cancel" not in panel and "signin-code" not in panel
+
+
+@needs_node
+@pytest.mark.parametrize("result,error,line", [("ok", None, "sign-in ok"),
+                                               ("failed", "launch-exit", "sign-in failed: launch-exit")])
+def test_a_result_stops_polling_and_drops_cancel_and_the_paste_field(
+        tmp_path: Path, result: str, error: str | None, line: str) -> None:
+    out = _relay(tmp_path, [SIGN_IN_MAC, TICK, TICK, TICK],
+                 [START, _view(url=CLAUDE_URL, result=result, error=error)])
+    assert _gets(out) == [f"/api/accounts/signin?id={SIGNIN_ID}"]
+    panel = _signin(_card(out["html"]["accounts"], "claude-b"))
+    assert line in _text(panel)
+    for gone in ("signin-cancel", "signin-code", "ac-link"):
+        assert gone not in panel
+
+
+@needs_node
+def test_a_foreign_url_draws_no_link(tmp_path: Path) -> None:
+    out = _relay(tmp_path, [SIGN_IN_MAC, TICK], [START, _view(url="https://evil.example/claude.com/")])
+    panel = _signin(_card(out["html"]["accounts"], "claude-b"))
+    assert "<a" not in panel and "evil.example" not in panel
+    assert 'data-op="signin-cancel"' in panel
+
+
+@needs_node
+def test_a_missing_attempt_ends_the_panel_with_no_attempt(tmp_path: Path) -> None:
+    out = _relay(tmp_path, [SIGN_IN_MAC, TICK, TICK], [START, ("GET", "/api/accounts/signin", 404, {"error": "x"})])
+    assert len(_gets(out)) == 1
+    panel = _signin(_card(out["html"]["accounts"], "claude-b"))
+    assert "error: no-attempt" in _text(panel)
+    assert "signin-cancel" not in panel
+
+
+@needs_node
+def test_a_refused_start_shows_the_error_on_the_card_and_no_panel(tmp_path: Path) -> None:
+    out = _relay(tmp_path, [SIGN_IN_MAC, TICK], [("POST", "/api/accounts/signin", 409, {"error": "running-job"})])
+    card = _card(out["html"]["accounts"], "claude-b")
+    assert '<div class="st-out bad" role="status">error: running-job</div>' in card
+    assert "ac-signin" not in card
+    assert _gets(out) == []
+
+
+@needs_node
+def test_the_cli_fallback_stays_while_a_sign_in_panel_is_open(tmp_path: Path) -> None:
+    out = _relay(tmp_path, [SIGN_IN_MAC, TICK], [START, _view(url=CLAUDE_URL)])
+    claude_b = _card(out["html"]["accounts"], "claude-b")
+    assert 'data-signin="mac"' in claude_b
+    assert re.findall(r'<code class="ac-cmd">([^<]*)</code>', claude_b) == [CLAUDE_B_PC, CLAUDE_B_MAC]
+
+
+@needs_node
+def test_a_card_runs_one_sign_in_at_a_time(tmp_path: Path) -> None:
+    out = _relay(tmp_path, [SIGN_IN_MAC, _click(CLAUDE_B, "signin", **{"data-pair": "pc"}), TICK],
+                 [START, ("POST", "/api/accounts/signin", 202, {"id": "other"}), _view()])
+    assert [body for method, url, body in _requests(out) if method == "POST"] == [
+        {"account": "claude-b", "device": "mac"}]
+    accounts = out["html"]["accounts"]
+    assert accounts.count('class="ac-signin"') == 1 and 'data-signin="mac"' in accounts
+
+
+@needs_node
+def test_a_finished_sign_in_can_start_again_on_another_device(tmp_path: Path) -> None:
+    out = _relay(tmp_path, [SIGN_IN_MAC, TICK, _click(CLAUDE_B, "signin", **{"data-pair": "pc"}), TICK, TICK],
+                 [START, _view(result="ok"), ("POST", "/api/accounts/signin", 202, {"id": "second"}),
+                  _view(), _view()])
+    assert _gets(out) == [f"/api/accounts/signin?id={SIGNIN_ID}", "/api/accounts/signin?id=second",
+                          "/api/accounts/signin?id=second"]
+    accounts = out["html"]["accounts"]
+    assert accounts.count('class="ac-signin"') == 1 and 'data-signin="pc"' in accounts
+
+
+@needs_node
+def test_signing_out_of_github_stops_the_polling(tmp_path: Path) -> None:
+    github_sign_out = ["click", {"within": {"cls": "st-auth"}, "attr": {"type": "button"}}]
+    out = _relay(tmp_path, [SIGN_IN_MAC, TICK, github_sign_out, TICK, TICK],
+                 [START, _view(), ("POST", "/api/signout", 200, {})])
+    assert ("POST", "/api/signout", {}) in _requests(out)
+    assert len(_gets(out)) == 1
+    assert "ac-signin" not in out["html"]["accounts"]
+
+
+def _focus(within: dict, props: dict | None = None, **attr: str) -> list:
+    return ["focus", {"pick": {"within": within, "attr": attr}, "props": props or {}}]
+
+
+def _focused(out: dict, name: str) -> dict | None:
+    return next(step["focus"] for step in out["steps"] if step.get("snap") == name)
+
+
+@needs_node
+def test_polling_keeps_focus_and_selection_in_the_code_field(tmp_path: Path) -> None:
+    typing = _focus(CLAUDE_B, {"value": "partial-code", "selectionStart": 3, "selectionEnd": 7},
+                    **{"data-field": "signin-code"})
+    out = _relay(tmp_path, [SIGN_IN_MAC, TICK, typing, ["snap", "before"], TICK, ["snap", "tick"],
+                            TICK, ["snap", "changed"]],
+                 [START, _view(url=CLAUDE_URL, expires_at=LOADED_AT + 600), _view(url=CLAUDE_URL,
+                                                                                  expires_at=LOADED_AT + 600),
+                  _view(state="verifying", url=CLAUDE_URL, expires_at=LOADED_AT + 600)])
+    field = {"field": "signin-code", "op": None, "value": "partial-code", "selection": [3, 7]}
+    assert _focused(out, "before") == field
+    assert _focused(out, "tick") == field
+    assert _focused(out, "changed") == field
+    assert "verifying" in _text(_signin(_card(_snap(out, "changed"), "claude-b")))
+
+
+@needs_node
+@pytest.mark.parametrize("op", ["signin-code", "signin-cancel"])
+def test_polling_keeps_focus_on_the_panel_buttons(tmp_path: Path, op: str) -> None:
+    out = _relay(tmp_path, [SIGN_IN_MAC, TICK, _focus(CLAUDE_B, **{"data-op": op}), TICK, ["snap", "tick"],
+                            TICK, ["snap", "changed"]],
+                 [START, _view(url=CLAUDE_URL), _view(url=CLAUDE_URL), _view(state="verifying", url=CLAUDE_URL)])
+    for name in ("tick", "changed"):
+        focus = _focused(out, name)
+        assert focus is not None and focus["op"] == op, name

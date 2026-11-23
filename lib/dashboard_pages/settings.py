@@ -27,6 +27,8 @@ ACCOUNT_READ_ONLY = {"default": "read-only: default account", "external": "read-
 NOT_SIGNED_IN = "not signed in on any device"
 NO_ACCOUNTS = "no accounts: machines.yml lists none"
 ADD_HARNESSES = ("claude", "codex", "cursor")
+SIGNIN_HARNESSES = ("claude", "codex")
+SIGNIN_REMIND = "Paste a code only from a sign-in you just started here. Never paste a code someone sent you."
 
 
 def drain_state(row: dict) -> tuple[str, str]:
@@ -237,6 +239,11 @@ CSS = """\
 .ac-name{color:var(--text)}.ac-when{color:var(--muted)}
 .ac-sign{flex-basis:100%}
 .ac-cmd{font:12px var(--mono);color:var(--accent);overflow-wrap:anywhere}
+.ac-signin{display:flex;flex-direction:column;gap:8px;padding:8px;border:1px solid var(--line-hi)}
+.st-ctl .ac-signin input{width:24ch}
+.ac-link{color:var(--accent);overflow-wrap:anywhere}
+.ac-code{font:600 16px var(--mono);letter-spacing:.1em;color:var(--accent)}
+.ac-remind{margin:0;color:var(--warn)}
 """
 
 
@@ -445,18 +452,131 @@ _SCRIPT = r"""
     doctor: function (c, device) { return {op: 'doctor', account: c.a.id, device: device}; },
     signout: function (c, device) { return {op: 'signout', account: c.a.id, device: device}; }
   };
-  function acDisable(c) { c.buttons.concat(c.pairButtons).forEach(function (b) { b.disabled = c.busy; }); }
-  function acSend(c, body) {
+  function acLive(c) { return !!c.signin && !c.signin.done; }
+  function acDisable(c) {
+    c.buttons.concat(c.pairButtons, c.panelButtons).forEach(function (b) {
+      b.disabled = c.busy || (b.getAttribute('data-op') === 'signin' && acLive(c));
+    });
+  }
+  function acPost(c, send, ok) {
     if (c.busy) return;
     c.busy = true;
     c.out.className = 'st-out';
     c.out.textContent = 'sending…';
     acDisable(c);
-    ghPost('/api/settings', Object.assign({target: 'account'}, body), true).then(function (res) {
+    send().then(function (res) {
       c.busy = false;
       c.out.className = 'st-out ' + (res.status === 202 ? 'ok' : 'bad');
-      c.out.textContent = res.status === 202 ? ST.queued : 'error: ' + res.error;
+      c.out.textContent = res.status === 202 ? ok(res.data) : 'error: ' + res.error;
       acDisable(c);
+    });
+  }
+  function acSend(c, body) {
+    acPost(c, function () { return ghPost('/api/settings', Object.assign({target: 'account'}, body), true); },
+           function () { return ST.queued; });
+  }
+  function acLeft(at) {
+    var n = Math.max(0, Math.floor(Number(at) - Date.now() / 1000));
+    return Math.floor(n / 60) + ':' + ('0' + n % 60).slice(-2) + ' left';
+  }
+  function acPanel(c) {
+    var s = c.signin;
+    var v = s && s.view || {};
+    var key = s && JSON.stringify([s.id, s.done, s.sent, v.state, v.url, v.code, v.expires_at]);
+    if (key === c.panelKey) {
+      if (c.left) c.left.textContent = acLeft(v.expires_at);
+      return;
+    }
+    c.panelKey = key;
+    acKeepFocus(c, function () { acDraw(c, s, v); });
+  }
+  function acKeepFocus(c, redraw) {
+    var active = document.activeElement;
+    var n = active;
+    while (n && n !== c.signinSlot) n = n.parentNode;
+    if (!n) { redraw(); return; }
+    var start = active.selectionStart, end = active.selectionEnd, op = active.getAttribute('data-op');
+    redraw();
+    var target = active.isConnected ? active : c.panelButtons.filter(function (b) {
+      return b.getAttribute('data-op') === op;
+    })[0];
+    if (!target || document.activeElement === target) return;
+    target.focus({preventScroll: true});
+    if (target === active && typeof start === 'number') active.setSelectionRange(start, end);
+  }
+  function acDraw(c, s, v) {
+    c.panelButtons = [];
+    c.left = null;
+    c.signinSlot.replaceChildren();
+    if (!s) return;
+    var p = acAttrs(add(c.signinSlot, el('div', 'ac-signin')), {'data-signin': s.device});
+    var row = add(p, el('div', 'gh-row'));
+    add(row, el('span', 'ac-name', s.device));
+    add(row, el('span', null, s.done || v.state || 'accepted'));
+    if (!s.done) {
+      var url = String(v.url || '');
+      if (/^https:\/\/(claude\.com|auth\.openai\.com)\//.test(url)) {
+        var a = add(row, acAttrs(link('ac-link', url), {rel: 'noopener noreferrer', target: '_blank'}));
+        a.textContent = url;
+      }
+      if (s.harness === 'codex' && v.code) add(row, el('code', 'ac-code', String(v.code)));
+      if (v.expires_at) c.left = add(row, el('span', 'ac-when', acLeft(v.expires_at)));
+      acButton(c, c.panelButtons, row, 'Cancel', 'signin-cancel', null, function () { acCancel(c, s); });
+      if (s.harness === 'claude' && s.sent) add(p, el('span', null, 'code sent'));
+      else if (s.harness === 'claude') {
+        var paste = add(p, el('div', 'gh-row'));
+        s.input = s.input || acAttrs(el('input'), {'data-field': 'signin-code', autocomplete: 'off',
+                                                   placeholder: 'code', 'aria-label': 'code for ' + s.device});
+        add(paste, s.input);
+        acButton(c, c.panelButtons, paste, 'Send', 'signin-code', null, function () { acCode(c, s); });
+      }
+    }
+    add(p, el('p', 'ac-remind', ST.remind));
+  }
+  function acSignin(c, device) {
+    if (acLive(c)) return;
+    var a = c.a;
+    acPost(c, function () { return ghPost('/api/accounts/signin', {account: a.id, device: device}, true); },
+           function (data) {
+             c.signin = {id: String(data.id || ''), device: device, harness: a.harness, view: null, done: null,
+                         polling: false, sent: false, input: null};
+             if (!ST.ticking) { ST.ticking = true; setInterval(acTick, 1000); }
+             acPanel(c);
+             return '';
+           });
+  }
+  function acCode(c, s) {
+    var code = String(s.input.value || '').trim();
+    if (!code) { stBad(c); return; }
+    acPost(c, function () { return ghPost('/api/accounts/signin/code', {id: s.id, code: code}, true); },
+           function () { s.sent = true; acPanel(c); return ''; });
+  }
+  function acCancel(c, s) {
+    acPost(c, function () { return ghPost('/api/accounts/signin/cancel', {id: s.id}, true); },
+           function () { return ''; });
+  }
+  function acView(s, res) {
+    if (res.status === 404) s.done = 'error: no-attempt';
+    if (!res.ok) return;
+    s.view = res.data;
+    if (res.data.result) s.done = 'sign-in ' + res.data.result + (res.data.error ? ': ' + res.data.error : '');
+  }
+  function acTick() {
+    if (!GH.login) return;
+    Object.keys(ST.accountCards).forEach(function (id) {
+      var c = ST.accountCards[id];
+      var s = c.signin;
+      if (!s || s.done) return;
+      acPanel(c);
+      if (s.polling) return;
+      s.polling = true;
+      ghGet('/api/accounts/signin?id=' + encodeURIComponent(s.id)).then(function (res) {
+        s.polling = false;
+        acView(s, res);
+        if (c.signin !== s) return;
+        acPanel(c);
+        acDisable(c);
+      });
     });
   }
   function acRun(c, op, device) {
@@ -468,14 +588,15 @@ _SCRIPT = r"""
     Object.keys(attrs).forEach(function (k) { node.setAttribute(k, attrs[k]); });
     return node;
   }
-  function acButton(c, list, row, text, op, device) {
-    var b = acAttrs(ghButton(row, text, function () { acRun(c, op, device); }), {'data-op': op});
+  function acButton(c, list, row, text, op, device, onClick) {
+    var b = acAttrs(ghButton(row, text, onClick || function () { acRun(c, op, device); }), {'data-op': op});
     if (device) b.setAttribute('data-pair', device);
     list.push(b);
     return b;
   }
   function acBase(label, op) {
-    var c = {root: el('div', 'st-ctl'), busy: false, boxes: [], boxKey: undefined, buttons: [], pairButtons: []};
+    var c = {root: el('div', 'st-ctl'), busy: false, boxes: [], boxKey: undefined, buttons: [], pairButtons: [],
+             panelButtons: [], signin: null, panelKey: null, left: null};
     c.fields = add(c.root, el('div', 'gh-row'));
     c.max = acAttrs(el('input'), {type: 'number', min: '1', max: '64', 'data-field': 'max_jobs'});
     var row = add(c.root, el('div', 'gh-row'));
@@ -530,6 +651,7 @@ _SCRIPT = r"""
     c.paused = acButton(c, c.buttons, row, '', 'paused');
     acButton(c, c.buttons, row, 'Remove', 'remove');
     c.pairs = add(c.root, el('div', 'ac-list'));
+    c.signinSlot = add(c.root, el('div', 'ac-list'));
     acOut(c);
     return c;
   }
@@ -545,8 +667,9 @@ _SCRIPT = r"""
     var on = acDevices(a);
     var names = acCandidates(d, a.harness);
     acBoxes(c, JSON.stringify([names, on]), names, on);
-    if (c.pairKey !== JSON.stringify(on)) {
-      c.pairKey = JSON.stringify(on);
+    var signin = GH.accountSignin && ST.signinHarnesses.indexOf(a.harness) >= 0;
+    if (c.pairKey !== JSON.stringify([on, signin])) {
+      c.pairKey = JSON.stringify([on, signin]);
       c.pairs.replaceChildren();
       c.pairButtons = [];
       on.forEach(function (device) {
@@ -554,6 +677,7 @@ _SCRIPT = r"""
         add(row, el('span', 'ac-name', device));
         acButton(c, c.pairButtons, row, 'Prepare', 'prepare', device);
         acButton(c, c.pairButtons, row, 'Run doctor', 'doctor', device);
+        if (signin) acButton(c, c.pairButtons, row, 'Sign in', 'signin', device, function () { acSignin(c, device); });
         acButton(c, c.pairButtons, row, 'Sign out', 'signout', device);
       });
     }
@@ -592,5 +716,5 @@ SCRIPT = _SCRIPT.replace("__ST__", json.dumps(
     {"tone": RESULT_TONE, "perCard": RESULTS_PER_CARD, "queued": QUEUED, "readOnly": READ_ONLY,
      "waiting": WAITING, "noChanges": NO_CHANGES, "signIn": SIGN_IN_TONE, "unchecked": UNCHECKED,
      "accountReadOnly": ACCOUNT_READ_ONLY, "notSignedIn": NOT_SIGNED_IN, "noAccounts": NO_ACCOUNTS,
-     "harnesses": ADD_HARNESSES}
+     "harnesses": ADD_HARNESSES, "signinHarnesses": SIGNIN_HARNESSES, "remind": SIGNIN_REMIND}
 ))
