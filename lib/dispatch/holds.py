@@ -12,7 +12,7 @@ from lib.dispatch.helpers import _base_update_key, _is_full_sha, _matching_head,
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, ShipError, TrackedTicket
 from lib.hold import HoldDecision, decide, ok_carries
-from lib.rule_engine import Land, Wait
+from lib.rule_engine import Escalate, Land, Wait
 
 _HELD_BASE_UPDATE = "held-base-update"
 
@@ -196,20 +196,33 @@ class HoldsMixin:
         return True, _HELD_BASE_UPDATE
 
     def _hold_decision(self, ticket: TrackedTicket, head: str) -> HoldDecision:
+        return self._read_hold(ticket, head)[0]
+
+    def _read_hold(self, ticket: TrackedTicket, head: str) -> tuple[HoldDecision, bool]:
+        """The bool says a read behind an ok's coverage failed. The decision
+        keeps its own unread rule, so only the ok reading sees it."""
         hold = ticket.factory.hold
         assert hold is not None
         waited = False
+        failed = False
 
         def covers(ok_head: str) -> bool:
-            nonlocal waited
+            nonlocal waited, failed
             if ticket.factory.rule_engine != "on":
-                return self._approval_covers(ticket, ok_head, head) or self._ok_carries(
-                    ticket, ok_head, head
-                )
+                if self._approval_covers(ticket, ok_head, head):
+                    return True
+                carries = self._ok_carries(ticket, ok_head, head)
+                failed = failed or carries is None
+                return carries is True
             if _matching_head(ok_head, head) is not None:
                 return True
             outcome = self._rule_on_moved_head(ticket, ok_head, head)
             waited = waited or isinstance(outcome, Wait)
+            failed = failed or (
+                outcome == Escalate("probe-unknown")
+                and self.moved_head is not None
+                and self._moved_head(ticket, ok_head, head) is None
+            )
             return isinstance(outcome, Land)
 
         decision = decide(
@@ -223,10 +236,10 @@ class HoldsMixin:
             covers=covers,
         )
         if waited and decision.blocks and decision.unread is None:
-            return replace(decision, unread="moved-head ci")
-        return decision
+            decision = replace(decision, unread="moved-head ci")
+        return decision, failed
 
-    def _ok_carries(self, ticket: TrackedTicket, ok_head: str, head: str) -> bool:
+    def _ok_carries(self, ticket: TrackedTicket, ok_head: str, head: str) -> bool | None:
         hold = ticket.factory.hold
         assert hold is not None
         if self.hold_carry is None:
@@ -244,7 +257,7 @@ class HoldsMixin:
                     f"hold ok carry unread: {ticket.repo}#{ticket.ticket_id}: "
                     f"{type(exc).__name__}"
                 )
-            return False
+            return None
         self._hold_carries[key] = carries
         return carries
 
@@ -272,8 +285,8 @@ class HoldsMixin:
             return "rejected-hold-ok-author"
         if ticket.current_head is None:
             return OK_UNREAD
-        decision = self._hold_decision(ticket, ticket.current_head)
-        if decision.unread is not None:
+        decision, failed = self._read_hold(ticket, ticket.current_head)
+        if decision.unread is not None or failed:
             return OK_UNREAD
         return "hold-ok" if decision.reasons else "ok-no-hold"
 

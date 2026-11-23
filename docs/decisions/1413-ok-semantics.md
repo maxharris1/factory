@@ -17,7 +17,7 @@ The poller reads the ok against the hold decision at the PR's current head (the 
 | `rejected-hold-ok-author` | The author is not `hold.approver`, or the approver may not approve (`trusted_logins`, or `approver_logins` with `github_app.enabled`). Unchanged, and read before any hold input. |
 | `hold-ok` | The PR is held (label, label removed by someone else, or a `hold.paths` file) and the ok is the approver's. A covering ok clears the hold as T4H says. |
 | `ok-no-hold` | The repo's hold applies, but this PR is not held at its current head. The ok clears nothing and ships nothing. |
-| (unhandled) | A hold input (labels, changed files, label events, the `factory.md` trust comparison, the current head, or the rule engine's moved-head read) is unread. The ok stays unhandled and is read again next poll, so it fails closed. |
+| (unhandled) | A hold input (labels, changed files, label events, the `factory.md` trust comparison, the current head, the rule engine's moved-head probe, or, with the engine off, whether an ok at an earlier head carries to the current one) is unread. The ok stays unhandled and is read again next poll, so it fails closed. |
 
 A `ship: after:<approver>` repo is outside the hold: its `kind=ok` and `decline` still go to the T8 hook, unchanged. `/ok <sha>` is still read only by T4H's `decide` and gets no outcome of its own.
 

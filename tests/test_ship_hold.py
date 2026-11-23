@@ -36,6 +36,7 @@ from tests.test_dispatcher import (
     VERDICT,
     FakeGrokDelivery,
     FakeReviewActions,
+    FakeSource,
     comment,
     seed_review_job,
 )
@@ -805,14 +806,16 @@ def test_an_unread_carry_keeps_the_hold_and_is_read_again_next_poll(
 def test_an_unread_carry_leaves_the_ok_unhandled_until_read(
     tmp_path: Path, error: Exception
 ) -> None:
-    dispatcher, queue, actions = held_at_new_head(tmp_path, FakeHoldCarry(error, MERGED_MAIN))
+    carry = FakeHoldCarry(error)
+    dispatcher, queue, actions = held_at_new_head(tmp_path, carry)
 
     dispatcher.process(snapshot(approve(NEW_HEAD), ok(HEAD), head=NEW_HEAD, files=PR_FILES))
     assert ok_outcome(queue) is None
+    assert_held(queue, actions, NEW_HEAD)
 
-    dispatcher.process(snapshot(approve(NEW_HEAD), ok(HEAD), head=NEW_HEAD, files=PR_FILES))
+    carry.outcomes = [MERGED_MAIN]
+    dispatcher.process(snapshot(ok(HEAD), head=NEW_HEAD, files=PR_FILES))
     assert ok_outcome(queue) == "hold-ok"
-    assert actions.merges == [(True, NEW_HEAD)]
 
 
 def test_a_new_head_with_its_own_commit_after_the_ok_still_needs_a_new_ok(
@@ -986,15 +989,18 @@ def test_with_the_engine_on_an_unknown_probe_escalates(
 def test_with_the_engine_on_an_unread_probe_leaves_the_ok_unhandled_until_read(
     tmp_path: Path, error: Exception
 ) -> None:
-    dispatcher, queue, actions = engine_at_new_head(tmp_path, FakeProbe(error, PURE))
+    probe = FakeProbe(error)
+    dispatcher, queue, actions = engine_at_new_head(tmp_path, probe)
 
     dispatcher.process(moved())
     assert ok_outcome(queue) is None
     assert_held(queue, actions, NEW_HEAD)
+    assert len(probe.calls) == 1
 
-    dispatcher.process(moved())
+    probe.outcomes = [PURE]
+    dispatcher.poll_once(FakeSource())
+    dispatcher.process(snapshot(ok(HEAD), head=NEW_HEAD, files=PR_FILES, factory=ENGINE))
     assert ok_outcome(queue) == "hold-ok"
-    assert actions.merges == [(True, NEW_HEAD)]
 
 
 def test_with_the_engine_on_pending_ci_waits_with_no_wake_and_lands_once_green(

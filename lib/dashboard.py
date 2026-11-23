@@ -2018,6 +2018,8 @@ def _read_db(
         for key, info in ticket_info.items()
     }
     record_keys = _record_keys(ticket_info)
+    for item, key in ticket_rows:
+        item["record"] = record_keys[key]
     ci_runs = (
         _ci_runs(connection, now, sources, {key: info.tracker for key, info in ticket_info.items()})
         if "ci_jobs" in tables else {"runs": [], "failures": []}
