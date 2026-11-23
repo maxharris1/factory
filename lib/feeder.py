@@ -40,7 +40,9 @@ is not refused; it goes into the brief's separate ops step. Optional
 `Assumed environment` and `Out of scope` sections (#1033) go into the brief
 beside the criteria; a builder criterion with an unbounded quantifier
 ("every", "all", "never") on a ticket with no `Out of scope` section adds an
-intake warning to the brief and is never refused. A ticket that
+intake warning to the brief and is never refused. An optional `Target branch:`
+line names the draft PR's base (SPEC section 4.4); a second line, a bad
+value or the ticket's own head branch is a defect. A ticket that
 fails is `refused-intake` with its reasons, takes no room and no holds,
 posts nothing, raises needs-attention (`intake-refused`) and queues one
 Grok `refused` wake per distinct defect set. It is re-checked every poll,
@@ -305,6 +307,7 @@ _COLUMNS = (
     ("base_branch", "TEXT"),
     ("own_tier", "INTEGER"),
     ("split_noted", "INTEGER NOT NULL DEFAULT 0"),
+    ("target_source", "TEXT"),
 )
 ORCHESTRATOR = "grok-bot"
 FACTORY_LABEL = "factory"
@@ -366,6 +369,7 @@ _UNBOUNDED = re.compile(
 _LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s*)?(.*)$")
 _FIELD = r"^\s*(?:[-*+]\s+)?(?:\*\*|__)?\s*{name}\s*(?:\*\*|__)?\s*:\s*(?:\*\*|__)?\s*(?P<value>.*?)\s*$"
 _RISK_LINE = re.compile(_FIELD.format(name=r"risk"), re.IGNORECASE)
+_TARGET_LINE = re.compile(_FIELD.format(name=r"target\s+branch"), re.IGNORECASE)
 _PLAN_LINE = re.compile(_FIELD.format(name=r"plan\s+first(?:\s*\(yes\s*/\s*no\))?"), re.IGNORECASE)
 _DEPENDS_LINE = re.compile(_FIELD.format(name=r"depends\s+on"), re.IGNORECASE)
 _TYPE_LINE = re.compile(_FIELD.format(name=r"type"), re.IGNORECASE)
@@ -391,7 +395,8 @@ _OPS_ACTION = re.compile(
 @dataclass(frozen=True)
 class Defect:
     code: (
-        Literal["no-criteria", "other-prs-criterion", "no-risk", "no-plan-first", "no-depends-on", "bad-type"]
+        Literal["no-criteria", "other-prs-criterion", "no-risk", "no-plan-first", "no-depends-on", "bad-type",
+                "bad-target-branch"]
         | JourneyCode
     )
     reason: str
@@ -414,6 +419,7 @@ class IntakeTemplate:
     assumed_environment: tuple[str, ...] = ()
     out_of_scope: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    target_branch: str | None = None
 
 
 def _unfenced(body: str) -> list[str]:
@@ -442,6 +448,26 @@ def _field(lines: Sequence[str], pattern: re.Pattern[str]) -> str | None:
         if match:
             return match.group("value").strip("*_ ").strip()
     return None
+
+
+def _target_branch(lines: Sequence[str], head: str | None) -> tuple[str | None, Defect | None]:
+    values = [
+        match.group("value").strip("*_ ").strip()
+        for match in map(_TARGET_LINE.match, lines)
+        if match
+    ]
+    if not values:
+        return None, None
+    if len(values) > 1:
+        return None, Defect("bad-target-branch", f"{len(values)} `Target branch:` lines: keep one")
+    (value,) = values
+    if value.lower() == "default":
+        return None, None
+    if not _BRANCH.fullmatch(value) or ".." in value:
+        return None, Defect("bad-target-branch", f"`Target branch: {value}` is not a plain branch name")
+    if value == head:
+        return None, Defect("bad-target-branch", f"`Target branch: {value}` is the ticket's own head branch")
+    return value, None
 
 
 def _prose_and_link_targets(item: str, document: dict[str, object]) -> tuple[str, ...]:
@@ -506,7 +532,7 @@ def _section_items(lines: Sequence[str]) -> dict[str, list[str]]:
     return sections
 
 
-def parse_intake(body: str, labels: Collection[str]) -> IntakeTemplate:
+def parse_intake(body: str, labels: Collection[str], *, head: str | None = None) -> IntakeTemplate:
     """The ticket's intake template fields and what is wrong with them."""
     lines = _unfenced(body)
     defects: list[Defect] = []
@@ -567,6 +593,9 @@ def parse_intake(body: str, labels: Collection[str]) -> IntakeTemplate:
         valid = ", ".join(f"`{name}`" for name in TICKET_TYPES)
         defects.append(Defect("bad-type", f"`Type: {ticket_type}` is not one of {valid} (no line means feature)"))
         ticket_type = None
+    target_branch, target_defect = _target_branch(lines, head)
+    if target_defect is not None:
+        defects.append(target_defect)
     journeys, bad = parse_features(_field(lines, _FEATURES_LINE))
     qa_criteria = tuple(qa)
     defects.extend(Defect(code, reason) for code, reason in problems(journeys, bad, qa_criteria))
@@ -584,6 +613,7 @@ def parse_intake(body: str, labels: Collection[str]) -> IntakeTemplate:
         assumed_environment=tuple(sections["assumed_environment"]),
         out_of_scope=tuple(sections["out_of_scope"]),
         warnings=tuple(warnings),
+        target_branch=target_branch,
     )
 
 
@@ -756,10 +786,16 @@ class _Candidate:
 
     @property
     def base(self) -> str | None:
+        if self.template.target_branch is not None:
+            return self.template.target_branch
         intake = self.project.intake
         if intake is not None and intake.base_branches and self.issue.linear_project is None:
             return None
         return self.project.base_for(self.issue.linear_project) or self.context.config.base_branch
+
+    @property
+    def target_source(self) -> str:
+        return "project" if self.template.target_branch is None else "ticket"
 
     @property
     def line(self) -> tuple[str, str | None]:
@@ -1443,7 +1479,7 @@ class Feeder:
                         context=context,
                         issue=issue,
                         lines=gate_lines(issue),
-                        template=parse_intake(issue.body, issue.labels),
+                        template=parse_intake(issue.body, issue.labels, head=self._branch_for(issue)),
                     )
                 )
         return found, read, errors
@@ -2334,8 +2370,8 @@ class Feeder:
                     INSERT INTO {FEEDER_TABLE} (
                         repo, issue, tracker, title, harness, state, urgent, bug, tier, own_tier,
                         risk, issue_created_at, first_seen_at, seen_at, touches, conflicts,
-                        base_branch
-                    ) VALUES (?, ?, ?, ?, ?, 'eligible', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        base_branch, target_source
+                    ) VALUES (?, ?, ?, ?, ?, 'eligible', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(repo, issue) DO UPDATE SET
                         title = excluded.title,
                         touches = excluded.touches,
@@ -2348,6 +2384,8 @@ class Feeder:
                                     ELSE risk END,
                         base_branch = CASE WHEN {FEED_NOT_BEGUN} THEN excluded.base_branch
                                            ELSE base_branch END,
+                        target_source = CASE WHEN {FEED_NOT_BEGUN} THEN excluded.target_source
+                                             ELSE target_source END,
                         harness = CASE WHEN state IN ({_FINAL_SQL}) THEN harness
                                        ELSE excluded.harness END,
                         seen_at = excluded.seen_at
@@ -2371,6 +2409,7 @@ class Feeder:
                             [[ref.tracker, ref.repo, ref.key] for ref in sorted(candidate.lines.conflicts_with)]
                         ),
                         candidate.base,
+                        candidate.target_source,
                     ),
                 )
             connection.execute(
