@@ -261,27 +261,43 @@ class AccountLoads:
         return self.score.get(account, UNREAD_HEADROOM)
 
 
+@dataclass(frozen=True)
+class RunningPair:
+    job_id: str
+    account: str
+    device: str
+    placed_at: float
+
+
+def running_pairs(connection: sqlite3.Connection, config: MachinesConfig | None) -> list[RunningPair]:
+    if not _has_table(connection, SLOTS_TABLE):
+        return []
+    present = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({SLOTS_TABLE})")}
+    select = ", ".join(
+        name if name in present else "NULL" for name in ("job_id", "device", "harness", "account", "placed_at")
+    )
+    pairs = []
+    for job_id, device_name, harness, account, placed_at in connection.execute(
+        f"SELECT {select} FROM {SLOTS_TABLE}"
+    ):
+        if placed_at is None:
+            continue
+        if account is None:
+            device = None if config is None else config.device(str(device_name))
+            account = None if device is None else device.account_for(str(harness))
+        if account is not None:
+            pairs.append(RunningPair(str(job_id), str(account), str(device_name), float(placed_at)))
+    return pairs
+
+
 def account_loads(
     connection: sqlite3.Connection, config: MachinesConfig | None, now: float
 ) -> AccountLoads:
-    placed: list[tuple[str, float]] = []
+    pairs = running_pairs(connection, config)
+    placed = [(pair.account, pair.placed_at) for pair in pairs]
     devices_of: dict[str, set[str]] = {}
-    if _has_table(connection, SLOTS_TABLE):
-        present = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({SLOTS_TABLE})")}
-        select = ", ".join(
-            name if name in present else "NULL" for name in ("device", "harness", "account", "placed_at")
-        )
-        for device_name, harness, account, placed_at in connection.execute(
-            f"SELECT {select} FROM {SLOTS_TABLE}"
-        ):
-            if placed_at is None:
-                continue
-            if account is None:
-                device = None if config is None else config.device(str(device_name))
-                account = None if device is None else device.account_for(str(harness))
-            if account is not None:
-                placed.append((str(account), float(placed_at)))
-                devices_of.setdefault(str(account), set()).add(str(device_name))
+    for pair in pairs:
+        devices_of.setdefault(pair.account, set()).add(pair.device)
     order = {device.name: index for index, device in enumerate(config.devices if config is not None else ())}
     running_on = {
         account: tuple(sorted(names, key=lambda name: (order.get(name, len(order)), name)))
