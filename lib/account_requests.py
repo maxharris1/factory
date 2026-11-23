@@ -17,6 +17,7 @@ OPS: Mapping[str, frozenset[str]] = MappingProxyType({
     "remove": frozenset({"expect"}),
     "prepare": frozenset({"device"}),
     "doctor": frozenset({"device"}),
+    "signout": frozenset({"device"}),
 })
 SET_FIELDS = frozenset({"max_jobs", "signed_in_on", "paused"})
 REMOVE_EXPECT_KEYS = frozenset({"harness", "max_jobs", "paused", "signed_in_on"})

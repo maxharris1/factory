@@ -712,6 +712,7 @@ ACCOUNT_OPS = {
     "remove": frozenset({"expect"}),
     "prepare": frozenset({"device"}),
     "doctor": frozenset({"device"}),
+    "signout": frozenset({"device"}),
 }
 ACCOUNT_FIELDS = {
     "max_jobs": (_is_slot_max, _is_max_jobs_expect),
@@ -735,6 +736,7 @@ ACCOUNT_SHAPES: dict[str, Callable[[dict], bool]] = {
     "remove": lambda p: _is_account_view(p["expect"]),
     "prepare": lambda p: isinstance(p["device"], str),
     "doctor": lambda p: isinstance(p["device"], str),
+    "signout": lambda p: isinstance(p["device"], str),
 }
 ACCOUNT_DEVICES: dict[str, Callable[[dict], list]] = {
     "add": lambda p: p["signed_in_on"],
@@ -742,6 +744,7 @@ ACCOUNT_DEVICES: dict[str, Callable[[dict], list]] = {
     "remove": lambda p: [],
     "prepare": lambda p: [p["device"]],
     "doctor": lambda p: [p["device"]],
+    "signout": lambda p: [p["device"]],
 }
 
 

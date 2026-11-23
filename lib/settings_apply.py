@@ -42,7 +42,8 @@ not seen:
   doctor request for one account on one device takes none of it: it runs
   `orch accounts prepare` over the doctor's ssh path with this machines.yml
   on stdin, then the doctor, and records the pair's
-  account_signins status before and after.
+  account_signins status before and after. A signout request runs the
+  harness's logout there instead, refused while the pair holds a running job.
 * Every outcome is one AuditEntry line in `<state>/settings-audit.jsonl`. An
   id already there is never applied again, so a pass is safe to repeat.
 """
@@ -79,7 +80,7 @@ from lib.device_pool import RunningPair, running_pairs, slots_in_use
 from lib.load import is_strict_int, load_yaml
 from lib.machines_yml import Device, MachinesConfig, load_machines_yml
 from lib.orch_yml import load_orch_yml
-from lib.remote import _UNTRACE, PROBE_TIMEOUT_SECONDS, ByteTransport, SshTransport, _login
+from lib.remote import _UNTRACE, PROBE_TIMEOUT_SECONDS, SSH_UNREACHABLE, ByteTransport, SshTransport, _login
 from lib.wait import OWNING_BOTS
 
 if TYPE_CHECKING:
@@ -97,6 +98,7 @@ APPLIED = "applied"
 PENDING = "pending"
 REFUSED = "refused"
 FAILED = "failed"
+SIGNED_OUT = "signed-out"
 
 REQUEST_NAME = re.compile(r"^([A-Za-z0-9_-]{16,64})\.json$")
 REQUESTED_AT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
@@ -691,6 +693,8 @@ class Applier:
         return old_bytes, new_text, previous
 
     def _apply_pair(self, request: PairRequest) -> AuditEntry:
+        if request.op == "signout":
+            return self._apply_signout(request)
         try:
             config, device, harness = self._pair(request)
         except Refused as refusal:
@@ -708,6 +712,49 @@ class Applier:
             return self._entry(request, FAILED, previous, error)
         entry = self._entry(request, FAILED if error else APPLIED, previous, error)
         return replace(entry, new=_clip(new))
+
+    def _apply_signout(self, request: PairRequest) -> AuditEntry:
+        try:
+            config, device, harness = self._pair(request)
+        except Refused as refusal:
+            return self._entry(request, REFUSED, None, refusal.error)
+        home = config.account_home(device.name, harness, request.account)
+        if home is None:
+            return self._entry(request, REFUSED, None, "default-account")
+        previous = None
+        try:
+            with closing(sqlite3.connect(self.db, timeout=30, isolation_level=None)) as connection:
+                account_doctor.ensure_table(connection)
+                previous = _signin(connection, request)
+                try:
+                    with self.claims() as held:
+                        busy = any(pair.account == request.account and pair.device == device.name
+                                   for pair in held.pairs(config))
+                except sqlite3.Error:
+                    return self._entry(request, REFUSED, previous, "cannot read running jobs")
+                if busy:
+                    return self._entry(request, REFUSED, previous, "running-job")
+                error = self._logout(device, harness, home)
+                account_doctor.run(connection, config, self.transport, self.clock(), self.repo)
+                new = _signin(connection, request)
+        except sqlite3.Error:
+            return self._entry(request, FAILED, previous, "doctor-db")
+        if error is None and new != "signed-out":
+            error = "unreachable" if new == "unreachable" else "still-signed-in"
+        entry = self._entry(request, FAILED if error else SIGNED_OUT, previous, error)
+        return replace(entry, new=_clip(new))
+
+    def _logout(self, device: Device, harness: str, home: str) -> str | None:
+        if account_doctor.no_ssh_path(device, harness) is not None:
+            return "no-ssh-path"
+        exchanged = self.transport.exchange(
+            account_doctor.ssh_argv(device, harness, account_doctor.logout_script(harness, home)),
+            timeout=PROBE_TIMEOUT_SECONDS)
+        if exchanged.timed_out:
+            return "logout-timeout"
+        if exchanged.code == SSH_UNREACHABLE:
+            return "unreachable"
+        return None if exchanged.code == 0 else "logout-exit"
 
     def _pair(self, request: PairRequest) -> tuple[MachinesConfig, Device, str]:
         self._approve(request)

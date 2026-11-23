@@ -29,7 +29,7 @@ A card shows these facts:
 
 Only the approver can sign in to the page. Signed in, the panel shows an
 Add account form. Each card shows Apply max_jobs, Apply devices, Pause or
-Resume, and Remove, plus Prepare and Run doctor for each of its devices. A
+Resume, and Remove, plus Prepare, Run doctor and Sign out for each of its devices. A
 card marked `read-only: default account` or `read-only: external account`
 shows no controls. A device's login account is read-only when `accounts:`
 does not declare it. The server refuses every `<harness>-default` account,
@@ -50,6 +50,7 @@ and writes the request to the settings spool. The card then shows
 | `remove` | `expect` | Remove | Deletes the account's block and keeps its comments. `expect` is the account as the card showed it, with `harness`, `max_jobs`, `paused` and `signed_in_on`. |
 | `prepare` | `device` | Prepare | Makes the account's folder on `device`, then runs the doctor. It edits nothing. |
 | `doctor` | `device` | Run doctor | Makes the account's folder on `device`, as Prepare does, then runs the doctor. It edits nothing. |
+| `signout` | `device` | Sign out | Runs `claude auth logout` or `codex logout` as the bot in the account's folder on `device`, with the five token variables and `CLAUDE_SECURESTORAGE_CONFIG_DIR` unset, then runs the doctor. It records `signed-out`, `failed`, or `refused` with `running-job` while the pair runs a job. |
 
 ### Refusals by the server
 
@@ -58,7 +59,7 @@ drawn from. A refused request writes nothing.
 
 | Status | Code | Cause |
 | --- | --- | --- |
-| 400 | `bad-op` | The op is not one of the five. |
+| 400 | `bad-op` | The op is not one of the six. |
 | 400 | `bad-keys` | The keys are not exactly `target`, `op`, `account` and the op's keys. |
 | 400 | `bad-field` | A `set` names a field other than `max_jobs`, `signed_in_on` or `paused`. |
 | 400 | `bad-value` | A bad account id, or a value of the wrong shape. Examples are a `max_jobs` outside 1 to 64, a device named twice, an unknown harness, and a remove `expect` without its four keys. |
@@ -67,7 +68,7 @@ drawn from. A refused request writes nothing.
 | 403 | `content-type`, `origin`, `csrf` | The request did not come from the page. |
 | 403 | `not-approver` | The login is not the approver. |
 | 403 | `read-only` | A `<harness>-default` account, an account the snapshot marks read-only, or an `add` with harness `external`. |
-| 404 | `not-in-snapshot` | The account is not in `status.json` (an `add` is exempt). Or a device is not in it, or a `prepare` or `doctor` device is not in the account's `signed_in_on`. |
+| 404 | `not-in-snapshot` | The account is not in `status.json` (an `add` is exempt). Or a device is not in it, or a `prepare`, `doctor` or `signout` device is not in the account's `signed_in_on`. |
 | 409 | `exists` | An `add` names an account that exists. |
 | 409 | `changed` | `expect` no longer matches the snapshot. Reload the page and try again. |
 | 429 | `busy` | 20 requests already wait to be applied. |
