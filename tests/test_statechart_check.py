@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -6,6 +7,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECK = ROOT / "model" / "check.sh"
+FIRST_STEP = re.search(r'echo "(1/\d+ phase 1 model)', CHECK.read_text()).group(1)
 
 FLAKY = """#!/bin/sh
 echo "$*" >> "{log}"
@@ -81,7 +83,7 @@ def test_statechart_fetch_survives_github_rate_limit(tmp_path: Path) -> None:
     result = run_check(env)
 
     assert count.read_text().strip() == "3"
-    assert "1/9 phase 1 model" in result.stdout, result.stderr
+    assert FIRST_STEP in result.stdout, result.stderr
     assert "exited 3, expected 0" in result.stderr
 
 
@@ -125,9 +127,9 @@ breaks() {{
 }}
 case $cfg in
   Orchestrator.cfg)
-    printf '## Rules that hold\\nT1KindGo, T1PDecided, Phase1T9Off, HandoffCountsApprovedRound, ReopenHoldOnlyAtWork, ShipNeedsCoveredQa, QaResultFromRun, RebaseDecided, RebaseSpendsNoRound, RebaseKeepsExtra, RebaseReviewsAtR\\n' > "$out/report.md" ;;
+    printf '## Rules that hold\\nT1KindGo, T1PDecided, Phase1T9Off, HandoffCountsApprovedRound, ReopenHoldOnlyAtWork, ShipNeedsCoveredQa, QaResultFromRun, RebaseDecided, RebaseSpendsNoRound, RebaseKeepsExtra, RebaseReviewsAtR, {stack_rules}\\n' > "$out/report.md" ;;
   OrchestratorAll.cfg)
-    printf '## Rules that hold\\nT9Decided, RebaseDecided, RebaseSpendsNoRound, RebaseKeepsExtra, RebaseReviewsAtR\\n' > "$out/report.md" ;;
+    printf '## Rules that hold\\nT9Decided, RebaseDecided, RebaseSpendsNoRound, RebaseKeepsExtra, RebaseReviewsAtR, {stack_rules}\\n' > "$out/report.md" ;;
   chart.cfg) grep -v ': post-merge$' "$chart" > "$out/chart.mmd" ;;
   chart-all.cfg) cp "$chart" "$out/chart.mmd" ;;
   omit-t1.cfg) breaks T1KindGo '{t1_steps}' ;;
@@ -137,12 +139,32 @@ case $cfg in
   omit-ship-guard.cfg) breaks ShipPinnedToCoveredHead '1. ship = merge: merged' ;;
   omit-qa-guard.cfg) {qa_guard} ;;
   omit-trb.cfg) {trb} ;;
+  omit-stack-guard.cfg) {omit_stack_guard} ;;
+  omit-hold-guard.cfg) {omit_hold_guard} ;;
 esac
 exit 0
 """
 
 QA_GUARD_BREAKS = "breaks ShipNeedsCoveredQa '1. ship = merge, QA covers the head: merged'"
 TRB_BREAKS = "breaks RebaseDecided '1. ready, CI green: review'"
+STACK_RULES = "NoShipIntoParent, StackHeldStartsNoJob"
+STACK_FIXTURES = {
+    "omit-stack-guard": ("NoShipIntoParent", "ship = merge, QA covers the head", "merged"),
+    "omit-hold-guard": (
+        "StackHeldStartsNoJob",
+        "parent closed unmerged or the retarget fails, needs attention",
+        "ship",
+    ),
+}
+
+
+def stack_breaks(**override: str) -> dict[str, str]:
+    cases = {
+        name.replace("-", "_"): f"breaks {rule} '1. {label}: {end}'"
+        for name, (rule, label, end) in STACK_FIXTURES.items()
+    }
+    cases.update(override)
+    return {"stack_rules": STACK_RULES, **cases}
 
 
 @pytest.mark.parametrize(
@@ -171,6 +193,7 @@ def test_check_sh_fails_when_the_break_trace_ends_elsewhere(
             t1_steps=t1_steps,
             qa_guard=QA_GUARD_BREAKS,
             trb=TRB_BREAKS,
+            **stack_breaks(),
         ),
     )
     env["STATECHART"] = str(fake)
@@ -214,6 +237,7 @@ def test_check_sh_fails_when_the_qa_guard_fixture_does_not_break(
             t1_steps="1. brief and acceptance criteria posted: questions",
             qa_guard=qa_guard,
             trb=TRB_BREAKS,
+            **stack_breaks(),
         ),
     )
     env["STATECHART"] = str(fake)
@@ -253,6 +277,42 @@ def test_check_sh_fails_when_the_trb_fixture_does_not_break(
             t1_steps="1. brief and acceptance criteria posted: questions",
             qa_guard=QA_GUARD_BREAKS,
             trb=trb,
+            **stack_breaks(),
+        ),
+    )
+    env["STATECHART"] = str(fake)
+    env["TLA2TOOLS"] = str(tmp_path / "tla2tools.jar")
+
+    result = run_check(env)
+
+    assert result.returncode != 0
+    assert message in result.stderr
+
+
+@pytest.mark.parametrize("fixture", sorted(STACK_FIXTURES))
+@pytest.mark.parametrize("how", ["holds", "ends-elsewhere"])
+def test_check_sh_fails_when_a_stack_fixture_does_not_break(
+    tmp_path: Path,
+    fixture: str,
+    how: str,
+) -> None:
+    rule, label, end = STACK_FIXTURES[fixture]
+    if how == "holds":
+        case = f"printf '## Rules that hold\\n{rule}\\n' > \"$out/report.md\""
+        message = f"{fixture} exited 0, expected 1"
+    else:
+        case = f"breaks {rule} '1. {label}: building'"
+        message = f"{fixture} counterexample did not end in {end}"
+    _bin_dir, env = sandbox(tmp_path)
+    fake = tmp_path / "statechart"
+    write_tool(
+        fake,
+        FAKE_STATECHART.format(
+            chart=ROOT / "model" / "chart.mmd",
+            t1_steps="1. brief and acceptance criteria posted: questions",
+            qa_guard=QA_GUARD_BREAKS,
+            trb=TRB_BREAKS,
+            **stack_breaks(**{fixture.replace("-", "_"): case}),
         ),
     )
     env["STATECHART"] = str(fake)
