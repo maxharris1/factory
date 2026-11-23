@@ -1049,3 +1049,92 @@ def test_an_unbounded_criterion_is_fed_with_a_brief_warning(tmp_path: Path) -> N
     warnings = brief.split("### Ticket")[0].split("### Intake warnings")[1]
     assert "Every ticket gets a brief." in warnings
     assert "### Assumed environment" not in brief and "### Out of scope" not in brief
+
+
+# --- Target branch (#1467) ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["Target branch: feature/x", "- Target branch: feature/x", "**Target branch:** feature/x",
+     "TARGET BRANCH: feature/x", "target branch:feature/x"],
+)
+def test_a_target_branch_line_names_the_base(line: str) -> None:
+    template = parse_intake(body(extra=line), ())
+    assert template.target_branch == "feature/x"
+    assert template.defects == ()
+
+
+@pytest.mark.parametrize("extra", [None, "Target branch: default", "Target branch: Default"])
+def test_no_line_or_default_is_no_target(extra) -> None:
+    template = parse_intake(body(extra=extra), ())
+    assert template.target_branch is None
+    assert template.defects == ()
+
+
+@pytest.mark.parametrize(
+    "value", ["a..b", "-x", "two words", "", "`dev`", "feature/x~1", "x" * 201],
+)
+def test_a_bad_target_branch_value_is_a_defect(value: str) -> None:
+    template = parse_intake(body(extra=f"Target branch: {value}"), ())
+    assert {defect.code for defect in template.defects} == {"bad-target-branch"}
+    assert template.target_branch is None
+
+
+@pytest.mark.parametrize("second", ["Target branch: feature/x", "Target branch: feature/y"])
+def test_a_second_target_branch_line_is_a_defect(second: str) -> None:
+    template = parse_intake(body(extra=f"Target branch: feature/x\n{second}"), ())
+    assert {defect.code for defect in template.defects} == {"bad-target-branch"}
+    assert template.target_branch is None
+
+
+def test_the_tickets_own_head_branch_is_a_defect() -> None:
+    text = body(extra="Target branch: factory/issue-7")
+    assert codes(text) == set()
+    template = parse_intake(text, (), head="factory/issue-7")
+    assert {defect.code for defect in template.defects} == {"bad-target-branch"}
+    assert "factory/issue-7" in template.defects[0].reason
+    assert template.target_branch is None
+
+
+def test_a_fenced_target_branch_is_an_example() -> None:
+    template = parse_intake(body(extra="```\nTarget branch: a..b\nTarget branch: feature/x\n```"), ())
+    assert template.target_branch is None
+    assert template.defects == ()
+
+
+@pytest.mark.parametrize(
+    ("line", "branch"),
+    [("Target branch: release_", "release_"), ("Target branch: feature/__x__", "feature/__x__"),
+     ("Target branch: **release_**", "release_"), ("Target branch: *release*", "release"),
+     ("Target branch: _release_", "release"), ("**Target branch:** release_", "release_"),
+     ("**Target branch: release_**", "release_"), ("__Target branch__: release_", "release_")],
+)
+def test_a_target_branch_keeps_its_punctuation_inside_markdown_emphasis(line: str, branch: str) -> None:
+    template = parse_intake(body(extra=line), ())
+    assert (template.target_branch, template.defects) == (branch, ())
+
+
+@pytest.mark.parametrize(
+    "value", ["release*", "*release", "rel*ea*se", "**release*", "release\\_", "release.", "x.lock", "a//b"],
+)
+def test_a_target_branch_markdown_cannot_hide_a_bad_character(value: str) -> None:
+    template = parse_intake(body(extra=f"Target branch: {value}"), ())
+    assert [defect.code for defect in template.defects] == ["bad-target-branch"]
+    assert template.target_branch is None
+
+
+@pytest.mark.parametrize(
+    "example",
+    ["````markdown\n```\nTarget branch: release\n````", "```\n~~~\nTarget branch: release\n```",
+     "~~~~\n~~~\nTarget branch: release\n~~~~", "> ```\n> Target branch: release\n> ```",
+     "- item\n\n  ```\n  Target branch: release\n  ```"],
+)
+def test_a_target_branch_inside_any_fence_is_an_example(example: str) -> None:
+    template = parse_intake(body() + "\n" + example + "\n", ())
+    assert (template.target_branch, template.defects) == (None, ())
+
+
+def test_a_target_branch_after_a_closed_long_fence_still_counts() -> None:
+    template = parse_intake(body(extra="````\n```\n````\nTarget branch: release"), ())
+    assert (template.target_branch, template.defects) == ("release", ())
