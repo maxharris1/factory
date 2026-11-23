@@ -45,6 +45,9 @@ class Repo:
             ["git", *args], cwd=self.path, check=True, capture_output=True, text=True
         ).stdout.strip()
 
+    def run(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["git", *args], cwd=self.path, capture_output=True, text=True)
+
     def commit(self, subject: str, name: str, lines: list[str]) -> str:
         (self.path / name).write_text("\n".join(lines) + "\n", encoding="utf-8")
         self.git("add", name)
@@ -64,9 +67,16 @@ class Repo:
         return self.head()
 
     def run_documented(self, template: str, shas: dict[str, str]) -> str:
-        args = shlex.split(re.sub(r"<([a-z-]+)>", lambda m: shas[m.group(1)], template))
-        assert args[0] == "git", template
-        return self.git(*args[1:])
+        return self.git(*_documented_args(template, shas))
+
+    def try_documented(self, template: str, shas: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        return self.run(*_documented_args(template, shas))
+
+
+def _documented_args(template: str, shas: dict[str, str]) -> list[str]:
+    args = shlex.split(re.sub(r"<([a-z-]+)>", lambda m: shas[m.group(1)], template))
+    assert args[0] == "git", template
+    return args[1:]
 
 
 def _old_base(repo: Repo, shas: dict[str, str]) -> str | None:
@@ -79,12 +89,29 @@ def _old_base(repo: Repo, shas: dict[str, str]) -> str | None:
     return None
 
 
+def _merges_preserved(repo: Repo, shas: dict[str, str]) -> bool:
+    for merge in repo.run_documented(_command("Retarget.", "git rev-list --merges "), shas).split():
+        _, *parents = repo.git("rev-list", "--parents", "-n", "1", merge).split()
+        if len(parents) != 2:
+            return False
+        merged = repo.try_documented(
+            _command("Retarget.", "git merge-tree --write-tree "),
+            {"first-parent": parents[0], "second-parent": parents[1]},
+        )
+        tree = repo.run_documented(_command("Retarget.", "git rev-parse "), {"merge": merge})
+        if merged.returncode != 0 or merged.stdout.strip() != tree:
+            return False
+    return True
+
+
 def _retarget(repo: Repo, shas: dict[str, str], parent_heads: list[str]) -> dict[str, str]:
     shas = {**shas, "parent-heads": " ".join(parent_heads)}
     old_base = _old_base(repo, shas)
     if old_base is None:
         pytest.fail("the documented rule fails closed on a history it should retarget")
     shas = {**shas, "old-base": old_base}
+    if not _merges_preserved(repo, shas):
+        pytest.fail("the documented merge check rejects a history it should retarget")
     repo.run_documented(_command("Retarget.", "git rebase --onto "), shas)
     return {**shas, "new-head": repo.head()}
 
@@ -198,6 +225,7 @@ def test_scoped_review_skips_a_parent_update_the_child_merged_in(tmp_path):
     )
 
     assert shas["old-base"] == p2
+    assert repo.git("show", f"{shas['new-head']}:f.txt").splitlines()[0] == "child line 1", "rebase kept the child's edit"
     _assert_range_diff_names_only_the_child(repo, shas)
 
 
@@ -217,3 +245,57 @@ def test_retarget_fails_closed_when_the_child_merged_two_parent_rewrites(tmp_pat
     shas = {"old-head": repo.head(), "parent-heads": " ".join([p1, rewritten, p2])}
 
     assert _old_base(repo, shas) is None
+
+
+def test_retarget_fails_closed_on_a_merge_that_resolved_a_conflict(tmp_path):
+    repo = Repo(tmp_path / "repo")
+    repo.commit("base", "f", ["base"])
+    repo.git("switch", "-q", "-c", "parent")
+    p1 = repo.commit("parent-v1", "p.txt", ["parent"])
+    repo.git("switch", "-q", "-c", "child")
+    repo.commit("child-only", "f", ["child"])
+    repo.git("switch", "-q", "parent")
+    p2 = repo.commit("parent-v2", "f", ["parent"])
+    repo.git("switch", "-q", "child")
+    assert repo.run("merge", "-q", "--no-edit", "parent").returncode != 0, "merging the parent update conflicts"
+    old_head = repo.commit("resolve", "f", ["resolved-parent-and-child"])
+    repo.git("switch", "-q", "parent")
+    repo.git("reset", "-q", "--soft", "main")
+    replacement = repo.commit("parent-rewritten", "f", ["base"])
+    new_base = repo.squash_into_main("parent")
+    shas = {"old-head": old_head, "new-base": new_base, "parent-heads": " ".join([p1, replacement, p2])}
+
+    old_base = _old_base(repo, shas)
+    assert old_base == p2, "the old base is the parent update the child merged"
+    shas = {**shas, "old-base": old_base}
+    assert not _merges_preserved(repo, shas), "the merge check rejects the conflict resolution"
+
+    repo.run_documented(_command("Retarget.", "git rebase --onto "), shas)
+    assert repo.git("show", "HEAD:f") == "child", "the rebase alone drops the resolution"
+
+
+def test_retarget_fails_closed_on_a_clean_merge_amended_with_an_edit(tmp_path):
+    repo = Repo(tmp_path / "repo")
+    p1, _ = _parent_and_child(repo)
+    repo.git("switch", "-q", "parent")
+    p2 = repo.commit("parent-v2", "f.txt", _edit(LINES, 50, "parent"))
+    repo.git("switch", "-q", "child")
+    repo.git("merge", "-q", "--no-ff", "--no-edit", "parent")
+    merged = repo.git("show", "HEAD:f.txt").splitlines()
+    (repo.path / "f.txt").write_text("\n".join(_edit(merged, 30, "evil")) + "\n", encoding="utf-8")
+    repo.git("commit", "-q", "-a", "--amend", "--no-edit")
+    old_head = repo.head()
+    repo.git("switch", "-q", "parent")
+    repo.git("reset", "-q", "--soft", "main")
+    repo.git("commit", "-q", "-m", "parent-rewritten")
+    rewritten = repo.head()
+    new_base = repo.squash_into_main("parent")
+    shas = {"old-head": old_head, "new-base": new_base, "parent-heads": " ".join([p1, rewritten, p2])}
+
+    old_base = _old_base(repo, shas)
+    assert old_base == p2, "the old base is the parent update the child merged"
+    shas = {**shas, "old-base": old_base}
+    assert not _merges_preserved(repo, shas), "the merge check rejects the edit amended into the merge"
+
+    repo.run_documented(_command("Retarget.", "git rebase --onto "), shas)
+    assert "evil line 30" not in repo.git("show", "HEAD:f.txt"), "the rebase alone drops the amended edit"
