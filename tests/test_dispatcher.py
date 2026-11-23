@@ -6860,6 +6860,38 @@ def test_a_job_behind_a_requested_drain_on_a_memory_held_device_records_no_memor
     assert _memory_waits(queue, waiting.id) == []
 
 
+def test_a_job_while_project_pins_are_unknown_on_a_memory_held_device_records_no_memory_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lib.orch_yml import ProjectPins, load_orch_yml
+
+    monkeypatch.setenv("ORCH_NO_LOCAL_OVERLAY", "1")
+    now = [0.0]
+    dispatcher, queue, pool, _ = _live_memory_dispatcher(tmp_path, now, {"box": LOW_MEMORY})
+    orch = tmp_path / "orch.yml"
+    orch.write_text(
+        "poll_seconds: 30\nprojects:\n  - repo: owner/repo\n    devices: [box]\n"
+        "trusted_logins:\n  maxharris1: [grok-bot]\n",
+        encoding="utf-8",
+    )
+    config, findings = load_orch_yml(orch)
+    assert config is not None, findings
+    dispatcher.wake_routes = {project.repo.lower(): project for project in config.projects}
+    pool.pins = ProjectPins(orch)
+    orch.write_text("projects: [", encoding="utf-8")
+    waiting = _queue_build(queue, 1, recipient="codex")
+
+    for second in (60, 120, 180):
+        now[0] = second
+        dispatcher.reconcile_jobs()
+
+    assert _state(queue, waiting.id) == "queued"
+    assert _memory_waits(queue, waiting.id) == []
+    with queue.connect() as connection:
+        connection.execute("DELETE FROM device_memory_holds")
+    assert pool.claim("codex") is None
+
+
 ABANDONED = (
     "<!-- orch:v1 kind=answers from=grok-bot role=orchestrator state=abandoned -->\n"
     "Max dropped it.\n"

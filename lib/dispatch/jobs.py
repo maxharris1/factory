@@ -268,7 +268,9 @@ class JobsMixin:
         return full
 
     def _memory_wait(self, config: MachinesConfig | None) -> Callable[[Job], str | None]:
-        holds = {} if config is None else memory_holds(self.queue)
+        pool = getattr(self.devices, "pool", None)
+        unknown_pins = pool is not None and pool.pins() is None
+        holds = {} if config is None or unknown_pins else memory_holds(self.queue)
         if not holds:
             return lambda job: None
         full = self._no_free_slot(config)
