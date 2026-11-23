@@ -73,7 +73,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
-from lib import account_doctor, dashboard_push, heal, live_settings, self_deploy
+from lib import account_doctor, account_signin, dashboard_push, heal, live_settings, self_deploy
 from lib.config_overlay import overlay_path, read_overlay
 from lib.dashboard_config import SettingsConfig, is_bot_login
 from lib.device_pool import RunningPair, running_pairs, slots_in_use
@@ -756,7 +756,7 @@ class Applier:
 
     def _logout(self, device: Device, harness: str, home: str) -> str | None:
         exchanged = self.transport.exchange(
-            account_doctor.ssh_argv(device, harness, account_doctor.logout_script(harness, home)),
+            account_doctor.ssh_argv(device, harness, account_signin.logout_script(harness, home)),
             timeout=PROBE_TIMEOUT_SECONDS)
         if exchanged.timed_out:
             return "logout-timeout"

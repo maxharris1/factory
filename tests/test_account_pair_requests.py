@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import account_doctor, heal, settings_apply
+from lib import account_doctor, account_signin, heal, settings_apply
 from lib.machines_yml import load_machines_yml
 from lib.remote import SshTransport
 from lib.settings_apply import Applier, LocalSpool, run_pass
@@ -574,7 +574,7 @@ def test_logout_script_unsets_every_token_variable_after_the_profile() -> None:
     tokens = {name for isolation in ACCOUNT_ISOLATION.values() for name in isolation.tokens}
     assert len(tokens) == 5
     for harness, command in (("claude", "claude auth logout"), ("codex", "codex logout")):
-        inner = shlex.split(account_doctor.logout_script(harness, "/h/acct"))[3]
+        inner = shlex.split(account_signin.logout_script(harness, "/h/acct"))[3]
         unset = next(part for part in inner.split(";") if part.strip().startswith("unset "))
         assert set(unset.split()[1:]) >= tokens | {SECURE}
         assert inner.index("unset ") < inner.index(command)
