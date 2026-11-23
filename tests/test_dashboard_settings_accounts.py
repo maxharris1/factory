@@ -66,9 +66,10 @@ def _facts(card: str) -> dict[str, str]:
 
 
 def test_the_accounts_panel_sits_under_devices(tmp_path: Path) -> None:
-    page = _page(_snapshot(tmp_path))
+    snapshot = _snapshot(tmp_path)
+    page = _page(snapshot)
     assert page.index('id="settings"') < page.index('id="accounts"')
-    head = _panel(_snapshot(tmp_path))
+    head = _panel(snapshot)
     assert re.search(r"<h2><span>Accounts</span><span class=\"count\">4 accounts</span></h2>", head)
 
 
@@ -112,9 +113,9 @@ def test_one_row_per_signed_in_device_with_the_doctor_status(tmp_path: Path) -> 
 
 
 def test_a_mismatch_names_the_account_with_the_same_login(tmp_path: Path) -> None:
-    pc = _device(_card(_panel(_snapshot(tmp_path)), "claude-b"), "pc")
-    assert "same login as claude-default" in _text(pc)
-    assert "same login as" not in _card(_panel(_snapshot(tmp_path)), "claude-default")
+    panel = _panel(_snapshot(tmp_path))
+    assert "same login as claude-default" in _text(_device(_card(panel, "claude-b"), "pc"))
+    assert "same login as" not in _card(panel, "claude-default")
 
 
 def test_used_and_headroom_show_with_the_floor_marked(tmp_path: Path) -> None:
