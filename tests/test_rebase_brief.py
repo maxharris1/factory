@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -102,7 +104,7 @@ def test_unresolvable_conflict_aborts_and_asks(text: str, method: str) -> None:
     assert "wall-clock budget" in paragraph
     steps = [
         "`git diff --name-only --diff-filter=U`",
-        "`git rebase --abort`",
+        f"`git rebase --abort 2>/dev/null; git reset --hard {HEAD}`",
         f"`git rev-parse HEAD` prints `{HEAD}`",
         "push nothing",
         "`questions` handoff that names each file",
@@ -120,3 +122,49 @@ def test_wall_clock_line_pushes_nothing(text: str) -> None:
 def test_no_contradiction_in_the_rebase_brief(text: str) -> None:
     assert contradictions_in(text) == []
     assert "no rebase, no force-push" not in text
+
+
+def git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+
+
+def commit(repo: Path, name: str, text: str) -> str:
+    (repo / name).write_text(text)
+    git(repo, "add", name)
+    assert git(repo, "commit", "-q", "-m", name).returncode == 0
+    return git(repo, "rev-parse", "HEAD").stdout.strip()
+
+
+@pytest.mark.parametrize("stage", ["conflicted", "finished"])
+def test_budget_cleanup_restores_the_original_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    for key in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{key}_NAME", "t")
+        monkeypatch.setenv(f"GIT_{key}_EMAIL", "t@example.com")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    commit(repo, "a.txt", "base\n")
+    git(repo, "checkout", "-q", "-b", BRANCH)
+    head = commit(repo, "a.txt", "branch\n")
+    git(repo, "checkout", "-q", "main")
+    commit(repo, "a.txt" if stage == "conflicted" else "b.txt", "main\n")
+    git(repo, "checkout", "-q", BRANCH)
+    rebase = git(repo, "rebase", "main")
+    assert (rebase.returncode != 0) == (stage == "conflicted")
+    assert git(repo, "rev-parse", "HEAD").stdout.strip() != head
+
+    job = _job("fix", "claude", 1, head, {"kind": "rebase", "base_branch": "main", "gitBranchName": BRANCH})
+    method = section(render(job, "box"), "Method")
+    (paragraph,) = [line for line in method.splitlines() if "git rebase --abort" in line]
+    cleanup = re.search(r"run `([^`]*git rebase --abort[^`]*)`", paragraph)
+    assert cleanup is not None, paragraph
+    subprocess.run(cleanup.group(1), shell=True, cwd=repo, capture_output=True)
+
+    assert git(repo, "rev-parse", "HEAD").stdout.strip() == head
+    assert git(repo, "status", "--porcelain").stdout == ""
+    assert git(repo, "rev-parse", "-q", "--verify", "REBASE_HEAD").returncode != 0
+    assert "rebase" not in git(repo, "status").stdout

@@ -27,7 +27,9 @@ def lead(job: Job, facts: dict) -> Lead:
             "Never push with a bare `--force`.",
             "8. Post the ready handoff below with the head you pushed, and finish the job.",
             "If a conflict cannot be resolved without changing behavior, or the wall-clock budget runs "
-            "short: list the files with `git diff --name-only --diff-filter=U`, run `git rebase --abort`, "
+            "short: list the files with `git diff --name-only --diff-filter=U`, run "
+            f"`git rebase --abort 2>/dev/null; git reset --hard {head}` (the abort ends a rebase still in "
+            "progress, the reset undoes one that already finished), "
             f"check that `git rev-parse HEAD` prints `{head}`, push nothing, and post a `questions` "
             "handoff that names each file. That questions handoff is the job's handoff.",
             *builder_notes(job, facts),
