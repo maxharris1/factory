@@ -199,26 +199,24 @@ class HoldsMixin:
         return self._read_hold(ticket, head)[0]
 
     def _read_hold(self, ticket: TrackedTicket, head: str) -> tuple[HoldDecision, bool]:
-        """The bool says a read behind an ok's coverage failed. The decision
-        keeps its own unread rule, so only the ok reading sees it."""
         hold = ticket.factory.hold
         assert hold is not None
         waited = False
-        failed = False
+        coverage_unread = False
 
         def covers(ok_head: str) -> bool:
-            nonlocal waited, failed
+            nonlocal waited, coverage_unread
             if ticket.factory.rule_engine != "on":
                 if self._approval_covers(ticket, ok_head, head):
                     return True
                 carries = self._ok_carries(ticket, ok_head, head)
-                failed = failed or carries is None
+                coverage_unread = coverage_unread or carries is None
                 return carries is True
             if _matching_head(ok_head, head) is not None:
                 return True
             outcome = self._rule_on_moved_head(ticket, ok_head, head)
             waited = waited or isinstance(outcome, Wait)
-            failed = failed or (
+            coverage_unread = coverage_unread or (
                 outcome == Escalate("probe-unknown")
                 and self.moved_head is not None
                 and self._moved_head(ticket, ok_head, head) is None
@@ -237,7 +235,7 @@ class HoldsMixin:
         )
         if waited and decision.blocks and decision.unread is None:
             decision = replace(decision, unread="moved-head ci")
-        return decision, failed
+        return decision, coverage_unread
 
     def _ok_carries(self, ticket: TrackedTicket, ok_head: str, head: str) -> bool | None:
         hold = ticket.factory.hold
@@ -285,8 +283,8 @@ class HoldsMixin:
             return "rejected-hold-ok-author"
         if ticket.current_head is None:
             return OK_UNREAD
-        decision, failed = self._read_hold(ticket, ticket.current_head)
-        if decision.unread is not None or failed:
+        decision, coverage_unread = self._read_hold(ticket, ticket.current_head)
+        if decision.unread is not None or coverage_unread:
             return OK_UNREAD
         return "hold-ok" if decision.reasons else "ok-no-hold"
 
