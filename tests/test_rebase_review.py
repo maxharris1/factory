@@ -183,6 +183,39 @@ def test_a_rebase_review_is_queued_after_the_cap_was_lowered(tmp_path: Path) -> 
     assert flow.state()["cap_extra"] == 0
 
 
+@pytest.mark.parametrize(
+    ("verdict", "answered", "after"),
+    [("APPROVE", "handed-off", ("handed-off", 2, 0)), ("REVISE", "capped-review", ("capped", 3, 0))],
+)
+def test_a_verdict_on_a_rebase_review_above_a_lowered_cap_is_acted_on(
+    tmp_path: Path, verdict: str, answered: str, after: tuple
+) -> None:
+    flow = Flow(tmp_path)
+    capped_at_cap(flow)
+    flow.factory = replace(flow.factory, rounds_high=2)
+    assert rebase_then_ready(flow, HEADS[4]) == "queued-review"
+    flow.finish("codex", "verdict-3/2")
+    body = VERDICT.format(round="3/2", head=flow.head, verdict=verdict, risk="high")
+    if verdict == "REVISE":
+        body += "- [blocking] f-40: still open.\n"
+
+    assert flow.post("verdict-3/2", body, "codex-login") == answered
+
+    assert spent(flow) == after
+
+
+def test_a_verdict_above_a_lowered_cap_at_a_head_no_rebase_review_covers_is_rejected(tmp_path: Path) -> None:
+    flow = Flow(tmp_path)
+    capped_at_cap(flow)
+    flow.factory = replace(flow.factory, rounds_high=2)
+    assert rebase_then_ready(flow, HEADS[4]) == "queued-review"
+    flow.finish("codex", "verdict-3/2")
+    flow.head = HEADS[5]
+    body = VERDICT.format(round="3/2", head=flow.head, verdict="APPROVE", risk="high")
+
+    assert flow.post("verdict-3/2", body, "codex-login") == "rejected-over-cap"
+
+
 def test_a_rebase_review_reusing_round_one_carries_the_range_diff(tmp_path: Path) -> None:
     flow = Flow(tmp_path, rounds_high=1)
     assert flow.go() == "queued-build"

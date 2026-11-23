@@ -8,7 +8,14 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 
 from lib.dispatch.decisions import Decision, record_decisions
-from lib.dispatch.helpers import _comment_link, _comment_order, _scope
+from lib.dispatch.helpers import (
+    _comment_link,
+    _comment_order,
+    _detail_field,
+    _detail_round_number,
+    _matching_head,
+    _scope,
+)
 from lib.dispatch.retry import _harness_job_active, _newest_harness_job
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
@@ -26,6 +33,23 @@ _ALONE = re.compile(r"`?([^`\s]+)`?")
 _BACKTICKED = re.compile(r"`([^`\s]+)`")
 _PATH_LIKE = re.compile(r"/|\w\.\w")
 _NOT_A_FILE = re.compile(r"-.*|[0-9a-f]{7,40}|\w*HEAD[~^\d]*|.*[.,;:!?]")
+
+
+def answers_rebase_review(connection: sqlite3.Connection, ticket: TrackedTicket, round_number: int) -> bool:
+    row = connection.execute(
+        """
+        SELECT head, detail FROM jobs
+        WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
+        ORDER BY rowid DESC LIMIT 1
+        """,
+        (ticket.repo.lower(), ticket.ticket_id),
+    ).fetchone()
+    return (
+        row is not None
+        and _detail_round_number(row["detail"]) == round_number
+        and _detail_field(row["detail"], "source") == "rebase"
+        and _matching_head(str(row["head"] or ""), ticket.current_head) is not None
+    )
 
 
 def conflict_files(body: str, base: str = "main") -> tuple[str, ...]:

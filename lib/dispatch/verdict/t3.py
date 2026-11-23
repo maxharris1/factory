@@ -7,38 +7,14 @@ from dataclasses import dataclass
 
 from lib import job_detail
 from lib.dispatch.constants import APPROVE_ROUND_STATES, REVISE_ROUND_STATES
-from lib.dispatch.helpers import (
-    _comment_link,
-    _detail_field,
-    _detail_round_number,
-    _matching_head,
-    _round_number,
-    _scope,
-    red_checks,
-)
+from lib.dispatch.helpers import _comment_link, _matching_head, _round_number, _scope, red_checks
 from lib.dispatch.qa import QaFix, ReviewFix, Wait, failed_column
+from lib.dispatch.rebase import answers_rebase_review
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, Registration, TrackedTicket
 from lib.dispatch.verdict.convergence import Continue, Repeated, Stalled
 from lib.handoff import parse_comment
 from lib.queue import JobRequest
-
-
-def _rebase_review(connection: sqlite3.Connection, ticket: TrackedTicket, round_number: int) -> bool:
-    row = connection.execute(
-        """
-        SELECT head, detail FROM jobs
-        WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
-        ORDER BY rowid DESC LIMIT 1
-        """,
-        (ticket.repo.lower(), ticket.ticket_id),
-    ).fetchone()
-    return (
-        row is not None
-        and _detail_round_number(row["detail"]) == round_number
-        and _detail_field(row["detail"], "source") == "rebase"
-        and _matching_head(str(row["head"] or ""), ticket.current_head) is not None
-    )
 
 
 @dataclass(frozen=True)
@@ -172,7 +148,7 @@ class T3Mixin:
                 return "stale-revise", None
             granted = (
                 self._auto_granted_cap_extra(ticket, state, convergence)
-                if round_number >= cap and not _rebase_review(connection, ticket, round_number)
+                if round_number >= cap and not answers_rebase_review(connection, ticket, round_number)
                 else None
             )
             if granted is not None:
