@@ -91,6 +91,7 @@ class RebaseStep:
     approved_head: str | None = None
     approved_at: float | None = None
     approve_comment_id: str | None = None
+    onto_from: str | None = None
 
     @property
     def review_round(self) -> int:

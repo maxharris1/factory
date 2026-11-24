@@ -36,6 +36,7 @@ DEFAULT_CAPS = {"low": 1, "high": 3}
 TEXT_LIMIT = 20_000
 
 _HEAD = re.compile(r"^[0-9a-f]{7,40}$")
+_OID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _ROUND = re.compile(r"^([1-9][0-9]*)/([1-9][0-9]*)$")
 _BRANCH = re.compile(r"^[A-Za-z0-9._/-]+$")
 _SKILL = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -199,6 +200,7 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
         "update": _update_scope(detail) if job.request.action == "review" else None,
         "rebase": _rebase_scope(detail) if job.request.action == "review" else None,
         "rebased": job.request.action == "review" and detail.get("source") == "rebase",
+        "onto_from": _onto_from(detail) if job.request.action == "fix" else None,
         "size_flag": _size_flag(detail) if job.request.action == "review" else None,
         "qa": context is not None and context.config.qa is not None,
         "stack": _stack(detail.get("stack")),
@@ -231,6 +233,14 @@ def _qa_criteria(detail: dict[str, object]) -> tuple[str, ...] | None:
     if not isinstance(ids, (list, tuple)) or not all(isinstance(i, str) and _AC.fullmatch(i) for i in ids):
         return None
     return tuple(ids)
+
+
+def _onto_from(detail: dict[str, object]) -> str | None:
+    rebase = detail.get("rebase")
+    if detail.get("kind") != "rebase" or not isinstance(rebase, dict):
+        return None
+    onto_from = rebase.get("onto_from")
+    return onto_from if isinstance(onto_from, str) and _OID.fullmatch(onto_from) else None
 
 
 def _rebase_scope(detail: dict[str, object]) -> dict | None:

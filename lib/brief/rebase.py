@@ -16,7 +16,10 @@ def lead(job: Job, facts: dict) -> Lead:
         (
             *stack_lines(facts),
             f"1. Check out `{branch}` at {head} and run `git fetch origin {base}`.",
-            f"2. `git rebase origin/{base}`, without `--rebase-merges`. Never run `git merge`.",
+            f"2. `git rebase --onto origin/{base} {facts['onto_from']}`, without `--rebase-merges`. "
+            "Never run `git merge`."
+            if facts["onto_from"]
+            else f"2. `git rebase origin/{base}`, without `--rebase-merges`. Never run `git merge`.",
             "3. Resolve each conflict without changing behavior, then `git rebase --continue`.",
             "4. If a generated Supabase types file conflicts, take the base side, regenerate it with the "
             "project's documented types command, and commit the result. If that command cannot run, "

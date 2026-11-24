@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -89,6 +90,39 @@ def rebase_scope(
     if ancestry != 1:
         raise ValueError("git merge-base --is-ancestor failed")
     return RebaseScope(last, _merge_base(clone, last, base_ref), _merge_base(clone, new, base_ref))
+
+
+class StackUnbounded(ValueError):
+    pass
+
+
+def stack_bounds(clone: Path, old_head: str, parent_heads: Sequence[str]) -> str:
+    """The old base for a stacked child's `git rebase --onto` (#1492, SPEC
+    section 4.4 Retarget): the first merge base of old_head with a parent
+    head whose range up to old_head lists exactly the child's own commits,
+    where every merge in that range is git's own clean merge of its two
+    parents. Raises StackUnbounded when no merge base bounds that range or a
+    merge fails, and ValueError when the clone cannot answer."""
+    old = _resolve(clone, old_head)
+    heads = [_resolve(clone, head) for head in parent_heads]
+    own = set(_output(clone, "rev-list", old, "--not", *heads).split())
+    for head in heads:
+        found = _run(clone, "merge-base", old, head)
+        if found.returncode != 0:
+            continue
+        base = found.stdout.decode("ascii").strip()
+        if set(_output(clone, "rev-list", old, f"^{base}").split()) == own:
+            break
+    else:
+        raise StackUnbounded("no merge base with a parent head bounds the child's own range")
+    merges = _output(clone, "rev-list", "--merges", "--parents", f"{base}..{old}").decode("ascii")
+    for line in merges.splitlines():
+        merge, *parents = line.split()
+        tree = _output(clone, "rev-parse", f"{merge}^{{tree}}").strip()
+        merged = _run(clone, "merge-tree", "--write-tree", "--no-messages", *parents)
+        if len(parents) != 2 or merged.returncode != 0 or merged.stdout.strip() != tree:
+            raise StackUnbounded(f"merge {merge} is not git's own clean merge of its parents")
+    return base
 
 
 def merge_update(clone: Path, approved_head: str, head: str, base_ref: str) -> MergeUpdate:
