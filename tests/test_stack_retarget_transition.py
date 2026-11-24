@@ -1,16 +1,16 @@
-"""#1494: the dispatcher retargets a stacked child when its parent merges."""
 
 from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
-from lib.dispatch.types import ParentMerged, ParentOpen
+from lib.dispatch.types import ParentMerged, ParentOpen, StackParent
 from lib.intake_live import StackHeadsUnknown
 from lib.update_check import StackUnbounded
 from tests.merge_queue_support import sha
-from tests.test_dispatcher import FakeReviewActions
+from tests.test_dispatcher import READY, FakeReviewActions, comment
 from tests.test_ticket_base_branch import (
     CHILD_PR,
     FEATURE,
@@ -151,7 +151,8 @@ def test_a_base_github_moved_itself_gets_the_same_onto_rebase_and_no_edit(tmp_pa
 
 def test_a_feature_branch_target_with_no_stack_parent_is_never_retargeted(tmp_path: Path) -> None:
     queue, github, dispatcher = wired(tmp_path, text=targeted(f"Target branch: {FEATURE}"))
-    assert (child_row(tmp_path)["base_branch"], child_row(tmp_path)["stack_parent_pr"]) == (FEATURE, None)
+    row = child_row(tmp_path)
+    assert (row["base_branch"], row["stack_parent_pr"]) == (FEATURE, None)
     github.pulls[(STACK_REPO, PARENT_PR)]["head"] = FEATURE
     land(github)
 
@@ -243,9 +244,48 @@ def test_a_busy_child_takes_the_new_base_now_and_its_rebase_once_it_is_free(
     running = queue.claim("claude")
     queue.finish(running.id, owner="claude", handoff_comment_id="ready-1")
     with queue.connect() as connection:
-        connection.execute("UPDATE ticket_state SET workflow_state = 'handed-off', review_round = 1")
+        connection.execute(
+            "UPDATE ticket_state SET workflow_state = 'handed-off', review_round = 1"
+        )
     dispatcher.process(polled_child(tmp_path, github))
     dispatcher.process(polled_child(tmp_path, github))
 
     assert [rebase["rebase"]["onto_from"] for rebase in rebases(queue)] == [ONTO]
     assert dispatcher.review_actions.bases == ["main"]
+
+
+def test_a_ready_posted_before_the_retarget_rebase_is_superseded_by_it(tmp_path: Path) -> None:
+    queue, github, dispatcher = wired(tmp_path)
+    land(github)
+    dispatcher.process(polled_child(tmp_path, github))
+    (job,) = queue.outstanding()
+    child = polled_child(tmp_path, github)
+    before = comment("ready-2", READY.format(head=sha(3)), author="claude-bot",
+                     created_at=job.created_at - 1)
+    after = comment("ready-3", READY.format(head=sha(8)), author="claude-bot",
+                    created_at=job.created_at + 1)
+
+    assert dispatcher._superseded_by_rebase(child, before)
+    assert not dispatcher._superseded_by_rebase(child, after)
+
+
+def test_the_rebase_job_no_longer_names_the_parent_as_its_stack(tmp_path: Path) -> None:
+    queue, github, dispatcher = wired(tmp_path)
+    land(github)
+    child = polled_child(tmp_path, github)
+
+    dispatcher.process(replace(child, stack=StackParent(PARENT_PR, PARENT, sha(2))))
+
+    (rebase,) = rebases(queue)
+    assert rebase.get("stack") is None
+
+
+def test_a_closed_child_is_not_retargeted(tmp_path: Path) -> None:
+    queue, github, dispatcher = wired(tmp_path)
+    land(github)
+
+    dispatcher.process(replace(polled_child(tmp_path, github), closed=True))
+
+    assert dispatcher.review_actions.bases == []
+    assert child_row(tmp_path)["base_branch"] == PARENT
+    assert rebases(queue) == []

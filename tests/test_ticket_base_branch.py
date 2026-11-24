@@ -680,7 +680,7 @@ def test_a_stacked_child_reads_its_merged_parents_heads_feed_head_first(tmp_path
     feeder, _, github, _ = fed_child(tmp_path)
     github.landings[(STACK_REPO, PARENT_PR)] = ParentMerged(into="main", heads=(sha(4), sha(2), sha(5)))
 
-    assert feeder.stack_parent_facts(polled_child(tmp_path, github)) == ParentMerged(
+    assert feeder.stacked_parent_facts(polled_child(tmp_path, github)) == ParentMerged(
         into="main", heads=(sha(2), sha(4), sha(5))
     )
 
@@ -689,13 +689,13 @@ def test_an_open_stacked_parent_reads_as_open(tmp_path: Path) -> None:
     feeder, _, github, _ = fed_child(tmp_path)
     github.landings[(STACK_REPO, PARENT_PR)] = ParentOpen()
 
-    assert feeder.stack_parent_facts(polled_child(tmp_path, github)) == ParentOpen()
+    assert feeder.stacked_parent_facts(polled_child(tmp_path, github)) == ParentOpen()
 
 
 def test_an_unstacked_ticket_has_no_parent_facts_and_reads_nothing(tmp_path: Path) -> None:
     feeder, _, github, _ = fed_child(tmp_path, target=None)
 
-    assert feeder.stack_parent_facts(polled_child(tmp_path, github)) is None
+    assert feeder.stacked_parent_facts(polled_child(tmp_path, github)) is None
     assert not [call for call in github.calls if call.startswith("landing:")]
 
 
@@ -717,13 +717,13 @@ def test_a_linear_child_takes_its_parents_merge_target(tmp_path: Path) -> None:
         comments=(), current_head=sha(3), ci={}, risk="low", pr_number=str(CHILD_PR), pr_base="dev",
     )
 
-    assert feeder.stack_parent_facts(child) == ParentMerged(into="dev", heads=(sha(2), sha(4)))
+    assert feeder.stacked_parent_facts(child) == ParentMerged(into="dev", heads=(sha(2), sha(4)))
     with sqlite3.connect(tmp_path / "orch.db") as connection:
         assert feeder.move_stack_base(connection, child, "dev", sha(9))
         assert not feeder.move_stack_base(connection, child, "dev", sha(9))
-        assert feeder.stack_onto(connection, child) == sha(9)
+        assert feeder.pending_onto_from(connection, child) == sha(9)
     assert FedPulls(tmp_path / "orch.db").base(LINEAR_STACK_REPO, "AUT-7") == "dev"
-    assert feeder.stack_parent_facts(child) is None
+    assert feeder.stacked_parent_facts(child) is None
 
 
 def github_poll(tmp_path: Path, number: int, *, factory_ref: str = "main") -> TrackedTicket:

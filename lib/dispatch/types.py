@@ -749,11 +749,6 @@ class Feeder(Protocol):
     holds a ready's review, with the same Grok wake, while the ready's head carries
     another open PR's commits, and returns None when it did; otherwise it
     returns the base the review runs against, the open PR's own base.
-    stack_parent_facts reads the parent of a child still based on its
-    parent's branch, else returns None. move_stack_base records base and the
-    pending rebase's onto_from for that child in the caller's transaction and
-    returns False when the child already moved; stack_onto and clear_stack_onto
-    read and settle that pending rebase.
     """
 
     ledger: LockLedger | None
@@ -762,15 +757,19 @@ class Feeder(Protocol):
 
     def review_base_unless_stacked(self, ticket: TrackedTicket, head: str) -> str | None: ...
 
-    def stack_parent_facts(self, ticket: TrackedTicket) -> ParentFacts | None: ...
+    def stacked_parent_facts(self, ticket: TrackedTicket) -> ParentFacts | None: ...
 
     def move_stack_base(
         self, connection: sqlite3.Connection, ticket: TrackedTicket, base: str, onto_from: str
     ) -> bool: ...
 
-    def stack_onto(self, connection: sqlite3.Connection, ticket: TrackedTicket) -> str | None: ...
+    def pending_onto_from(
+        self, connection: sqlite3.Connection, ticket: TrackedTicket
+    ) -> str | None: ...
 
-    def clear_stack_onto(self, connection: sqlite3.Connection, ticket: TrackedTicket) -> None: ...
+    def clear_pending_onto_from(
+        self, connection: sqlite3.Connection, ticket: TrackedTicket
+    ) -> None: ...
 
 
 # (repo, base branch, approved head, updated head, shared_paths) -> whether the update is

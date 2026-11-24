@@ -314,7 +314,7 @@ _COLUMNS = (
     ("stack_parent_pr", "INTEGER"),
     ("stack_parent_branch", "TEXT"),
     ("stack_parent_head_at_feed", "TEXT"),
-    ("stack_onto", "TEXT"),
+    ("pending_onto_from", "TEXT"),
 )
 ORCHESTRATOR = "grok-bot"
 FACTORY_LABEL = "factory"
@@ -2918,11 +2918,11 @@ class Feeder:
         )
         return None if wait is not None else base
 
-    def stack_parent_facts(self, ticket: TrackedTicket) -> ParentFacts | None:
+    def stacked_parent_facts(self, ticket: TrackedTicket) -> ParentFacts | None:
         with self.queue.connect() as connection:
             row = connection.execute(
-                f"SELECT stack_parent_pr, stack_parent_head_at_feed, base_branch, stack_parent_branch "
-                f"FROM {FEEDER_TABLE} WHERE repo = ? AND ticket_id = ?",
+                "SELECT stack_parent_pr, stack_parent_head_at_feed, base_branch, "
+                f"stack_parent_branch FROM {FEEDER_TABLE} WHERE repo = ? AND ticket_id = ?",
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchone()
         if row is None or row[0] is None or row[2] != row[3]:
@@ -2945,7 +2945,7 @@ class Feeder:
             return False
         recorded = row[0]
         connection.execute(
-            f"UPDATE {FEEDER_TABLE} SET base_branch = ?, stack_onto = ? "
+            f"UPDATE {FEEDER_TABLE} SET base_branch = ?, pending_onto_from = ? "
             "WHERE repo = ? AND ticket_id = ? AND base_branch = ?",
             (base, onto_from, *key, recorded),
         )
@@ -2956,16 +2956,20 @@ class Feeder:
         )
         return True
 
-    def stack_onto(self, connection: sqlite3.Connection, ticket: TrackedTicket) -> str | None:
+    def pending_onto_from(
+        self, connection: sqlite3.Connection, ticket: TrackedTicket
+    ) -> str | None:
         row = connection.execute(
-            f"SELECT stack_onto FROM {FEEDER_TABLE} WHERE repo = ? AND ticket_id = ?",
+            f"SELECT pending_onto_from FROM {FEEDER_TABLE} WHERE repo = ? AND ticket_id = ?",
             (ticket.repo.lower(), ticket.ticket_id),
         ).fetchone()
         return None if row is None else row[0]
 
-    def clear_stack_onto(self, connection: sqlite3.Connection, ticket: TrackedTicket) -> None:
+    def clear_pending_onto_from(
+        self, connection: sqlite3.Connection, ticket: TrackedTicket
+    ) -> None:
         connection.execute(
-            f"UPDATE {FEEDER_TABLE} SET stack_onto = NULL WHERE repo = ? AND ticket_id = ?",
+            f"UPDATE {FEEDER_TABLE} SET pending_onto_from = NULL WHERE repo = ? AND ticket_id = ?",
             (ticket.repo.lower(), ticket.ticket_id),
         )
 

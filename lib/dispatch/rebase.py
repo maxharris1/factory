@@ -121,14 +121,12 @@ def _on_base(ticket: TrackedTicket, base: str) -> TrackedTicket:
         ticket,
         factory=replace(ticket.factory, base_branch=base),
         factory_md=ticket.factory_md and replace(ticket.factory_md, base_branch=base),
+        stack=None,
     )
 
 
 class RebaseMixin:
     def _advance_stack(self, ticket: TrackedTicket) -> TrackedTicket:
-        """#1494: once a stacked child's parent merges, move the child's PR
-        and recorded base to the parent's merge target and queue the
-        `--onto` rebase of its own commits."""
         if self.feeder is None:
             return ticket
         try:
@@ -144,7 +142,7 @@ class RebaseMixin:
 
     def _queue_pending_stack_rebase(self, ticket: TrackedTicket) -> bool:
         with self._connect() as connection:
-            if self.feeder.stack_onto(connection, ticket) is None:
+            if self.feeder.pending_onto_from(connection, ticket) is None:
                 return False
             connection.execute("BEGIN IMMEDIATE")
             queued = self._stack_rebase_in_transaction(connection, ticket)
@@ -153,9 +151,11 @@ class RebaseMixin:
 
     def _land_stack_parent(self, ticket: TrackedTicket) -> tuple[TrackedTicket, bool]:
         try:
-            facts = self.feeder.stack_parent_facts(ticket)
+            facts = self.feeder.stacked_parent_facts(ticket)
             if (
                 not isinstance(facts, ParentMerged)
+                or ticket.merged
+                or ticket.closed
                 or self.stack_bounds is None
                 or ticket.current_head is None
                 or ticket.pr_base not in (None, ticket.factory.base_branch, facts.into)
@@ -184,7 +184,7 @@ class RebaseMixin:
     def _stack_rebase_in_transaction(
         self, connection: sqlite3.Connection, ticket: TrackedTicket
     ) -> bool:
-        onto_from = self.feeder.stack_onto(connection, ticket)
+        onto_from = self.feeder.pending_onto_from(connection, ticket)
         head = ticket.current_head
         if onto_from is None or head is None:
             return False
@@ -204,7 +204,7 @@ class RebaseMixin:
             or _harness_job_active(connection, key)
         ):
             return False
-        self.feeder.clear_stack_onto(connection, ticket)
+        self.feeder.clear_pending_onto_from(connection, ticket)
         dedupe_key = f"t-retarget:{_scope(ticket.repo, ticket.ticket_id)}:{onto_from}"
         if connection.execute(
             "SELECT 1 FROM jobs WHERE dedupe_key = ?", (dedupe_key,)
@@ -295,6 +295,15 @@ class RebaseMixin:
                     (ticket.repo.lower(), ticket.ticket_id),
                 )
             }
+            retargeted = connection.execute(
+                """
+                SELECT max(created_at) FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND dedupe_key LIKE 't-retarget:%'
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()[0]
+        if retargeted is not None and comment.created_at < retargeted:
+            return True
         return any(
             _comment_order(comment) < _comment_order(rebase)
             for rebase in ticket.comments
