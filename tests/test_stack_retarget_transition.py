@@ -46,7 +46,7 @@ class Actions(FakeReviewActions):
 
     def set_pull_base(self, ticket, base: str) -> None:
         self.bases.append(base)
-        self.github.pulls[(STACK_REPO, CHILD_PR)]["base"] = base
+        self.github.pulls[(ticket.repo, int(ticket.pr_number))]["base"] = base
         if self.crash_after_patch:
             self.crash_after_patch = False
             raise RuntimeError("poller died after the base edit")
