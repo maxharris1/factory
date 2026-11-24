@@ -1,8 +1,11 @@
+import http.client
 import os
 import socket
 import stat
 import subprocess
+import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -330,7 +333,7 @@ def test_restart_refuses_a_disabled_unit_without_a_cutover(units: Units, app: HT
 def test_an_unknown_command_prints_usage_and_exits_2(units: Units, args: tuple[str, ...]) -> None:
     result = _run(units, *args)
     assert result.returncode == 2
-    assert "usage: dashboard-http-service.sh {install|status|restart}" in result.stderr
+    assert "usage: dashboard-http-service.sh {install|status|restart|rollback}" in result.stderr
 
 
 REQUIRED_KEYS = ["TAILNET_IP", "DASHBOARD_DIR", "DASHBOARD_PORT"]
@@ -369,11 +372,27 @@ class Node:
             "".join(f"{k}={v}\n" for k, v in values.items() if v is not None), encoding="utf-8")
 
     def install(self, script: Path = SERVICE, **env: str) -> subprocess.CompletedProcess:
-        return _run(self.units, "install", script=script,
+        return self._verb("install", script, **env)
+
+    def rollback(self, **env: str) -> subprocess.CompletedProcess:
+        return self._verb("rollback", SERVICE, **env)
+
+    def _verb(self, verb: str, script: Path, **env: str) -> subprocess.CompletedProcess:
+        return _run(self.units, verb, script=script,
                     PATH=f"{self.bin}:{os.environ['PATH']}",
                     DASHBOARD_ENV_FILE=str(self.env_file),
                     DASHBOARD_UNIT_DIR=str(self.unit_dir),
                     DASHBOARD_LIB_DIR=str(self.lib_dir), **env)
+
+    def write_static_unit(self) -> None:
+        self.unit_dir.mkdir(exist_ok=True)
+        self.static_unit.write_text(
+            "[Unit]\nDescription=Factory dashboard (static)\n\n"
+            "[Service]\n"
+            f"ExecStart=/usr/bin/python3 -m http.server --bind 127.0.0.1 8090 --directory {self.dashboard}\n"
+            "Restart=on-failure\n\n"
+            "[Install]\nWantedBy=multi-user.target\n",
+            encoding="utf-8")
 
     def user_added(self) -> list[str]:
         log = self.bin / "useradd.log"
@@ -391,6 +410,10 @@ class Node:
     def drop_in(self) -> Path:
         return self.unit_dir / f"{HTTP_UNIT}.d" / "paths.conf"
 
+    @property
+    def static_unit(self) -> Path:
+        return self.unit_dir / STATIC_UNIT
+
     def assert_untouched(self) -> None:
         assert self.units.calls() == []
         assert not self.unit_dir.exists()
@@ -402,6 +425,27 @@ class Node:
 @pytest.fixture
 def node(tmp_path: Path, units: Units) -> Node:
     return Node(tmp_path, units)
+
+
+@pytest.fixture
+def real_static_server(node: Node):
+    port = _free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "http.server", "--bind", "127.0.0.1", str(port),
+         "--directory", str(node.dashboard)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=1).close()
+            break
+        except OSError:
+            assert proc.poll() is None, "python3 -m http.server exited before it listened"
+            assert time.monotonic() < deadline, "python3 -m http.server never listened"
+            time.sleep(0.05)
+    yield port
+    proc.terminate()
+    proc.wait(timeout=10)
 
 
 def _changes(units: Units) -> list[str]:
@@ -621,3 +665,142 @@ def test_install_refuses_a_bind_that_would_unprotect_the_system(
     assert result.returncode == 78, result.stdout + result.stderr
     assert key in result.stderr
     node.assert_untouched()
+
+
+def _installed(node: Node, app: HTTPServer, env_port: int) -> None:
+    node.write_env(env_port)
+    installed = node.install(DASHBOARD_PROBE_ADDR=_addr(app))
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    node.write_static_unit()
+
+
+def _installed_then_rolled_back(node: Node, app: HTTPServer, static_port: int) -> subprocess.CompletedProcess:
+    _installed(node, app, static_port)
+    return node.rollback()
+
+
+def test_rollback_after_install_restores_the_static_server(
+        node: Node, app: HTTPServer, real_static_server: int) -> None:
+    result = _installed_then_rolled_back(node, app, real_static_server)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.startswith("rolled back"), result.stdout
+    assert f"127.0.0.1:{real_static_server}" in result.stdout
+    assert node.units.state(STATIC_UNIT) == ("active", "enabled")
+    assert node.units.state(HTTP_UNIT) == ("inactive", "disabled")
+    assert _changes(node.units)[-2:] == [f"enable --now {STATIC_UNIT}", f"disable --now {HTTP_UNIT}"]
+    status = _run(node.units, "status", DASHBOARD_ENV_FILE=str(node.env_file))
+    assert status.returncode == 3, status.stdout + status.stderr
+
+
+def test_after_rollback_settings_is_read_only(
+        node: Node, app: HTTPServer, real_static_server: int) -> None:
+    result = _installed_then_rolled_back(node, app, real_static_server)
+    assert result.returncode == 0, result.stdout + result.stderr
+    conn = http.client.HTTPConnection("127.0.0.1", real_static_server, timeout=5)
+    conn.request("GET", "/api/session")
+    session = conn.getresponse()
+    session.read()
+    assert session.status == 404, "GET /api/session must not answer 200 after rollback"
+    conn.request("GET", "/")
+    index = conn.getresponse()
+    index.read()
+    conn.close()
+    assert index.getheader("Server", "").startswith("SimpleHTTP"), index.getheader("Server")
+
+
+def test_rollback_leaves_http_env_app_unit_and_drop_in_in_place(
+        node: Node, app: HTTPServer, real_static_server: int) -> None:
+    _installed(node, app, real_static_server)
+    kept = [node.env_file, node.installed_app, node.installed_unit, node.drop_in, node.static_unit]
+    before = [(path.read_bytes(), path.stat().st_mtime_ns) for path in kept]
+    users_before = node.user_added()
+    result = node.rollback()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert [(path.read_bytes(), path.stat().st_mtime_ns) for path in kept] == before
+    assert node.user_added() == users_before
+
+
+def test_rollback_refuses_when_the_static_unit_file_is_missing(
+        node: Node, real_static_server: int) -> None:
+    node.write_env(real_static_server)
+    _live(node.units)
+    result = node.rollback()
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert str(node.static_unit) in result.stderr
+    assert node.units.calls() == []
+
+
+def test_rollback_keeps_the_app_when_starting_the_static_unit_fails(
+        node: Node, app: HTTPServer) -> None:
+    _installed(node, app, app.server_address[1])
+    node.units.fail("enable", STATIC_UNIT)
+    result = node.rollback()
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert f"enable --now {STATIC_UNIT}" in result.stderr
+    assert node.units.state(HTTP_UNIT) == ("active", "enabled")
+    assert f"disable --now {HTTP_UNIT}" not in node.units.calls()
+
+
+def test_rollback_says_the_http_unit_is_still_enabled_when_disabling_it_fails(
+        node: Node, app: HTTPServer, real_static_server: int) -> None:
+    _installed(node, app, real_static_server)
+    node.units.fail("disable", HTTP_UNIT)
+    result = node.rollback()
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert f"{HTTP_UNIT} is still enabled" in result.stderr
+    assert node.units.state(STATIC_UNIT) == ("active", "enabled")
+
+
+def test_rollback_is_3_while_the_app_still_answers(
+        node: Node, app: HTTPServer, real_static_server: int) -> None:
+    _installed(node, app, real_static_server)
+    result = node.rollback(DASHBOARD_PROBE_ADDR=_addr(app), DASHBOARD_START_WAIT="1")
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert result.stdout.startswith("not rolled back: "), result.stdout
+    assert "Server: factory-dashboard" in result.stdout
+    assert node.units.state(STATIC_UNIT) == ("active", "enabled")
+    assert node.units.state(HTTP_UNIT) == ("inactive", "disabled")
+
+
+def test_rollback_is_3_when_api_session_answers_200(
+        node: Node, static_server: HTTPServer, real_static_server: int) -> None:
+    node.write_env(real_static_server)
+    node.write_static_unit()
+    result = node.rollback(DASHBOARD_PROBE_ADDR=_addr(static_server), DASHBOARD_START_WAIT="1")
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert result.stdout.startswith("not rolled back: "), result.stdout
+    assert "/api/session" in result.stdout
+
+
+def test_rollback_is_3_when_nothing_listens(node: Node, real_static_server: int) -> None:
+    node.write_env(real_static_server)
+    _live(node.units)
+    node.write_static_unit()
+    addr = f"127.0.0.1:{_free_port()}"
+    result = node.rollback(DASHBOARD_PROBE_ADDR=addr, DASHBOARD_START_WAIT="1")
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert result.stdout.startswith("not rolled back: "), result.stdout
+    assert f"nothing answers at {addr}" in result.stdout
+    assert node.units.state(STATIC_UNIT) == ("active", "enabled")
+    assert node.units.state(HTTP_UNIT) == ("inactive", "disabled")
+
+
+def test_rollback_is_3_when_the_address_is_unknown(node: Node) -> None:
+    _live(node.units)
+    node.write_static_unit()
+    result = node.rollback(DASHBOARD_START_WAIT="1")
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert result.stdout.startswith("not rolled back: "), result.stdout
+    assert str(node.env_file) in result.stdout
+    assert node.units.state(STATIC_UNIT) == ("active", "enabled")
+    assert node.units.state(HTTP_UNIT) == ("inactive", "disabled")
+
+
+def test_rollback_when_already_static_is_0(node: Node, real_static_server: int) -> None:
+    node.write_env(real_static_server)
+    node.write_static_unit()
+    result = node.rollback()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.startswith("rolled back"), result.stdout
+    assert node.units.state(STATIC_UNIT) == ("active", "enabled")
+    assert node.units.state(HTTP_UNIT) == ("inactive", "disabled")

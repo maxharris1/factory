@@ -9,9 +9,14 @@
 #                                       8090 server
 #   dashboard-http-service.sh restart   restart the HTTP unit and wait for
 #                                       status; never a cutover
+#   dashboard-http-service.sh rollback  move 8090 back to
+#                                       factory-dashboard.service and check
+#                                       python3 -m http.server answers
 #
-# Exit codes: 0 live, 1 cutover failed and reverted (or systemctl restart
-# failed), 3 not live, 78 the env file is incomplete, 2 usage.
+# Exit codes: 0 live, or for rollback the static server answers; 1 cutover
+# failed and reverted, a systemctl call failed, or rollback refused; 3 not
+# live, or for rollback the units switched but the static server is not
+# confirmed; 78 the env file is incomplete; 2 usage.
 #
 # Live means factory-dashboard-http.service is active, factory-dashboard.service
 # is not, and the tailnet address answers with Server: factory-dashboard.
@@ -219,6 +224,54 @@ wait_live() {
     done
 }
 
+response_status() {
+    python3 -I -c '
+import http.client, sys
+try:
+    conn = http.client.HTTPConnection(sys.argv[1], timeout=3)
+    conn.request("GET", sys.argv[2])
+    print(conn.getresponse().status)
+except (OSError, http.client.HTTPException, ValueError):
+    sys.exit(1)
+' "$1" "$2" 2>/dev/null
+}
+
+static_reason() {
+    local state addr header product
+    state="$(unit_state "$STATIC_UNIT")"
+    if [[ "$state" != active ]]; then
+        echo "${STATIC_UNIT} is ${state}"
+        return
+    fi
+    if [[ "$(unit_state "$HTTP_UNIT")" == active ]]; then
+        echo "${HTTP_UNIT} is active"
+        return
+    fi
+    addr="$(probe_addr)"
+    if [[ -z "$addr" ]]; then
+        echo "cannot read TAILNET_IP and DASHBOARD_PORT from ${ENV_FILE}; run as root or set DASHBOARD_PROBE_ADDR"
+        return
+    fi
+    if ! header="$(server_header "$addr")"; then
+        echo "nothing answers at ${addr}"
+        return
+    fi
+    read -r product _ <<<"$header" || true
+    if [[ "${product%%/*}" != SimpleHTTP ]]; then
+        echo "${addr} answers Server: ${header:-(none)}, not SimpleHTTP"
+        return
+    fi
+    [[ "$(response_status "$addr" /api/session)" != 200 ]] ||
+        echo "${addr} answers 200 on /api/session, so Settings is not read-only"
+}
+
+wait_static() {
+    local deadline=$((SECONDS + START_WAIT))
+    while ((SECONDS < deadline)) && [[ -n "$(static_reason)" ]]; do
+        sleep 0.5
+    done
+}
+
 status() {
     local reason
     reason="$(live_reason)"
@@ -368,12 +421,36 @@ install_service() {
     return 1
 }
 
+rollback() {
+    local reason
+    if [[ ! -e "${UNIT_DIR}/${STATIC_UNIT}" ]]; then
+        echo "dashboard-http-service: refusing to roll back: ${UNIT_DIR}/${STATIC_UNIT} does not exist, so nothing would serve 8090" >&2
+        return 1
+    fi
+    if ! "$SYSTEMCTL" enable --now "$STATIC_UNIT"; then
+        say "systemctl enable --now ${STATIC_UNIT} failed; ${HTTP_UNIT} still serves 8090" >&2
+        return 1
+    fi
+    if ! "$SYSTEMCTL" disable --now "$HTTP_UNIT"; then
+        say "systemctl disable --now ${HTTP_UNIT} failed; ${STATIC_UNIT} is up but ${HTTP_UNIT} is still enabled" >&2
+        return 1
+    fi
+    wait_static
+    reason="$(static_reason)"
+    if [[ -n "$reason" ]]; then
+        echo "not rolled back: ${reason}"
+        return 3
+    fi
+    echo "rolled back: python3 -m http.server serves $(probe_addr); Settings is read-only"
+}
+
 case "${1:-}" in
     install) install_service ;;
     status) status ;;
     restart) restart ;;
+    rollback) rollback ;;
     *)
-        echo "usage: $(basename "$0") {install|status|restart}" >&2
+        echo "usage: $(basename "$0") {install|status|restart|rollback}" >&2
         exit 2
         ;;
 esac
