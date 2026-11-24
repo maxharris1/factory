@@ -351,6 +351,13 @@ class StackParent:
 
 
 @dataclass(frozen=True)
+class StackedOn:
+    pr: int
+    branch: str
+    default_branch: str
+
+
+@dataclass(frozen=True)
 class TrackedTicket:
     repo: str
     ticket_id: str
@@ -416,7 +423,7 @@ class TrackedTicket:
     pr_base: str | None = None
     pr_commits: int | None = None
     stack: StackParent | None = None
-    stack_parent_branch: str | None = None
+    stacked_on: StackedOn | None = None
 
     @property
     def no_ci_base(self) -> str | None:

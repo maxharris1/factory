@@ -225,5 +225,5 @@ def test_fed_pulls_reads_a_stacked_tickets_parent_branch(tmp_path: Path) -> None
 
     fed_pulls = FedPulls(tmp_path / "orch.db")
 
-    assert fed_pulls.stack_parent_branch(REPO, "AUT-7") == "factory/issue-10"
-    assert fed_pulls.stack_parent_branch(REPO, "AUT-8") is None
+    assert fed_pulls.stack_parent(REPO, "AUT-7") == (10, "factory/issue-10")
+    assert fed_pulls.stack_parent(REPO, "AUT-8") is None
