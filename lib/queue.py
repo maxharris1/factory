@@ -31,6 +31,7 @@ back, so callers pass the connection the row came from.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 from collections.abc import Collection
@@ -89,7 +90,14 @@ LOCAL_GATE_PASSED = "local-gate-passed"
 CHECK_FAILED_EVENTS = (PRE_READY_FAILED, LOCAL_GATE_FAILED)
 CHECK_PASSED_EVENTS = (PRE_READY_PASSED, LOCAL_GATE_PASSED)
 INVALID_HANDOFF_EVENTS = (SUBMITTED_INVALID, *CHECK_FAILED_EVENTS)
+_PASSED_DETAIL = re.compile(r"handoff [^:]+: at ([0-9a-f]{40})")
 MAX_INVALID_HANDOFFS = 3
+
+
+def passed_head(detail: object) -> str | None:
+    """The head in a check-passed event's detail, as record_check_passed writes it."""
+    match = _PASSED_DETAIL.fullmatch(detail) if isinstance(detail, str) else None
+    return match.group(1) if match else None
 
 
 class QueueError(ValueError):

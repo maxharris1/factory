@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import re
-
 from lib.brief.common import (
     QUESTIONS_LINES,
     Lead,
     TEST_SCOPE,
     answers_lines,
+    command_code,
     comment_url,
     detail_of,
     fenced,
@@ -87,12 +86,21 @@ def base_step(number: int, facts: dict) -> str:
 
 
 def builder_notes(job: Job, facts: dict) -> list[str]:
-    gate = (
-        f"CI does not run on `{facts['no_ci_base']}`. Run {local_checks(facts)} locally at the head you push, "
-        "paste each command and its result in the ready, and say that CI did not run."
-        if facts["no_ci_base"]
-        else "CI runs the full suite and is the gate: a red CI comes back to you as a fix job."
-    )
+    if facts["no_ci_base"] and facts["local_gate"]:
+        spec = facts["local_gate"]
+        gate = (
+            f"CI does not run on `{facts['no_ci_base']}`. Before `ready` counts, the factory runs "
+            f"{command_code(spec.command)} (timeout {spec.timeout_seconds}s), factory.md `ci.local_gate`, in a fresh "
+            "checkout of the head you name and records `local-gate-passed` at it. Run it yourself before you post. "
+            "You need not paste local results."
+        )
+    elif facts["no_ci_base"]:
+        gate = (
+            f"CI does not run on `{facts['no_ci_base']}`. Run {local_checks(facts)} locally at the head you push, "
+            "paste each command and its result in the ready, and say that CI did not run."
+        )
+    else:
+        gate = "CI runs the full suite and is the gate: a red CI comes back to you as a fix job."
     notes = [
         title_line(facts),
         gate + _PRINT_MODE.get(f"{job.request.recipient}-bot", ""),
@@ -101,10 +109,8 @@ def builder_notes(job: Job, facts: dict) -> list[str]:
     ]
     if facts["pre_ready"] is not None:
         spec = facts["pre_ready"]
-        fence = "`" * (max((len(run) for run in re.findall("`+", spec.command)), default=0) + 1)
-        command = f"{fence} {spec.command} {fence}" if len(fence) > 1 else f"`{spec.command}`"
         notes.append(
-            f"Before `ready` counts, the factory runs {command} (timeout {spec.timeout_seconds}s) "
+            f"Before `ready` counts, the factory runs {command_code(spec.command)} (timeout {spec.timeout_seconds}s) "
             "in a fresh checkout of the head you name, without anything uncommitted or untracked "
             "and without your installed dependencies or generated files. `ready` is not accepted "
             "until it passes at the pushed head. Run it yourself before you post."

@@ -1315,7 +1315,7 @@ def _check_gate(board: str) -> None:
 def test_a_base_without_ci_shows_the_newest_local_gate_pass(tmp_path: Path) -> None:
     snapshot = gate_snapshot(tmp_path)
     assert {row["ticket_id"]: row.get("no_ci") for row in snapshot["tickets"]} == {
-        NO_CI[1]: {"base": "release/1.x", "gate_head": GATE_HEAD}, ON_CI[1]: None,
+        NO_CI[1]: {"base": "release/1.x", "gate_head": GATE_HEAD[:12]}, ON_CI[1]: None,
     }
     _check_gate(_server(snapshot)["pipeline"])
 
