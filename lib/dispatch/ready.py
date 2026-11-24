@@ -43,7 +43,7 @@ from lib.dispatch.helpers import (
     own_close_at_head,
     record_own_close,
 )
-from lib.dispatch.rebase import RebaseStep, newest_rebase
+from lib.dispatch.rebase import RebaseStep, newest_rebase, parent_overlap
 from lib.dispatch.retry import _harness_job_active
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import (
@@ -323,6 +323,7 @@ class ReadyMixin:
                 generation=generation,
                 update=update,
                 source=None if rebase is None else "rebase",
+                retarget=rebase if rebase is not None and rebase.onto_from is not None else None,
             )
             if not queued:
                 return True, "capped-ready"
@@ -1532,6 +1533,7 @@ class ReadyMixin:
         detail: str | None = None,
         update: UpdateScope | None = None,
         source: str | None = None,
+        retarget: RebaseStep | None = None,
     ) -> tuple[bool, Comment | None]:
         """Queue the next review round for comment, with the later trusted
         verdict that already answered it (_enqueue_step); (False, None), with
@@ -1568,7 +1570,7 @@ class ReadyMixin:
                     update=update,
                     source=source,
                     rebase=(
-                        self._rebase_scope(ticket, comment, head, review_round)
+                        self._rebase_scope(ticket, comment, head, review_round, retarget)
                         if (review_round > 1 or source == "rebase") and update is None
                         else None
                     ),
@@ -1815,20 +1817,55 @@ class ReadyMixin:
         return str(row["head"])
 
     def _rebase_scope(
-        self, ticket: TrackedTicket, comment: Comment, head: str, review_round: int
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        head: str,
+        review_round: int,
+        retarget: RebaseStep | None = None,
     ) -> RebaseScope | None:
-        last = self._reviewed_head(ticket, comment, review_round)
+        last = (
+            retarget.from_head
+            if retarget is not None
+            else self._reviewed_head(ticket, comment, review_round)
+        )
         if last is None or last == head or self.rebase_classifier is None:
             return None
         try:
-            return self.rebase_classifier(
-                ticket.repo, ticket.factory.base_branch, last, head
-            )
+            scope = self.rebase_classifier(ticket.repo, ticket.factory.base_branch, last, head)
         except Exception as exc:
             self.record_poll_error(
                 ticket.repo, ticket.ticket_id, f"rebase-check:{type(exc).__name__}"
             )
             return None
+        if retarget is None or scope is None:
+            return scope
+        return replace(
+            scope,
+            reviewed_base=retarget.onto_from,
+            overlap=self._parent_overlap(ticket, retarget, head),
+        )
+
+    def _parent_overlap(
+        self, ticket: TrackedTicket, retarget: RebaseStep, head: str
+    ) -> tuple[str, ...] | None:
+        if retarget.parent_head is None or self.retarget_delta is None:
+            return None
+        try:
+            delta = self.retarget_delta(
+                ticket.repo,
+                ticket.factory.base_branch,
+                retarget.onto_from,
+                retarget.from_head,
+                retarget.parent_head,
+                head,
+            )
+        except Exception as exc:
+            self.record_poll_error(
+                ticket.repo, ticket.ticket_id, f"retarget-delta:{type(exc).__name__}"
+            )
+            return None
+        return parent_overlap(delta, ticket.factory.exclusive_paths)
 
     def _record_ci_result(
         self,

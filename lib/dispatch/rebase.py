@@ -28,10 +28,11 @@ from lib.dispatch.types import (
     RetargetProof,
     TrackedTicket,
 )
+from lib.feeder_gates import path_matches
 from lib.handoff import parse_comment
 from lib.job_detail import as_object
 from lib.queue import JobRequest
-from lib.update_check import StackUnbounded
+from lib.update_check import RetargetDelta, StackUnbounded
 
 STACK_RETARGET_FAILED = "stack-retarget-failed"
 LEAVES_MERGE_QUEUE = frozenset({"merge-queue", "waiting-external"})
@@ -60,6 +61,21 @@ def answers_rebase_review(connection: sqlite3.Connection, ticket: TrackedTicket,
         and _detail_round_number(row["detail"]) == round_number
         and _detail_field(row["detail"], "source") == "rebase"
         and _matching_head(str(row["head"] or ""), ticket.current_head) is not None
+    )
+
+
+def parent_overlap(delta: RetargetDelta, shared: tuple[str, ...]) -> tuple[str, ...]:
+    patterns = [
+        pattern
+        for pattern in shared
+        if any(path_matches((pattern,), path) for path in delta.parent_files)
+    ]
+    return tuple(
+        sorted(
+            path
+            for path in delta.child_files
+            if path in delta.parent_files or path_matches(patterns, path)
+        )
     )
 
 

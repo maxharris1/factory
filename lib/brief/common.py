@@ -255,7 +255,11 @@ def _rebase_scope(detail: dict[str, object]) -> dict | None:
     keys = ("last_reviewed_head", "reviewed_base", "base")
     if not all(isinstance(rebase.get(key), str) and _HEAD.fullmatch(rebase[key]) for key in keys):
         return None
-    return {key: rebase[key] for key in keys}
+    scope = {key: rebase[key] for key in keys}
+    overlap = rebase.get("overlap")
+    if isinstance(overlap, list) and all(isinstance(path, str) for path in overlap):
+        scope["overlap"] = overlap
+    return scope
 
 
 def _size_flag(detail: dict[str, object]) -> dict[str, int] | None:

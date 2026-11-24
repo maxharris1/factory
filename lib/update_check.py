@@ -74,6 +74,7 @@ class RebaseScope:
     last_reviewed_head: str
     reviewed_base: str
     base: str
+    overlap: tuple[str, ...] | None = None
 
 
 def rebase_scope(

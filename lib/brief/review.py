@@ -357,6 +357,22 @@ def _rebased_step(rebase: dict | None, base: str, head: str) -> str:
         f"changes no behavior on purpose. Review the range-diff: {range_diff}. Every finding open in the last "
         "verdict stays open. Carry each forward under its `f-<n>` id and list none as `[closed]`, since a rebase "
         "does not fix a finding."
+    ) + _retarget_overlap(rebase, base)
+
+
+def _retarget_overlap(rebase: dict | None, base: str) -> str:
+    if rebase is None or "overlap" not in rebase:
+        return ""
+    landed = (
+        f" The stack parent landed on `{base}`. The range-diff starts at this PR's old base, so it reads only "
+        "this PR's own commits."
+    )
+    if not rebase["overlap"]:
+        return landed + " No file this PR changes overlaps the parent's final change."
+    files = ", ".join(f"`{path}`" for path in rebase["overlap"])
+    return (
+        landed + f" This PR shares {files} with the parent's final change. Check those files against what "
+        "the parent landed."
     )
 
 
