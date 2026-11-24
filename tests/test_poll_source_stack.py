@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from lib.dispatch.types import StackParent
+from lib.dispatch.types import StackedOn, StackParent
 from lib.dispatcher import TicketRef
 from lib.feeder import FEEDER_TABLE, ensure_tables
 from lib.poll_source import FedPulls, LivePollSource
@@ -50,6 +50,20 @@ def test_a_pull_retargeted_to_main_is_not_stacked(tmp_path: Path) -> None:
 
     assert ticket.stack is None
     assert ticket.factory.base_branch == "main"
+    assert ticket.stacked_on == StackedOn(1449, PARENT, "main")
+
+
+def test_a_ticket_targeted_child_keeps_the_project_default_branch(tmp_path: Path) -> None:
+    database = tmp_path / "orch.db"
+    record(database, "1450", "12", "github")
+    with sqlite3.connect(database) as connection:
+        connection.execute(f"UPDATE {FEEDER_TABLE} SET target_source = 'ticket'")
+    gh = FakeGh(FACTORY.format(tickets="github", ship="handoff"))
+    gh.pull = {"state": "open", "base": {"ref": "main", "sha": LIVE_PARENT_SHA}}
+    source = LivePollSource(config(), gh_runner=gh, fed_pulls=FedPulls(database))
+    (ticket,) = source.tracked_tickets((TicketRef("acme/widgets", "12", "github"),))
+
+    assert ticket.stacked_on == StackedOn(1449, PARENT, "main")
 
 
 def test_a_linear_ticket_on_its_recorded_parent_is_stacked(tmp_path: Path) -> None:
@@ -70,6 +84,7 @@ def test_a_linear_ticket_on_its_recorded_parent_is_stacked(tmp_path: Path) -> No
 
     assert ticket.stack == StackParent(1449, PARENT, LIVE_PARENT_SHA)
     assert ticket.factory.base_branch == PARENT
+    assert ticket.stacked_on == StackedOn(1449, PARENT, "main")
 
 
 def test_no_feeder_table_means_no_stack(tmp_path: Path) -> None:

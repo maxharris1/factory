@@ -316,6 +316,23 @@ def _base_mismatch(ticket: TrackedTicket) -> str | None:
     return f"PR #{ticket.pr_number} targets {ticket.pr_base}; the ticket base is {base}"
 
 
+def _stack_wait(ticket: TrackedTicket, head: str | None) -> str | None:
+    stacked = ticket.stacked_on
+    if stacked is None:
+        return None
+    base = ticket.pr_base or ticket.factory.base_branch
+    if base == stacked.branch:
+        return f"stacked on {stacked.branch}: waits for its retarget"
+    if ticket.factory.ship == "handoff" and base != stacked.default_branch:
+        return f"stacked child: on {base}, waits for a retarget to {stacked.default_branch}"
+    if ticket.no_ci_base is not None:
+        return f"stacked child: GitHub CI does not run on {base}, waits for a retarget to a CI base"
+    ci = ticket.ci.get(head) if head is not None else None
+    if ci is not None and ci.status == "not-run":
+        return f"stacked child: CI not-run on {base}, waits for GitHub CI"
+    return None
+
+
 def _redrive_eligible(exc: BaseException, policy: str) -> bool:
     """Whether a failed ship gets its one re-drive (issue #47, issue #83)."""
     if not isinstance(exc, ShipError):
