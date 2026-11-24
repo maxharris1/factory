@@ -2837,6 +2837,36 @@ class Feeder:
         )
         return None if wait is not None else base
 
+    def accept_stack_retarget(self, ticket: TrackedTicket) -> str | None:
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        with self.queue.connect() as connection:
+            row = connection.execute(
+                f"SELECT base_branch, stack_parent_pr, stack_parent_branch FROM {FEEDER_TABLE} "
+                "WHERE repo = ? AND ticket_id = ?",
+                key,
+            ).fetchone()
+        if row is None or row[1] is None or row[0] != row[2]:
+            return None
+        recorded, parent = row[0], int(row[1])
+        moved = ticket.pr_base
+        if moved is None or moved == recorded:
+            return None
+        if self.github.pull_state(ticket.repo, parent) != "merged":
+            return None
+        if self.github.pull_base(ticket.repo, parent) != moved:
+            return None
+        with self.queue.connect() as connection:
+            connection.execute(
+                f"UPDATE {FEEDER_TABLE} SET base_branch = ? "
+                "WHERE repo = ? AND ticket_id = ? AND base_branch = ?",
+                (moved, *key, recorded),
+            )
+        self.log(
+            f"feeder: {ticket.repo}#{ticket.ticket_id} moved from {recorded} to {moved}"
+            f" after #{parent} merged into it; recorded {moved} as its base"
+        )
+        return moved
+
     def _pull_base(self, repo: str, ticket_id: str, recorded: str, number: int, head: str) -> str:
         base = self.github.pull_base(repo, number)
         note = (repo.lower(), number, head, recorded, base)

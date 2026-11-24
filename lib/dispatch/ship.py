@@ -957,7 +957,7 @@ class ReviewShipper:
         if len(found) != 1:
             raise ShipError(f"{request.repo}#{request.ticket_id} was not found")
         try:
-            self.dispatcher._observed(found[0])
-            return self.dispatcher._routed(found[0])
+            observed = self.dispatcher._observed(found[0])
+            return self.dispatcher._routed(observed or found[0])
         except (BaseMismatch, RouteError) as error:
             raise ShipError(str(error)) from error

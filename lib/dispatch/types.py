@@ -704,6 +704,8 @@ class Feeder(Protocol):
     holds a ready's review, with the same Grok wake, while the ready's head carries
     another open PR's commits, and returns None when it did; otherwise it
     returns the base the review runs against, the open PR's own base.
+    accept_stack_retarget records a stacked child's new PR base and returns it
+    when its parent merged into that base, else returns None.
     """
 
     ledger: LockLedger | None
@@ -711,6 +713,8 @@ class Feeder(Protocol):
     def feed_once(self) -> object: ...
 
     def review_base_unless_stacked(self, ticket: TrackedTicket, head: str) -> str | None: ...
+
+    def accept_stack_retarget(self, ticket: TrackedTicket) -> str | None: ...
 
 
 # (repo, base branch, approved head, updated head, shared_paths) -> whether the update is
