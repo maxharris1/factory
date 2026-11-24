@@ -392,6 +392,29 @@ def test_dashboard_server_unit_is_documented_not_installed() -> None:
     assert "factory-dashboard" not in install
 
 
+def test_readme_dashboard_describes_live_http_server() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    start = readme.index("## Dashboard\n")
+    section = " ".join(readme[start : readme.index("\n## ", start)].split())
+    unit = (ROOT / "deploy/factory-dashboard-http.service").read_text(encoding="utf-8")
+    keys = re.findall(r"^#\s+([A-Z_]+)=", unit, re.MULTILINE)
+    assert keys
+    assert "deploy/dashboard-http-service.sh install|status|restart|rollback" in section
+    assert "/etc/factory-dashboard/http.env" in section
+    for key in keys:
+        assert key in section, key
+    assert "Any secret or OAuth value is Max's to create and set" in section
+    assert "sign-in broker" in section
+    assert "#1398" in section
+    for stale in (
+        "not deployed",
+        "~/.config/factory-dashboard/http.env",
+        "systemctl --user",
+        "Nothing in this repository installs",
+    ):
+        assert stale not in section, stale
+
+
 def test_webhook_template_names_every_accepted_variable() -> None:
     template = (ROOT / "deploy/webhook.env.example").read_text(encoding="utf-8")
     orch = (ROOT / "orch.yml").read_text(encoding="utf-8")
