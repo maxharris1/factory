@@ -345,9 +345,7 @@ class ReadyMixin:
         return True, "queued-ci-fix"
 
     def _local_gate_hold(self, ticket: TrackedTicket, comment_id: str) -> tuple[str, str] | None:
-        """#1464: the newest local_gate unavailable or failure at this ready
-        and its reason. None once the gate passed, since a pass is never
-        undone, or when the gate never reported one for this PR."""
+        """#1464: None once the gate passed at this ready, since a pass is never undone."""
         if not any(check.name == "local_gate" for check in planned(ticket.factory, ticket.pr_base)):
             return None
         prefix = f"handoff {comment_id}:"

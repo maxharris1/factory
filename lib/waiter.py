@@ -1515,10 +1515,8 @@ class Waiter:
         return reason
 
     def _retry_waiting_gates(self) -> None:
-        """#1464: rerun ci.local_gate for a ready T2 holds as local-gate-waiting
-        once its newest gate event is an unavailable at least
-        LOCAL_GATE_RETRY_SECONDS old, recording the outcome on the job that
-        posted the ready. The job's state never changes."""
+        """#1464: rerun ci.local_gate for a local-gate-waiting ready. Records a
+        gate event on the job that posted it; the job's state never changes."""
         gate_events = (LOCAL_GATE_PASSED, LOCAL_GATE_FAILED, LOCAL_GATE_UNAVAILABLE)
         try:
             with self.queue.connect() as connection:

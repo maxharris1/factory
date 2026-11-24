@@ -1,6 +1,6 @@
 """The checks a builder's ready must pass at its head before it counts:
 factory.md's `review.pre_ready` (#503), then `ci.local_gate` on a PR into a
-base CI never runs on (#1463). Only local_gate can be unavailable (#1464)."""
+base CI never runs on (#1463)."""
 
 from __future__ import annotations
 
@@ -36,8 +36,7 @@ TAIL_CHARS = 4000
 DRAIN_SECONDS = 1
 JOB_CONTROL_VARIABLES = frozenset({PROOF_ENV, "ORCH_DB"})
 ORCH_INTERPRETER_ENV = "ORCH_PYTHON"
-# EX_TEMPFAIL: the command says this device cannot run it right now.
-UNAVAILABLE_EXIT = 75
+UNAVAILABLE_EXIT = os.EX_TEMPFAIL
 
 
 @dataclass(frozen=True)
@@ -167,8 +166,6 @@ def first_failure(
     environ: Mapping[str, str],
     passed: Callable[[HeadCheck], None],
 ) -> tuple[HeadCheck, PreReadyResult] | None:
-    """The first check that did not pass, and its result. A check with no
-    unavailable_event fails where it would be unavailable (#503)."""
     for check in checks:
         result = run(check.spec, cwd, head, environ)
         if result.outcome == "unavailable" and check.unavailable_event is None:

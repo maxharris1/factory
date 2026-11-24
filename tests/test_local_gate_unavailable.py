@@ -1,11 +1,4 @@
-"""#1464: a device that cannot run `ci.local_gate` leaves the ticket waiting.
-
-A gate that exits 75 or cannot start is unavailable: the job finishes with its
-ready, no invalid-handoff slot is used, and `local-gate-unavailable` is
-recorded at the head. T2 holds the ready as `local-gate-waiting` ("gate
-unavailable") and never passes it. The waiter retries at most every 600
-seconds: a pass lets review queue, and a failure queues a CI fix.
-"""
+"""#1464: a device that cannot run `ci.local_gate` leaves the ticket waiting."""
 
 from __future__ import annotations
 
