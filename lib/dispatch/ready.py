@@ -501,12 +501,11 @@ class ReadyMixin:
         ticket = self._polled.get(key, ticket)
         head = ticket.current_head
         result = ticket.ci.get(head) if head is not None else None
-        ci_branches = ticket.factory.ci_branches
         silent = (
             head is not None
             and (result is None or not result.reported)
-            and ci_branches is not None
-            and ticket.pr_base in ci_branches
+            and ticket.pr_base is not None
+            and ticket.no_ci_base is None
             and self._review_context(ticket)[0] not in TERMINAL_STATES
             and self._names_head(ticket, head, ("ready",))
         )
@@ -536,13 +535,18 @@ class ReadyMixin:
                     (*key, CI_SILENT_REASON),
                 )
                 return
+            where = (
+                f"on CI base {ticket.pr_base}"
+                if ticket.factory.ci_branches is not None
+                else f"on base {ticket.pr_base} (factory.md sets no ci.branches)"
+            )
             self._flag_attention_once(
                 connection,
                 ticket.repo,
                 ticket.ticket_id,
                 CI_SILENT_REASON,
                 f"no check run or status on {head[:12]} after "
-                f"{CI_SILENT_SECONDS / 60:.0f} minutes on CI base {ticket.pr_base}",
+                f"{CI_SILENT_SECONDS / 60:.0f} minutes {where}",
             )
 
     def _ci_stale_state(self, ticket: TrackedTicket) -> str | None:
