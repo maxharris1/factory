@@ -455,6 +455,9 @@ def test_a_ready_on_a_base_ci_never_runs_on_goes_to_review(tmp_path: Path) -> No
     assert [(job["recipient"], job["head"]) for job in board.jobs("review")] == [("codex", sha(1))]
     assert ci_waits(board) == []
     assert ci_events(board) == []
+    board.now[0] += CI_SILENT_SECONDS * 3
+    board.poll()
+    assert ci_silent(board) == []
 
 
 @pytest.mark.parametrize("on", [True, False])
@@ -505,12 +508,23 @@ def test_a_ready_with_unreported_ci_waits_where_ci_runs(
     assert [(w["comment_id"], w["reason"]) for w in ci_waits(board)] == [(ready, "ci-pending")]
 
 
+SILENT_BASES = pytest.mark.parametrize(
+    ("ci_branches", "where"),
+    [
+        (("dev", "main"), "on CI base dev"),
+        (None, "on base dev (factory.md sets no ci.branches)"),
+    ],
+    ids=["ci-base", "ci-branches-absent"],
+)
+
+
+@SILENT_BASES
 @pytest.mark.parametrize("reports", ["pending", "success"])
-def test_ci_silent_on_a_ci_base_raises_one_flag_until_ci_reports(
-    tmp_path: Path, reports: str
+def test_ci_silent_raises_one_flag_until_ci_reports(
+    tmp_path: Path, reports: str, ci_branches: tuple[str, ...] | None, where: str
 ) -> None:
     board = board_with(tmp_path, on=False)
-    reported = on_base(board, "dev")
+    reported = on_base(board, "dev", ci_branches=ci_branches)
     pr = built_with_ci_pending(board, sha(1))
     ready = board.ready(pr, pr.head)
     board.poll()
@@ -522,8 +536,9 @@ def test_ci_silent_on_a_ci_base_raises_one_flag_until_ci_reports(
     for _ in range(3):
         board.poll()
     assert ci_silent(board) == [
-        ("42", f"no check run or status on {sha(1)[:12]} after 10 minutes on CI base dev")
+        ("42", f"no check run or status on {sha(1)[:12]} after 10 minutes {where}")
     ]
+    assert [(w["comment_id"], w["reason"]) for w in ci_waits(board)] == [(ready, "ci-pending")]
 
     reported.add(pr.head)
     pr.ci[pr.head] = reports
@@ -532,26 +547,32 @@ def test_ci_silent_on_a_ci_base_raises_one_flag_until_ci_reports(
     assert board.outcome(ready) == (None if reports == "pending" else "queued-review")
 
 
-def test_ci_silent_is_never_raised_without_ci_branches(tmp_path: Path) -> None:
+def test_ci_without_ci_branches_that_reports_in_time_waits_then_reviews(tmp_path: Path) -> None:
     board = board_with(tmp_path, on=False)
-    on_base(board, "dev", ci_branches=None)
+    reported = on_base(board, "dev", ci_branches=None)
     pr = built_with_ci_pending(board, sha(1))
     ready = board.ready(pr, pr.head)
     board.poll()
-    board.now[0] += CI_SILENT_SECONDS * 3
+    reported.add(pr.head)
+    board.now[0] += CI_SILENT_SECONDS * 2
     for _ in range(3):
         board.poll()
-
     assert ci_silent(board) == []
     assert [(w["comment_id"], w["reason"]) for w in ci_waits(board)] == [(ready, "ci-pending")]
 
+    pr.ci[pr.head] = "success"
+    board.poll()
+    assert ci_silent(board) == []
+    assert board.outcome(ready) == "queued-review"
 
+
+@SILENT_BASES
 @pytest.mark.parametrize("verdict", ["approve", "revise"])
 def test_ci_silent_after_an_early_review_raises_one_flag_until_ci_reports(
-    tmp_path: Path, verdict: str
+    tmp_path: Path, verdict: str, ci_branches: tuple[str, ...] | None, where: str
 ) -> None:
     board = board_with(tmp_path, on=True)
-    reported = on_base(board, "dev")
+    reported = on_base(board, "dev", ci_branches=ci_branches)
     pr = built_with_ci_pending(board, sha(1))
     ready = board.ready(pr, pr.head)
     board.poll()
@@ -567,7 +588,7 @@ def test_ci_silent_after_an_early_review_raises_one_flag_until_ci_reports(
     for _ in range(3):
         board.poll()
     assert ci_silent(board) == [
-        ("42", f"no check run or status on {sha(1)[:12]} after 10 minutes on CI base dev")
+        ("42", f"no check run or status on {sha(1)[:12]} after 10 minutes {where}")
     ]
 
     reported.add(pr.head)

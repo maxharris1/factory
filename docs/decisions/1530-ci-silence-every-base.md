@@ -1,0 +1,3 @@
+- **Decision:** When factory.md sets no `ci.branches`, the CI-silence watcher treats every base as a CI base, using the same predicate as `no_ci_base`. A readied head with no check run or status after ten minutes raises one `ci-silent` needs-attention row instead of waiting at `ci-pending` with no flag. This replaces part C of #615's row in the frozen SPEC.md log, which kept the watcher off when `ci.branches` was absent.
+- **When:** 2026-11-24 8:57 AM ET, by Max
+- **Source:** https://github.com/maxharris1/factory/issues/1530
