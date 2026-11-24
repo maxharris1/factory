@@ -7,6 +7,7 @@ nothing reaches a real tracker.
 from __future__ import annotations
 
 import json
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
@@ -229,3 +230,67 @@ def test_a_starred_target_is_refused_and_wakes_once(tmp_path: Path) -> None:
     assert nothing_written(github)
     (wake,) = wakes(tmp_path)
     assert json.loads(wake["detail"])["defects"] == ["bad-target-branch"]
+
+
+def blocked_wakes(tmp_path: Path) -> list[dict]:
+    with sqlite3.connect(tmp_path / "orch.db") as connection:
+        connection.row_factory = sqlite3.Row
+        return [
+            dict(row)
+            for row in connection.execute("SELECT * FROM jobs WHERE recipient = 'grok' AND action = 'blocked'")
+        ]
+
+
+def missing_target(tmp_path: Path, tracker: str):
+    github = FakeGitHub()
+    if tracker == "github":
+        feeder, _, _, _ = make_feeder(tmp_path, github=github)
+        github.issues[HOME] = [issue(7, body=targeted(), template=False)]
+        return feeder, github, HOME, "7", "factory/issue-7"
+    linear = FakeLinear()
+    feeder, _, _, _ = make_feeder(
+        tmp_path, orch=LINEAR_ORCH, github=github, linear=linear, factory_text=LINEAR_FACTORY_MD
+    )
+    ticket = linear_ticket(targeted())
+    linear.issues = [ticket]
+    return feeder, github, LINEAR_REPO, "AUT-7", ticket.branch
+
+
+@pytest.mark.parametrize("tracker", ["github", "linear"])
+def test_a_missing_target_holds_and_feeds_on_the_poll_after_it_appears(tmp_path: Path, tracker: str) -> None:
+    feeder, github, repo, key, head = missing_target(tmp_path, tracker)
+
+    for _ in range(2):
+        report = feeder.feed_once()
+        assert (report.fed, report.blocked, report.refused) == ((), 1, 0)
+
+    assert nothing_written(github)
+    row = rows(tmp_path / "orch.db")[key]
+    assert (row["state"], row["waiting_reason"]) == ("waiting-blocked", f"target branch {TARGET} does not exist")
+    assert flags(tmp_path) == {(repo, key, "target-branch-missing")}
+    (wake,) = blocked_wakes(tmp_path)
+    assert f"target branch {TARGET} does not exist" in json.loads(wake["detail"])["detail"]
+
+    github.branches[(repo, TARGET)] = TARGET_SHA
+    report = feeder.feed_once()
+
+    assert [ref.ticket_id for ref in report.fed] == [key if tracker == "linear" else "501"]
+    assert pull_on(github, head)["base"] == TARGET
+    assert [(r, sha) for r, sha, _ in github.commits] == [(repo, TARGET_SHA)]
+    assert rows(tmp_path / "orch.db")[key]["state"] == "fed"
+    assert flags(tmp_path) == set()
+    assert len(blocked_wakes(tmp_path)) == 1
+
+
+def test_a_failed_target_read_keeps_the_hold_and_its_flag(tmp_path: Path) -> None:
+    feeder, github, repo, key, _ = missing_target(tmp_path, "github")
+    feeder.feed_once()
+
+    github.fail["branch_sha"] = 1
+    report = feeder.feed_once()
+
+    assert report.fed == ()
+    assert report.errors >= 1
+    assert nothing_written(github)
+    assert rows(tmp_path / "orch.db")[key]["state"] == "waiting-blocked"
+    assert flags(tmp_path) == {(repo, key, "target-branch-missing")}

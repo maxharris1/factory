@@ -42,7 +42,9 @@ beside the criteria; a builder criterion with an unbounded quantifier
 ("every", "all", "never") on a ticket with no `Out of scope` section adds an
 intake warning to the brief and is never refused. An optional `Target branch:`
 line names the draft PR's base (SPEC section 4.4); a second line, a bad
-value or the ticket's own head branch is a defect. A ticket that
+value or the ticket's own head branch is a defect. A target that does not
+exist yet holds the ticket `waiting-blocked` with needs-attention
+(`target-branch-missing`) and one Grok `blocked` wake until it does. A ticket that
 fails is `refused-intake` with its reasons, takes no room and no holds,
 posts nothing, raises needs-attention (`intake-refused`) and queues one
 Grok `refused` wake per distinct defect set. It is re-checked every poll,
@@ -315,6 +317,7 @@ URGENT_LABELS = frozenset({"urgent", "priority:urgent"})
 BUG_LABELS = frozenset({"bug"})
 RISK_HIGH_LABEL = "risk:high"
 INTAKE_REFUSED = "intake-refused"  # needs_attention reason
+TARGET_BRANCH_MISSING = "target-branch-missing"
 LINEAR_URGENT_PRIORITY = 1
 LINEAR_PRIORITIES = (1, 2, 3, 4)  # Urgent, High, Medium, Low; 0 is no priority
 PLANNING_FILE_COUNT = 3  # SPEC section 4.1 (D36): over 3 files starts with a plan
@@ -1163,6 +1166,7 @@ class Feeder:
             candidates, states, skip
         )
         stops, stop_errors = self._line_stops(candidates, begun, skip, mains)
+        targets, target_errors = self._target_holds(candidates, begun, skip, read_repos, now)
         for candidate in candidates:
             candidate.unblocks = unblocks[candidate.ref]
             candidate.effective_tier = tiers[candidate.ref]
@@ -1176,7 +1180,7 @@ class Feeder:
         blocked = 0
         blocked_on: list[tuple[_Candidate, Wait]] = []
         busy: set[str] = set()
-        errors = read_errors + stop_errors + map_errors + (0 if gate_read else 1)
+        errors = read_errors + stop_errors + target_errors + map_errors + (0 if gate_read else 1)
         order = sorted(candidates, key=lambda item: (states[item.ref] not in IN_FLIGHT, *item.order()))
         while order:
             candidate = next(
@@ -1191,7 +1195,7 @@ class Feeder:
                 continue
             wait = None
             if candidate.ref not in begun:
-                wait = line_stop(stops.get(candidate.line), candidate.issue.labels)
+                wait = line_stop(stops.get(candidate.line), candidate.issue.labels) or targets.get(candidate.ref)
             if wait is None and state in UNSTARTED:
                 wait = waits.get(candidate.ref) or holds.collision(candidate.ref, candidate.lines)
             if wait is not None:
@@ -1915,6 +1919,67 @@ class Feeder:
                 self.log(f"feeder: cannot read main CI for {repo}@{base}: {safe_ship_error(exc)}")
                 stops[candidate.line] = Wait(f"main CI unreadable for {base}")
         return stops, errors
+
+    def _target_holds(
+        self,
+        candidates: Sequence[_Candidate],
+        begun: Collection[Ref],
+        refused: Collection[Ref],
+        repos: set[str],
+        now: float,
+    ) -> tuple[dict[Ref, Wait], int]:
+        holds: dict[Ref, Wait] = {}
+        unread_repos: set[str] = set()
+        errors = 0
+        for candidate in candidates:
+            target = candidate.template.target_branch
+            if target is None or candidate.ref in begun or candidate.ref in refused:
+                continue
+            repo = candidate.project.repo
+            try:
+                sha = self.github.branch_sha(repo, target)
+            except Exception as exc:
+                errors += 1
+                unread_repos.add(candidate.ref.repo)
+                self.log(f"feeder: cannot read target branch {repo}@{target}: {safe_ship_error(exc)}")
+                holds[candidate.ref] = Wait(f"target branch {target} was not read")
+                continue
+            if sha is not None:
+                continue
+            wait = Wait(f"target branch {target} does not exist", TARGET_BRANCH_MISSING)
+            holds[candidate.ref] = wait
+            issue = candidate.issue
+            self.queue.enqueue(
+                JobRequest(
+                    repo=repo,
+                    ticket_id=issue.key,
+                    action="blocked",
+                    recipient="grok",
+                    source_comment_id=f"feeder-target:{issue.key}:{target}",
+                    timeout_seconds=resolve_job_timeout(self.config, repo) * 60,
+                    detail=json.dumps(
+                        {
+                            "project_bot": candidate.project.grok_bot,
+                            "detail": (
+                                f"{_ticket_name(issue)} is held: {wait.reason}; "
+                                "it feeds on the first poll the branch exists."
+                            ),
+                            "ticket_url": issue.url,
+                        },
+                        sort_keys=True,
+                    ),
+                ),
+                dedupe_key=f"feeder-target:{repo.lower()}:{issue.key}:{target}",
+            )
+            self.log(f"feeder: {issue.repo}#{issue.key} held: {wait.reason}")
+        flags = {
+            (ref.repo, ref.key, wait.attention): wait.reason
+            for ref, wait in holds.items()
+            if wait.attention is not None
+        }
+        with self.queue.connect() as connection:
+            attention.sync(connection, (TARGET_BRANCH_MISSING,), repos - unread_repos, flags, now)
+        return holds, errors
 
     # -- gates (#156) ----------------------------------------------------------------
 
