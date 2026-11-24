@@ -48,7 +48,7 @@ exist yet holds the ticket `waiting-blocked` with needs-attention
 fails is `refused-intake` with its reasons, takes no room and no holds,
 posts nothing, raises needs-attention (`intake-refused`) and queues one
 Grok `refused` wake per distinct defect set. It is re-checked every poll,
-so a fixed ticket feeds. A ticket already feeding or fed is not re-checked.
+so a fixed ticket feeds. A ticket fed, or feeding with its branch recorded, is not re-checked.
 An optional `Features:` line names QA journeys (lib/journeys.py, #1029); each
 poll reads the qa.verify skill's feature map at the base once, refuses ids the
 map contradicts or a project with no qa.verify, and leaves a ticket eligible while that read fails.
@@ -213,6 +213,7 @@ from lib.feeder_gates import (
     parse_gate_lines,
     path_matches,
     paths_collide,
+    stacked_lines,
 )
 from lib.followups import has_marker, split_parent
 from lib.github_actions import TIMEOUT_SECONDS
@@ -407,7 +408,7 @@ _OPS_ACTION = re.compile(
 class Defect:
     code: (
         Literal["no-criteria", "other-prs-criterion", "no-risk", "no-plan-first", "no-depends-on", "bad-type",
-                "bad-target-branch"]
+                "bad-target-branch", "stack-without-depends"]
         | JourneyCode
     )
     reason: str
@@ -875,6 +876,11 @@ class _StateWrite(NamedTuple):
     issue: str
 
 
+def _ticket_ref(repo: str, value: str) -> Ref:
+    number = value.removeprefix("#")
+    return github_ref(repo, number) if number.isdigit() else Ref("linear", repo.lower(), value)
+
+
 def _state_write(
     candidate: _Candidate, state: str, *, error: str | None = None, reason: str | None = None
 ) -> _StateWrite:
@@ -1155,13 +1161,22 @@ class Feeder:
         states = {candidate.ref: self._state(candidate) for candidate in candidates}
         begun = {c.ref for c in candidates if self._row(c)["branch"] is not None}
         split = {c.ref for c in candidates if states[c.ref] == "split-parent"}
-        malformed = {c.ref for c in candidates if states[c.ref] in UNSTARTED and c.template.defects}
+        refusable = {
+            c.ref
+            for c in candidates
+            if states[c.ref] in UNSTARTED or (states[c.ref] in IN_FLIGHT and c.ref not in begun)
+        }
+        malformed = {c.ref for c in candidates if c.ref in refusable and c.template.defects}
         targets, target_errors = self._target_holds(candidates, begun, split | malformed, read_repos, now)
+        parent_holds, parent_errors = self._stack_parents(
+            candidates, refusable, begun, split | malformed | targets.keys()
+        )
+        targets.update(parent_holds)
         unread, map_errors = self._add_map_defects(candidates, states, targets.keys())
         refused = {
             candidate.ref
             for candidate in candidates
-            if states[candidate.ref] in UNSTARTED
+            if candidate.ref in refusable
             and candidate.template.defects
             and candidate.ref not in split
         }
@@ -1188,7 +1203,7 @@ class Feeder:
         blocked = 0
         blocked_on: list[tuple[_Candidate, Wait]] = []
         busy: set[str] = set()
-        errors = read_errors + stop_errors + target_errors + map_errors + (0 if gate_read else 1)
+        errors = read_errors + stop_errors + target_errors + parent_errors + map_errors + (0 if gate_read else 1)
         order = sorted(candidates, key=lambda item: (states[item.ref] not in IN_FLIGHT, *item.order()))
         while order:
             candidate = next(
@@ -1995,6 +2010,68 @@ class Feeder:
                     flags[(ref.repo, ref.key, TARGET_BRANCH_MISSING)] = row[0]
             attention.sync(connection, (TARGET_BRANCH_MISSING,), repos, flags, now)
         return holds, errors
+
+    def _stack_parents(
+        self,
+        candidates: Sequence[_Candidate],
+        refusable: Collection[Ref],
+        begun: Collection[Ref],
+        skip: Collection[Ref],
+    ) -> tuple[dict[Ref, Wait], int]:
+        holds: dict[Ref, Wait] = {}
+        errors = 0
+        aliases: dict[Ref, set[Ref]] | None = None
+        for candidate in candidates:
+            if candidate.ref not in refusable or candidate.ref in skip:
+                continue
+            if candidate.ref not in begun:
+                target = candidate.template.target_branch
+            else:
+                row = self._row(candidate)
+                target = row["base_branch"] if row["target_source"] == "ticket" else None
+            if target is None:
+                continue
+            repo = candidate.project.repo
+            try:
+                number = self.github.find_pull(repo, target)
+            except Exception as exc:
+                errors += 1
+                self.log(f"feeder: cannot read the open PR on {repo}@{target}: {safe_ship_error(exc)}")
+                holds[candidate.ref] = Wait(f"open PR on target branch {target} was not read")
+                continue
+            if number is None:
+                continue
+            pull = github_ref(repo, number)
+            if aliases is None:
+                aliases = self._tickets_by_pull()
+            parent = frozenset({pull, *aliases.get(pull, ())})
+            lines = stacked_lines(candidate.lines, parent)
+            if lines is not None:
+                candidate.lines = lines
+                continue
+            if candidate.ref in begun:
+                continue
+            defect = Defect(
+                "stack-without-depends",
+                f"`Target branch: {target}` is the head of open PR #{number}, "
+                f"but no `Depends on` line names #{number} or its ticket",
+            )
+            candidate.template = replace(candidate.template, defects=(*candidate.template.defects, defect))
+        return holds, errors
+
+    def _tickets_by_pull(self) -> dict[Ref, set[Ref]]:
+        aliases: dict[Ref, set[Ref]] = {}
+        for ref, row in self._feeder_rows().items():
+            if row.pull is not None:
+                aliases.setdefault(row.pull, set()).add(ref)
+        with self.queue.connect() as connection:
+            sources = read_sources(connection)
+        for (repo, ticket_id), (source, number) in sources.items():
+            if number is not None and number.isdigit():
+                aliases.setdefault(github_ref(repo, number), set()).update(
+                    _ticket_ref(repo, value) for value in (ticket_id, source)
+                )
+        return aliases
 
     # -- gates (#156) ----------------------------------------------------------------
 

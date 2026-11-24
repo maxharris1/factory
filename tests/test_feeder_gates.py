@@ -6,6 +6,7 @@ use the fakes from tests/test_feeder.py; nothing reaches a real tracker.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
@@ -28,6 +29,7 @@ from lib.feeder_gates import (
     linear_status,
     parse_gate_lines,
     paths_collide,
+    stacked_lines,
 )
 from tests.test_feeder import (
     FACTORY_MD,
@@ -44,6 +46,7 @@ from tests.test_feeder import (
     make_feeder,
     rows,
 )
+from tests.test_feeder_template import body, wakes
 
 HOME = "owner/app"
 OPEN = RefStatus(Progress.OPEN)
@@ -976,3 +979,138 @@ def test_a_red_main_lets_a_begun_feed_finish_after_a_stack_hold(tmp_path: Path) 
 
     assert [ref.ticket_id for ref in report.fed] == ["501", "502"]
     assert rows(tmp_path / "orch.db")["1"]["state"] == "fed"
+
+
+# --- stacked targets (#1449) --------------------------------------------------
+
+
+def test_stacked_lines_drops_only_the_parent() -> None:
+    lines = GateLines(blocked_by=frozenset({ref(6), ref(9)}), touches=frozenset({"lib/x.py"}))
+
+    stacked = stacked_lines(lines, frozenset({ref(6), ref(113)}))
+
+    assert stacked == GateLines(blocked_by=frozenset({ref(9)}), touches=frozenset({"lib/x.py"}))
+
+
+def test_stacked_lines_is_none_when_no_blocker_names_the_parent() -> None:
+    assert stacked_lines(blocked(9), frozenset({ref(6), ref(113)})) is None
+    assert stacked_lines(GateLines(), frozenset({ref(113)})) is None
+
+
+PARENT_HEAD = "factory/issue-6"
+
+
+def child(number: int, depends: str, *, target: bool = True) -> object:
+    extra = f"Target branch: {PARENT_HEAD}" if target else ""
+    return issue(number, created_at=float(number), body=body(depends=depends, extra=extra), template=False)
+
+
+def with_open_parent(tmp_path: Path):
+    feeder, _, github, _ = make_feeder(tmp_path, box=3)
+    github.issues[HOME] = [issue(6, created_at=6.0)]
+    assert fed_heads(github, feeder.feed_once()) == [PARENT_HEAD]
+    github.statuses = {ref(6): OPEN, ref(501): OPEN_PULL, ref(9): OPEN}
+    return feeder, github
+
+
+def test_a_stacked_github_child_feeds_while_its_parent_pr_is_open(tmp_path: Path) -> None:
+    feeder, github = with_open_parent(tmp_path)
+    github.issues[HOME] = [child(7, "Depends on: #6"), child(8, "Depends on: #6", target=False)]
+
+    assert fed_heads(github, feeder.feed_once()) == ["factory/issue-7"]
+
+    assert github.pulls[(HOME, 502)]["base"] == PARENT_HEAD
+    assert states(tmp_path)["7"] == ("fed", None)
+    assert states(tmp_path)["8"] == ("waiting-blocked", "waiting on #6")
+
+
+def test_a_child_naming_the_parent_pr_feeds_while_it_is_open(tmp_path: Path) -> None:
+    feeder, github = with_open_parent(tmp_path)
+    github.issues[HOME] = [child(7, "Depends on: PR #501")]
+
+    assert fed_heads(github, feeder.feed_once()) == ["factory/issue-7"]
+
+
+def test_the_same_child_without_a_target_waits_on_its_open_parent(tmp_path: Path) -> None:
+    feeder, github = with_open_parent(tmp_path)
+    github.issues[HOME] = [child(7, "Depends on: #6", target=False)]
+
+    assert feeder.feed_once().fed == ()
+
+    assert states(tmp_path)["7"] == ("waiting-blocked", "waiting on #6")
+
+
+def test_a_second_open_blocker_still_holds_a_stacked_child(tmp_path: Path) -> None:
+    feeder, github = with_open_parent(tmp_path)
+    github.issues[HOME] = [child(7, "Depends on: #6, #9")]
+
+    assert feeder.feed_once().fed == ()
+
+    assert states(tmp_path)["7"] == ("waiting-blocked", "waiting on #9")
+    github.statuses[ref(9)] = DONE
+    assert fed_heads(github, feeder.feed_once()) == ["factory/issue-7"]
+
+
+@pytest.mark.parametrize("depends", ["Depends on: none", "Depends on: #9"])
+def test_a_stacked_target_without_depends_on_the_parent_is_refused(tmp_path: Path, depends: str) -> None:
+    feeder, github = with_open_parent(tmp_path)
+    github.issues[HOME] = [child(7, depends)]
+
+    report = feeder.feed_once()
+    feeder.feed_once()
+
+    assert report.fed == () and report.refused == 1
+    state, reason = states(tmp_path)["7"]
+    assert state == "refused-intake"
+    assert reason == (
+        f"`Target branch: {PARENT_HEAD}` is the head of open PR #501, "
+        "but no `Depends on` line names #501 or its ticket"
+    )
+    assert [json.loads(wake["detail"])["defects"] for wake in wakes(tmp_path)] == [["stack-without-depends"]]
+
+
+def test_a_target_whose_pr_merged_gates_as_usual(tmp_path: Path) -> None:
+    feeder, github = with_open_parent(tmp_path)
+    github.pulls[(HOME, 501)]["merged"] = True
+    github.pulls[(HOME, 501)]["state"] = "closed"
+    github.statuses[ref(501)] = MERGED
+    github.issues[HOME] = [child(7, "Depends on: none")]
+
+    assert fed_heads(github, feeder.feed_once()) == ["factory/issue-7"]
+
+
+def test_an_unread_stack_parent_holds_the_child(tmp_path: Path) -> None:
+    feeder, github = with_open_parent(tmp_path)
+    github.issues[HOME] = [child(7, "Depends on: none")]
+    github.fail["find_pull"] = 1
+
+    report = feeder.feed_once()
+
+    assert report.fed == () and report.errors == 1
+    assert states(tmp_path)["7"] == (
+        "waiting-blocked", f"open PR on target branch {PARENT_HEAD} was not read"
+    )
+    feeder.feed_once()
+    assert states(tmp_path)["7"][0] == "refused-intake"
+
+
+def test_a_stacked_linear_child_feeds_while_its_parent_is_agent_reviewed(tmp_path: Path) -> None:
+    linear = FakeLinear()
+    linear.issues = [linear_issue("AUT-6")]
+    feeder, _, github, _ = make_feeder(tmp_path, orch=LINEAR_ORCH, linear=linear,
+                                       factory_text=LINEAR_FACTORY_MD)
+    assert [item.ticket_id for item in feeder.feed_once().fed] == ["AUT-6"]
+    parent_head = linear_issue("AUT-6").branch
+    stacked = replace(
+        linear_issue("AUT-7"),
+        body=body(extra=f"Target branch: {parent_head}"),
+        blocked_by=(("AUT-6", "started"),),
+    )
+    unstacked = replace(linear_issue("AUT-8"), blocked_by=(("AUT-6", "started"),))
+    linear.issues = [stacked, unstacked]
+
+    assert [item.ticket_id for item in feeder.feed_once().fed] == ["AUT-7"]
+
+    (pull,) = [pull for pull in github.pulls.values() if pull["head"] == stacked.branch]
+    assert pull["base"] == parent_head
+    assert states(tmp_path)["AUT-8"] == ("waiting-blocked", "waiting on AUT-6")
