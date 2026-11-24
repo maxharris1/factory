@@ -564,9 +564,9 @@ class SQLiteJobQueue:
             )
             connection.commit()
 
-    def reserve_gate_retry(self, job_id: str, *, comment_id: str, head: str, seen: int) -> bool:
-        """Record a local-gate-retry for the ready only while `seen` is still
-        its newest gate event, so one waiter runs each retry (#1464)."""
+    def reserve_gate_retry(
+        self, job_id: str, *, comment_id: str, head: str, expected_newest_event_id: int
+    ) -> bool:
         prefix = f"handoff {comment_id}:"
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -580,7 +580,7 @@ class SQLiteJobQueue:
                 """,
                 (job_id, *LOCAL_GATE_EVENTS, len(prefix), prefix),
             ).fetchone()[0]
-            if newest != seen:
+            if newest != expected_newest_event_id:
                 connection.rollback()
                 return False
             connection.execute(

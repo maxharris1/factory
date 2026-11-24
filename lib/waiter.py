@@ -1518,9 +1518,7 @@ class Waiter:
 
     def _retry_waiting_gates(self) -> None:
         """#1464: rerun ci.local_gate for a local-gate-waiting ready. Records a
-        gate event on the job that posted it; the job's state never changes.
-        A local-gate-retry is recorded before any work, so a retry that dies
-        or cannot check out still waits LOCAL_GATE_RETRY_SECONDS."""
+        gate event on the job that posted it; the job's state never changes."""
         try:
             with self.queue.connect() as connection:
                 tables = connection.execute(
@@ -1558,7 +1556,8 @@ class Waiter:
             try:
                 if not retry_locked(
                     lambda: self.queue.reserve_gate_retry(
-                        job_id, comment_id=comment_id, head=head, seen=int(row["id"])
+                        job_id, comment_id=comment_id, head=head,
+                        expected_newest_event_id=int(row["id"]),
                     )
                 ):
                     continue

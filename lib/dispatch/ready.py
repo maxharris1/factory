@@ -263,7 +263,7 @@ class ReadyMixin:
         if state in ("fixing", "awaiting-ok") and self._held_approve_covers(ticket, head):
             return True, "held-ci-fix-ready"
         gate = self._local_gate_hold(ticket, comment.id)
-        if gate is not None and self._taken_over(ticket, comment):
+        if gate is not None and self._superseded_by_later_ready(ticket, comment):
             return True, "ready-superseded-by-ready"
         if gate is not None and gate[0] == LOCAL_GATE_UNAVAILABLE:
             return False, LOCAL_GATE_WAITING
@@ -347,8 +347,7 @@ class ReadyMixin:
             self._set_workflow_state(ticket, "fixing")
         return True, "queued-ci-fix"
 
-    def _taken_over(self, ticket: TrackedTicket, comment: Comment) -> bool:
-        """#1464: a later ready already queued review or a CI fix."""
+    def _superseded_by_later_ready(self, ticket: TrackedTicket, comment: Comment) -> bool:
         with self._connect() as connection:
             handled = {
                 row["comment_id"]
