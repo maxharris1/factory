@@ -198,7 +198,7 @@ class FakeLinearSource:
 LINEAR_ISSUE_FIELDS = frozenset({
     "id", "identifier", "title", "description", "url", "branchName", "priority",
     "createdAt", "labels", "history", "project", "assignee", "state", "team", "comments",
-    "attachments",
+    "attachments", "creator",
 })
 
 
@@ -271,6 +271,48 @@ def test_linear_intake_reads_who_moved_the_issue_to_the_state() -> None:
     assert (item.repo, item.key, item.applied_by, item.urgent, item.bug, item.branch) == (
         "acme/app", "AUT-7", "max", True, True, "max/aut-7-t"
     )
+
+
+def created_in_state_node(*, creator: str | None, more_history: bool = False) -> dict:
+    node = linear_node(2534)
+    node["creator"] = None if creator is None else {"id": creator}
+    node["history"] = {
+        "nodes": [{"createdAt": "2026-11-12T21:00:00Z", "actor": {"id": "bot"}, "toState": None}],
+        "pageInfo": {"hasNextPage": more_history},
+    }
+    return node
+
+
+def test_an_issue_created_in_the_intake_state_is_applied_by_its_creator() -> None:
+    source = PagedLinearSource([[created_in_state_node(creator="max")]])
+    found = LinearIntakeClient(source, {"proj-1": "acme/app"}).linear_intake(
+        frozenset({"proj-1"}), "In Progress", {}
+    )
+    assert [(item.key, item.applied_by) for item in found] == [("AUT-2534", "max")]
+
+
+def test_a_move_into_the_intake_state_wins_over_the_creator() -> None:
+    node = linear_node(7)
+    node["creator"] = {"id": "creator"}
+    found = LinearIntakeClient(PagedLinearSource([[node]]), {"proj-1": "acme/app"}).linear_intake(
+        frozenset({"proj-1"}), "In Progress", {}
+    )
+    assert [item.applied_by for item in found] == ["max"]
+
+
+@pytest.mark.parametrize(
+    "node",
+    [
+        created_in_state_node(creator=None),
+        created_in_state_node(creator="max", more_history=True),
+    ],
+    ids=["no-creator", "history-truncated"],
+)
+def test_an_issue_with_no_resolvable_actor_has_no_applied_by(node: dict) -> None:
+    found = LinearIntakeClient(PagedLinearSource([[node]]), {"proj-1": "acme/app"}).linear_intake(
+        frozenset({"proj-1"}), "In Progress", {}
+    )
+    assert [item.applied_by for item in found] == [None]
 
 
 def test_linear_comment_is_confirmed() -> None:
