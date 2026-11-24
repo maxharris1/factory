@@ -144,7 +144,7 @@ def test_three_big_logs_fit_the_body_limit_keeping_each_last_line() -> None:
     template = parse_intake(body, LABELS)
     assert template.defects == ()
     assert (template.risk, template.plan_first, template.ticket_type) == ("high", False, "bug-fix")
-    assert template.criteria == ("The required checks (`test (*)`) pass on `main`.",)
+    assert template.criteria == ("The required checks (`test (*)`) pass at this PR's head.",)
     assert parse_gate_lines(body, REPO) == GateLines()
 
 
