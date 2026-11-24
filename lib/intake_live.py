@@ -756,8 +756,6 @@ def _is_sha(value: object) -> bool:
 
 
 def _force_push_page(number: int, items: object) -> tuple[int, tuple[str, ...], str | None]:
-    """One timeline page: the total force-push count, each push's before
-    commit, and the cursor of the next page when more remain."""
     nodes = items.get("nodes") if isinstance(items, dict) else None
     total = items.get("totalCount") if isinstance(items, dict) else None
     page = items.get("pageInfo") if isinstance(items, dict) else None
