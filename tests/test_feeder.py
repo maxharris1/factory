@@ -205,6 +205,7 @@ class FakeGitHub:
 
     def find_pull(self, repo: str, branch: str) -> int | None:
         # Like GitHubIntakeClient.find_pull: the oldest open PR on the branch.
+        self._maybe_fail("find_pull")
         for (pull_repo, number), pull in sorted(self.pulls.items()):
             if pull_repo == repo and pull["head"] == branch and pull.get("state", "open") == "open":
                 return number

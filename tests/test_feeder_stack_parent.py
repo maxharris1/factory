@@ -8,6 +8,7 @@ from lib.feeder import _pull_body
 from tests.test_feeder import LINEAR_FACTORY_MD, LINEAR_ORCH, FakeGitHub, FakeLinear, issue, make_feeder, rows
 from tests.test_feeder_holds import grok_wakes
 from tests.test_feeder_target import LINEAR_REPO, linear_ticket, pull_on, targeted
+from tests.test_feeder_template import body
 
 HOME = "owner/app"
 PARENT = "factory/issue-6"
@@ -23,6 +24,10 @@ def with_parent(repo: str, **pull: object) -> FakeGitHub:
     return github
 
 
+def stacked(branch: str = PARENT, pr: int = 113) -> str:
+    return body(depends=f"Depends on: #{pr}", extra=f"Target branch: {branch}")
+
+
 def parent_columns(row: dict) -> tuple:
     return row["stack_parent_pr"], row["stack_parent_branch"], row["stack_parent_head_at_feed"]
 
@@ -30,7 +35,7 @@ def parent_columns(row: dict) -> tuple:
 def test_a_github_child_records_and_names_its_parent(tmp_path: Path) -> None:
     github = with_parent(HOME)
     feeder, _, _, _ = make_feeder(tmp_path, github=github)
-    github.issues[HOME] = [issue(7, body=targeted(f"Target branch: {PARENT}"), template=False)]
+    github.issues[HOME] = [issue(7, body=stacked(), template=False)]
 
     assert len(feeder.feed_once().fed) == 1
 
@@ -48,7 +53,7 @@ def test_a_linear_child_records_and_names_its_parent(tmp_path: Path) -> None:
     feeder, _, _, _ = make_feeder(
         tmp_path, orch=LINEAR_ORCH, github=github, linear=linear, factory_text=LINEAR_FACTORY_MD
     )
-    ticket = linear_ticket(targeted(f"Target branch: {PARENT}"))
+    ticket = linear_ticket(stacked())
     linear.issues = [ticket]
 
     assert len(feeder.feed_once().fed) == 1
@@ -87,7 +92,7 @@ def test_the_parent_head_at_feed_stays_the_first_one_read(tmp_path: Path) -> Non
     github = with_parent(HOME)
     github.fail["pull"] = 1
     feeder, _, _, _ = make_feeder(tmp_path, github=github)
-    github.issues[HOME] = [issue(7, body=targeted(f"Target branch: {PARENT}"), template=False)]
+    github.issues[HOME] = [issue(7, body=stacked(), template=False)]
     assert feeder.feed_once().fed == ()
 
     github.branches[(HOME, PARENT)] = D
@@ -108,7 +113,7 @@ def with_child_branch() -> FakeGitHub:
 def test_a_child_targeting_its_parent_branch_is_not_held(tmp_path: Path) -> None:
     github = with_child_branch()
     feeder, _, _, _ = make_feeder(tmp_path, github=github)
-    github.issues[HOME] = [issue(7, body=targeted(f"Target branch: {PARENT}"), template=False)]
+    github.issues[HOME] = [issue(7, body=stacked(), template=False)]
 
     report = feeder.feed_once()
 
@@ -136,7 +141,7 @@ def test_an_adopted_child_pr_keeps_its_body_and_names_its_parent(tmp_path: Path)
     github = with_child_branch()
     github.pulls[(HOME, 77)] = {"head": CHILD, "base": PARENT, "title": "child", "body": "Fixes #7\n\nNotes."}
     feeder, _, _, _ = make_feeder(tmp_path, github=github)
-    github.issues[HOME] = [issue(7, body=targeted(f"Target branch: {PARENT}"), template=False)]
+    github.issues[HOME] = [issue(7, body=stacked(), template=False)]
 
     assert len(feeder.feed_once().fed) == 1
 
@@ -149,7 +154,7 @@ def test_an_adopted_child_pr_keeps_its_body_and_names_its_parent(tmp_path: Path)
 def test_an_interrupted_freeze_classifies_the_parent_of_the_retried_target(tmp_path: Path) -> None:
     github = with_parent(HOME)
     feeder, _, _, _ = make_feeder(tmp_path, github=github)
-    github.issues[HOME] = [issue(7, body=targeted(f"Target branch: {PARENT}"), template=False)]
+    github.issues[HOME] = [issue(7, body=stacked(), template=False)]
     with feeder.queue.connect() as connection:
         connection.execute(
             "CREATE TRIGGER fail_branch BEFORE UPDATE OF branch ON feeder_items "
@@ -164,7 +169,7 @@ def test_an_interrupted_freeze_classifies_the_parent_of_the_retried_target(tmp_p
     github.branches[(HOME, other)] = C
     github.branch_commits[(HOME, other)] = (A, C)
     github.pulls[(HOME, 114)] = {"head": other, "base": "main", "title": "t", "body": "", "draft": True}
-    github.issues[HOME] = [issue(7, body=targeted(f"Target branch: {other}"), template=False)]
+    github.issues[HOME] = [issue(7, body=stacked(other, 114), template=False)]
     assert len(feeder.feed_once().fed) == 1
 
     assert parent_columns(rows(tmp_path / "orch.db")["7"]) == (114, other, C)

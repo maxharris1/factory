@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Collection, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Literal
 
@@ -113,6 +113,15 @@ class GateLines:
 
     def __bool__(self) -> bool:
         return bool(self.blocked_by or self.touches or self.conflicts_with)
+
+
+def stacked_lines(lines: GateLines, parent: frozenset[Ref]) -> GateLines | None:
+    """A stacked ticket's lines without its stack parent's blocker; None when
+    no blocker names the parent (issue #1449)."""
+    named = lines.blocked_by & parent
+    if not named:
+        return None
+    return replace(lines, blocked_by=lines.blocked_by - named)
 
 
 def parse_gate_lines(body: str, repo: str) -> GateLines:

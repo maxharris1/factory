@@ -213,6 +213,7 @@ from lib.feeder_gates import (
     parse_gate_lines,
     path_matches,
     paths_collide,
+    stacked_lines,
 )
 from lib.followups import has_marker, split_parent
 from lib.github_actions import TIMEOUT_SECONDS
@@ -407,7 +408,7 @@ _OPS_ACTION = re.compile(
 class Defect:
     code: (
         Literal["no-criteria", "other-prs-criterion", "no-risk", "no-plan-first", "no-depends-on", "bad-type",
-                "bad-target-branch"]
+                "bad-target-branch", "stack-without-depends"]
         | JourneyCode
     )
     reason: str
@@ -1164,6 +1165,8 @@ class Feeder:
         split = {c.ref for c in candidates if states[c.ref] == "split-parent"}
         malformed = {c.ref for c in candidates if states[c.ref] in UNSTARTED and c.template.defects}
         targets, target_errors = self._target_holds(candidates, begun, split | malformed, read_repos, now)
+        parent_holds, parent_errors = self._stack_parents(candidates, states, split | malformed | targets.keys())
+        targets.update(parent_holds)
         unread, map_errors = self._add_map_defects(candidates, states, targets.keys())
         refused = {
             candidate.ref
@@ -1195,7 +1198,7 @@ class Feeder:
         blocked = 0
         blocked_on: list[tuple[_Candidate, Wait]] = []
         busy: set[str] = set()
-        errors = read_errors + stop_errors + target_errors + map_errors + (0 if gate_read else 1)
+        errors = read_errors + stop_errors + target_errors + parent_errors + map_errors + (0 if gate_read else 1)
         order = sorted(candidates, key=lambda item: (states[item.ref] not in IN_FLIGHT, *item.order()))
         while order:
             candidate = next(
@@ -2001,6 +2004,47 @@ class Feeder:
                 if row is not None:
                     flags[(ref.repo, ref.key, TARGET_BRANCH_MISSING)] = row[0]
             attention.sync(connection, (TARGET_BRANCH_MISSING,), repos, flags, now)
+        return holds, errors
+
+    def _stack_parents(
+        self, candidates: Sequence[_Candidate], states: Mapping[Ref, str], skip: Collection[Ref]
+    ) -> tuple[dict[Ref, Wait], int]:
+        """Drop each stacked candidate's parent from its blockers, or refuse it
+        when no blocker names the parent (#1449)."""
+        holds: dict[Ref, Wait] = {}
+        errors = 0
+        tickets: dict[Ref, set[Ref]] | None = None
+        for candidate in candidates:
+            target = candidate.template.target_branch
+            if target is None or states[candidate.ref] not in UNSTARTED or candidate.ref in skip:
+                continue
+            repo = candidate.project.repo
+            try:
+                number = self.github.find_pull(repo, target)
+            except Exception as exc:
+                errors += 1
+                self.log(f"feeder: cannot read the open PR on {repo}@{target}: {safe_ship_error(exc)}")
+                holds[candidate.ref] = Wait(f"open PR on target branch {target} was not read")
+                continue
+            if number is None:
+                continue
+            pull = github_ref(repo, number)
+            if tickets is None:
+                tickets = {}
+                for ref, row in self._feeder_rows().items():
+                    if row.pull is not None:
+                        tickets.setdefault(row.pull, set()).add(ref)
+            parent = frozenset({pull, *tickets.get(pull, ())})
+            lines = stacked_lines(candidate.lines, parent)
+            if lines is not None:
+                candidate.lines = lines
+                continue
+            defect = Defect(
+                "stack-without-depends",
+                f"`Target branch: {target}` is the head of open PR #{number}, "
+                f"but no `Depends on` line names #{number} or its ticket",
+            )
+            candidate.template = replace(candidate.template, defects=(*candidate.template.defects, defect))
         return holds, errors
 
     # -- gates (#156) ----------------------------------------------------------------
