@@ -177,7 +177,8 @@ def test_profile_snippet_is_safe_before_install(tmp_path: Path) -> None:
 
 DASHBOARD_UNIT = ROOT / "deploy" / "factory-dashboard-http.service"
 DASHBOARD_SERVER = ROOT / "deploy" / "factory-dashboard-http.py"
-SERVER_ON_NODE = "%h/.local/lib/factory-dashboard/factory-dashboard-http.py"
+SERVER_ON_NODE = "/usr/local/lib/factory-dashboard/factory-dashboard-http.py"
+PUSHED_DIR = "/home/cursor-bot/factory-dashboard"
 
 
 def _unit_values(key: str) -> list[str]:
@@ -188,12 +189,18 @@ def _unit_values(key: str) -> list[str]:
     ]
 
 
+def _bot_pattern() -> re.Pattern[str]:
+    (line,) = [line for line in DASHBOARD_SERVER.read_text(encoding="utf-8").splitlines()
+               if line.startswith("BOT_USER = ")]
+    return re.compile(line.split('"')[1])
+
+
 def test_dashboard_server_unit_binds_only_the_tailnet_address() -> None:
     text = DASHBOARD_UNIT.read_text(encoding="utf-8")
     # Preservation guard: no wildcard, loopback or other bind in the unit.
     for forbidden in ("0.0.0.0", "--bind ::", "[::]", "--bind 127.", "--bind localhost"):
         assert forbidden not in text
-    assert _unit_values("EnvironmentFile") == ["%h/.config/factory-dashboard/http.env"]
+    assert _unit_values("EnvironmentFile") == ["/etc/factory-dashboard/http.env"]
 
 
 def test_dashboard_server_unit_runs_the_repo_handler_not_http_server() -> None:
@@ -210,12 +217,36 @@ def test_dashboard_server_unit_runs_the_repo_handler_not_http_server() -> None:
     assert DASHBOARD_SERVER.is_file()
 
 
+def test_dashboard_server_unit_is_a_system_unit_that_replaces_the_static_one() -> None:
+    assert _unit_values("Conflicts") == ["factory-dashboard.service"]
+    assert _unit_values("WantedBy") == ["multi-user.target"]
+    assert "tailscaled.service" in " ".join(_unit_values("After")).split()
+    settings = [line for line in DASHBOARD_UNIT.read_text(encoding="utf-8").splitlines()
+                if line and not line.startswith(("#", "["))]
+    assert not [line for line in settings if "%h" in line or "~" in line]
+
+
+def test_dashboard_server_unit_runs_as_its_own_non_bot_user() -> None:
+    assert _unit_values("User") == ["factory-dash"]
+    assert _unit_values("Group") == ["factory-dash"]
+    assert _unit_values("SupplementaryGroups") == ["cursor-bot"]
+    assert _bot_pattern().fullmatch("factory-dash") is None
+    for bot in ("cursor-bot", "codex-bot", "claude-bot", "grok", "box"):
+        assert _bot_pattern().fullmatch(bot) is not None, bot
+
+
+def test_dashboard_server_unit_sees_only_the_pushed_directory_of_home() -> None:
+    assert _unit_values("ProtectHome") == ["tmpfs"]
+    assert _unit_values("BindReadOnlyPaths") == [PUSHED_DIR]
+    assert _unit_values("BindPaths") == []
+    assert _unit_values("ReadWritePaths") == []
+
+
 @pytest.mark.parametrize(
     "key,value",
     [
         ("NoNewPrivileges", "yes"),
         ("ProtectSystem", "strict"),
-        ("ProtectHome", "read-only"),
         ("PrivateTmp", "yes"),
         ("PrivateDevices", "yes"),
         ("PrivateUsers", "yes"),
@@ -234,12 +265,6 @@ def test_dashboard_server_unit_runs_the_repo_handler_not_http_server() -> None:
 )
 def test_dashboard_server_unit_is_sandboxed(key: str, value: str) -> None:
     assert _unit_values(key) == [value]
-
-
-def test_dashboard_server_unit_hides_credential_directories() -> None:
-    (paths,) = _unit_values("InaccessiblePaths")
-    for name in (".ssh", ".gnupg", ".config/gh", ".aws", ".netrc"):
-        assert f"-%h/{name}" in paths.split()
 
 
 def _check(env: dict[str, str]) -> subprocess.CompletedProcess:
