@@ -7,6 +7,7 @@ import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, replace
 
+from lib.dispatch.constants import STACK_PARENT_CLOSED
 from lib.dispatch.decisions import Decision, record_decisions
 from lib.dispatch.helpers import (
     _base_mismatch,
@@ -19,7 +20,14 @@ from lib.dispatch.helpers import (
 )
 from lib.dispatch.retry import _harness_job_active, _newest_harness_job
 from lib.dispatch.transitions import write_workflow_state
-from lib.dispatch.types import Comment, ParentMerged, RetargetProof, TrackedTicket
+from lib.dispatch.types import (
+    Comment,
+    ParentClosed,
+    ParentFacts,
+    ParentMerged,
+    RetargetProof,
+    TrackedTicket,
+)
 from lib.handoff import parse_comment
 from lib.job_detail import as_object
 from lib.queue import JobRequest
@@ -131,7 +139,13 @@ class RebaseMixin:
         if self.feeder is None:
             return ticket, False
         try:
-            ticket, queued = self._land_stack_parent(ticket)
+            facts = self.feeder.stacked_parent_facts(ticket)
+            if isinstance(facts, ParentClosed) and not (ticket.merged or ticket.closed):
+                self._hold_for_closed_parent(ticket, facts)
+                return ticket, True
+            if self._stack_parent_closed(ticket.repo, ticket.ticket_id):
+                self.clear_attention(ticket.repo, ticket.ticket_id, STACK_PARENT_CLOSED)
+            ticket, queued = self._land_stack_parent(ticket, facts)
             queued = queued or self._queue_pending_stack_rebase(ticket)
         except StackUnbounded as exc:
             with self._connect() as connection:
@@ -148,8 +162,32 @@ class RebaseMixin:
             self._write_state_label(ticket, "fixing")
         return ticket, False
 
-    def _land_stack_parent(self, ticket: TrackedTicket) -> tuple[TrackedTicket, bool]:
-        facts = self.feeder.stacked_parent_facts(ticket)
+    def _stack_parent_closed(self, repo: str, ticket_id: str) -> bool:
+        with self._connect() as connection:
+            return connection.execute(
+                "SELECT 1 FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason = ?",
+                (repo.lower(), ticket_id, STACK_PARENT_CLOSED),
+            ).fetchone() is not None
+
+    def _hold_for_closed_parent(self, ticket: TrackedTicket, parent: ParentClosed) -> None:
+        detail = f"stack parent PR #{parent.pr} closed without merging; the child waits for a person"
+        with self._connect() as connection:
+            self._flag_attention_once(
+                connection, ticket.repo, ticket.ticket_id, STACK_PARENT_CLOSED, detail
+            )
+        source = self._latest_trusted_comment(ticket)
+        self.wake_grok_once(
+            ticket,
+            reason=STACK_PARENT_CLOSED,
+            source_comment_id=source.id if source is not None else "",
+            detail=self._project_wake_detail(ticket, detail),
+            head=ticket.current_head,
+            once_key=str(parent.pr),
+        )
+
+    def _land_stack_parent(
+        self, ticket: TrackedTicket, facts: ParentFacts | None
+    ) -> tuple[TrackedTicket, bool]:
         head = ticket.current_head
         if (
             not isinstance(facts, ParentMerged)

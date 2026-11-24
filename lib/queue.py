@@ -67,6 +67,7 @@ ACTIONS = (
     "qa-head-moved",
     "ci-rerun-refused",
     "ci-stale",
+    "stack-parent-closed",
 )
 FINISHING_ACTIONS = ("review", "fix", "update-from-main", "qa")
 QA_RECIPIENT = "qa"

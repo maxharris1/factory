@@ -29,6 +29,7 @@ CI_RERUN_SETTLE_SECONDS = 900.0
 CI_INFRA_WAIT_SECONDS = 1800.0
 CI_STALE_SECONDS = 7200.0
 CI_STALE_REASON = "ci-stale"
+STACK_PARENT_CLOSED = "stack-parent-closed"
 CI_INFRA_BLOCKED_REASON = "ci-infra-blocked"
 # #615: how long a ready on a CI base waits with no check run and no commit
 # status on its head before the ticket needs attention as ci-silent.
@@ -86,6 +87,7 @@ GROK_WAKE_REASONS = (
     "qa-env-failed",
     "qa-skill-drift",
     "ci-rerun-refused",
+    STACK_PARENT_CLOSED,
     CI_STALE_REASON,
 )
 GROK_WAKE_SKIP = frozenset({"done", "refused", "rejected", "unparsed", "stale"})
