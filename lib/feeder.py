@@ -2311,9 +2311,6 @@ class Feeder:
         return found & tickets
 
     def _own_closing(self, tickets: set[tuple[str, str]]) -> set[tuple[str, str]]:
-        """The (repo, ticket_id) of tickets whose PR the factory closed to
-        restart CI and has not yet reopened (#1496); empty on a database
-        without that state."""
         if not tickets:
             return set()
         with self.queue.connect() as connection:

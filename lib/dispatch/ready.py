@@ -40,7 +40,7 @@ from lib.dispatch.helpers import (
     _round_number,
     _scope,
     failed_checks,
-    own_close_step,
+    own_close_step_at_head,
     record_own_close,
 )
 from lib.dispatch.rebase import RebaseStep, newest_rebase
@@ -1324,7 +1324,7 @@ class ReadyMixin:
                 rebase is None
                 or rebase.onto_from is None
                 or _matching_head(head, rebase.from_head) is None
-                or own_close_step(connection, ticket) == "reopened"
+                or own_close_step_at_head(connection, ticket) == "reopened"
             ):
                 return
             record_own_close(connection, ticket, head, "closing")

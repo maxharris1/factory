@@ -33,7 +33,7 @@ from lib.dispatch.cycle_clock import (
     CycleClock,
 )
 from lib.dispatch.errors_text import poll_error_detail, poll_error_text
-from lib.dispatch.helpers import _matching_head, own_close_step, record_own_close
+from lib.dispatch.helpers import _matching_head, own_close_step_at_head, record_own_close
 from lib.dispatch.types import (
     AlreadyDeferred,
     PollCycleFailed,
@@ -654,12 +654,10 @@ class PollMixin:
         return True
 
     def _reopen_own_close(self, ticket: TrackedTicket) -> bool:
-        """A poll that finds the PR closed by the factory's own unfinished
-        close and reopen reopens it and acts on nothing else (#1496)."""
         if not (ticket.closed and not ticket.merged and ticket.current_head is not None):
             return False
         with self._connect() as connection:
-            if own_close_step(connection, ticket) != "closing":
+            if own_close_step_at_head(connection, ticket) != "closing":
                 return False
         self._review_actions(ticket).reopen(ticket)
         with self._connect() as connection:
