@@ -21,6 +21,7 @@ from lib.dispatch.constants import (
     CI_STALE_SECONDS,
     CI_WAIT_REASONS,
     HARNESS_WORK,
+    LOCAL_GATE_WAITING,
     TERMINAL_STATES,
     UNANNOUNCED_AFTER_CAP,
     CIHold,
@@ -57,7 +58,14 @@ from lib.dispatch.types import (
 from lib.dispatch.verdict.shipped import _approved_round
 from lib.factory_md import padded_estimate
 from lib.handoff import HandoffError, parse_comment
-from lib.queue import JobRequest, _job
+from lib.pre_ready import planned
+from lib.queue import (
+    LOCAL_GATE_FAILED,
+    LOCAL_GATE_PASSED,
+    LOCAL_GATE_UNAVAILABLE,
+    JobRequest,
+    _job,
+)
 from lib.update_check import RebaseScope, UpdateScope
 
 if TYPE_CHECKING:
@@ -253,7 +261,15 @@ class ReadyMixin:
             return True, "stale-ready-verdict"
         if state in ("fixing", "awaiting-ok") and self._held_approve_covers(ticket, head):
             return True, "held-ci-fix-ready"
-        result = ticket.ci.get(head) or ticket.ci.get(reported_head)
+        gate = self._local_gate_hold(ticket, comment.id)
+        if gate is not None and gate[0] == LOCAL_GATE_UNAVAILABLE:
+            return False, LOCAL_GATE_WAITING
+        gate_red = None if gate is None else CIResult(
+            "failure",
+            log=f"ci.local_gate failed at {head}: {gate[1]}",
+            failed=(FailedCheck("local_gate", cause="code"),),
+        )
+        result = gate_red or ticket.ci.get(head) or ticket.ci.get(reported_head)
         pending = result is None or result.status == "pending"
         covering = self._red_ci_approval_covering(ticket, head)
         if pending:
@@ -275,7 +291,7 @@ class ReadyMixin:
             if base is None:
                 return False, "stacked-held"
             ticket = replace(ticket, factory=replace(ticket.factory, base_branch=base))
-        if result is not None:
+        if result is not None and gate_red is None:
             settled = self._settled_red(ticket, comment, head, result)
             if isinstance(settled, str):
                 return False, settled
@@ -327,6 +343,30 @@ class ReadyMixin:
         if reentry is not None or rereview:
             self._set_workflow_state(ticket, "fixing")
         return True, "queued-ci-fix"
+
+    def _local_gate_hold(self, ticket: TrackedTicket, comment_id: str) -> tuple[str, str] | None:
+        """#1464: the newest local_gate unavailable or failure at this ready
+        and its reason. None once the gate passed, since a pass is never
+        undone, or when the gate never reported one for this PR."""
+        if not any(check.name == "local_gate" for check in planned(ticket.factory, ticket.pr_base)):
+            return None
+        prefix = f"handoff {comment_id}:"
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT event, detail FROM job_events
+                WHERE repo = ? AND ticket_id = ? AND event IN (?, ?, ?)
+                  AND substr(detail, 1, ?) = ?
+                ORDER BY id
+                """,
+                (
+                    ticket.repo.lower(), ticket.ticket_id, LOCAL_GATE_PASSED, LOCAL_GATE_FAILED,
+                    LOCAL_GATE_UNAVAILABLE, len(prefix), prefix,
+                ),
+            ).fetchall()
+        if not rows or any(row["event"] == LOCAL_GATE_PASSED for row in rows):
+            return None
+        return str(rows[-1]["event"]), str(rows[-1]["detail"]).split(": ", 2)[-1]
 
     def _ci_fix_finished(self, dedupe_key: str, comment: Comment) -> bool:
         with self._connect() as connection:
@@ -399,7 +439,11 @@ class ReadyMixin:
                     comment.id,
                     head,
                     outcome,
-                    json.dumps(list(result.pending) if result is not None else []),
+                    json.dumps(
+                        ["gate unavailable"] if outcome == LOCAL_GATE_WAITING
+                        else list(result.pending) if result is not None
+                        else []
+                    ),
                     self.queue.now(),
                     self._completed_round(ticket) + 1,
                 ),

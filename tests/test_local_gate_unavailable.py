@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
@@ -82,8 +83,12 @@ def test_a_gate_that_cannot_start_is_unavailable(
 ) -> None:
     box.ready(_factory_text("true"))
 
-    def refuse(*_args, **_kwargs):
-        raise OSError("no shell")
+    spawn = subprocess.Popen
+
+    def refuse(argv, *args, **kwargs):
+        if argv[:2] == ["/bin/sh", "-c"]:
+            raise OSError("no shell")
+        return spawn(argv, *args, **kwargs)
 
     monkeypatch.setattr("lib.pre_ready.subprocess.Popen", refuse)
 
@@ -154,7 +159,10 @@ def _gated(comment_id: str, base: str = FEATURE) -> TrackedTicket:
         ci={HEAD: CIResult("not-run", reported=False)},
     )
     factory = replace(
-        snapshot.factory, ci_branches=("main",), ci_local_gate=CheckCommand("make gate", 60)
+        snapshot.factory,
+        base_branch=base,
+        ci_branches=("main",),
+        ci_local_gate=CheckCommand("make gate", 60),
     )
     return replace(snapshot, factory=factory, pr_base=base)
 
@@ -234,13 +242,10 @@ def test_t2_queues_a_ci_fix_once_a_retry_fails(tmp_path: Path) -> None:
 
     dispatcher.process(_gated("ready-1"))
 
-    assert _actions(queue) == ["ci-fix"]
+    assert _actions(queue) == ["fix"]
     assert _wait(queue) is None
-    with queue.connect() as connection:
-        detail = json.loads(
-            connection.execute("SELECT detail FROM jobs WHERE action = 'ci-fix'").fetchone()[0]
-        )
-    assert "local_gate failed: exit 1" in json.dumps(detail)
+    detail = next(job.request.detail for job in queue.outstanding() if job.request.action == "fix")
+    assert "local_gate failed: exit 1" in detail
 
 
 @pytest.mark.job_bound

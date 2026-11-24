@@ -143,6 +143,7 @@ import yaml
 
 from lib.brief import BriefError, render_brief
 from lib.device_pool import UNREACHABLE_BACKOFF_SECONDS, DevicePool, Placement, run_account
+from lib.dispatch.constants import LOCAL_GATE_WAITING
 from lib.factory_md import FactoryContext, parse_factory_context
 from lib.load import load_yaml
 from lib.machines_yml import Device, MachinesConfig, orch_host
@@ -165,8 +166,12 @@ from lib.heal import _webhook
 from lib.health import LOADED_VERSION, checkout_sha
 from lib.orch_yml import Approvals, OrchConfig, approvals, load_orch_yml
 from lib.pre_ready import ContextUnavailable, check_environ, checks_for, first_failure
+from lib.pre_ready import run as run_check
 from lib.pstack_pin import LOCK_PATH, ROOT as FACTORY_CHECKOUT
 from lib.queue import (
+    LOCAL_GATE_FAILED,
+    LOCAL_GATE_PASSED,
+    LOCAL_GATE_UNAVAILABLE,
     ClaimProofError,
     Job,
     Proof,
@@ -227,6 +232,7 @@ HOME_RETRY_SECONDS = 60.0
 CONTAINER_SWEEP_SECONDS = 600.0
 CLEANUP_SWEEP_SECONDS = 900.0
 CLEANUP_LOG = "cleanup.log"
+LOCAL_GATE_RETRY_SECONDS = 600
 UNSTARTED_CLAIM = (
     "harness = ? AND autostart_pid = ? AND runner_pid IS NULL "
     "AND worker_pid IS NULL AND COALESCE(remote_started, 0) = 0"
@@ -688,6 +694,7 @@ class Waiter:
         self._reconcile_home()
         if self._draining():
             return None
+        self._retry_waiting_gates()
         try:
             claimed = claim_once(
                 self.queue, self.recipient, self.pool, autostart=self._claimer
@@ -1471,7 +1478,7 @@ class Waiter:
                 ready.head,
                 check_environ(os.environ, approvals(config)),
                 lambda check: retry_locked(
-                    lambda: self.queue.record_check_passed(
+                    lambda: self.queue.record_head_check(
                         job_id, event=check.passed_event, comment_id=comment_id,
                         head=ready.head, proof=proof,
                     )
@@ -1480,6 +1487,20 @@ class Waiter:
         if failed is None:
             return None
         check, result = failed
+        if result.outcome == "unavailable":
+            retry_locked(
+                lambda: self.queue.record_head_check(
+                    job_id, event=check.unavailable_event, comment_id=comment_id,
+                    head=result.head, reason=result.reason, proof=proof,
+                )
+            )
+            self.log(
+                f"job {job_id}: {check.name} unavailable {comment_id}: {result.reason}; "
+                "the ticket waits for a device that can run it"
+            )
+            if result.tail:
+                self.log(f"job {job_id}: {check.name} output:\n{result.tail}")
+            return None
         detail = f"{check.name} failed: {result.reason}"
         retry_locked(
             lambda: self.queue.record_invalid_handoff(
@@ -1492,6 +1513,84 @@ class Waiter:
         if result.tail:
             self.log(f"job {job_id}: {check.name} output:\n{result.tail}")
         return reason
+
+    def _retry_waiting_gates(self) -> None:
+        """#1464: rerun ci.local_gate for a ready T2 holds as local-gate-waiting
+        once its newest gate event is an unavailable at least
+        LOCAL_GATE_RETRY_SECONDS old, recording the outcome on the job that
+        posted the ready. The job's state never changes."""
+        gate_events = (LOCAL_GATE_PASSED, LOCAL_GATE_FAILED, LOCAL_GATE_UNAVAILABLE)
+        try:
+            with self.queue.connect() as connection:
+                tables = connection.execute(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' "
+                    "AND name IN ('ci_waits', 'job_events')"
+                ).fetchone()[0]
+                rows = [] if tables < 2 else connection.execute(
+                    """
+                    SELECT waits.comment_id, events.job_id, jobs.repo, events.event,
+                        events.detail, events.recorded_at
+                    FROM ci_waits AS waits
+                    JOIN job_events AS events
+                      ON events.repo = waits.repo AND events.ticket_id = waits.ticket_id
+                     AND substr(events.detail, 1, length('handoff ' || waits.comment_id || ':'))
+                         = 'handoff ' || waits.comment_id || ':'
+                    JOIN jobs ON jobs.id = events.job_id
+                    WHERE waits.reason = ? AND jobs.recipient = ? AND events.event IN (?, ?, ?)
+                    ORDER BY events.id
+                    """,
+                    (LOCAL_GATE_WAITING, self.recipient, *gate_events),
+                ).fetchall()
+        except (sqlite3.Error, OSError) as exc:
+            self.log(f"local_gate retry: waiting gates not read ({_one_line(exc)})")
+            return
+        newest = {row["comment_id"]: row for row in rows}
+        for comment_id, row in newest.items():
+            age = self.queue.now() - float(row["recorded_at"])
+            if row["event"] != LOCAL_GATE_UNAVAILABLE or age < LOCAL_GATE_RETRY_SECONDS:
+                continue
+            job_id, repo = str(row["job_id"]), str(row["repo"])
+            head = str(row["detail"]).removeprefix(f"handoff {comment_id}: at ").partition(":")[0]
+            try:
+                config, findings = load_orch_yml(self.orch_yml, allow_placeholders=True)
+                errors = [item.message for item in findings if item.severity == "error"]
+                if config is None or errors:
+                    raise ValueError(
+                        f"{self.orch_yml}: {errors[0] if errors else 'invalid configuration'}"
+                    )
+                source = GhContextSource(
+                    config, retry_log=lambda line: self.log(f"job {job_id}: {line}")
+                )
+                loaded = source.load(repo)
+                if loaded.context is None:
+                    raise ContextUnavailable(loaded.note or f"{repo} factory.md could not be read")
+                spec = loaded.context.config.ci_local_gate
+                if spec is None:
+                    continue
+                with detached_checkout(work_root(None), repo, head, url_template(None)) as checkout:
+                    result = run_check(
+                        spec, checkout, head, check_environ(os.environ, approvals(config))
+                    )
+                if result.passed:
+                    event, reason = LOCAL_GATE_PASSED, None
+                elif result.outcome == "unavailable":
+                    event, reason = LOCAL_GATE_UNAVAILABLE, result.reason
+                else:
+                    event, reason = LOCAL_GATE_FAILED, f"local_gate failed: {result.reason}"
+                retry_locked(
+                    lambda: self.queue.record_head_check(
+                        job_id, event=event, comment_id=comment_id, head=head, reason=reason
+                    )
+                )
+            except (
+                ReadError, ContextUnavailable, WorktreeError, ApproverProfileExposed, ValueError,
+                QueueError, sqlite3.Error, OSError,
+            ) as exc:
+                self.log(f"job {job_id}: local_gate retry {comment_id} not run ({_one_line(exc)})")
+                continue
+            self.log(
+                f"job {job_id}: local_gate retry {comment_id} at {head}: {event} ({result.reason})"
+            )
 
     def _forget_remote(self, job_dir: Path) -> None:
         try:

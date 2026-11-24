@@ -1796,7 +1796,8 @@ def _check_handoff(
 
     None when it does. A read that fails (GitHub, orch.yml) exits 1 and
     records nothing; a handoff that does not fit is submitted-invalid,
-    exits 1, and the MAX_INVALID_HANDOFFS-th fails the job for T6."""
+    exits 1, and the MAX_INVALID_HANDOFFS-th fails the job for T6. An
+    unavailable local_gate is recorded and the job is done (#1464)."""
     if args.handoff is None:
         return None
     try:
@@ -1818,6 +1819,21 @@ def _check_handoff(
             if failed is None:
                 return None
             check, checked = failed
+            if checked.outcome == "unavailable":
+                retry_locked(
+                    lambda: queue.record_head_check(
+                        args.job_id, event=check.unavailable_event, comment_id=args.handoff,
+                        head=checked.head, reason=checked.reason, proof=proof,
+                    )
+                )
+                print(
+                    f"{prog}: {check.name} unavailable {args.handoff}: {checked.reason}; "
+                    "the ticket waits for a device that can run it",
+                    file=sys.stderr,
+                )
+                if checked.tail:
+                    print(checked.tail, file=sys.stderr)
+                return None
             found, event = [f"{check.name} failed: {checked.reason}"], check.failed_event
         count, job = retry_locked(
             lambda: queue.record_invalid_handoff(
@@ -1878,7 +1894,7 @@ def _head_check_failure(
             ready.head,
             check_environ(os.environ, approvals(config)),
             lambda check: retry_locked(
-                lambda: queue.record_check_passed(
+                lambda: queue.record_head_check(
                     args.job_id, event=check.passed_event, comment_id=args.handoff,
                     head=ready.head, proof=proof,
                 )

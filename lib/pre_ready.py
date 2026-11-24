@@ -1,6 +1,6 @@
 """The checks a builder's ready must pass at its head before it counts:
 factory.md's `review.pre_ready` (#503), then `ci.local_gate` on a PR into a
-base CI never runs on (#1463)."""
+base CI never runs on (#1463). Only local_gate can be unavailable (#1464)."""
 
 from __future__ import annotations
 
@@ -11,14 +11,20 @@ import sys
 import tempfile
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from lib.factory_md import CheckCommand, FactoryConfig, no_ci_base
 from lib.harness_env import harness_environ
 from lib.job_token import PROOF_ENV
-from lib.queue import LOCAL_GATE_FAILED, LOCAL_GATE_PASSED, PRE_READY_FAILED, PRE_READY_PASSED
+from lib.queue import (
+    LOCAL_GATE_FAILED,
+    LOCAL_GATE_PASSED,
+    LOCAL_GATE_UNAVAILABLE,
+    PRE_READY_FAILED,
+    PRE_READY_PASSED,
+)
 from lib.redact_output import redact_output
 
 if TYPE_CHECKING:
@@ -30,14 +36,20 @@ TAIL_CHARS = 4000
 DRAIN_SECONDS = 1
 JOB_CONTROL_VARIABLES = frozenset({PROOF_ENV, "ORCH_DB"})
 ORCH_INTERPRETER_ENV = "ORCH_PYTHON"
+# EX_TEMPFAIL: the command says this device cannot run it right now.
+UNAVAILABLE_EXIT = 75
 
 
 @dataclass(frozen=True)
 class PreReadyResult:
-    passed: bool
+    outcome: Literal["passed", "failed", "unavailable"]
     reason: str
     tail: str
     head: str
+
+    @property
+    def passed(self) -> bool:
+        return self.outcome == "passed"
 
 
 @dataclass(frozen=True)
@@ -46,6 +58,7 @@ class HeadCheck:
     spec: CheckCommand
     passed_event: str
     failed_event: str
+    unavailable_event: str | None
 
 
 class ContextUnavailable(Exception):
@@ -55,10 +68,18 @@ class ContextUnavailable(Exception):
 def planned(factory: FactoryConfig, pr_base: str | None) -> tuple[HeadCheck, ...]:
     checks: list[HeadCheck] = []
     if factory.pre_ready is not None:
-        checks.append(HeadCheck("pre_ready", factory.pre_ready, PRE_READY_PASSED, PRE_READY_FAILED))
+        checks.append(
+            HeadCheck("pre_ready", factory.pre_ready, PRE_READY_PASSED, PRE_READY_FAILED, None)
+        )
     if factory.ci_local_gate is not None and no_ci_base(factory, pr_base) is not None:
         checks.append(
-            HeadCheck("local_gate", factory.ci_local_gate, LOCAL_GATE_PASSED, LOCAL_GATE_FAILED)
+            HeadCheck(
+                "local_gate",
+                factory.ci_local_gate,
+                LOCAL_GATE_PASSED,
+                LOCAL_GATE_FAILED,
+                LOCAL_GATE_UNAVAILABLE,
+            )
         )
     return tuple(checks)
 
@@ -98,7 +119,7 @@ def run(spec: CheckCommand, cwd: Path, head: str, environ: Mapping[str, str]) ->
     at = _git(cwd, "rev-parse", "HEAD")
     dirty = _git(cwd, "status", "--porcelain", "--untracked-files=no")
     if at is None or at != head or dirty is None or dirty:
-        return PreReadyResult(False, f"not at head {head}", "", head)
+        return PreReadyResult("failed", f"not at head {head}", "", head)
     try:
         process = subprocess.Popen(
             ["/bin/sh", "-c", spec.command],
@@ -110,19 +131,20 @@ def run(spec: CheckCommand, cwd: Path, head: str, environ: Mapping[str, str]) ->
             start_new_session=True,
         )
     except OSError as exc:
-        return PreReadyResult(False, f"could not start: {type(exc).__name__}", "", head)
+        return PreReadyResult("unavailable", f"could not start: {type(exc).__name__}", "", head)
     try:
         output, _ = process.communicate(timeout=spec.timeout_seconds)
     except subprocess.TimeoutExpired:
         _kill_group(process.pid)
         output = _drain(process)
         return PreReadyResult(
-            False, f"timeout after {spec.timeout_seconds}s", _decoded(output), head
+            "failed", f"timeout after {spec.timeout_seconds}s", _decoded(output), head
         )
     _kill_group(process.pid)
-    if process.returncode != 0:
-        return PreReadyResult(False, f"exit {process.returncode}", _decoded(output), head)
-    return PreReadyResult(True, "exit 0", _decoded(output), head)
+    if process.returncode == 0:
+        return PreReadyResult("passed", "exit 0", _decoded(output), head)
+    outcome = "unavailable" if process.returncode == UNAVAILABLE_EXIT else "failed"
+    return PreReadyResult(outcome, f"exit {process.returncode}", _decoded(output), head)
 
 
 @contextmanager
@@ -145,8 +167,12 @@ def first_failure(
     environ: Mapping[str, str],
     passed: Callable[[HeadCheck], None],
 ) -> tuple[HeadCheck, PreReadyResult] | None:
+    """The first check that did not pass, and its result. A check with no
+    unavailable_event fails where it would be unavailable (#503)."""
     for check in checks:
         result = run(check.spec, cwd, head, environ)
+        if result.outcome == "unavailable" and check.unavailable_event is None:
+            return check, replace(result, outcome="failed")
         if not result.passed:
             return check, result
         passed(check)
