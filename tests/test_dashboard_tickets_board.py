@@ -1280,6 +1280,55 @@ def test_script_draws_a_base_without_ci_like_the_server(tmp_path: Path) -> None:
         assert out["html"][ident] == server[ident], ident
 
 
+GATE_HEAD = "c0ffee" + "1" * 34
+
+
+def gate_snapshot(tmp_path: Path) -> dict:
+    db = tmp_path / "orch.db"
+    make_db(db)
+    with sqlite3.connect(db) as connection:
+        add_ticket(connection, *NO_CI, state="review")
+        add_ticket(connection, *ON_CI, state="review")
+        connection.execute(
+            "INSERT INTO no_ci_bases (repo, ticket_id, base) VALUES (?, ?, 'release/1.x')",
+            (NO_CI[0].lower(), NO_CI[1]),
+        )
+        for key, at, head in ((NO_CI, 1.0, "d" * 40), (NO_CI, 2.0, GATE_HEAD), (ON_CI, 3.0, "f" * 40)):
+            connection.execute(
+                "INSERT INTO job_events (job_id, repo, ticket_id, action, recipient, event, detail, recorded_at) "
+                "VALUES ('j', ?, ?, 'build', 'claude', 'local-gate-passed', ?, ?)",
+                (key[0].lower(), key[1], f"handoff 7: at {head}", at),
+            )
+    log = tmp_path / "poller.log"
+    log.write_text("cycle\n", encoding="utf-8")
+    return collect_snapshot(db, log, now=NOW, chart_path=CHART)
+
+
+def _check_gate(board: str) -> None:
+    line = _one(_card(board, "#".join(NO_CI)), _cls("tk-ci"))
+    chips = [(_text(chip), chip["attrs"]["class"]) for chip in _all(line, _cls("chip"))]
+    assert chips == [("no CI on this base", "chip muted"), ("local gate passed", "chip ok")]
+    assert "release/1.x" in _text(line) and GATE_HEAD[:12] in _text(line)
+    assert "local gate" not in _text(_card(board, "#".join(ON_CI)))
+
+
+def test_a_base_without_ci_shows_the_newest_local_gate_pass(tmp_path: Path) -> None:
+    snapshot = gate_snapshot(tmp_path)
+    assert {row["ticket_id"]: row.get("no_ci") for row in snapshot["tickets"]} == {
+        NO_CI[1]: {"base": "release/1.x", "gate_head": GATE_HEAD}, ON_CI[1]: None,
+    }
+    _check_gate(_server(snapshot)["pipeline"])
+
+
+@layout.needs_node
+def test_script_draws_a_local_gate_pass_like_the_server(tmp_path: Path) -> None:
+    snapshot = gate_snapshot(tmp_path)
+    out, server = _script(tmp_path, snapshot), _server(snapshot)
+    _check_gate(out["html"]["pipeline"])
+    for ident in BOARD:
+        assert out["html"][ident] == server[ident], ident
+
+
 STALE = ("maxharris1/cleffy", "131")
 LIVE = {("maxharris1/factory", "474"): ("fixing", 665), ("maxharris1/factory", "478"): ("building", 372)}
 QUEUED_FOR = ("maxharris1/factory", "472")
