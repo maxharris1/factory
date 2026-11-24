@@ -331,6 +331,7 @@ SCRIPT_GITHUB = r"""
     GH.login = signedIn ? String(data.login || '') : null;
     GH.csrf = signedIn ? String(data.csrf || '') : null;
     if (latest) render(latest);
+    else if (GH.login) poll();
   }
   var SHA = /^[0-9a-f]{40}$/;
   function ghResult(out, res, text) {
@@ -643,7 +644,7 @@ SCRIPT_TAIL = r"""
   function failed() {
     failures += 1;
     resuming = false;
-    if (!everOk && failures >= 3 && !reloadArmed) {
+    if (!everOk && !GH.on && failures >= 3 && !reloadArmed) {
       // status.json cannot be fetched (blocked or missing): behave like a
       // page without script and reload the server-rendered view every
       // refresh_seconds.
@@ -669,6 +670,10 @@ SCRIPT_TAIL = r"""
     try { request = fetch(STATUS_URL, options); } catch (err) { request = Promise.reject(err); }
     request
       .then(function (response) {
+        if (response.status === 401) {
+          if (!GH.started) { GH.started = true; ghStart(); }
+          throw new Error('HTTP 401');
+        }
         if (!response.ok) throw new Error('HTTP ' + response.status);
         return response.json();
       })

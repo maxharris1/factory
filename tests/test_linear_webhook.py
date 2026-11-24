@@ -953,14 +953,14 @@ def _seen(database: Path) -> dict[str, float]:
     [b"not json", issue_event(timestamp_ms=int((NOW - 600) * 1000))],
     ids=["malformed", "stale-timestamp"],
 )
-def test_any_signed_delivery_counts_as_received(
+def test_malformed_or_stale_delivery_does_not_count_as_received(
     app: WebhookApp, database: Path, raw_or_event
 ) -> None:
     raw = raw_or_event if isinstance(raw_or_event, bytes) else None
     result = post(app, None if raw else raw_or_event, raw=raw)
 
     assert result.outcome == "rejected"
-    assert _health_row(database) == (NOW, "-")
+    assert _health_row(database) == (None, None)
 
 
 def test_an_unsigned_delivery_does_not_count_as_received(app: WebhookApp, database: Path) -> None:

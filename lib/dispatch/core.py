@@ -460,6 +460,15 @@ class DispatcherBase:
         role: str,
     ) -> bool:
         del ticket
+        if (
+            expected_bot == ORCHESTRATOR
+            and role == "orchestrator"
+            and fields.get("from") == "approver"
+            and fields.get("role") == "approver"
+            and self._may_approve(comment.author)
+            and self.approvals.app_bot(comment.author) is None
+        ):
+            return True
         return (
             fields.get("from") == expected_bot
             and fields.get("role") == role

@@ -1063,9 +1063,9 @@ WINTER = datetime(2026, 1, 15, 20, 4, tzinfo=timezone.utc)
 SUMMER = datetime(2026, 7, 15, 13, 5, tzinfo=timezone.utc)
 WINTER_WORDS = "**Max's words** (Max 2026-01-15 3:04 PM ET)\n> first line\n> second line\n"
 SUMMER_WORDS = "**Max's words** (Max 2026-07-15 9:05 AM ET)\n> first line\n> second line\n"
-GO_LINE = "<!-- orch:v1 kind=go from=grok-bot role=orchestrator state=building -->"
-CLOSE_LINE = "<!-- orch:v1 kind=answers from=grok-bot role=orchestrator state=abandoned -->"
-HANDOFF_LINE = "<!-- orch:v1 kind=answers from=grok-bot role=orchestrator state=handed-off -->"
+GO_LINE = "<!-- orch:v1 kind=go from=approver role=approver state=building -->"
+CLOSE_LINE = "<!-- orch:v1 kind=answers from=approver role=approver state=abandoned -->"
+HANDOFF_LINE = "<!-- orch:v1 kind=answers from=approver role=approver state=handed-off -->"
 
 
 def act(client: Client, ticket_id: str, action: str,
@@ -1108,9 +1108,9 @@ def act_client(serve_actions, fake_github, actions_site: Path, audit: Path, monk
      f"{GO_LINE}\n\n**Ticket**\n{REPO}#42\n\n{WINTER_WORDS}\n"
      "**Instruction**\nRun one more round, as Max's words above say.\n"),
     ("43", "answer", SUMMER, {}, REPO, 43,
-     f"<!-- orch:v1 kind=answers from=grok-bot role=orchestrator -->\n\n{SUMMER_WORDS}"),
+     f"<!-- orch:v1 kind=answers from=approver role=approver -->\n\n{SUMMER_WORDS}"),
     ("44", "retry", WINTER, {}, REPO, 44,
-     f"<!-- orch:v1 kind=retry from=grok-bot role=orchestrator -->\n\n{WINTER_WORDS}"),
+     f"<!-- orch:v1 kind=retry from=approver role=approver -->\n\n{WINTER_WORDS}"),
     ("AUT-8", "resume", SUMMER, {}, LINEAR_REPO, 56, f"{GO_LINE}\n\n{SUMMER_WORDS}"),
     ("43", "close", SUMMER, {}, REPO, 43, f"{CLOSE_LINE}\n\n{SUMMER_WORDS}"),
     ("42", "hand-off", WINTER, {}, REPO, 52, f"{HANDOFF_LINE}\n\n{WINTER_WORDS}"),

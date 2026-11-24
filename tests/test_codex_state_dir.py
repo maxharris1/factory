@@ -208,20 +208,37 @@ while index < len(args):
         index += 2
         continue
     index += 1
-sys.stdin.read()
-db = Path(os.environ["ORCH_DB"]).resolve()
+brief = sys.stdin.read()
+job = os.environ["ORCH_JOB_ID"]
+has_db = "ORCH_DB" in os.environ
+has_proof = "ORCH_JOB_PROOF" in os.environ
+db_path = Path(os.environ.get("ORCH_DB") or os.environ["FAKE_CODEX_DB"]).resolve()
 resolved = [Path(root).resolve() for root in roots]
 writable = sandbox != "workspace-write" or any(
-    root == db.parent or root in db.parents for root in resolved
+    root == db_path.parent or root in db_path.parents for root in resolved
 )
-job = os.environ["ORCH_JOB_ID"]
 Path(os.environ["FAKE_CODEX_DIR"], job + ".json").write_text(json.dumps(
-    {"argv": args, "roots": roots, "writable": writable, "cwd": os.getcwd()}))
-if not writable:
+    {
+        "argv": args,
+        "roots": roots,
+        "writable": writable,
+        "has_db": has_db,
+        "has_proof": has_proof,
+        "cwd": os.getcwd(),
+        "brief_marker": "ORCH-HANDOFF: <comment-id>" in brief,
+    }
+))
+comment_id = subprocess.check_output(
+    [sys.executable, os.environ["FAKE_POST_HANDOFF"], str(db_path), job], text=True
+).strip()
+if "ORCH-HANDOFF: <comment-id>" in brief:
+    print(f"ORCH-HANDOFF: {comment_id}", flush=True)
+    sys.exit(0)
+if not writable or not has_db:
     print("orch job done: attempt to write a readonly database", flush=True)
     sys.exit(0)  # codex itself exits 0 after its turn
 subprocess.run([sys.executable, os.environ["FAKE_ORCH"], "job", "done",
-                os.environ["ORCH_JOB_BOT"], job, "--handoff", subprocess.check_output([sys.executable, os.environ["FAKE_POST_HANDOFF"], os.environ["ORCH_DB"], job], text=True).strip()], check=True)
+                os.environ["ORCH_JOB_BOT"], job, "--handoff", comment_id], check=True)
 """
 
 
@@ -261,6 +278,7 @@ def _codex_waiter(tmp_path: Path, command: list[str]):
         "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
         "PYTHONUNBUFFERED": "1",
         "FAKE_CODEX_DIR": str(record_dir),
+        "FAKE_CODEX_DB": str(db),
         "FAKE_ORCH": str(ORCH),
         "FAKE_GH_LOG": str(tmp_path / "gh.log"),
         "FAKE_GH_FACTORY": str(factory_md),
@@ -305,7 +323,7 @@ def _run_codex_job(tmp_path: Path, command: list[str]) -> tuple[Path, str, dict,
     return db, job_id, record, stderr
 
 
-def test_a_sandboxed_codex_job_finishes_done_because_the_state_dir_was_added(
+def test_a_sandboxed_codex_job_finishes_done_via_marker_without_state_dir(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "bin-codex").mkdir()
@@ -314,9 +332,11 @@ def test_a_sandboxed_codex_job_finishes_done_because_the_state_dir_was_added(
         tmp_path, [str(codex), "exec", "--sandbox", "workspace-write", "-"]
     )
 
-    assert record["argv"] == ["exec", "--add-dir", str(tmp_path), "--json", "--sandbox",
-                              "workspace-write", "-"], stderr
-    assert record["writable"] is True
+    assert record["argv"] == ["exec", "--json", "--sandbox", "workspace-write", "-"], stderr
+    assert record["writable"] is False
+    assert record["has_db"] is False
+    assert record["has_proof"] is False
+    assert record["brief_marker"] is True
     assert Path(record["cwd"]).is_relative_to(tmp_path / "work")  # the job worktree
     assert _job_row(db, job_id) == ("done", harness_comment_id(job_id))
 
@@ -331,6 +351,8 @@ def test_a_box_local_manual_add_dir_stopgap_still_works_and_is_not_doubled(
 
     assert record["argv"] == ["exec", "--json", *command[2:]], stderr
     assert _add_dirs(record["argv"]) == [str(tmp_path)]
+    assert record["has_db"] is False
+    assert record["has_proof"] is False
     assert _job_row(db, job_id) == ("done", harness_comment_id(job_id))
 
 

@@ -23,6 +23,14 @@ PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
     ("aws-access-key", re.compile(rb"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
     ("slack-token", re.compile(rb"\bxox[abposr]-[A-Za-z0-9-]{10,}")),
     ("api-key", re.compile(rb"\bsk-[A-Za-z0-9_-]{20,}")),
+    ("xai-api-key", re.compile(rb"\bxai-[A-Za-z0-9_-]{20,}")),
+    ("linear-api-key", re.compile(rb"\blin_api_[A-Za-z0-9]{20,}")),
+    ("google-api-key", re.compile(rb"\bAIza[0-9A-Za-z_-]{35}\b")),
+    (
+        "jwt",
+        re.compile(rb"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
+    ),
+    ("orch-job-proof", re.compile(rb"\bORCH_JOB_PROOF\s*=\s*['\"]?[A-Za-z0-9_=-]{16,}")),
 )
 
 

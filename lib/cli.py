@@ -2588,15 +2588,15 @@ def _job_run_command(argv: list[str]) -> int:
                 "login PATH" + (f"; --add-dir {guarded} only if it exists there"
                                 if guarded else ""))
     else:
-        # #103: a sandboxed `codex exec` may write only its worktree, so its
-        # `orch job done` could not write orch.db (or -wal/-shm). Add the
-        # state dir, where it exists, as a writable root.
-        harness = codex_sandbox.with_state_dir(command, database)
-        if harness != command:
-            dirs = " ".join(str(path) for path in codex_sandbox.state_dirs(database)
-                            if str(path) in harness and str(path) not in command)
-            log(f"sandboxed codex exec: added --add-dir {dirs} (the orch state dir) "
-                f"so orch job done can write {database.name}")
+        # PR 0.3 security boundary: never grant a sandboxed `codex exec` write
+        # access to the orch state dir (orch.db, app-tokens/, locks). Strip
+        # ORCH_DB and ORCH_JOB_PROOF from its child environment; the waiter
+        # finishes the job outside the sandbox via the ORCH-HANDOFF marker.
+        if codex_sandbox.is_sandboxed_exec(command):
+            environment.pop("ORCH_DB", None)
+            environment.pop(job_token.PROOF_ENV, None)
+            log(f"sandboxed codex exec: kept {database.parent} outside sandbox; "
+                "waiter finishes job via ORCH-HANDOFF")
     code: int | None = None  # #91: how the command ended, for ended() and finish()
     budget = job_run.Budget(timeout_seconds)  # #199: the brief prints it
     try:
@@ -2685,9 +2685,14 @@ def _job_run_command(argv: list[str]) -> int:
         # #199: a box run stopped past its budget is failed too, but only
         # once no worker of it runs (run reaped its own), so T6 never
         # retries it beside a live one.
+        sandboxed_marker = (
+            placed.autostart and not placed.remote and codex_sandbox.is_sandboxed_exec(command)
+        )
         settle = (
             (lambda: _settle_box(queue, args.job_id, owner, log, placed.live_worker, claim_proof))
-            if (placed.autostart or budget.expired) and not placed.remote
+            if (placed.autostart or budget.expired)
+            and not placed.remote
+            and (not sandboxed_marker or budget.expired)
             else None
         )
         try:

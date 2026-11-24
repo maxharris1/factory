@@ -115,6 +115,7 @@ def render_brief(
     remote_device: str | None = None,
     factory_root: str | None = None,
     pin_root: Path = ROOT,
+    handoff_via_marker: bool = False,
 ) -> str:
     """The brief for job, as `bot` runs it. See the module doc.
 
@@ -166,7 +167,7 @@ def render_brief(
         lead_sections(bot, lead),
         job_section(job, bot, kind, facts, remote_device),
         *middle,
-        finish_section(job, bot, remote_device),
+        finish_section(job, bot, remote_device, handoff_via_marker=handoff_via_marker),
         *([review_rules(facts)] if kind == "review" else []),
         rules(remote_device, follow_ups=kind != "review" and review.filing_active(facts)),
         data_section(

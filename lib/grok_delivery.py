@@ -23,12 +23,26 @@ CLAUDE_ROUTINE_BETA = "experimental-cc-routine-2026-04-01"
 ANTHROPIC_VERSION = "2023-06-01"
 
 
+DEFAULT_RETRY_AFTER_SECONDS = 60.0
+MAX_RETRY_AFTER_SECONDS = 3600.0
+OK_STATUSES = frozenset({200, 201, 202})
+
+
 class GrokDeliveryError(RuntimeError):
     """detail is safe to record: a status, an exception type, or env names."""
 
-    def __init__(self, message: str, *, detail: str):
+    def __init__(
+        self,
+        message: str,
+        *,
+        detail: str,
+        status: int | None = None,
+        retry_after: float | None = None,
+    ):
         super().__init__(message)
         self.detail = detail
+        self.status = status
+        self.retry_after = retry_after
 
 
 @dataclass(frozen=True)
@@ -94,7 +108,7 @@ def _post(
         with _OPENER.open(request, timeout=timeout) as response:
             return WebhookResult(response.status, dict(response.headers.items()))
     except HTTPError as exc:
-        return WebhookResult(exc.code, {})
+        return WebhookResult(exc.code, dict(exc.headers.items()) if exc.headers else {})
     except (OSError, URLError, ValueError) as exc:
         detail = _exception_detail(exc)
         raise GrokDeliveryError(
@@ -275,12 +289,30 @@ def _send(
             f"{label} request failed: {detail}",
             detail=detail,
         ) from None
-    if result.status != 200:
+    if result.status not in OK_STATUSES:
+        retry_after = _retry_after(result.headers) if result.status == 429 else None
         raise GrokDeliveryError(
             f"{label} returned HTTP {result.status}",
             detail=f"HTTP-{result.status}",
+            status=result.status,
+            retry_after=retry_after,
         )
     return result
+
+
+def _retry_after(headers: Mapping[str, str]) -> float:
+    raw = next(
+        (value for name, value in headers.items() if name.lower() == "retry-after"),
+        None,
+    )
+    if raw is not None:
+        try:
+            seconds = float(raw.strip())
+            if seconds > 0:
+                return min(seconds, MAX_RETRY_AFTER_SECONDS)
+        except ValueError:
+            pass
+    return DEFAULT_RETRY_AFTER_SECONDS
 
 
 def authorization(

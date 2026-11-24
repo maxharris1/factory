@@ -97,6 +97,12 @@ def state_dirs(db: Path) -> tuple[Path, ...]:
     return (absolute,) if absolute == real else (absolute, real)
 
 
+def is_sandboxed_exec(command: Sequence[str]) -> bool:
+    """True when command is a `codex exec` running in workspace-write sandbox mode."""
+    argv = list(command)
+    return exec_index(argv) is not None and _workspace_write(_options(argv))
+
+
 def with_state_dir(
     command: Sequence[str], db: Path, *, is_dir: Callable[[str], bool] | None = None
 ) -> list[str]:

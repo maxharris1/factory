@@ -163,6 +163,28 @@ QA_HEADERS = {
 }
 QA_DOWNLOAD = ("text/plain; charset=utf-8", {**QA_HEADERS, "Content-Disposition": "attachment"})
 QA_CHUNK = 1024 * 1024
+_AUTH_REQUIRED_HTML = (
+    "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+    "<title>Factory Mission Control — Sign in</title>"
+    "<style>body{font-family:system-ui,sans-serif;max-width:34rem;margin:4rem auto;padding:0 1rem;"
+    "background:#0f1115;color:#e6e8ec}button{padding:.6rem 1rem;font-size:1rem;cursor:pointer}"
+    "code{padding:.2rem .4rem;background:#1d2129;border-radius:4px}a{color:#7cb7ff}</style></head>"
+    "<body><h1>Sign in required</h1><p>Authenticate with GitHub to view Factory Mission Control.</p>"
+    "<div id='auth'><button id='go' type='button'>Sign in with GitHub</button></div><p id='msg'></p>"
+    "<script>(function(){var btn=document.getElementById('go'),msg=document.getElementById('msg');"
+    "function poll(sec){setTimeout(function(){fetch('/api/signin/poll',{method:'POST',"
+    "credentials:'same-origin',headers:{'Content-Type':'application/json'},body:'{}'})"
+    ".then(function(r){return r.json()}).then(function(d){if(d.state==='signed-in'){location.reload();return}"
+    "if(d.state==='pending'){poll(sec);return}msg.textContent='Sign-in '+(d.state||'failed')})"
+    ".catch(function(){msg.textContent='Sign-in error'})},sec*1000)}"
+    "btn.addEventListener('click',function(){btn.disabled=true;msg.textContent='Starting sign-in...';"
+    "fetch('/api/signin',{method:'POST',credentials:'same-origin',"
+    "headers:{'Content-Type':'application/json'},body:'{}'}).then(function(r){return r.json()})"
+    ".then(function(d){if(!d.user_code){msg.textContent='Sign-in unavailable';btn.disabled=false;return}"
+    "msg.textContent='Enter code '+d.user_code+' at '+d.verification_uri;"
+    "poll(Math.max(1,Number(d.interval)||5))}).catch(function(){msg.textContent='Sign-in failed';"
+    "btn.disabled=false})});})();</script></body></html>\n"
+).encode("utf-8")
 
 
 class ConfigError(ValueError):
@@ -220,6 +242,9 @@ CLIENT_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
 BOT_USER = re.compile(r".*-bot|grok|box")
 
 
+OAUTH_SCOPE = re.compile(r"[A-Za-z0-9:_-]+(?: [A-Za-z0-9:_-]+)*")
+
+
 class ActionsConfig(NamedTuple):
     client_id: str
     approver: str
@@ -229,6 +254,9 @@ class ActionsConfig(NamedTuple):
     settings_spool: Path | None = None
     audit: Path | None = None
     signin_relay: Path | None = None
+    https: bool = False
+    oauth_scope: str = "repo"
+    require_auth_reads: bool = False
 
 
 def check_spool(value: str) -> Path:
@@ -334,10 +362,20 @@ def check_actions(
         clients.add(ipaddress.IPv4Address(entry))
     if relay and not spool:
         raise ConfigError("DASHBOARD_SIGNIN_RELAY needs DASHBOARD_SETTINGS_SPOOL")
+    https = environ.get("DASHBOARD_HTTPS", "").strip().lower() in ("1", "true", "yes")
+    oauth_scope = environ.get("DASHBOARD_OAUTH_SCOPE", "repo").strip()
+    if not oauth_scope or OAUTH_SCOPE.fullmatch(oauth_scope) is None:
+        raise ConfigError("DASHBOARD_OAUTH_SCOPE must name GitHub OAuth scopes")
+    require_auth_reads = (
+        environ.get("DASHBOARD_REQUIRE_AUTH_READS", "").strip().lower() in ("1", "true", "yes")
+    )
     return ActionsConfig(client_id, approver, frozenset(clients),
                          settings_spool=check_spool(spool) if spool else None,
                          audit=check_audit(audit) if audit else None,
-                         signin_relay=check_relay(relay) if relay else None)
+                         signin_relay=check_relay(relay) if relay else None,
+                         https=https,
+                         oauth_scope=oauth_scope,
+                         require_auth_reads=require_auth_reads)
 
 
 def current_user() -> str:
@@ -516,7 +554,7 @@ class GitHubClient:
 
     def device_code(self) -> dict:
         return self._call("POST", f"{self.config.web_base}/login/device/code",
-                          form={"client_id": self.config.client_id, "scope": "repo"})
+                          form={"client_id": self.config.client_id, "scope": self.config.oauth_scope})
 
     def poll_token(self, device_code: str) -> dict:
         return self._call("POST", f"{self.config.web_base}/login/oauth/access_token", form={
@@ -842,11 +880,11 @@ MAX_WORDS = MAX_COMMENT // 2
 COMMENT_ID = re.compile(r"[0-9]{1,20}")
 ISSUE_NUMBER = re.compile(r"[1-9][0-9]{0,9}")
 AUDIT_FIELDS = ("repo", "ticket_id", "action", "expect_state", "head")
-GO_HEADER = "<!-- orch:v1 kind=go from=grok-bot role=orchestrator state=building -->"
-ANSWERS_HEADER = "<!-- orch:v1 kind=answers from=grok-bot role=orchestrator -->"
-CLOSE_HEADER = "<!-- orch:v1 kind=answers from=grok-bot role=orchestrator state=abandoned -->"
-RETRY_HEADER = "<!-- orch:v1 kind=retry from=grok-bot role=orchestrator -->"
-HANDOFF_HEADER = "<!-- orch:v1 kind=answers from=grok-bot role=orchestrator state=handed-off -->"
+GO_HEADER = "<!-- orch:v1 kind=go from=approver role=approver state=building -->"
+ANSWERS_HEADER = "<!-- orch:v1 kind=answers from=approver role=approver -->"
+CLOSE_HEADER = "<!-- orch:v1 kind=answers from=approver role=approver state=abandoned -->"
+RETRY_HEADER = "<!-- orch:v1 kind=retry from=approver role=approver -->"
+HANDOFF_HEADER = "<!-- orch:v1 kind=answers from=approver role=approver state=handed-off -->"
 
 
 def clock() -> datetime:
@@ -1159,8 +1197,9 @@ def sanitized_signin_view(harness: str, view: dict | None) -> dict:
     }
 
 
-def cookie(name: str, value: str, max_age: int) -> str:
-    return f"{name}={value}; HttpOnly; SameSite=Strict; Path=/api; Max-Age={max_age}"
+def cookie(name: str, value: str, max_age: int, *, secure: bool = False, path: str = "/api") -> str:
+    suffix = "; Secure" if secure else ""
+    return f"{name}={value}; HttpOnly; SameSite=Strict; Path={path}; Max-Age={max_age}{suffix}"
 
 
 class SnapshotHandler(BaseHTTPRequestHandler):
@@ -1237,12 +1276,20 @@ class SnapshotHandler(BaseHTTPRequestHandler):
             return
         self._json(200, sanitized_signin_view(attempt.harness, relay.read_view(rid)))
 
+    def _is_https(self) -> bool:
+        actions: Actions | None = self.server.actions  # type: ignore[attr-defined]
+        if actions is not None and actions.config.https:
+            return True
+        proto = self.headers.get("X-Forwarded-Proto", "").split(",")[0].strip().lower()
+        return proto == "https"
+
     def _read_json(self) -> dict:
         content_type = self.headers.get("Content-Type", "").split(";")[0].strip().lower()
         if content_type != "application/json":
             raise ApiError(403, "content-type")
         host = self.headers.get("Host", "")
-        if not host or self.headers.get("Origin") != f"http://{host}":
+        scheme = "https" if self._is_https() else "http"
+        if not host or self.headers.get("Origin") != f"{scheme}://{host}":
             raise ApiError(403, "origin")
         length = self.headers.get("Content-Length", "")
         if not length.isdigit() or int(length) > MAX_REQUEST:
@@ -1274,21 +1321,24 @@ class SnapshotHandler(BaseHTTPRequestHandler):
 
     def _signin(self, actions: Actions, session: Session | None, payload: dict):
         flow_id, grant = actions.start_flow()
-        return 200, grant, [cookie("factory_flow", flow_id, int(grant["expires_in"]))]
+        return 200, grant, [cookie("factory_flow", flow_id, int(grant["expires_in"]), secure=self._is_https())]
 
     def _signin_poll(self, actions: Actions, session: Session | None, payload: dict):
         state, signed = actions.poll_flow(self._cookie("factory_flow"))
         if state == "pending":
             return 200, {"state": state}, []
-        cookies = [cookie("factory_flow", "", 0)]
+        secure = self._is_https()
+        session_path = "/" if actions.config.require_auth_reads else "/api"
+        cookies = [cookie("factory_flow", "", 0, secure=secure)]
         if signed is None:
             return 200, {"state": state}, cookies
-        cookies.append(cookie("factory_session", signed.session_id, SESSION_SECONDS))
+        cookies.append(cookie("factory_session", signed.session_id, SESSION_SECONDS, secure=secure, path=session_path))
         return 200, {"state": state, "login": signed.login, "csrf": signed.csrf}, cookies
 
     def _signout(self, actions: Actions, session: Session | None, payload: dict):
         actions.sign_out()
-        return 200, {}, [cookie("factory_session", "", 0)]
+        session_path = "/" if actions.config.require_auth_reads else "/api"
+        return 200, {}, [cookie("factory_session", "", 0, secure=self._is_https(), path=session_path)]
 
     def _comment(self, actions: Actions, session: Session | None, payload: dict):
         assert session is not None
@@ -1518,6 +1568,18 @@ class SnapshotHandler(BaseHTTPRequestHandler):
 
     def _serve(self, *, body: bool) -> None:
         path = urlsplit(self.path).path
+        actions: Actions | None = self.server.actions  # type: ignore[attr-defined]
+        if (
+            actions is not None
+            and actions.config.require_auth_reads
+            and actions.current(self._cookie("factory_session")) is None
+        ):
+            if path in ("/status.json", "/tickets.json") or path.startswith(QA_RUNS):
+                self._json(401, {"error": "no-session"})
+                return
+            if path in ROUTES:
+                self._send(401, _AUTH_REQUIRED_HTML, "text/html; charset=utf-8", body=body)
+                return
         if path.startswith(QA_RUNS):
             self._serve_qa(path, body=body)
             return

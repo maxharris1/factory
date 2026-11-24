@@ -1580,18 +1580,18 @@ def _wakes(lab: Lab) -> list[tuple]:
     ]
 
 
-def test_head_moved_posts_nothing_marks_stale_and_wakes_grok_once(tmp_path: Path) -> None:
+def test_head_moved_posts_nothing_marks_stale_without_waking_grok(tmp_path: Path) -> None:
     lab = Lab(tmp_path, lanes=2)
     run_id = _stale_run(lab)
 
     assert lab.posted == {}
     assert lab.run.rows("SELECT state, reason FROM qa_runs WHERE run_id = ?", run_id) == [("stale", "head-moved")]
-    assert _wakes(lab) == [("grok", HEAD_A, HEAD_B)]
+    assert _wakes(lab) == []
     assert lab.run.rows("SELECT state FROM jobs WHERE action = 'qa'") == [("failed",)]
     assert f"qa run {run_id}: head moved from {HEAD_A[:12]} to {HEAD_B[:12]}" in lab.logs
 
     lab.run.poll()
-    assert lab.run.rows("SELECT state FROM jobs WHERE action = 'qa-head-moved'") == [("done",)]
+    assert _wakes(lab) == []
     assert lab.run.rows("SELECT state, reason FROM qa_runs WHERE run_id = ?", run_id) == [("stale", "head-moved")]
     qa_job = lab.run.rows("SELECT id FROM jobs WHERE action = 'qa'")[0][0]
     assert lab.run.rows("SELECT event FROM job_events WHERE job_id = ? AND event = 'qa-no-retry'", qa_job) == [
@@ -1614,10 +1614,10 @@ def test_head_moved_while_lanes_are_described_posts_nothing(tmp_path: Path, monk
 
     assert lab.posted == {}
     assert lab.run.rows("SELECT state, reason FROM qa_runs WHERE run_id = ?", run_id) == [("stale", "head-moved")]
-    assert _wakes(lab) == [("grok", HEAD_A, HEAD_B)]
+    assert _wakes(lab) == []
 
 
-def test_head_moved_replay_queues_no_second_wake(tmp_path: Path) -> None:
+def test_head_moved_replay_queues_no_wake(tmp_path: Path) -> None:
     lab = Lab(tmp_path, lanes=2)
     _stale_run(lab)
     with lab.run.queue.connect() as connection:
@@ -1626,7 +1626,7 @@ def test_head_moved_replay_queues_no_second_wake(tmp_path: Path) -> None:
     lab.worker = lab.new_worker()
     lab.tick()
 
-    assert _wakes(lab) == [("grok", HEAD_A, HEAD_B)]
+    assert _wakes(lab) == []
     assert lab.posted == {}
     assert lab.run.rows("SELECT state FROM jobs WHERE action = 'qa'") != [("running",)]
 

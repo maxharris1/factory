@@ -55,6 +55,11 @@ def driver_wake_step(
     return "flag" if rewoken else "rewake"
 
 
+CRITICAL_WAKE_ACTIONS = frozenset(
+    {"stuck", "capped", "blocked", "awaiting-ok", "ship-failed"}
+)
+
+
 class DetailMixin:
     def _deliver_grok_jobs(self, deferred: set[str]) -> None:
         while (
@@ -65,6 +70,11 @@ class DetailMixin:
         ) is not None:
             route = self._wake_route(job)
             inbox = route.driver_inbox if route is not None else None
+            uses_webhook = inbox is None or route.grok_webhook
+            if uses_webhook and self.queue.now() < getattr(self, "_grok_backoff_until", 0.0):
+                self.queue.release(job.id, owner="grok")
+                deferred.add(job.id)
+                continue
             try:
                 if inbox is not None and not route.grok_webhook:
                     self._queue_inbox_post(job, inbox)
@@ -96,6 +106,8 @@ class DetailMixin:
                 if isinstance(exc, GrokDeliveryError):
                     self._record_job_error(job, f"{type(exc).__name__}:{exc.detail}",
                                            prefix="grok-delivery:")
+                    if exc.retry_after is not None:
+                        self._grok_backoff_until = self.queue.now() + exc.retry_after
                 else:
                     self._record_job_error(job, exc, prefix="grok-delivery:")
                 try:
@@ -174,6 +186,40 @@ class DetailMixin:
                 self.record_poll_exception(
                     ticket.repo, ticket.ticket_id, exc, prefix="driver-wake:"
                 )
+        self._backstop_undelivered_critical_wakes()
+
+    def _backstop_undelivered_critical_wakes(self) -> None:
+        """Raise needs_attention if any critical driver wake stays undelivered
+        (queued past driver_wake_seconds) due to webhook/429/network outages."""
+        cutoff = self.queue.now() - self.job_states.driver_wake_seconds
+        actions = sorted(CRITICAL_WAKE_ACTIONS)
+        marks = ", ".join("?" for _ in actions)
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                rows = connection.execute(
+                    f"""
+                    SELECT id, repo, ticket_id, action, created_at
+                    FROM jobs
+                    WHERE recipient = 'grok' AND state = 'queued'
+                      AND action IN ({marks}) AND created_at <= ?
+                    ORDER BY created_at, id
+                    """,
+                    (*actions, cutoff),
+                ).fetchall()
+                now = self.queue.now()
+                for row in rows:
+                    minutes = int((now - float(row["created_at"])) // 60)
+                    self._flag_attention_once(
+                        connection,
+                        str(row["repo"]),
+                        str(row["ticket_id"]),
+                        DRIVER_WAKE_UNANSWERED,
+                        f"{row['action']} wake {row['id']} undelivered for {minutes} min",
+                    )
+                connection.commit()
+        except Exception as exc:
+            self.record_poll_exception("driver-wake", "-", exc, prefix="driver-wake:")
 
     def _backstop_driver_wake(self, ticket: TrackedTicket, question_id: str | None) -> None:
         repo, ticket_id = ticket.repo, ticket.ticket_id
