@@ -19,13 +19,21 @@ from lib.dispatch.helpers import (
 )
 from lib.dispatch.retry import _harness_job_active, _newest_harness_job
 from lib.dispatch.transitions import write_workflow_state
-from lib.dispatch.types import Comment, ParentMerged, RetargetProof, TrackedTicket
+from lib.dispatch.types import (
+    Comment,
+    ParentClosed,
+    ParentFacts,
+    ParentMerged,
+    RetargetProof,
+    TrackedTicket,
+)
 from lib.handoff import parse_comment
 from lib.job_detail import as_object
 from lib.queue import JobRequest
 from lib.update_check import StackUnbounded
 
 STACK_RETARGET_FAILED = "stack-retarget-failed"
+STACK_PARENT_CLOSED = "stack-parent-closed"
 LEAVES_MERGE_QUEUE = frozenset({"merge-queue", "waiting-external"})
 REBASE_FROM = (
     frozenset({"review", "fixing", "awaiting-ok", "capped", "handed-off"}) | LEAVES_MERGE_QUEUE
@@ -131,7 +139,11 @@ class RebaseMixin:
         if self.feeder is None:
             return ticket, False
         try:
-            ticket, queued = self._land_stack_parent(ticket)
+            facts = self.feeder.stacked_parent_facts(ticket)
+            if isinstance(facts, ParentClosed) and not (ticket.merged or ticket.closed):
+                self._hold_for_closed_parent(ticket, facts)
+                return ticket, True
+            ticket, queued = self._land_stack_parent(ticket, facts)
             queued = queued or self._queue_pending_stack_rebase(ticket)
         except StackUnbounded as exc:
             with self._connect() as connection:
@@ -148,8 +160,25 @@ class RebaseMixin:
             self._write_state_label(ticket, "fixing")
         return ticket, False
 
-    def _land_stack_parent(self, ticket: TrackedTicket) -> tuple[TrackedTicket, bool]:
-        facts = self.feeder.stacked_parent_facts(ticket)
+    def _hold_for_closed_parent(self, ticket: TrackedTicket, parent: ParentClosed) -> None:
+        detail = f"stack parent PR #{parent.pr} closed without merging; the child waits for a person"
+        with self._connect() as connection:
+            self._flag_attention_once(
+                connection, ticket.repo, ticket.ticket_id, STACK_PARENT_CLOSED, detail
+            )
+        source = self._latest_trusted_comment(ticket)
+        self.wake_grok_once(
+            ticket,
+            reason=STACK_PARENT_CLOSED,
+            source_comment_id=source.id if source is not None else "",
+            detail=self._project_wake_detail(ticket, detail),
+            head=ticket.current_head,
+            once_key=str(parent.pr),
+        )
+
+    def _land_stack_parent(
+        self, ticket: TrackedTicket, facts: ParentFacts | None
+    ) -> tuple[TrackedTicket, bool]:
         head = ticket.current_head
         if (
             not isinstance(facts, ParentMerged)
@@ -162,6 +191,7 @@ class RebaseMixin:
             return ticket, False
         proof = RetargetProof(self.stack_bounds(ticket.repo, head, facts.heads), head, facts.heads)
         self.clear_attention(ticket.repo, ticket.ticket_id, STACK_RETARGET_FAILED)
+        self.clear_attention(ticket.repo, ticket.ticket_id, STACK_PARENT_CLOSED)
         if ticket.pr_base != facts.into:
             self._review_actions(ticket).set_pull_base(ticket, facts.into)
         moved = _on_base(replace(ticket, pr_base=facts.into), facts.into)

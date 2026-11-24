@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from lib.dispatch.types import CIResult, ParentMerged, ParentOpen, StackParent
+from lib.dispatch.types import CIResult, ParentClosed, ParentMerged, ParentOpen, StackParent
 from lib.intake_live import StackHeadsUnknown
 from lib.update_check import StackUnbounded
 from tests.merge_queue_support import sha
@@ -380,3 +380,27 @@ def test_a_pending_rebase_waits_while_the_live_base_is_another_branch(tmp_path: 
     dispatcher.process(polled_child(tmp_path, github))
 
     assert [rebase["rebase"]["onto_from"] for rebase in rebases(queue)] == [ONTO]
+
+
+def jobs_for(queue) -> list[tuple[str, str]]:
+    with queue.connect() as connection:
+        return [tuple(row) for row in connection.execute("SELECT recipient, action FROM jobs")]
+
+
+def test_a_parent_closed_unmerged_raises_attention_wakes_once_and_queues_no_job(
+    tmp_path: Path,
+) -> None:
+    queue, github, dispatcher = wired(tmp_path)
+    before = jobs_for(queue)
+    github.landings[(STACK_REPO, PARENT_PR)] = ParentClosed(PARENT_PR)
+    github.pulls[(STACK_REPO, PARENT_PR)].update(merged=False, state="closed")
+
+    for _ in range(3):
+        dispatcher.process(ready_on(tmp_path, github))
+
+    assert set(stack_attention(tmp_path)) == {"stack-parent-closed"}
+    assert f"#{PARENT_PR}" in stack_attention(tmp_path)["stack-parent-closed"]
+    assert jobs_for(queue) == [*before, ("grok", "stack-parent-closed")]
+    assert dispatcher.review_actions.bases == []
+    assert child_row(tmp_path)["base_branch"] == PARENT
+    assert workflow_state(tmp_path) == "handed-off"

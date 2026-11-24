@@ -359,7 +359,7 @@ class ParentOpen:
 
 @dataclass(frozen=True)
 class ParentClosed:
-    pass
+    pr: int
 
 
 @dataclass(frozen=True)

@@ -86,6 +86,7 @@ GROK_WAKE_REASONS = (
     "qa-env-failed",
     "qa-skill-drift",
     "ci-rerun-refused",
+    "stack-parent-closed",
     CI_STALE_REASON,
 )
 GROK_WAKE_SKIP = frozenset({"done", "refused", "rejected", "unparsed", "stale"})

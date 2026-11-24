@@ -125,6 +125,7 @@ One row per wake the dispatcher sends Grok Bot: each `action` in `lib.dispatch.c
 | `qa-env-failed` | Under `qa.gate: block`, QA at an approved head failed on its environment twice. | Tell Max once. |
 | `qa-skill-drift` | A primary QA `FAIL` with `[drift]` lines, whatever the verdict. | Run `maintain-verification-skill` as `detail.ask` says. Tell Max once. |
 | `ci-rerun-refused` | A completed red run's rerun was refused and charged. | Tell Max once. |
+| `stack-parent-closed` | A stacked child's parent PR closed without merging. `detail.detail` names the parent. The child starts no job and is never retargeted. | Tell Max once: reopen the parent, or retarget or close the child. |
 | `qa-head-moved` | A QA run's head moved, so it posted nothing. | Nothing to post. |
 | `ci-stale` | Two hours at one head in the CI state `detail.detail` names. | Run Stalled ticket. |
 | `done` | The ticket finished. `detail.outcome` and `follow_up_owner` name what is left; `detail.followup_issue` names the parked follow-up issue. | Run Follow-up triage on `followup_issue`. Act by hand on a `detail.note`, such as an unmoved Linear issue. |

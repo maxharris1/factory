@@ -834,7 +834,7 @@ def landing_page(
     }}}})
 
 
-@pytest.mark.parametrize(("state", "facts"), [("OPEN", ParentOpen()), ("CLOSED", ParentClosed())])
+@pytest.mark.parametrize(("state", "facts"), [("OPEN", ParentOpen()), ("CLOSED", ParentClosed(113))])
 def test_pull_landing_reads_an_unmerged_parent_without_paging(state: str, facts: object) -> None:
     gh = RecordedGh()
     gh.route(landing(), landing_page([], state=state, remaining=150, cursor="c1", has_next=True))
