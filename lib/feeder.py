@@ -1148,7 +1148,9 @@ class Feeder:
         states = {candidate.ref: self._state(candidate) for candidate in candidates}
         begun = {c.ref for c in candidates if self._row(c)["branch"] is not None}
         split = {c.ref for c in candidates if states[c.ref] == "split-parent"}
-        unread, map_errors = self._add_map_defects(candidates, states)
+        malformed = {c.ref for c in candidates if states[c.ref] in UNSTARTED and c.template.defects}
+        targets, target_errors = self._target_holds(candidates, begun, split | malformed, read_repos, now)
+        unread, map_errors = self._add_map_defects(candidates, states, targets.keys())
         refused = {
             candidate.ref
             for candidate in candidates
@@ -1165,8 +1167,7 @@ class Feeder:
         waits, critical, holds, capped, gate_read, unblocks, tiers = self._gates(
             candidates, states, skip
         )
-        stops, stop_errors = self._line_stops(candidates, begun, skip, mains)
-        targets, target_errors = self._target_holds(candidates, begun, skip, read_repos, now)
+        stops, stop_errors = self._line_stops(candidates, begun, skip | targets.keys(), mains)
         for candidate in candidates:
             candidate.unblocks = unblocks[candidate.ref]
             candidate.effective_tier = tiers[candidate.ref]
@@ -1195,7 +1196,7 @@ class Feeder:
                 continue
             wait = None
             if candidate.ref not in begun:
-                wait = line_stop(stops.get(candidate.line), candidate.issue.labels) or targets.get(candidate.ref)
+                wait = targets.get(candidate.ref) or line_stop(stops.get(candidate.line), candidate.issue.labels)
             if wait is None and state in UNSTARTED:
                 wait = waits.get(candidate.ref) or holds.collision(candidate.ref, candidate.lines)
             if wait is not None:
@@ -1537,14 +1538,14 @@ class Feeder:
         return _state_write(candidate, "refused-intake", reason=reason)
 
     def _add_map_defects(
-        self, candidates: Sequence[_Candidate], states: Mapping[Ref, str]
+        self, candidates: Sequence[_Candidate], states: Mapping[Ref, str], held: Collection[Ref]
     ) -> tuple[set[Ref], int]:
         maps: dict[tuple[str, str | None, str], frozenset[str] | None] = {}
         unread: set[Ref] = set()
         errors = 0
         for candidate in candidates:
             journeys = candidate.template.journeys
-            if not journeys or states[candidate.ref] not in UNSTARTED:
+            if not journeys or states[candidate.ref] not in UNSTARTED or candidate.ref in held:
                 continue
             qa = candidate.context.config.qa
             verify = qa.verify if qa else None
@@ -1929,7 +1930,7 @@ class Feeder:
         now: float,
     ) -> tuple[dict[Ref, Wait], int]:
         holds: dict[Ref, Wait] = {}
-        unread_repos: set[str] = set()
+        unread: list[Ref] = []
         errors = 0
         for candidate in candidates:
             target = candidate.template.target_branch
@@ -1940,7 +1941,7 @@ class Feeder:
                 sha = self.github.branch_sha(repo, target)
             except Exception as exc:
                 errors += 1
-                unread_repos.add(candidate.ref.repo)
+                unread.append(candidate.ref)
                 self.log(f"feeder: cannot read target branch {repo}@{target}: {safe_ship_error(exc)}")
                 holds[candidate.ref] = Wait(f"target branch {target} was not read")
                 continue
@@ -1978,7 +1979,14 @@ class Feeder:
             if wait.attention is not None
         }
         with self.queue.connect() as connection:
-            attention.sync(connection, (TARGET_BRANCH_MISSING,), repos - unread_repos, flags, now)
+            for ref in unread:
+                row = connection.execute(
+                    "SELECT detail FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason = ?",
+                    (ref.repo, ref.key, TARGET_BRANCH_MISSING),
+                ).fetchone()
+                if row is not None:
+                    flags[(ref.repo, ref.key, TARGET_BRANCH_MISSING)] = row[0]
+            attention.sync(connection, (TARGET_BRANCH_MISSING,), repos, flags, now)
         return holds, errors
 
     # -- gates (#156) ----------------------------------------------------------------

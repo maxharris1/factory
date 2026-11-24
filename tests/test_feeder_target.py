@@ -13,11 +13,13 @@ from pathlib import Path
 
 import pytest
 
+from lib.dispatch.types import BaseCheck
 from lib.feeder import _pull_body
 from tests.test_feeder import (
     BASE_SHA,
     LINEAR_FACTORY_MD,
     LINEAR_ORCH,
+    REQUIRED_MD,
     FakeGitHub,
     FakeLinear,
     issue,
@@ -27,7 +29,7 @@ from tests.test_feeder import (
 )
 from tests.test_feeder_base_branch import ORCH as MULTI_PROJECT_ORCH
 from tests.test_feeder_base_branch import OVERRIDDEN
-from tests.test_feeder_template import body, flags, nothing_written, wakes
+from tests.test_feeder_template import body, flags, map_feeder, nothing_written, wakes
 
 HOME = "owner/app"
 LINEAR_REPO = "acme/linear-app"
@@ -294,3 +296,62 @@ def test_a_failed_target_read_keeps_the_hold_and_its_flag(tmp_path: Path) -> Non
     assert nothing_written(github)
     assert rows(tmp_path / "orch.db")[key]["state"] == "waiting-blocked"
     assert flags(tmp_path) == {(repo, key, "target-branch-missing")}
+
+
+def test_a_missing_target_holds_a_ticket_with_features_before_its_map_is_read(tmp_path: Path) -> None:
+    feeder, github = map_feeder(tmp_path)
+    github.issues[HOME] = [issue(7, template=False, body=body(extra=f"Features: search\nTarget branch: {TARGET}"))]
+
+    report = feeder.feed_once()
+
+    row = rows(tmp_path / "orch.db")["7"]
+    assert (row["state"], row["waiting_reason"], report.blocked) == (
+        "waiting-blocked", f"target branch {TARGET} does not exist", 1
+    )
+    assert flags(tmp_path) == {(HOME, "7", "target-branch-missing")}
+
+    github.branches[(HOME, TARGET)] = TARGET_SHA
+    report = feeder.feed_once()
+
+    assert [ref.ticket_id for ref in report.fed] == ["501"]
+    assert pull_on(github, "factory/issue-7")["base"] == TARGET
+    assert flags(tmp_path) == set()
+
+
+def test_a_missing_target_outranks_red_ci_left_on_that_branch(tmp_path: Path) -> None:
+    feeder, _, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD)
+    github.main_checks[(HOME, TARGET)] = {"test (1/3)": BaseCheck("test (1/3)", "failure", "900", "1", "c" * 40)}
+    github.issues[HOME] = [issue(7, body=targeted(), template=False)]
+
+    report = feeder.feed_once()
+
+    row = rows(tmp_path / "orch.db")["7"]
+    assert (row["state"], row["waiting_reason"], report.blocked) == (
+        "waiting-blocked", f"target branch {TARGET} does not exist", 1
+    )
+    assert flags(tmp_path) == {(HOME, "7", "target-branch-missing")}
+
+
+def test_a_failed_target_read_keeps_only_that_tickets_flag(tmp_path: Path) -> None:
+    feeder, _, github, _ = make_feeder(tmp_path)
+    github.issues[HOME] = [
+        issue(7, body=targeted("Target branch: feature/x"), template=False),
+        issue(8, body=targeted("Target branch: feature/y"), template=False),
+    ]
+    feeder.feed_once()
+    assert flags(tmp_path) == {(HOME, "7", "target-branch-missing"), (HOME, "8", "target-branch-missing")}
+
+    github.branches[(HOME, "feature/x")] = TARGET_SHA
+    read = github.branch_sha
+
+    def failing_y(repo: str, branch: str):
+        if branch == "feature/y":
+            raise RuntimeError("temporary target read failure")
+        return read(repo, branch)
+
+    github.branch_sha = failing_y
+    feeder.feed_once()
+
+    assert rows(tmp_path / "orch.db")["7"]["state"] == "fed"
+    assert rows(tmp_path / "orch.db")["8"]["state"] == "waiting-blocked"
+    assert flags(tmp_path) == {(HOME, "8", "target-branch-missing")}
