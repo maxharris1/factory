@@ -23,6 +23,10 @@ if [[ "${1:-}" == --now ]]; then
     shift
 fi
 unit="${1:-}"
+if [[ -f "$dir/fail.$verb${unit:+.$unit}" ]]; then
+    echo "Interactive authentication required." >&2
+    exit 1
+fi
 start() {
     echo active >"$dir/active.$unit"
     for other in "$dir"/active.*; do
@@ -51,13 +55,7 @@ case "$verb" in
         ;;
     stop) echo inactive >"$dir/active.$unit" ;;
     start) start ;;
-    restart)
-        if [[ -f "$dir/fail.restart" ]]; then
-            echo "Interactive authentication required." >&2
-            exit 1
-        fi
-        start
-        ;;
+    restart) start ;;
     *) exit 1 ;;
 esac
 """
@@ -96,8 +94,8 @@ class Units:
         if enabled is not None:
             (self.dir / f"enabled.{unit}").write_text(enabled + "\n", encoding="utf-8")
 
-    def fail_restart(self) -> None:
-        (self.dir / "fail.restart").touch()
+    def fail(self, *call: str) -> None:
+        (self.dir / ".".join(("fail", *call))).touch()
 
     def calls(self) -> list[str]:
         log = self.dir / "calls.log"
@@ -312,7 +310,7 @@ def test_restart_refuses_while_the_static_unit_serves(
 
 def test_restart_fails_when_systemctl_restart_fails(units: Units, app: HTTPServer) -> None:
     _live(units)
-    units.fail_restart()
+    units.fail("restart", HTTP_UNIT)
     result = _run(units, "restart", DASHBOARD_PROBE_ADDR=_addr(app))
     assert result.returncode == 1, result.stdout + result.stderr
     assert f"systemctl restart {HTTP_UNIT} failed" in result.stderr
@@ -436,9 +434,25 @@ def test_install_reverts_to_the_static_unit_when_the_app_never_goes_live(
 
 def test_install_reverts_when_systemctl_restart_fails(node: Node, app: HTTPServer) -> None:
     node.write_env(app.server_address[1])
-    node.units.fail_restart()
+    node.units.fail("restart", HTTP_UNIT)
     result = node.install()
     assert result.returncode == 1, result.stdout + result.stderr
+    assert node.units.state(HTTP_UNIT) == ("inactive", "disabled")
+    assert node.units.state(STATIC_UNIT) == ("active", "enabled")
+
+
+@pytest.mark.parametrize("call", [
+    ("daemon-reload",), ("disable", STATIC_UNIT), ("enable", HTTP_UNIT), ("restart", HTTP_UNIT),
+], ids=lambda call: call[0])
+def test_install_rerun_fails_when_a_cutover_systemctl_call_fails(
+        node: Node, app: HTTPServer, call: tuple[str, ...]) -> None:
+    node.write_env(app.server_address[1])
+    assert node.install().returncode == 0
+    node.units.fail(*call)
+    result = node.install()
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "live: " not in result.stdout
+    assert f"systemctl {' '.join(call)} failed" in result.stderr
     assert node.units.state(HTTP_UNIT) == ("inactive", "disabled")
     assert node.units.state(STATIC_UNIT) == ("active", "enabled")
 

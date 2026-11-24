@@ -342,13 +342,18 @@ install_service() {
     mv -f "$tmp" "${drop_in}/paths.conf"
 
     say "moving 8090 from ${STATIC_UNIT} to ${HTTP_UNIT}"
-    if "$SYSTEMCTL" daemon-reload &&
-        "$SYSTEMCTL" disable "$STATIC_UNIT" &&
-        "$SYSTEMCTL" enable "$HTTP_UNIT" &&
-        "$SYSTEMCTL" restart "$HTTP_UNIT"; then
+    if ! "$SYSTEMCTL" daemon-reload; then
+        reason="systemctl daemon-reload failed"
+    elif ! "$SYSTEMCTL" disable "$STATIC_UNIT"; then
+        reason="systemctl disable ${STATIC_UNIT} failed"
+    elif ! "$SYSTEMCTL" enable "$HTTP_UNIT"; then
+        reason="systemctl enable ${HTTP_UNIT} failed"
+    elif ! "$SYSTEMCTL" restart "$HTTP_UNIT"; then
+        reason="systemctl restart ${HTTP_UNIT} failed"
+    else
         wait_live
+        reason="$(live_reason)"
     fi
-    reason="$(live_reason)"
     if [[ -z "$reason" ]]; then
         status
         return
