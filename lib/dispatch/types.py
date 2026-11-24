@@ -416,6 +416,7 @@ class TrackedTicket:
     pr_base: str | None = None
     pr_commits: int | None = None
     stack: StackParent | None = None
+    stack_parent_branch: str | None = None
 
     @property
     def no_ci_base(self) -> str | None:

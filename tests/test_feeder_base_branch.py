@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
 from lib.brief_comment import FACTORY_MD_HEADING
 from lib.dispatcher import TicketRef
+from lib.feeder import FEEDER_TABLE
 from lib.poll_source import FedPulls, LivePollSource
 from tests.test_feeder import (
     LINEAR_FACTORY_MD,
@@ -214,3 +216,14 @@ def test_a_partly_fed_ticket_that_returns_after_losing_its_signal_keeps_its_base
     assert len(github.pulls) == 1
     (brief, *_) = linear.posted["uuid-AUT-7"]
     assert f"off `{FEATURE}`" in brief.body
+
+
+def test_fed_pulls_reads_a_stacked_tickets_parent_branch(tmp_path: Path) -> None:
+    feed(tmp_path, in_project("AUT-7", "proj-upload"))
+    with sqlite3.connect(tmp_path / "orch.db") as connection:
+        connection.execute(f"UPDATE {FEEDER_TABLE} SET stack_parent_pr = 10, stack_parent_branch = 'factory/issue-10'")
+
+    fed_pulls = FedPulls(tmp_path / "orch.db")
+
+    assert fed_pulls.stack_parent_branch(REPO, "AUT-7") == "factory/issue-10"
+    assert fed_pulls.stack_parent_branch(REPO, "AUT-8") is None

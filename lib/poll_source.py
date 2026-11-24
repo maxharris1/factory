@@ -550,6 +550,10 @@ class FedPulls:
         ).fetchone()
         return None if row is None or None in row else (int(row[0]), str(row[1]))
 
+    def stack_parent_branch(self, repo: str, ticket_id: str) -> str | None:
+        recorded = self.stack_parent(repo, ticket_id)
+        return None if recorded is None else recorded[1]
+
     def _columns(self) -> set[str]:
         return {row[1] for row in self._connection.execute(f"PRAGMA table_info({FEEDER_TABLE})")}
 
@@ -2120,6 +2124,7 @@ class LivePollSource:
             source_issue=source_issue,
             pr_title=_open_title(pull),
             stack=stack,
+            stack_parent_branch=self.fed_pulls.stack_parent_branch(project.repo, number),
             **_pull_facts(pull, fresh=fresh),
         )
         self._ticket_cache[cache_key] = ticket
@@ -2487,6 +2492,7 @@ class LivePollSource:
             source_issue=identifier if pr_number is not None and SOURCE.fullmatch(identifier) else None,
             pr_title=pr_title,
             stack=stack,
+            stack_parent_branch=self.fed_pulls.stack_parent_branch(project.repo, identifier),
             **pull_facts,
         )
         self._ticket_cache[cache_key] = ticket

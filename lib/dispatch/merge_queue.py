@@ -666,6 +666,9 @@ class MergeQueueMixin:
             return "base update out"
         if head is None:
             return "head unread"
+        parent = ticket.stack_parent_branch
+        if parent is not None and (ticket.pr_base or ticket.factory.base_branch) == parent:
+            return f"stacked on {parent}: waits for its retarget"
         if ticket.mergeable is not True:
             return f"not mergeable ({ticket.mergeable_state or 'pending'})"
         ci = ticket.ci.get(head)
