@@ -12,7 +12,7 @@ from lib.dispatch.types import CIResult, ParentClosed, ParentMerged, ParentOpen,
 from lib.intake_live import StackHeadsUnknown
 from lib.update_check import StackUnbounded
 from tests.merge_queue_support import sha
-from tests.test_dispatcher import READY, FakeReviewActions, comment
+from tests.test_dispatcher import READY, FakeReviewActions, FakeSource, comment
 from tests.test_ticket_base_branch import (
     CHILD_PR,
     FEATURE,
@@ -404,3 +404,83 @@ def test_a_parent_closed_unmerged_raises_attention_wakes_once_and_queues_no_job(
     assert dispatcher.review_actions.bases == []
     assert child_row(tmp_path)["base_branch"] == PARENT
     assert workflow_state(tmp_path) == "handed-off"
+
+
+def close_parent(github) -> None:
+    github.landings[(STACK_REPO, PARENT_PR)] = ParentClosed(PARENT_PR)
+    github.pulls[(STACK_REPO, PARENT_PR)].update(merged=False, state="closed")
+
+
+def poll_child(tmp_path: Path, github, dispatcher, **fields) -> None:
+    child = replace(polled_child(tmp_path, github), **fields)
+    with sqlite3.connect(tmp_path / "orch.db") as connection:
+        connection.execute(
+            "INSERT OR IGNORE INTO tracked_tickets VALUES (?, ?, 'github', 0)",
+            (child.repo, child.ticket_id),
+        )
+    source = FakeSource(child)
+    source.fresh_ticket = lambda ref: child
+    dispatcher.poll_once(source)
+
+
+def harness_jobs(queue) -> list[tuple[str, str, int]]:
+    with queue.connect() as connection:
+        return [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT recipient, action, attempt FROM jobs WHERE recipient != 'grok'"
+            )
+        ]
+
+
+def test_a_closed_parent_holds_the_failed_build_retry_through_a_full_poll(
+    tmp_path: Path,
+) -> None:
+    queue, github, dispatcher = wired(tmp_path, state="building")
+    build = queue.claim("claude")
+    queue.finish(build.id, owner="claude", handoff_comment_id=None)
+    before = harness_jobs(queue)
+    close_parent(github)
+
+    for _ in range(2):
+        poll_child(tmp_path, github, dispatcher)
+
+    assert harness_jobs(queue) == before
+    assert not queue.outstanding()
+    assert set(stack_attention(tmp_path)) == {"stack-parent-closed"}
+    assert [action for _, action in jobs_for(queue) if _ == "grok"] == ["stack-parent-closed"]
+
+
+def test_a_closed_parent_holds_an_approved_child_out_of_the_merge_queue(
+    tmp_path: Path,
+) -> None:
+    queue, github, dispatcher = wired(tmp_path, state="merge-queue")
+    with queue.connect() as connection:
+        connection.execute(
+            "UPDATE ticket_state SET approved_head = ?, approved_at = ?",
+            (sha(3), queue.now()),
+        )
+    before = harness_jobs(queue)
+    close_parent(github)
+
+    merge_line = replace(polled_child(tmp_path, github).factory, finish_line="merge")
+    poll_child(
+        tmp_path, github, dispatcher, factory=merge_line, mergeable=False, mergeable_state="dirty"
+    )
+
+    assert harness_jobs(queue) == before
+    assert workflow_state(tmp_path) == "merge-queue"
+    assert set(stack_attention(tmp_path)) == {"stack-parent-closed"}
+
+
+def test_a_reopened_parent_releases_the_hold(tmp_path: Path) -> None:
+    queue, github, dispatcher = wired(tmp_path)
+    close_parent(github)
+    dispatcher.process(ready_on(tmp_path, github))
+    assert set(stack_attention(tmp_path)) == {"stack-parent-closed"}
+
+    github.landings[(STACK_REPO, PARENT_PR)] = ParentOpen()
+    github.pulls[(STACK_REPO, PARENT_PR)].update(state="open")
+    dispatcher.process(polled_child(tmp_path, github))
+
+    assert stack_attention(tmp_path) == {}

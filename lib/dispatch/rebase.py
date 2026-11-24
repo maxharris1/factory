@@ -7,6 +7,7 @@ import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, replace
 
+from lib.dispatch.constants import STACK_PARENT_CLOSED
 from lib.dispatch.decisions import Decision, record_decisions
 from lib.dispatch.helpers import (
     _base_mismatch,
@@ -33,7 +34,6 @@ from lib.queue import JobRequest
 from lib.update_check import StackUnbounded
 
 STACK_RETARGET_FAILED = "stack-retarget-failed"
-STACK_PARENT_CLOSED = "stack-parent-closed"
 LEAVES_MERGE_QUEUE = frozenset({"merge-queue", "waiting-external"})
 REBASE_FROM = (
     frozenset({"review", "fixing", "awaiting-ok", "capped", "handed-off"}) | LEAVES_MERGE_QUEUE
@@ -143,6 +143,8 @@ class RebaseMixin:
             if isinstance(facts, ParentClosed) and not (ticket.merged or ticket.closed):
                 self._hold_for_closed_parent(ticket, facts)
                 return ticket, True
+            if self._stack_parent_closed(ticket.repo, ticket.ticket_id):
+                self.clear_attention(ticket.repo, ticket.ticket_id, STACK_PARENT_CLOSED)
             ticket, queued = self._land_stack_parent(ticket, facts)
             queued = queued or self._queue_pending_stack_rebase(ticket)
         except StackUnbounded as exc:
@@ -159,6 +161,13 @@ class RebaseMixin:
             self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
             self._write_state_label(ticket, "fixing")
         return ticket, False
+
+    def _stack_parent_closed(self, repo: str, ticket_id: str) -> bool:
+        with self._connect() as connection:
+            return connection.execute(
+                "SELECT 1 FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason = ?",
+                (repo.lower(), ticket_id, STACK_PARENT_CLOSED),
+            ).fetchone() is not None
 
     def _hold_for_closed_parent(self, ticket: TrackedTicket, parent: ParentClosed) -> None:
         detail = f"stack parent PR #{parent.pr} closed without merging; the child waits for a person"
@@ -191,7 +200,6 @@ class RebaseMixin:
             return ticket, False
         proof = RetargetProof(self.stack_bounds(ticket.repo, head, facts.heads), head, facts.heads)
         self.clear_attention(ticket.repo, ticket.ticket_id, STACK_RETARGET_FAILED)
-        self.clear_attention(ticket.repo, ticket.ticket_id, STACK_PARENT_CLOSED)
         if ticket.pr_base != facts.into:
             self._review_actions(ticket).set_pull_base(ticket, facts.into)
         moved = _on_base(replace(ticket, pr_base=facts.into), facts.into)
