@@ -1007,7 +1007,9 @@ class JobsMixin:
             return
         if self._restored_failure_waits(job):
             return
-        if self._stack_parent_closed(job.request.repo, job.request.ticket_id):
+        if job.request.recipient != "grok" and self._stack_parent_closed(
+            job.request.repo, job.request.ticket_id
+        ):
             self._record_job_event_once(
                 job,
                 STACK_PARENT_CLOSED,

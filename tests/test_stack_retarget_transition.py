@@ -12,7 +12,14 @@ from lib.dispatch.types import CIResult, ParentClosed, ParentMerged, ParentOpen,
 from lib.intake_live import StackHeadsUnknown
 from lib.update_check import StackUnbounded
 from tests.merge_queue_support import sha
-from tests.test_dispatcher import READY, FakeReviewActions, FakeSource, comment
+from tests.test_dispatcher import (
+    READY,
+    FakeGrokDelivery,
+    FakeReviewActions,
+    FakeSource,
+    RaisingGrokDelivery,
+    comment,
+)
 from tests.test_ticket_base_branch import (
     CHILD_PR,
     FEATURE,
@@ -484,3 +491,31 @@ def test_a_reopened_parent_releases_the_hold(tmp_path: Path) -> None:
     dispatcher.process(polled_child(tmp_path, github))
 
     assert stack_attention(tmp_path) == {}
+
+
+def test_a_held_child_still_wakes_the_project_bot_after_a_delivery_outage(
+    tmp_path: Path,
+) -> None:
+    queue, github, dispatcher = wired(tmp_path)
+    now = [queue.now()]
+    queue.clock = lambda: now[0]
+    before = harness_jobs(queue)
+    close_parent(github)
+    dispatcher.grok_delivery = RaisingGrokDelivery(RuntimeError("delivery outage"))
+    dispatcher.process(polled_child(tmp_path, github))
+    wake = queue.outstanding()[0]
+    dispatcher.reconcile_jobs()
+    now[0] += wake.request.timeout_seconds
+    dispatcher.reconcile_jobs()
+
+    dispatcher.grok_delivery = FakeGrokDelivery()
+    for _ in range(3):
+        now[0] += 1
+        dispatcher.process(polled_child(tmp_path, github))
+        dispatcher.reconcile_jobs()
+
+    assert [job.request.action for job in dispatcher.grok_delivery.jobs] == [
+        "stack-parent-closed"
+    ]
+    assert harness_jobs(queue) == before
+    assert set(stack_attention(tmp_path)) == {"stack-parent-closed"}
