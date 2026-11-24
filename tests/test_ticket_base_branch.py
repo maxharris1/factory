@@ -16,15 +16,29 @@ from lib.dispatcher import (
     ShipError,
     ShipRequest,
     TicketRef,
+    TrackedTicket,
 )
 from lib.github_actions import LinearReviewActions
 from lib.orch_yml import Intake, load_orch_yml
-from lib.poll_source import LivePollSource
+from lib.poll_source import FedPulls, LivePollSource
 from lib.queue import SQLiteJobQueue
 from lib.waiter import GhContextSource
 from tests.merge_queue_support import Board, sha
 from tests.regenerate_brief_snapshots import BOX_FACTORY_ROOT
 from tests.test_brief import FACTORY_MD
+from tests.test_feeder import (
+    LINEAR_FACTORY_MD,
+    LINEAR_ORCH,
+    FakeGitHub,
+    FakeLinear,
+    dispatcher_for,
+    make_feeder,
+    rows,
+)
+from tests.test_feeder import issue as feeder_issue
+from tests.test_feeder_stack_parent import PARENT, stacked
+from tests.test_feeder_target import LINEAR_REPO as LINEAR_STACK_REPO
+from tests.test_feeder_target import linear_ticket, targeted
 from tests.test_dispatcher import (
     GO,
     READY,
@@ -495,3 +509,261 @@ def test_a_linear_handoff_whose_fresh_read_shows_another_base_writes_nothing() -
 
     assert gh.calls == []
     assert linear_writes == []
+
+
+STACK_REPO = "owner/app"
+PARENT_PR = 113
+CHILD_PR = 501
+
+
+class CountingGitHub(FakeGitHub):
+    def __init__(self) -> None:
+        super().__init__()
+        self.parent_reads: list[int] = []
+
+    def pull_state(self, repo: str, number: int) -> str:
+        self.parent_reads.append(number)
+        return super().pull_state(repo, number)
+
+
+def fed_child(tmp_path: Path, *, target: str | None = PARENT):
+    github = CountingGitHub()
+    github.branches[(STACK_REPO, PARENT)] = sha(2)
+    github.branch_commits[(STACK_REPO, PARENT)] = (sha(1), sha(2))
+    github.pulls[(STACK_REPO, PARENT_PR)] = {"head": PARENT, "base": "main", "title": "t", "body": ""}
+    feeder, queue, _, _ = make_feeder(tmp_path, github=github)
+    text = stacked(target, PARENT_PR) if target else targeted("")
+    github.issues[STACK_REPO] = [feeder_issue(7, body=text, template=False)]
+    assert len(feeder.feed_once().fed) == 1
+    github.parent_reads.clear()
+    return feeder, queue, github, dispatcher_for(tmp_path, queue, feeder=feeder)
+
+
+def merge_parent(github: FakeGitHub, *, into: str = "main") -> None:
+    github.pulls[(STACK_REPO, PARENT_PR)].update(merged=True, state="closed", base=into)
+    del github.branches[(STACK_REPO, PARENT)]
+
+
+def child_row(tmp_path: Path) -> dict:
+    return rows(tmp_path / "orch.db")["7"]
+
+
+def polled_child(tmp_path: Path, github: FakeGitHub) -> TrackedTicket:
+    return TrackedTicket(
+        repo=STACK_REPO,
+        ticket_id=str(CHILD_PR),
+        factory=replace(factory(), base_branch=child_row(tmp_path)["base_branch"]),
+        comments=tuple(github.comments(STACK_REPO, CHILD_PR)),
+        current_head=sha(3),
+        ci={},
+        risk="low",
+        pr_number=str(CHILD_PR),
+        pr_base=github.pulls[(STACK_REPO, CHILD_PR)]["base"],
+    )
+
+
+def stack_attention(tmp_path: Path) -> dict[str, str]:
+    with sqlite3.connect(tmp_path / "orch.db") as connection:
+        return dict(connection.execute("SELECT reason, detail FROM needs_attention").fetchall())
+
+
+def stack_poll_errors(tmp_path: Path) -> list[str]:
+    with sqlite3.connect(tmp_path / "orch.db") as connection:
+        return [row[0] for row in connection.execute("SELECT error FROM poll_errors")]
+
+
+def test_a_stacked_child_retargeted_after_its_parent_merged_runs_on_the_new_base(
+    tmp_path: Path,
+) -> None:
+    _, queue, github, dispatcher = fed_child(tmp_path)
+    assert child_row(tmp_path)["base_branch"] == PARENT
+    merge_parent(github)
+    github.pulls[(STACK_REPO, CHILD_PR)]["base"] = "main"
+
+    dispatcher.process(polled_child(tmp_path, github))
+
+    assert stack_attention(tmp_path) == {}
+    (job,) = queue.outstanding()
+    assert json.loads(job.request.detail)["base_branch"] == "main"
+    assert child_row(tmp_path)["base_branch"] == "main"
+    assert github.parent_reads == [PARENT_PR]
+
+    dispatcher.process(polled_child(tmp_path, github))
+
+    assert github.parent_reads == [PARENT_PR], "an accepted base costs no further parent reads"
+    assert stack_attention(tmp_path) == {}
+
+
+def test_an_earlier_base_mismatch_clears_once_the_retarget_is_accepted(tmp_path: Path) -> None:
+    _, queue, github, dispatcher = fed_child(tmp_path)
+    github.pulls[(STACK_REPO, CHILD_PR)]["base"] = "main"
+
+    dispatcher.process(polled_child(tmp_path, github))
+
+    assert set(stack_attention(tmp_path)) == {"base-mismatch"}
+    assert queue.outstanding() == ()
+
+    merge_parent(github)
+    dispatcher.process(polled_child(tmp_path, github))
+
+    assert stack_attention(tmp_path) == {}
+    assert [json.loads(job.request.detail)["base_branch"] for job in queue.outstanding()] == ["main"]
+
+
+def unaccepted(tmp_path: Path, github: FakeGitHub, queue, dispatcher, moved_to: str) -> None:
+    before = child_row(tmp_path)
+    github.pulls[(STACK_REPO, CHILD_PR)]["base"] = moved_to
+
+    dispatcher.process(polled_child(tmp_path, github))
+
+    recorded = before["base_branch"]
+    assert stack_attention(tmp_path) == {
+        "base-mismatch": f"PR #{CHILD_PR} targets {moved_to}; the ticket base is {recorded}"
+    }
+    assert queue.outstanding() == ()
+    assert child_row(tmp_path) == before
+
+
+def test_a_human_retarget_of_an_unstacked_pr_stays_base_mismatch_with_the_feeder_wired(
+    tmp_path: Path,
+) -> None:
+    _, queue, github, dispatcher = fed_child(tmp_path, target=None)
+    assert child_row(tmp_path)["stack_parent_pr"] is None
+    merge_parent(github)
+
+    unaccepted(tmp_path, github, queue, dispatcher, "release")
+
+    assert github.parent_reads == []
+    with queue.connect() as connection:
+        connection.execute(
+            "INSERT INTO tracked_tickets VALUES (?, ?, 'github', 0)", (STACK_REPO, str(CHILD_PR))
+        )
+
+    class Source:
+        def tracked_tickets(self, wanted):
+            return (polled_child(tmp_path, github),)
+
+    request = ShipRequest(STACK_REPO, str(CHILD_PR), HEAD, "max", "ok-1", "verdict-1")
+    with pytest.raises(ShipError, match=f"PR #{CHILD_PR} targets release; the ticket base is main"):
+        ReviewShipper(dispatcher, Source())._ticket(request)
+
+
+def test_a_stacked_child_moved_while_its_parent_is_open_stays_base_mismatch(tmp_path: Path) -> None:
+    _, queue, github, dispatcher = fed_child(tmp_path)
+
+    unaccepted(tmp_path, github, queue, dispatcher, "main")
+
+
+def test_a_child_moved_off_its_parents_merge_target_stays_base_mismatch(tmp_path: Path) -> None:
+    _, queue, github, dispatcher = fed_child(tmp_path)
+    merge_parent(github, into="release")
+
+    unaccepted(tmp_path, github, queue, dispatcher, "main")
+
+
+def test_an_unreadable_parent_stays_base_mismatch_and_records_the_error(tmp_path: Path) -> None:
+    _, queue, github, dispatcher = fed_child(tmp_path)
+    del github.pulls[(STACK_REPO, PARENT_PR)]
+
+    unaccepted(tmp_path, github, queue, dispatcher, "main")
+
+    assert stack_poll_errors(tmp_path) == ["KeyError"]
+
+
+def test_a_linear_child_takes_its_parents_merge_target(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    github.branches[(LINEAR_STACK_REPO, PARENT)] = sha(2)
+    github.branch_commits[(LINEAR_STACK_REPO, PARENT)] = (sha(1), sha(2))
+    github.pulls[(LINEAR_STACK_REPO, PARENT_PR)] = {"head": PARENT, "base": "dev", "title": "t", "body": ""}
+    linear = FakeLinear()
+    linear.issues = [linear_ticket(stacked(PARENT, PARENT_PR))]
+    feeder, _, _, _ = make_feeder(
+        tmp_path, orch=LINEAR_ORCH, github=github, linear=linear, factory_text=LINEAR_FACTORY_MD
+    )
+    assert len(feeder.feed_once().fed) == 1
+    github.pulls[(LINEAR_STACK_REPO, PARENT_PR)].update(merged=True, state="closed")
+    child = TrackedTicket(
+        repo=LINEAR_STACK_REPO, ticket_id="AUT-7",
+        factory=replace(factory(tickets="linear"), base_branch=PARENT),
+        comments=(), current_head=sha(3), ci={}, risk="low", pr_number=str(CHILD_PR), pr_base="dev",
+    )
+
+    assert feeder.accept_stack_retarget(child) == "dev"
+    assert feeder.accept_stack_retarget(child) is None
+    assert FedPulls(tmp_path / "orch.db").base(LINEAR_STACK_REPO, "AUT-7") == "dev"
+
+
+def github_poll(tmp_path: Path, number: int, *, factory_ref: str = "main") -> TrackedTicket:
+    base = config()
+    (project,) = base.projects
+    gh = FakeGh(FACTORY.format(tickets="github", ship="handoff").replace("main", factory_ref))
+    gh.pull = {"state": "open", "base": {"ref": "main"}, "head": {"ref": "x"}}
+    source = LivePollSource(
+        replace(base, projects=(replace(project, repo=STACK_REPO, factory_ref=factory_ref),)),
+        gh_runner=gh,
+        fed_pulls=FedPulls(tmp_path / "orch.db"),
+    )
+    source.begin_cycle()
+    (found,) = source.tracked_tickets((TicketRef(STACK_REPO, str(number), "github"),))
+    return found
+
+
+def test_a_github_ticket_fed_on_a_target_branch_polls_with_its_recorded_base(
+    tmp_path: Path,
+) -> None:
+    fed_child(tmp_path)
+
+    assert github_poll(tmp_path, CHILD_PR).factory.base_branch == PARENT
+
+
+def test_a_github_ticket_fed_on_the_project_base_polls_with_factory_ref(tmp_path: Path) -> None:
+    fed_child(tmp_path, target=None)
+
+    assert child_row(tmp_path)["base_branch"] == "main"
+    assert github_poll(tmp_path, CHILD_PR, factory_ref="dev").factory.base_branch == "dev"
+
+
+def retargeted_after(tmp_path: Path, github: FakeGitHub, dispatcher) -> None:
+    merge_parent(github)
+    github.pulls[(STACK_REPO, CHILD_PR)]["base"] = "main"
+    dispatcher.process(polled_child(tmp_path, github))
+    assert child_row(tmp_path)["base_branch"] == "main"
+    assert stack_attention(tmp_path) == {}
+
+
+def test_a_build_that_failed_before_the_retarget_retries_on_the_new_base(tmp_path: Path) -> None:
+    _, queue, github, dispatcher = fed_child(tmp_path)
+    dispatcher.process(polled_child(tmp_path, github))
+    failed = queue.claim("claude")
+    queue.finish(failed.id, owner="claude", handoff_comment_id=None)
+
+    retargeted_after(tmp_path, github, dispatcher)
+    dispatcher.reconcile_jobs()
+
+    retry = queue.claim("claude")
+    assert retry.request.attempt == 2
+    assert json.loads(retry.request.detail)["base_branch"] == "main"
+
+
+def test_a_build_queued_before_the_retarget_runs_on_the_new_base(tmp_path: Path) -> None:
+    _, queue, github, dispatcher = fed_child(tmp_path)
+    dispatcher.process(polled_child(tmp_path, github))
+
+    retargeted_after(tmp_path, github, dispatcher)
+
+    job = queue.claim("claude")
+    assert json.loads(job.request.detail)["base_branch"] == "main"
+
+
+def test_a_build_running_across_the_retarget_retries_on_the_new_base(tmp_path: Path) -> None:
+    _, queue, github, dispatcher = fed_child(tmp_path)
+    dispatcher.process(polled_child(tmp_path, github))
+    running = queue.claim("claude")
+
+    retargeted_after(tmp_path, github, dispatcher)
+    queue.finish(running.id, owner="claude", handoff_comment_id=None)
+    dispatcher.reconcile_jobs()
+
+    retry = queue.claim("claude")
+    assert retry.request.attempt == 2
+    assert json.loads(retry.request.detail)["base_branch"] == "main"

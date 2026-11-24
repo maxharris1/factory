@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from lib.dispatch.bookkeeping import LockLedger
@@ -312,6 +313,7 @@ class DispatcherBase:
     def _observed(self, fresh: TrackedTicket | None) -> TrackedTicket | None:
         if fresh is None:
             return None
+        fresh = self._retargeted(fresh)
         self._fresh_reads[(fresh.repo.lower(), fresh.ticket_id)] = fresh
         if fresh.merged:
             return fresh
@@ -324,6 +326,22 @@ class DispatcherBase:
             self._polled[(fresh.repo.lower(), fresh.ticket_id)] = fresh
             raise BaseMismatch(mismatch, fresh)
         return fresh
+
+    def _retargeted(self, ticket: TrackedTicket) -> TrackedTicket:
+        if self.feeder is None or _base_mismatch(ticket) is None:
+            return ticket
+        try:
+            base = self.feeder.accept_stack_retarget(ticket)
+        except Exception as exc:
+            self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
+            return ticket
+        if base is None:
+            return ticket
+        return replace(
+            ticket,
+            factory=replace(ticket.factory, base_branch=base),
+            factory_md=ticket.factory_md and replace(ticket.factory_md, base_branch=base),
+        )
 
     def _sync_base_mismatch(self, ticket: TrackedTicket) -> str | None:
         mismatch = _base_mismatch(ticket)

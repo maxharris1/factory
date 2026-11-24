@@ -541,6 +541,17 @@ class FedPulls:
     def base(self, repo: str, identifier: str) -> str | None:
         return self._read("base_branch", repo, identifier)
 
+    def ticket_base(self, repo: str, ticket_id: str) -> str | None:
+        columns = {row[1] for row in self._connection.execute(f"PRAGMA table_info({FEEDER_TABLE})")}
+        if "target_source" not in columns:
+            return None
+        row = self._connection.execute(
+            f"SELECT base_branch FROM {FEEDER_TABLE} "
+            "WHERE repo = ? AND ticket_id = ? AND target_source = 'ticket'",
+            (repo.lower(), ticket_id),
+        ).fetchone()
+        return None if row is None or row[0] is None else str(row[0])
+
     def stack_parent(self, repo: str, ticket_id: str) -> tuple[int, str] | None:
         if not {"stack_parent_pr", "stack_parent_branch"} <= self._columns():
             return None
@@ -2037,6 +2048,9 @@ class LivePollSource:
         probed: str | None = None,
         uncached: bool = False,
     ) -> TrackedTicket:
+        recorded = self.fed_pulls.ticket_base(project.repo, number)
+        if recorded is not None:
+            factory = replace(factory, base_branch=recorded)
         cache_key = ("github", project.repo.lower(), number)
         cached = None if fresh or uncached else self._ticket_cache.get(cache_key)
         if cached is not None:
