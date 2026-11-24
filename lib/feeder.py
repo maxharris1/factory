@@ -700,6 +700,10 @@ class GitHubIntake(Protocol):
         self, repo: str, *, branch: str, base: str, title: str, body: str
     ) -> int: ...
 
+    def pull_body(self, repo: str, number: int) -> str: ...
+
+    def set_pull_body(self, repo: str, number: int, body: str) -> None: ...
+
     def add_labels(self, repo: str, number: int, labels: Sequence[str]) -> None: ...
 
     def comments(self, repo: str, number: int) -> Sequence[Comment]: ...
@@ -2616,14 +2620,19 @@ class Feeder:
             if wait is not None:
                 raise _Held(wait)
         self._start_feed(candidate)
-        parent = self._stack_parent(candidate, row, repo, base, tips)
+        parent = self._stack_parent(row, repo, base, tips)
         risk = str(row["risk"])
         if risk not in ("low", "high"):
             raise ValueError(f"ticket risk {risk!r} is not low or high")
         template = candidate.template
         main_fix = is_main_fix(issue.labels)
         state = "building" if main_fix else go_state_for(issue.body, template.plan_first)
-        self._record(candidate, branch=branch, base_branch=base)
+        self._record(
+            candidate, branch=branch, base_branch=base,
+            stack_parent_pr=parent and parent.pr,
+            stack_parent_branch=parent and parent.branch,
+            stack_parent_head_at_feed=parent and parent.head,
+        )
         if number is None:
             if not branch_found:
                 start = self.github.create_start_commit(
@@ -2637,6 +2646,11 @@ class Feeder:
                 title=_pull_title(issue),
                 body=_pull_body(issue, parent),
             )
+        elif parent is not None:
+            body = self.github.pull_body(repo, number)
+            line = _stack_line(parent)
+            if line not in body:
+                self.github.set_pull_body(repo, number, "\n\n".join(filter(None, (body.rstrip(), line))))
         ticket_id = issue.key if issue.tracker == "linear" else str(number)
         self._record(candidate, pr_number=str(number), ticket_id=ticket_id)
         holds.alias(candidate.ref, github_ref(repo, number))
@@ -2686,9 +2700,11 @@ class Feeder:
         return TicketRef(repo, ticket_id, issue.tracker)
 
     def _stack_parent(
-        self, candidate: _Candidate, row: sqlite3.Row, repo: str, base: str, tips: dict[str, str]
+        self, row: sqlite3.Row, repo: str, base: str, tips: dict[str, str]
     ) -> StackParent | None:
-        if row["stack_parent_pr"] is not None:
+        if row["branch"] is not None:
+            if row["stack_parent_pr"] is None:
+                return None
             return StackParent(
                 int(row["stack_parent_pr"]), row["stack_parent_branch"], row["stack_parent_head_at_feed"]
             )
@@ -2700,9 +2716,6 @@ class Feeder:
         head = tips.get(base) or self.github.branch_sha(repo, base)
         if head is None:
             return None
-        self._record(
-            candidate, stack_parent_pr=number, stack_parent_branch=base, stack_parent_head_at_feed=head
-        )
         return StackParent(number, base, head)
 
     def _tracked_open_pull(self, repo: str, ticket_id: str | None) -> int | None:
@@ -2952,12 +2965,16 @@ def _pull_title(issue: IntakeIssue) -> str:
     return prefixed(_ticket_name(issue), " ".join(issue.title.split())[:180])
 
 
+def _stack_line(parent: StackParent) -> str:
+    return f"Stacked on #{parent.pr}. Merge #{parent.pr} first."
+
+
 def _pull_body(issue: IntakeIssue, parent: StackParent | None = None) -> str:
     lines = [f"Fixes {_ticket_name(issue)}", ""]
     if issue.url:
         lines.append(f"Ticket: {issue.url}")
     if parent is not None:
-        lines.append(f"Stacked on #{parent.pr}. Merge #{parent.pr} first.")
+        lines.append(_stack_line(parent))
     lines.append(
         "Opened by the factory feeder from the ticket's intake signal. The builder "
         "pushes the work here; the brief and go handoffs are on the ticket."

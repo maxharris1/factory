@@ -130,3 +130,43 @@ def test_a_child_targeting_the_default_branch_with_its_parents_commits_is_held(t
     assert row["state"] == "waiting-blocked"
     assert row["waiting_reason"] == f"waiting on #113 (branch {CHILD} carries its commits)"
     assert [wake["action"] for wake in grok_wakes(tmp_path)] == ["blocked"]
+
+
+def test_an_adopted_child_pr_keeps_its_body_and_names_its_parent(tmp_path: Path) -> None:
+    github = with_child_branch()
+    github.pulls[(HOME, 77)] = {"head": CHILD, "base": PARENT, "title": "child", "body": "Fixes #7\n\nNotes."}
+    feeder, _, _, _ = make_feeder(tmp_path, github=github)
+    github.issues[HOME] = [issue(7, body=targeted(f"Target branch: {PARENT}"), template=False)]
+
+    assert len(feeder.feed_once().fed) == 1
+
+    assert rows(tmp_path / "orch.db")["7"]["pr_number"] == "77"
+    body = github.pulls[(HOME, 77)]["body"]
+    assert body.startswith("Fixes #7\n\nNotes.")
+    assert body.count("Stacked on #113. Merge #113 first.") == 1
+
+
+def test_an_interrupted_freeze_classifies_the_parent_of_the_retried_target(tmp_path: Path) -> None:
+    github = with_parent(HOME)
+    feeder, _, _, _ = make_feeder(tmp_path, github=github)
+    github.issues[HOME] = [issue(7, body=targeted(f"Target branch: {PARENT}"), template=False)]
+    with feeder.queue.connect() as connection:
+        connection.execute(
+            "CREATE TRIGGER fail_branch BEFORE UPDATE OF branch ON feeder_items "
+            "BEGIN SELECT RAISE(FAIL, 'injected'); END"
+        )
+    assert feeder.feed_once().errors == 1
+    assert parent_columns(rows(tmp_path / "orch.db")["7"]) == (None, None, None)
+    with feeder.queue.connect() as connection:
+        connection.execute("DROP TRIGGER fail_branch")
+
+    other = "feature/other"
+    github.branches[(HOME, other)] = C
+    github.branch_commits[(HOME, other)] = (A, C)
+    github.pulls[(HOME, 114)] = {"head": other, "base": "main", "title": "t", "body": "", "draft": True}
+    github.issues[HOME] = [issue(7, body=targeted(f"Target branch: {other}"), template=False)]
+    assert len(feeder.feed_once().fed) == 1
+
+    assert parent_columns(rows(tmp_path / "orch.db")["7"]) == (114, other, C)
+    assert "Stacked on #114. Merge #114 first." in pull_on(github, CHILD)["body"]
+    assert f"(stacked on #114 at `{C}`)" in github.posted[(HOME, 501)][0].body

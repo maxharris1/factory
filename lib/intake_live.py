@@ -637,6 +637,21 @@ class GitHubIntakeClient(GitHubReviewActions):
             raise GitHubAdapterError("draft pull request was not confirmed")
         return number
 
+    def pull_body(self, repo: str, number: int) -> str:
+        pull = self._json(f"{_repo_path(repo)}/pulls/{int(number)}")
+        body = (pull.get("body") or "") if isinstance(pull, dict) else None
+        if not isinstance(body, str):
+            raise GitHubAdapterError("pull request body is not readable")
+        return body
+
+    def set_pull_body(self, repo: str, number: int, body: str) -> None:
+        made = self._json(
+            "-X", "PATCH", f"{_repo_path(repo)}/pulls/{int(number)}",
+            "-f", f"body={body}",
+        )
+        if not isinstance(made, dict) or made.get("number") != int(number):
+            raise GitHubAdapterError("pull request body update was not confirmed")
+
     def add_labels(self, repo: str, number: int, labels: Sequence[str]) -> None:
         args: list[str] = ["-X", "POST", f"{_repo_path(repo)}/issues/{int(number)}/labels"]
         for label in labels:
