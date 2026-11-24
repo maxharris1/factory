@@ -504,11 +504,18 @@ def test_cli_prints_metrics_beside_the_baseline(tmp_path: Path, capsys) -> None:
     assert "prs-capped 2 2\n" in out
 
 
-def test_cli_db_needs_a_baseline_and_excludes_input(tmp_path: Path, capsys) -> None:
+def test_cli_db_allows_optional_baseline_and_json_and_excludes_input(tmp_path: Path, capsys) -> None:
     db = _seeded(tmp_path)
-    assert cli.main(["eval-report", "--db", str(db)]) == 2
+    assert cli.main(["eval-report", "--db", str(db)]) == 0
+    single_out = capsys.readouterr().out
+    assert "metric current\n" in single_out
+    assert cli.main(["eval-report", "--db", str(db), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["metrics"]["prs-capped"] == 2
+    assert cli.main(["eval-report", "--db", str(db), "--baseline", str(db), "--json"]) == 0
+    both = json.loads(capsys.readouterr().out)
+    assert both["baseline"]["metrics"]["prs-capped"] == 2
     assert cli.main(["eval-report", "--db", str(db), "--baseline", str(db), "--input", "x"]) == 2
-    assert cli.main(["eval-report", "--db", str(db), "--baseline", str(db), "--json"]) == 2
     capsys.readouterr()
 
 
@@ -863,9 +870,21 @@ def test_an_empty_window_prints_zero_counts_and_no_ratio(seed, tmp_path: Path) -
     windowed = {name: values[name] for name in WINDOWED_METRICS}
     counts = {"submitted-invalid", "repeat-block-stops", "unsatisfiable-stops"}
     counts |= {"ci-fix-without-log", "verdicts-on-accepted-head", "hand-written-gos"}
+    counts |= {
+        "poll-errors", "stuck-jobs", "failed-jobs", "ci-reruns",
+        "max-interventions", "wasted-wakes", "productive-cost-usd", "wasted-cost-usd",
+    }
     for name, value in windowed.items():
         if name in counts:
-            assert value in (0, Unrecorded("no-feeder_items-table")), name
+            assert value in (
+                0,
+                0.0,
+                Unrecorded("no-feeder_items-table"),
+                Unrecorded("no-job_telemetry-table"),
+                Unrecorded("no-poll_errors-table"),
+                Unrecorded("no-ci_reruns-table"),
+                Unrecorded("no-driver_wakes-table"),
+            ), name
         else:
             assert value is NO_RATIO, name
     assert metrics.followups == ()

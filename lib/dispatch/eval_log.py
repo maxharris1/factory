@@ -9,6 +9,7 @@ lib.eval_report's.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,6 +56,19 @@ def _finish_batch(log: Path, offset: int, batch: list[bytes]) -> None:
         position += len(line)
     if done < len(batch):
         append_lines(log, batch[done:])
+
+
+_NON_TOKEN = re.compile(r"[^a-z0-9]+")
+
+
+def _handled_token(raw: str) -> str | None:
+    """Return a valid eval_report token for source_comment_id, sanitizing synthetic IDs with ':'."""
+    if not raw or raw == "-":
+        return None
+    if _TOKEN.fullmatch(raw) is not None:
+        return raw
+    cleaned = _NON_TOKEN.sub("-", raw.lower()).strip("-")
+    return cleaned if cleaned and _TOKEN.fullmatch(cleaned) is not None else None
 
 
 class EvalLogMixin:
@@ -162,9 +176,12 @@ class EvalLogMixin:
         prefix = self._run_prefix(at, row["repo"], row["ticket_id"])
         if prefix is None:
             return []
-        handled = str(row["source_comment_id"])
-        handled_field = f" handled={handled}" if _TOKEN.fullmatch(handled) else ""
-        return [_Line(at, f"{prefix} wake role=orchestrator reason={reason}{handled_field}")]
+        handled = _handled_token(str(row["source_comment_id"] or ""))
+        handled_field = f" handled={handled}" if handled is not None else ""
+        wasted_field = " wasted=yes" if reason == "qa-head-moved" else ""
+        return [
+            _Line(at, f"{prefix} wake role=orchestrator reason={reason}{wasted_field}{handled_field}")
+        ]
 
     def _comment_lines(self, root: Path, row: sqlite3.Row) -> list[_Line]:
         ticket = self._polled.get((str(row["repo"]).lower(), row["ticket_id"]))

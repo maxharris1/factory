@@ -173,6 +173,6 @@ def test_message_line_for_unknown_repo_is_refused(tmp_path: Path) -> None:
         build_report(root)
 
 
-def test_json_needs_input() -> None:
+def test_json_supports_db_and_reports_missing_db() -> None:
     result = orch(["eval-report", "--db", "x", "--baseline", "y", "--json"])
-    assert result.returncode == 2
+    assert result.returncode == 1

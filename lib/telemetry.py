@@ -1270,6 +1270,7 @@ class Summary:
         self.tests_failed: int | None = None
         self.tokens_in = 0
         self.tokens_cached = 0
+        self.tokens_cache_write = 0
         self.tokens_out = 0
         self.usage_seen = False
         self.cost_usd: float | None = None
@@ -1433,9 +1434,17 @@ class Summary:
         if "num_turns" in event:
             self.turns = _int(event.get("num_turns"))
         usage = event.get("usage")
-        totals = self._claude_models(event.get("modelUsage"))
-        if totals is None and isinstance(usage, dict):
+        models = event.get("modelUsage")
+        totals = self._claude_models(models)
+        if totals is not None:
+            self.tokens_cache_write = sum(
+                _int(item.get("cacheCreationInputTokens"))
+                for item in models.values()
+                if isinstance(item, dict)
+            )
+        elif isinstance(usage, dict):
             totals = self._claude_usage(usage)
+            self.tokens_cache_write = _int(usage.get("cache_creation_input_tokens"))
         if totals is not None:
             self.usage_seen = True
             self.tokens_in, self.tokens_cached, self.tokens_out = totals
@@ -1561,6 +1570,9 @@ class Summary:
             "skill_reads": None if self.skills is None else self.skills.row(),
             **(dict.fromkeys(LIVE_RUN_COLUMNS) if self.live is None else self.live.row(self.scrub)),
         }
+
+
+from lib.pricing import DEFAULT_PRICING, effective_cost_usd, estimate_cost_usd
 
 
 def exit_reason(code: int | None, cli_reason: str | None) -> str:

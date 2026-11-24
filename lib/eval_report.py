@@ -173,98 +173,37 @@ from lib.handoff import STATES, HandoffError, matching_head, parse_comment
 from lib.job_detail import load as load_job_detail
 from lib.load import Finding
 from lib.orch_yml import load_orch_yml
+from lib.pricing import effective_cost_usd
 from lib.schema import AUT0_REPO
 
 EventKind = Literal["enter", "comment", "wake", "end"]
 RiskName = Literal["low", "high"]
 
-# Section 4.1 edges, in the kebab-case names lib.handoff.STATES uses.
-# [*] is not a state. The two PostMerge --> Done arrows are one edge.
-CHART_TRANSITIONS = frozenset(
-    {
-        ("intake", "refused"),
-        ("intake", "questions"),
-        ("questions", "waiting-max"),
-        ("waiting-max", "questions"),
-        ("questions", "planning"),
-        ("questions", "building"),
-        ("planning", "plan-check"),
-        ("planning", "stuck"),
-        ("plan-check", "planning"),
-        ("plan-check", "building"),
-        ("plan-check", "stuck"),
-        ("plan-check", "waiting-max"),
-        ("plan-check", "abandoned"),
-        ("building", "review"),
-        ("building", "building"),
-        ("building", "stuck"),
-        ("building", "waiting-max"),
-        ("review", "fixing"),
-        ("fixing", "review"),
-        ("fixing", "ship"),
-        ("fixing", "fixing"),
-        ("fixing", "stuck"),
-        ("review", "capped"),
-        ("review", "blocked"),
-        ("blocked", "review"),
-        ("review", "ship"),
-        ("review", "stuck"),
-        ("ship", "review"),
-        ("ship", "merged"),
-        ("ship", "handed-off"),
-        ("ship", "waiting-external"),
-        ("ship", "awaiting-ok"),
-        ("ship", "waiting-max"),
-        ("waiting-max", "ship"),
-        ("awaiting-ok", "merged"),
-        ("awaiting-ok", "merge-queue"),
-        ("awaiting-ok", "handed-off"),
-        ("awaiting-ok", "review"),
-        ("awaiting-ok", "fixing"),
-        ("awaiting-ok", "capped"),
-        ("waiting-external", "merged"),
-        ("waiting-external", "fixing"),
-        ("waiting-external", "stuck"),
-        ("merged", "post-merge"),
-        ("merged", "done"),
-        ("post-merge", "done"),
-        ("fixing", "waiting-max"),
-        ("waiting-max", "building"),
-        ("waiting-max", "fixing"),
-        ("waiting-max", "abandoned"),
-        ("waiting-max", "handed-off"),
-        ("capped", "handed-off"),
-        ("blocked", "handed-off"),
-        ("waiting-external", "handed-off"),
-        ("stuck", "handed-off"),
-        ("review", "waiting-max"),
-        ("awaiting-ok", "waiting-max"),
-        ("waiting-max", "review"),
-        ("capped", "fixing"),
-        ("capped", "review"),
-        ("handed-off", "review"),
-        ("handed-off", "fixing"),
-        ("handed-off", "merged"),
-        ("ship", "merge-queue"),
-        ("merge-queue", "merged"),
-        ("merge-queue", "updating"),
-        ("merge-queue", "planning"),
-        ("merge-queue", "building"),
-        ("merge-queue", "review"),
-        ("merge-queue", "fixing"),
-        ("merge-queue", "abandoned"),
-        ("updating", "merge-queue"),
-        ("updating", "review"),
-        ("updating", "stuck"),
-        ("capped", "handed-off-externally"),
-        ("stuck", "handed-off-externally"),
-        ("handed-off-externally", "capped"),
-        ("handed-off-externally", "stuck"),
-        ("handed-off-externally", "merged"),
-        ("handed-off-externally", "done"),
-        ("handed-off-externally", "abandoned"),
-    }
-)
+_CHART_PATH = Path(__file__).resolve().parent.parent / "model" / "chart.mmd"
+_MMD_NODE = re.compile(r"^\s*(s\d+):\s*([a-z0-9-]+)\s*$")
+_MMD_EDGE = re.compile(r"^\s*(s\d+)\s*-->\s*(s\d+)\s*(?::.*)?$")
+
+
+def load_chart_transitions(path: Path = _CHART_PATH) -> frozenset[tuple[str, str]]:
+    """Parse allowed (from_state, to_state) transitions directly from model/chart.mmd."""
+    nodes: dict[str, str] = {}
+    edges: set[tuple[str, str]] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        node = _MMD_NODE.match(line)
+        if node is not None:
+            nodes[node.group(1)] = node.group(2)
+            continue
+        edge = _MMD_EDGE.match(line)
+        if edge is not None:
+            src, dst = edge.group(1), edge.group(2)
+            if src in nodes and dst in nodes:
+                edges.add((nodes[src], nodes[dst]))
+    return frozenset(edges)
+
+
+# Parsed directly from model/chart.mmd so chart validation never drifts from the model.
+# Minimal checkouts (e.g. self-deploy fixtures copying only bin/ and lib/) skip cleanly.
+CHART_TRANSITIONS = load_chart_transitions() if _CHART_PATH.exists() else frozenset()
 
 _TIME = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 _KEY = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -1206,6 +1145,18 @@ _STOP_NAMES = (
     "repeat-block-stops",
     "unsatisfiable-stops",
 )
+_OPERATIONAL_METRICS = (
+    "poll-errors",
+    "stuck-jobs",
+    "failed-jobs",
+    "ci-reruns",
+    "cycle-time-p50-hours",
+    "cycle-time-p90-hours",
+    "max-interventions",
+    "wasted-wakes",
+    "productive-cost-usd",
+    "wasted-cost-usd",
+)
 WINDOWED_METRICS = (
     *_STOP_NAMES,
     "approved-by-round-2-share",
@@ -1215,6 +1166,7 @@ WINDOWED_METRICS = (
     "first-round-approve-rate-lines-unknown",
     "ci-fix-without-log",
     "verdicts-on-accepted-head",
+    *_OPERATIONAL_METRICS,
 )
 
 
@@ -1255,16 +1207,19 @@ def build_metrics(db: Path, *, since: str | None = None, until: str | None = Non
         connection.close()
 
 
-def render_metrics(current: Metrics, baseline: Metrics) -> str:
-    base = dict(baseline.values)
+def render_metrics(current: Metrics, baseline: Metrics | None = None) -> str:
+    base = dict(baseline.values) if baseline is not None else None
     lines = [
         "eval metrics",
         current.window.text(),
         f"windowed {' '.join(WINDOWED_METRICS)}",
-        "metric current baseline",
+        "metric current baseline" if base is not None else "metric current",
     ]
     for name, value in current.values:
-        lines.append(f"{name} {_metric_text(value)} {_metric_text(base[name])}")
+        if base is not None:
+            lines.append(f"{name} {_metric_text(value)} {_metric_text(base[name])}")
+        else:
+            lines.append(f"{name} {_metric_text(value)}")
     lines.append("merged PRs with follow-ups")
     if isinstance(current.followups, Unrecorded):
         lines.append(_metric_text(current.followups))
@@ -1273,6 +1228,67 @@ def render_metrics(current: Metrics, baseline: Metrics) -> str:
         if not current.followups:
             lines.append("none")
     return "\n".join(lines) + "\n"
+
+
+def _metric_json_value(value: MetricValue) -> object:
+    if isinstance(value, Unrecorded):
+        return {"unrecorded": value.reason}
+    if isinstance(value, NoRatio):
+        return None
+    if isinstance(value, float):
+        return round(value, 4)
+    return value
+
+
+def _metrics_payload(metrics: Metrics) -> dict[str, object]:
+    qa_payload: object
+    if isinstance(metrics.qa, Unrecorded):
+        qa_payload = {"unrecorded": metrics.qa.reason}
+    else:
+        qa_payload = {
+            "runners": [
+                {
+                    "name": r.name,
+                    "runs": dict(zip(QA_SCOPES, r.runs)),
+                    "results": dict(zip(QA_RESULTS, r.results)),
+                    "median_minutes": _metric_json_value(r.median_minutes),
+                    "fail_on_approved": _metric_json_value(r.fail_on_approved),
+                    "wrong_fail": r.wrong_fail,
+                    "wrong_pass": r.wrong_pass,
+                }
+                for r in metrics.qa.runners
+            ],
+            "agreed": metrics.qa.agreed,
+            "disagreed": [asdict(row) for row in metrics.qa.disagreed],
+        }
+    return {
+        "window": {
+            "since": None
+            if metrics.window.since is None
+            else _format_time(datetime.fromtimestamp(metrics.window.since, timezone.utc)),
+            "until": None
+            if metrics.window.until is None
+            else _format_time(datetime.fromtimestamp(metrics.window.until, timezone.utc)),
+        },
+        "windowed_metrics": list(WINDOWED_METRICS),
+        "metrics": {name: _metric_json_value(val) for name, val in metrics.values},
+        "followups": (
+            {"unrecorded": metrics.followups.reason}
+            if isinstance(metrics.followups, Unrecorded)
+            else [
+                {"repo": repo, "ticket_id": ticket_id, "url": url}
+                for repo, ticket_id, url in metrics.followups
+            ]
+        ),
+        "qa": qa_payload,
+    }
+
+
+def render_metrics_json(current: Metrics, baseline: Metrics | None = None) -> str:
+    payload = _metrics_payload(current)
+    if baseline is not None:
+        payload["baseline"] = _metrics_payload(baseline)
+    return json.dumps(payload, indent=2) + "\n"
 
 
 def render_qa(metrics: Metrics) -> str:
@@ -1326,8 +1342,22 @@ def _metric_values(
     tables: set[str],
     window: MetricWindow,
 ) -> tuple[tuple[str, MetricValue], ...]:
-    values: list[tuple[str, MetricValue]] = list(_review_metrics(connection, tables))
-    values.append(("prs-capped", _capped(connection, tables)))
+    review_values = _review_metrics(connection, tables)
+    values: list[tuple[str, MetricValue]] = list(review_values)
+    capped = _capped(connection, tables)
+    reviewed = dict(review_values).get("prs-reviewed")
+    cap_rate: MetricValue
+    if isinstance(capped, Unrecorded):
+        cap_rate = capped
+    elif isinstance(reviewed, Unrecorded):
+        cap_rate = reviewed
+    elif isinstance(capped, int) and isinstance(reviewed, int):
+        cap_rate = _ratio(capped, reviewed)
+    else:
+        cap_rate = NO_RATIO
+    values.append(("prs-capped", capped))
+    values.append(("cap-rate", cap_rate))
+    dirty_clause, dirty_bounds = window.sql("created_at")
     values.append(
         (
             "prs-dirty-after-approval",
@@ -1336,7 +1366,8 @@ def _metric_values(
                 tables,
                 ("jobs",),
                 "SELECT COUNT(*) FROM (SELECT DISTINCT lower(repo), ticket_id FROM jobs "
-                "WHERE action = 'update-from-main')",
+                f"WHERE action = 'update-from-main' AND {dirty_clause})",
+                dirty_bounds,
             ),
         )
     )
@@ -1386,20 +1417,23 @@ def _metric_values(
             ),
         )
     )
-    values.extend(_skill_read_metrics(connection, tables))
-    values.extend(_token_metrics(connection, tables))
-    values.extend(_tool_metrics(connection, tables))
-    values.append(("preflight-failures", _preflight_failures(connection, tables)))
+    values.extend(_skill_read_metrics(connection, tables, window))
+    values.extend(_token_metrics(connection, tables, window))
+    values.extend(_tool_metrics(connection, tables, window))
+    values.append(("preflight-failures", _preflight_failures(connection, tables, window)))
+    lost_clause, lost_bounds = window.sql("j.created_at")
     lost = _scalar(
         connection,
         tables,
         ("jobs", "job_telemetry"),
         "SELECT COALESCE(SUM(t.elapsed_seconds), 0) FROM job_telemetry t "
-        "JOIN jobs j ON j.id = t.job_id WHERE j.state IN ('failed', 'cancelled')",
+        f"JOIN jobs j ON j.id = t.job_id WHERE j.state IN ('failed', 'cancelled') AND {lost_clause}",
+        lost_bounds,
     )
     values.append(("slot-hours-lost", lost if isinstance(lost, Unrecorded) else lost / 3600))
     values.extend(_stop_metrics(connection, tables, window))
     values.extend(_loop_metrics(connection, tables, window))
+    values.extend(_operational_metrics(connection, tables, window))
     return tuple(values)
 
 
@@ -1597,7 +1631,11 @@ def _loop_metrics(
     measures["ci-fix-without-log"] = (
         _ci_fixes_without_log(connection, window) if "jobs" in tables else _missing("jobs")
     )
-    return [(name, measures[name]) for name in WINDOWED_METRICS if name not in _STOP_NAMES]
+    return [
+        (name, measures[name])
+        for name in WINDOWED_METRICS
+        if name not in _STOP_NAMES and name not in _OPERATIONAL_METRICS
+    ]
 
 
 def _verdict_measures(
@@ -1608,7 +1646,9 @@ def _verdict_measures(
     names = [
         name
         for name in WINDOWED_METRICS
-        if name not in _STOP_NAMES and name != "ci-fix-without-log"
+        if name not in _STOP_NAMES
+        and name not in _OPERATIONAL_METRICS
+        and name != "ci-fix-without-log"
     ]
     for table in ("verdict_heads", "review_events", "ship_intents", "jobs", "ticket_transitions"):
         if table not in tables:
@@ -1806,13 +1846,17 @@ def _followups(
     )
 
 
-def _preflight_failures(connection: sqlite3.Connection, tables: set[str]) -> MetricValue:
+def _preflight_failures(
+    connection: sqlite3.Connection, tables: set[str], window: MetricWindow = MetricWindow()
+) -> MetricValue:
     if "job_events" not in tables:
         return _missing("job_events")
+    clause, bounds = window.sql("recorded_at")
     return sum(
         1
         for (detail,) in connection.execute(
-            "SELECT detail FROM job_events WHERE event = 'requeued-unstarted'"
+            f"SELECT detail FROM job_events WHERE event = 'requeued-unstarted' AND {clause}",
+            bounds,
         )
         if PREFLIGHT_FAILURE.match(str(detail or ""))
     )
@@ -1837,6 +1881,7 @@ def _capped(connection: sqlite3.Connection, tables: set[str]) -> MetricValue:
 def _skill_read_metrics(
     connection: sqlite3.Connection,
     tables: set[str],
+    window: MetricWindow = MetricWindow(),
 ) -> list[tuple[str, MetricValue]]:
     names = [f"{metric}-{kind}" for kind in SKILL_KINDS for metric in SKILL_METRICS]
     for table in ("job_telemetry", "jobs"):
@@ -1846,12 +1891,13 @@ def _skill_read_metrics(
         return [(name, Unrecorded("no-skill_reads-column")) for name in names]
     recorded: dict[str, list[frozenset[str]]] = {kind: [] for kind in SKILL_KINDS}
     unrecorded = dict.fromkeys(SKILL_KINDS, 0)
+    clause, bounds = window.sql("j.created_at")
     for action, detail, raw in connection.execute(
         "SELECT j.action, j.detail, t.skill_reads FROM jobs j "
         "LEFT JOIN job_telemetry t ON t.job_id = j.id "
         "WHERE j.state IN ('done', 'failed') "
-        f"AND j.action IN ({', '.join('?' * len(SKILL_KINDS))})",
-        SKILL_KINDS,
+        f"AND j.action IN ({', '.join('?' * len(SKILL_KINDS))}) AND {clause}",
+        (*SKILL_KINDS, *bounds),
     ):
         if _merge_only(detail):
             continue
@@ -1878,6 +1924,7 @@ def _skill_read_metrics(
 def _token_metrics(
     connection: sqlite3.Connection,
     tables: set[str],
+    window: MetricWindow = MetricWindow(),
 ) -> list[tuple[str, MetricValue]]:
     names = [f"{metric}-{kind}" for kind in SKILL_KINDS for metric in TOKEN_METRICS]
     for table in ("job_telemetry", "jobs"):
@@ -1888,6 +1935,7 @@ def _token_metrics(
     sums = {kind: [0, 0, 0] for kind in SKILL_KINDS}
     measured = dict.fromkeys(SKILL_KINDS, 0)
     unmeasured = dict.fromkeys(SKILL_KINDS, 0)
+    clause, bounds = window.sql("j.created_at")
     for action, detail, unknown, *tokens in connection.execute(
         "SELECT j.action, j.detail, CASE WHEN t.job_id IS NULL THEN 1 "
         "WHEN t.tokens_unknown IS NULL THEN "
@@ -1897,8 +1945,8 @@ def _token_metrics(
         "COALESCE(t.tokens_out, 0) FROM jobs j "
         "LEFT JOIN job_telemetry t ON t.job_id = j.id "
         "WHERE j.state IN ('done', 'failed') "
-        f"AND j.action IN ({', '.join('?' * len(SKILL_KINDS))})",
-        SKILL_KINDS,
+        f"AND j.action IN ({', '.join('?' * len(SKILL_KINDS))}) AND {clause}",
+        (*SKILL_KINDS, *bounds),
     ):
         if _merge_only(detail):
             continue
@@ -1936,13 +1984,16 @@ def _skill_files(raw: object) -> frozenset[str] | None:
 def _tool_metrics(
     connection: sqlite3.Connection,
     tables: set[str],
+    window: MetricWindow = MetricWindow(),
 ) -> list[tuple[str, MetricValue]]:
     names = ("helpers-per-job", "helpers-per-job-max")
     if "job_telemetry" not in tables:
         return [(name, _missing("job_telemetry")) for name in names]
+    clause, bounds = window.sql("started_at")
     helpers: list[int] = []
     for (raw,) in connection.execute(
-        "SELECT tool_calls FROM job_telemetry WHERE harness = 'claude'"
+        f"SELECT tool_calls FROM job_telemetry WHERE harness = 'claude' AND {clause}",
+        bounds,
     ):
         try:
             counts = json.loads(raw)
@@ -1956,6 +2007,163 @@ def _tool_metrics(
     return [
         ("helpers-per-job", sum(helpers) / len(helpers)),
         ("helpers-per-job-max", max(helpers)),
+    ]
+
+
+def _percentile(values: list[float], pct: float) -> float | NoRatio:
+    if not values:
+        return NO_RATIO
+    ordered = sorted(values)
+    index = (len(ordered) - 1) * pct
+    low = int(index)
+    high = min(low + 1, len(ordered) - 1)
+    weight = index - low
+    return ordered[low] * (1.0 - weight) + ordered[high] * weight
+
+
+def _cycle_times(
+    connection: sqlite3.Connection, tables: set[str], window: MetricWindow
+) -> tuple[MetricValue, MetricValue]:
+    if "ticket_transitions" not in tables:
+        missing = _missing("ticket_transitions")
+        return missing, missing
+    first_at: dict[tuple[str, str], float] = {}
+    finished_at: dict[tuple[str, str], float] = {}
+    for repo, ticket_id, to_state, at in connection.execute(
+        "SELECT lower(repo), ticket_id, to_state, at FROM ticket_transitions ORDER BY at, id"
+    ):
+        key = (str(repo), str(ticket_id))
+        ts = float(at)
+        first_at.setdefault(key, ts)
+        if to_state in ("merged", "done") or (key[0] == AUT0_REPO and to_state == "handed-off"):
+            if key not in finished_at:
+                finished_at[key] = ts
+    hours = [
+        max(0.0, (end - first_at[key]) / 3600.0)
+        for key, end in finished_at.items()
+        if window.contains(end) and key in first_at
+    ]
+    return _percentile(hours, 0.50), _percentile(hours, 0.90)
+
+
+def _wasted_wakes(
+    connection: sqlite3.Connection, tables: set[str], window: MetricWindow
+) -> MetricValue:
+    if "jobs" not in tables:
+        return _missing("jobs")
+    seen: set[tuple[str, str, str]] = set()
+    wasted = 0
+    for repo, ticket_id, action, source_id, created_at in connection.execute(
+        "SELECT lower(repo), ticket_id, action, source_comment_id, created_at "
+        "FROM jobs WHERE recipient = 'grok' ORDER BY created_at, rowid"
+    ):
+        in_window = window.contains(float(created_at))
+        if action == "qa-head-moved":
+            if in_window:
+                wasted += 1
+            continue
+        source = str(source_id or "")
+        if source and source != "-":
+            key = (str(repo), str(ticket_id), source)
+            if key in seen:
+                if in_window:
+                    wasted += 1
+            else:
+                seen.add(key)
+    return wasted
+
+
+def _spend_split(
+    connection: sqlite3.Connection, tables: set[str], window: MetricWindow
+) -> tuple[MetricValue, MetricValue]:
+    for table in ("jobs", "job_telemetry"):
+        if table not in tables:
+            missing = _missing(table)
+            return missing, missing
+    clause, bounds = window.sql("j.created_at")
+    productive = 0.0
+    wasted = 0.0
+    for state, harness, cost_usd, t_in, t_cached, t_out in connection.execute(
+        "SELECT j.state, t.harness, t.cost_usd, t.tokens_in, t.tokens_cached, t.tokens_out "
+        "FROM job_telemetry t JOIN jobs j ON j.id = t.job_id "
+        f"WHERE {clause}",
+        bounds,
+    ):
+        eff = effective_cost_usd(
+            str(harness or ""),
+            cost_usd,
+            tokens_in=_count(t_in),
+            tokens_cached=_count(t_cached),
+            tokens_out=_count(t_out),
+        )
+        if eff is None:
+            continue
+        if state in ("failed", "cancelled"):
+            wasted += eff
+        else:
+            productive += eff
+    return round(productive, 4), round(wasted, 4)
+
+
+def _operational_metrics(
+    connection: sqlite3.Connection, tables: set[str], window: MetricWindow
+) -> list[tuple[str, MetricValue]]:
+    pe_clause, pe_bounds = window.sql("recorded_at")
+    poll_errors = _scalar(
+        connection,
+        tables,
+        ("poll_errors",),
+        f"SELECT COUNT(*) FROM poll_errors WHERE {pe_clause}",
+        pe_bounds,
+    )
+    st_clause, st_bounds = window.sql("at")
+    stuck_jobs = _scalar(
+        connection,
+        tables,
+        ("ticket_transitions",),
+        f"SELECT COUNT(*) FROM ticket_transitions WHERE to_state = 'stuck' AND {st_clause}",
+        st_bounds,
+    )
+    fj_clause, fj_bounds = window.sql("created_at")
+    failed_jobs = _scalar(
+        connection,
+        tables,
+        ("jobs",),
+        f"SELECT COUNT(*) FROM jobs WHERE state = 'failed' AND {fj_clause}",
+        fj_bounds,
+    )
+    cr_clause, cr_bounds = window.sql("requested_at")
+    ci_reruns = _scalar(
+        connection,
+        tables,
+        ("ci_reruns",),
+        f"SELECT COUNT(*) FROM ci_reruns WHERE {cr_clause}",
+        cr_bounds,
+    )
+    p50, p90 = _cycle_times(connection, tables, window)
+    max_interventions = _handled_count(
+        connection,
+        tables,
+        window,
+        "handled_comments",
+        "(s.outcome LIKE 'ok-%' OR s.outcome LIKE 'slash-go-%' OR s.outcome LIKE 'resumed-%' "
+        "OR s.outcome LIKE 'queued-retry-%' OR s.outcome LIKE 'qa-ruling-%' "
+        "OR s.outcome IN ('abandoned', 'handed-off', 'cleared-hold'))",
+        (),
+    )
+    wasted_wakes = _wasted_wakes(connection, tables, window)
+    productive_cost, wasted_cost = _spend_split(connection, tables, window)
+    return [
+        ("poll-errors", poll_errors),
+        ("stuck-jobs", stuck_jobs),
+        ("failed-jobs", failed_jobs),
+        ("ci-reruns", ci_reruns),
+        ("cycle-time-p50-hours", p50),
+        ("cycle-time-p90-hours", p90),
+        ("max-interventions", max_interventions),
+        ("wasted-wakes", wasted_wakes),
+        ("productive-cost-usd", productive_cost),
+        ("wasted-cost-usd", wasted_cost),
     ]
 
 
