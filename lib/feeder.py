@@ -314,6 +314,7 @@ _COLUMNS = (
     ("stack_parent_pr", "INTEGER"),
     ("stack_parent_branch", "TEXT"),
     ("stack_parent_head_at_feed", "TEXT"),
+    ("stack_onto", "TEXT"),
 )
 ORCHESTRATOR = "grok-bot"
 FACTORY_LABEL = "factory"
@@ -2917,50 +2918,56 @@ class Feeder:
         )
         return None if wait is not None else base
 
-    def accept_stack_retarget(self, ticket: TrackedTicket) -> str | None:
-        key = (ticket.repo.lower(), ticket.ticket_id)
-        with self.queue.connect() as connection:
-            row = connection.execute(
-                f"SELECT base_branch, stack_parent_pr, stack_parent_branch FROM {FEEDER_TABLE} "
-                "WHERE repo = ? AND ticket_id = ?",
-                key,
-            ).fetchone()
-        if row is None or row[1] is None or row[0] != row[2]:
-            return None
-        recorded, parent = row[0], int(row[1])
-        moved = ticket.pr_base
-        if moved is None or moved == recorded:
-            return None
-        if self.github.pull_state(ticket.repo, parent) != "merged":
-            return None
-        if self.github.pull_base(ticket.repo, parent) != moved:
-            return None
-        with self.queue.connect() as connection:
-            connection.execute(
-                f"UPDATE {FEEDER_TABLE} SET base_branch = ? "
-                "WHERE repo = ? AND ticket_id = ? AND base_branch = ?",
-                (moved, *key, recorded),
-            )
-            self.queue.retarget_details(connection, *key, recorded, moved)
-        self.log(
-            f"feeder: {ticket.repo}#{ticket.ticket_id} moved from {recorded} to {moved}"
-            f" after #{parent} merged into it; recorded {moved} as its base"
-        )
-        return moved
-
     def stack_parent_facts(self, ticket: TrackedTicket) -> ParentFacts | None:
         with self.queue.connect() as connection:
             row = connection.execute(
-                f"SELECT stack_parent_pr, stack_parent_head_at_feed FROM {FEEDER_TABLE} "
-                "WHERE repo = ? AND ticket_id = ?",
+                f"SELECT stack_parent_pr, stack_parent_head_at_feed, base_branch, stack_parent_branch "
+                f"FROM {FEEDER_TABLE} WHERE repo = ? AND ticket_id = ?",
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchone()
-        if row is None or row[0] is None:
+        if row is None or row[0] is None or row[2] != row[3]:
             return None
         facts = self.github.pull_landing(ticket.repo, int(row[0]))
         if not isinstance(facts, ParentMerged):
             return facts
         return replace(facts, heads=tuple(dict.fromkeys((row[1], *facts.heads))))
+
+    def move_stack_base(
+        self, connection: sqlite3.Connection, ticket: TrackedTicket, base: str, onto_from: str
+    ) -> bool:
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        row = connection.execute(
+            f"SELECT base_branch, stack_parent_pr FROM {FEEDER_TABLE} "
+            "WHERE repo = ? AND ticket_id = ? AND base_branch = stack_parent_branch",
+            key,
+        ).fetchone()
+        if row is None or row[1] is None:
+            return False
+        recorded = row[0]
+        connection.execute(
+            f"UPDATE {FEEDER_TABLE} SET base_branch = ?, stack_onto = ? "
+            "WHERE repo = ? AND ticket_id = ? AND base_branch = ?",
+            (base, onto_from, *key, recorded),
+        )
+        self.queue.retarget_details(connection, *key, recorded, base)
+        self.log(
+            f"feeder: {ticket.repo}#{ticket.ticket_id} moved from {recorded} to {base}"
+            f" after #{row[1]} merged into it; recorded {base} as its base"
+        )
+        return True
+
+    def stack_onto(self, connection: sqlite3.Connection, ticket: TrackedTicket) -> str | None:
+        row = connection.execute(
+            f"SELECT stack_onto FROM {FEEDER_TABLE} WHERE repo = ? AND ticket_id = ?",
+            (ticket.repo.lower(), ticket.ticket_id),
+        ).fetchone()
+        return None if row is None else row[0]
+
+    def clear_stack_onto(self, connection: sqlite3.Connection, ticket: TrackedTicket) -> None:
+        connection.execute(
+            f"UPDATE {FEEDER_TABLE} SET stack_onto = NULL WHERE repo = ? AND ticket_id = ?",
+            (ticket.repo.lower(), ticket.ticket_id),
+        )
 
     def _pull_base(self, repo: str, ticket_id: str, recorded: str, number: int, head: str) -> str:
         base = self.github.pull_base(repo, number)

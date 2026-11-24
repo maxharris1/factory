@@ -522,26 +522,31 @@ class CountingGitHub(FakeGitHub):
         super().__init__()
         self.parent_reads: list[int] = []
 
-    def pull_state(self, repo: str, number: int) -> str:
+    def pull_landing(self, repo: str, number: int):
         self.parent_reads.append(number)
-        return super().pull_state(repo, number)
+        return super().pull_landing(repo, number)
 
 
-def fed_child(tmp_path: Path, *, target: str | None = PARENT):
+def fed_child(tmp_path: Path, *, target: str | None = PARENT, text: str | None = None):
     github = CountingGitHub()
     github.branches[(STACK_REPO, PARENT)] = sha(2)
     github.branch_commits[(STACK_REPO, PARENT)] = (sha(1), sha(2))
+    github.branches[(STACK_REPO, FEATURE)] = sha(6)
     github.pulls[(STACK_REPO, PARENT_PR)] = {"head": PARENT, "base": "main", "title": "t", "body": ""}
+    github.landings[(STACK_REPO, PARENT_PR)] = ParentOpen()
     feeder, queue, _, _ = make_feeder(tmp_path, github=github)
-    text = stacked(target, PARENT_PR) if target else targeted("")
+    text = text or (stacked(target, PARENT_PR) if target else targeted(""))
     github.issues[STACK_REPO] = [feeder_issue(7, body=text, template=False)]
     assert len(feeder.feed_once().fed) == 1
     github.parent_reads.clear()
-    return feeder, queue, github, dispatcher_for(tmp_path, queue, feeder=feeder)
+    dispatcher = dispatcher_for(tmp_path, queue, feeder=feeder)
+    dispatcher.stack_bounds = lambda repo, old_head, parent_heads: sha(9)
+    return feeder, queue, github, dispatcher
 
 
 def merge_parent(github: FakeGitHub, *, into: str = "main") -> None:
     github.pulls[(STACK_REPO, PARENT_PR)].update(merged=True, state="closed", base=into)
+    github.landings[(STACK_REPO, PARENT_PR)] = ParentMerged(into=into, heads=(sha(2),))
     del github.branches[(STACK_REPO, PARENT)]
 
 
@@ -664,7 +669,7 @@ def test_a_child_moved_off_its_parents_merge_target_stays_base_mismatch(tmp_path
 
 def test_an_unreadable_parent_stays_base_mismatch_and_records_the_error(tmp_path: Path) -> None:
     _, queue, github, dispatcher = fed_child(tmp_path)
-    del github.pulls[(STACK_REPO, PARENT_PR)]
+    del github.landings[(STACK_REPO, PARENT_PR)]
 
     unaccepted(tmp_path, github, queue, dispatcher, "main")
 
@@ -705,16 +710,20 @@ def test_a_linear_child_takes_its_parents_merge_target(tmp_path: Path) -> None:
         tmp_path, orch=LINEAR_ORCH, github=github, linear=linear, factory_text=LINEAR_FACTORY_MD
     )
     assert len(feeder.feed_once().fed) == 1
-    github.pulls[(LINEAR_STACK_REPO, PARENT_PR)].update(merged=True, state="closed")
+    github.landings[(LINEAR_STACK_REPO, PARENT_PR)] = ParentMerged(into="dev", heads=(sha(4),))
     child = TrackedTicket(
         repo=LINEAR_STACK_REPO, ticket_id="AUT-7",
         factory=replace(factory(tickets="linear"), base_branch=PARENT),
         comments=(), current_head=sha(3), ci={}, risk="low", pr_number=str(CHILD_PR), pr_base="dev",
     )
 
-    assert feeder.accept_stack_retarget(child) == "dev"
-    assert feeder.accept_stack_retarget(child) is None
+    assert feeder.stack_parent_facts(child) == ParentMerged(into="dev", heads=(sha(2), sha(4)))
+    with sqlite3.connect(tmp_path / "orch.db") as connection:
+        assert feeder.move_stack_base(connection, child, "dev", sha(9))
+        assert not feeder.move_stack_base(connection, child, "dev", sha(9))
+        assert feeder.stack_onto(connection, child) == sha(9)
     assert FedPulls(tmp_path / "orch.db").base(LINEAR_STACK_REPO, "AUT-7") == "dev"
+    assert feeder.stack_parent_facts(child) is None
 
 
 def github_poll(tmp_path: Path, number: int, *, factory_ref: str = "main") -> TrackedTicket:

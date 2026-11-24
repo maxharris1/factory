@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import replace
 from pathlib import Path
 
 from lib.dispatch.bookkeeping import LockLedger
@@ -48,6 +47,7 @@ from lib.dispatch.types import (
     RouteError,
     RunJob,
     ShipError,
+    StackBoundsProbe,
     TicketRef,
     TrackedTicket,
     UpdateClassifier,
@@ -87,6 +87,7 @@ class DispatcherBase:
         hold_carry: HoldCarry | None = None,
         qa_diff: QaDiff | None = None,
         moved_head: MovedHeadProbe | None = None,
+        stack_bounds: StackBoundsProbe | None = None,
     ):
         if state_path.resolve() != queue.path.resolve():
             raise QueueError("dispatcher state and queue must use one database")
@@ -120,6 +121,7 @@ class DispatcherBase:
         self.qa_diff = qa_diff
         self._hold_carries: dict[tuple[str, str, str, str, tuple[str, ...]], bool] = {}
         self.moved_head = moved_head
+        self.stack_bounds = stack_bounds
         self._moved_heads: dict[tuple[str, str, str, str], MovedHead | None] = {}
         self.approvals = approvals if approvals is not None else Approvals()
         self.ci_logs = ci_logs
@@ -313,7 +315,8 @@ class DispatcherBase:
     def _observed(self, fresh: TrackedTicket | None) -> TrackedTicket | None:
         if fresh is None:
             return None
-        fresh = self._retargeted(fresh)
+        if _base_mismatch(fresh) is not None:
+            fresh = self._advance_stack(fresh)
         self._fresh_reads[(fresh.repo.lower(), fresh.ticket_id)] = fresh
         if fresh.merged:
             return fresh
@@ -326,22 +329,6 @@ class DispatcherBase:
             self._polled[(fresh.repo.lower(), fresh.ticket_id)] = fresh
             raise BaseMismatch(mismatch, fresh)
         return fresh
-
-    def _retargeted(self, ticket: TrackedTicket) -> TrackedTicket:
-        if self.feeder is None or _base_mismatch(ticket) is None:
-            return ticket
-        try:
-            base = self.feeder.accept_stack_retarget(ticket)
-        except Exception as exc:
-            self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
-            return ticket
-        if base is None:
-            return ticket
-        return replace(
-            ticket,
-            factory=replace(ticket.factory, base_branch=base),
-            factory_md=ticket.factory_md and replace(ticket.factory_md, base_branch=base),
-        )
 
     def _sync_base_mismatch(self, ticket: TrackedTicket) -> str | None:
         mismatch = _base_mismatch(ticket)

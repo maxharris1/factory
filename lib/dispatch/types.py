@@ -15,6 +15,8 @@ from lib.queue import Job
 from lib.update_check import HeadDiff, MovedHead, RebaseScope, UpdateClass
 
 if TYPE_CHECKING:
+    import sqlite3
+
     from lib.dispatch.bookkeeping import LockLedger
     from lib.dispatcher import Dispatcher
 
@@ -747,8 +749,11 @@ class Feeder(Protocol):
     holds a ready's review, with the same Grok wake, while the ready's head carries
     another open PR's commits, and returns None when it did; otherwise it
     returns the base the review runs against, the open PR's own base.
-    accept_stack_retarget records a stacked child's new PR base and returns it
-    when its parent merged into that base, else returns None.
+    stack_parent_facts reads the parent of a child still based on its
+    parent's branch, else returns None. move_stack_base records base and the
+    pending rebase's onto_from for that child in the caller's transaction and
+    returns False when the child already moved; stack_onto and clear_stack_onto
+    read and settle that pending rebase.
     """
 
     ledger: LockLedger | None
@@ -757,7 +762,15 @@ class Feeder(Protocol):
 
     def review_base_unless_stacked(self, ticket: TrackedTicket, head: str) -> str | None: ...
 
-    def accept_stack_retarget(self, ticket: TrackedTicket) -> str | None: ...
+    def stack_parent_facts(self, ticket: TrackedTicket) -> ParentFacts | None: ...
+
+    def move_stack_base(
+        self, connection: sqlite3.Connection, ticket: TrackedTicket, base: str, onto_from: str
+    ) -> bool: ...
+
+    def stack_onto(self, connection: sqlite3.Connection, ticket: TrackedTicket) -> str | None: ...
+
+    def clear_stack_onto(self, connection: sqlite3.Connection, ticket: TrackedTicket) -> None: ...
 
 
 # (repo, base branch, approved head, updated head, shared_paths) -> whether the update is
@@ -775,6 +788,10 @@ class HoldCarry(Protocol):
 
 class MovedHeadProbe(Protocol):
     def __call__(self, repo: str, base: str, ok: str, head: str) -> MovedHead: ...
+
+
+class StackBoundsProbe(Protocol):
+    def __call__(self, repo: str, old_head: str, parent_heads: tuple[str, ...]) -> str: ...
 
 
 class QaDiff(Protocol):

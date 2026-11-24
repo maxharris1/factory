@@ -57,7 +57,7 @@ class CommentsMixin:
             else:
                 self._reject_route(ticket, error)
             return
-        ticket = self._retargeted(ticket)
+        ticket = self._advance_stack(ticket)
         key = (ticket.repo.lower(), ticket.ticket_id)
         self._polled[key] = ticket
         try:
