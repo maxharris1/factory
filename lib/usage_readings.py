@@ -43,10 +43,6 @@ tables; a `usage_readings` row wins only when written later. Its
 and the not-on-plan streak key on it; a NULL account, written by older
 code, is `<harness>-default`. Cursor is not tracked.
 
-`TelemetryUsage` is a `lib.usage.UsageSource` over `stored`. Its report is
-verified only when both windows are fresh, so routing keeps the existing
-verified-report rule. `orchestrate.choose_route` does not use it yet.
-
 Nothing here opens a file or runs a process: readings come from parsed
 CLI output and orch.db rows only. The one exception is `migrate`, which has
 lib/state_backup.py copy the database before any write.
@@ -66,7 +62,6 @@ from typing import TYPE_CHECKING
 
 from lib import lane_limit, state_backup
 from lib.machines_yml import default_account
-from lib.usage import UsageReport
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -646,38 +641,3 @@ def newest_by_account(rows: Iterable[StoredRow]) -> dict[str, dict[str, Reading]
     ):
         newest.setdefault(account, {})[reading.window] = reading
     return newest
-
-
-class TelemetryUsage:
-    """`UsageSource` over the stored readings for the account each harness
-    uses, on any of its devices: each window's newest reading."""
-
-    def __init__(
-        self,
-        connect: Callable[[], sqlite3.Connection],
-        *,
-        account_for: Callable[[str], str | None],
-        clock: Callable[[], float] = time.time,
-    ):
-        self.connect = connect
-        self.account_for = account_for
-        self.clock = clock
-
-    def read(self, harness: str) -> UsageReport | None:
-        account = self.account_for(harness)
-        if harness not in SOURCES or account is None:
-            return None
-        try:
-            with closing(self.connect()) as connection:
-                rows = stored(connection, account) or []
-        except sqlite3.Error:
-            return None
-        now = self.clock()
-        readings = newest_by_account(row for row in rows if row.harness == harness).get(account, {})
-        remaining = headroom(list(readings.values()), now)
-        if remaining is None:
-            return None
-        verified = all(
-            window in readings and window_state(readings[window], now) == "ok" for window in WINDOWS
-        )
-        return UsageReport(harness, remaining, verified)

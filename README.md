@@ -2642,7 +2642,7 @@ device is always named on stderr and does not fail the check.
 
 ## orchestrate-project
 
-Grok Bot's skill is [`grok/orchestrate-project/SKILL.md`](grok/orchestrate-project/SKILL.md). Comment text, the questions gate, and routing go through [`lib/orchestrate.py`](lib/orchestrate.py). `choose_route` refuses a factory.md pair that fails `assert_cross_family`, then calls `lib.usage.route_job(config, marked_urgent=urgent)` once and builds a `FitChoice` from the route's builder and reviewer. See [`lib/usage.py`](lib/usage.py).
+Grok Bot's skill is [`grok/orchestrate-project/SKILL.md`](grok/orchestrate-project/SKILL.md). Comment text, the questions gate, and routing go through [`lib/orchestrate.py`](lib/orchestrate.py). `choose_route` validates the factory.md pair with `assert_cross_family` and enforces a cross-family reviewer against `built_by`.
 
 ## pstack pin
 
@@ -2658,12 +2658,6 @@ bin/orch doctor --home "$HOME" --responses DIR
 `install-skills` symlinks each pinned skill, and each skill in `skills/factory` (the routers `factory-builder` and `factory-reviewer`, and `factory-qa`), into `~/.claude/skills/<name>/`, `~/.agents/skills/<name>/`, and `~/.cursor/skills/<name>/`. `--cloud` copies those skills into the project's `.claude/skills/`, `.agents/skills/`, and `.cursor/skills/`. Each copy gets an `.orch-owned` marker with the sha256 of every file it holds. A later install replaces only a copy whose files still match its marker, so an edited copy is refused and kept. A local install refuses a checkout that is a linked git worktree or sits under the temp dir, since its links would dangle once that checkout is gone; `--allow-unstable-checkout` overrides that. A link into another or removed checkout's `skills/pstack/skills/` or `skills/factory/` is re-linked to this checkout, and a missing skill is added. In `--cloud` mode, `doctor` rejects a symlink anywhere on the path from the project down to a skill.
 
 `doctor` checks every installed skill and router against the lock, then prints a canary that asks the harness to read the installed `factory-builder` skill, name it, and quote the whole first bold passage of the pinned poteto-mode orchestrate playbook exactly as written, without the `**` markers, on one line. Claude Bot and Codex Bot each start their own harness and write the reply; Cursor is not asked. `doctor` fails if either harness did not load that version. It does not start `claude` or `codex`.
-
-## Usage reserve
-
-`orchestrate-project` (F1-07) calls `route_job` in [`lib/usage.py`](lib/usage.py) with the loaded `factory.md`. The best fit for a role is that role's harness and model hint; the other harnesses follow in `claude`, `codex`, `cursor` order. The reviewer is a different model family from the builder this call selected.
-
-The last 20% of a verified usage cycle is a reserve. A non-urgent job moves to the next fit that is outside the reserve. A resumed paused step, past-ship work, or a job Max marks urgent may use the reserve. Each owning bot calls `reserve_check` on its own harness before starting, when it has a verified report. No verified report leaves the route on best fit. Routing reads no live usage; tests use [`tests/fixtures/usage/`](tests/fixtures/usage/).
 
 ## Weekly eval report
 

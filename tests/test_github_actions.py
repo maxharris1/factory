@@ -32,7 +32,6 @@ from lib.github_actions import (
     HeadMismatchError,
     LinearReviewActions,
     NotFastForwardError,
-    review_actions_for,
 )
 from lib.evidence.ci import base_red, ci_evidence
 from lib.hook_t7 import T7Hook
@@ -1237,12 +1236,6 @@ def test_handoff_refuses_unsafe_pr_state_before_writes(
         actions.handoff(pr("handoff"), HEAD)
 
     assert gh.keys() == [PULL]
-
-
-def test_review_actions_are_picked_from_factory_md_tickets() -> None:
-    assert isinstance(review_actions_for("github"), GitHubReviewActions)
-    with pytest.raises(ValueError, match="no ReviewActions adapter for tickets: linear"):
-        review_actions_for("linear")
 
 
 class GitHubFixtureSource:

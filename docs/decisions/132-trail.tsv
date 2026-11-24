@@ -1,9 +1,0 @@
-decision	choice	why
-project field	Project.linear_project_ids: frozenset[str]; empty means a GitHub project; no single-id property left	Migrate Callers Then Delete Legacy APIs: no reader can still see only one id
-old key	linear_project_id: X parses to {X}; YAML configs keep working unchanged	AC5; unchanged YAML tests prove it
-refusals	both keys, empty or non-list value, non-string or placeholder id, an id twice in one project, an id another project names	AC1; cross-project duplicates keep the existing message so every id maps to one repo
-intake read	one Linear query per repo with project id in [..], sorted ids	same Linear budget as today; a per-project loop costs N reads per pass
-intake repo	LinearIntakeClient raises if the ids map to more than one repo	the schema forbids it; a broken map is an intake read error, not a misfiled ticket
-ticket state	nothing stores the project; tracked checks are set membership	a move between configured projects keeps job and state (AC3); an unconfigured project keeps the old error (AC4)
-webhook	no logic change; cli passes every configured id	WebhookApp already holds a set
-live orch.yml	untouched; check-config output identical to main	hold path; Max picks the Aut0 projects after merge

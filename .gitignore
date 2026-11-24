@@ -4,3 +4,7 @@ __pycache__/
 .venv/
 orch.local.yml
 machines.local.yml
+docs/screenshots/
+scripts/issue-*-screenshots.py
+docs/decisions/*-trail.tsv
+!docs/decisions/694-trail.tsv

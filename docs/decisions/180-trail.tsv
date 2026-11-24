@@ -1,7 +1,0 @@
-decision	choice	why
-where factory_root comes from	the placed device's factory_root_for(harness); the box falls back to its own checkout (lib.pstack_pin.ROOT); never the job worktree or workdir	MF-7; waiter is the only render_brief caller that knows the placement
-render-time fail closed	a named path missing from skills.lock, a bad or placeholder factory_root, an unreadable pin or model map, or a harness with no adapter (cursor) gives a questions-only brief with no work task lines and no plan/ready/verdict header	ticket: fail closed until T08
-run-time fail closed	the Skills section's first step is test -f on every path; a miss means a questions handoff, then stop	catches drift between the box pin and the device checkout
-tables keyed by bot login	ADAPTERS, read-with and general-helper tables use claude-bot/codex-bot keys	tests/test_waiter.py forbids harness binary names as string literals in lib/brief
-merge-only jobs	no Skills section and no Skills read line	merge-only never said Run as poteto-mode; its task is mechanical
-malformed YAML boundary	load_yaml turns every non-YAMLError exception from PyYAML (constructor AttributeError, KeyError, IndexError, ValueError, RecursionError and any other) into yaml.YAMLError	load_yaml parses text only, so any exception it raises means malformed input; listing types one at a time left the waiter holding a slot with no spawn (round-3 f-1)

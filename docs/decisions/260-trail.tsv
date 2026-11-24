@@ -1,8 +1,0 @@
-decision	choice	why
-scope source	UpdateClass carries an optional UpdateScope, computed only on the non-trivial path	one clone fetch and one injected classifier; every existing fake keeps working with the None default
-scope hand-off	_settle_update returns the UpdateScope (or None) and _t2 passes it to _queue_review	approved_head is cleared right after the review is queued, so the scope travels inside one _t2 call with no per-poll side table
-shape rule	the oldest first-parent commit after the approved head is a two-parent merge whose second parent is on base; every later first-parent commit has one parent	any other shape (rebase, second base merge, git error) returns None and the job gets the full review
-brief gate	facts_of reads update facts only for review jobs with kind=update and well-formed shas	malformed detail fails closed to the full review; fix-round snapshots stay byte-identical
-later-round step	the update step replaces both "Read the whole diff" and "Close the earlier rounds"	every finding was closed at the approval, so closing earlier rounds would contradict a merge-only review
-commit list cap	list at most 50 later commits and state the total	keeps the brief bounded on a long post-merge history
-delegation	the main job wrote the diff instead of a poteto-agent delegate	about 120 lines across one seam inside a 60-minute wall clock; the cross-family Codex review supplies review separation

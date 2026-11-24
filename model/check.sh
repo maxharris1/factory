@@ -7,7 +7,7 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 spec=$root/model/Orchestrator.tla
 view=$root/model/view.mjs
-pin=de8ee15dd1194627d21eb5fcd41cb1873208dabb
+pin=c742dd61706fbacc1b95f1a20b7b988cf096ce6c
 jar_sha=936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
 
 # GitHub sometimes answers 429 or 5xx. Try each download a few times.
@@ -34,8 +34,11 @@ if [ -z "${TLA2TOOLS:-}" ]; then
 fi
 
 if [ -z "${STATECHART:-}" ]; then
+  vendored=$root/skills/pstack/skills/statechart/scripts/statechart
   bundled=$HOME/.cursor/plugins/cache/cursor-public/9717366/$pin/skills/statechart/scripts/statechart
-  if [ -f "$bundled" ]; then
+  if [ -z "${STATECHART_NO_VENDORED:-}" ] && [ -f "$vendored" ]; then
+    STATECHART=$vendored
+  elif [ -f "$bundled" ]; then
     STATECHART=$bundled
   else
     cache=${XDG_CACHE_HOME:-$HOME/.cache}/factory-statechart/$pin

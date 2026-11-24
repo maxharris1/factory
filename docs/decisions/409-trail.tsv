@@ -1,9 +1,0 @@
-decision	choice	why
-failure 1 (reaper /proc reads)	tests/child_reaper.py reads /proc through os.open, os.read, os.close and os.listdir bound at import	the orphan-reaper thread polled through Path.read_text, so a test's open or Path patch recorded or broke its reads; the usage-readings assertion is correct and stays
-failure 1 guard	no broad except in the reaper loop	the cause is gone; a guard would hide later reaper bugs
-failure 2 (snapshots)	no change in this PR	#396 (a428379) regenerated review-update and review-update-commits on main while this job ran; the rebase dropped the same +1 line per file
-failure 3 (dashboard path)	collect_snapshot drops checkout from each health device row; orch health --json keeps it	box_sync puts the checkout path in the row only when origin/main exists (push runs); a path rule in redact() would change every free-text field
-failure 3 test	new test monkeypatches health.box_sync with /srv/factory and asserts the path reaches no written file	fails on PR runs and locally on the old code, not only on main pushes; seen red before the fix
-failure 4 (darwin race)	test accepts either checker fencing first: fenced record, START_REFUSED, no marker, slot released by requeue or by DeviceMonitor.reconcile	the deadline loop (#199) can fence before the box check; both outcomes are correct; fence=False in the loop was rejected as weakening a real guard
-failure 4 extra test	skipped the planned in-process UNKNOWN-then-GONE test	tests/test_remote_darwin.py already asserts it for a target with no record (check_worker on other)
-local verification	darwin and reaper tests skip or error on macOS (no /proc); CI on Linux is their check	this job ran on a Mac without docker

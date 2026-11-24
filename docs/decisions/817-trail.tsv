@@ -1,8 +1,0 @@
-decision	choice	why
-Linux containment	a systemd user scope per run, unit orch-run-<tag>.scope	Max approved it on PR #841. A cgroup holds every descendant whatever it does with setsid, its environment or its parent.
-local launch	the runner moves the gated worker into the scope over D-Bus (busctl StartTransientUnit with PIDs) before it records the worker	the worker keeps its pid, the runner reads /proc/<pid>/cgroup before recording run_scope, and a failure falls back without stopping the run. Measured 42 ms on pc.
-remote launch	the start execs the login shell through systemd-run --user --scope after a probe that also checks the cgroup v2 0:: line names a scope	systemd-run --scope execs in place, so the pid and fd 3 stay the start's. A cgroup v1 device fails the probe and stays uncontained rather than losing the session rule with no scope to read.
-usable test	Linger=yes from loginctl and a working user manager	without linger the user manager stops at the bot's last logout and takes the scope with it. Tests put a fake loginctl on PATH.
-fallback	no scope: today's tag, members, parent and session tracking, run_scope NULL and one run-log line	Max chose fallback over refusing to start
-session rule	dropped for a contained run; kept for an uncontained run only while a proven member is in that session	a contained run's same-session processes are all in the scope, so the rule adds nothing and a reused number names nothing (ac-3). The proven-member port matches lib/remote.py.
-split	this PR is #817a (Linux, local and remote); macOS local moved to #846; remote macOS out of scope	Max's go on PR #841
