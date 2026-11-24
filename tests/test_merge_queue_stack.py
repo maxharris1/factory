@@ -154,3 +154,28 @@ def test_an_ok_never_ships_a_child_still_stacked_on_its_parent(tmp_path: Path) -
     board.poll()
     assert board.outcome(ok) == "shipped"
     assert board.actions.fast_forwards == [("main", sha(1))]
+
+
+def test_a_child_retargeted_to_a_base_without_github_ci_never_merges_on_retained_green_ci(
+    tmp_path: Path,
+) -> None:
+    board = Board(tmp_path, ship="merge")
+    board.factory = replace(board.factory, ci_branches=("main",))
+    base = [PARENT_BRANCH]
+    stacked_on(board, base)
+    pr = board.open("42", sha(1))
+    board.build_and_approve(pr)
+    board.poll()
+
+    base[0] = "release"
+    ticket = board.snapshot(pr)
+    assert ticket.no_ci_base == "release"
+    assert ticket.ci[sha(1)].status == "success"
+    for _ in range(2):
+        board.poll()
+    assert board.actions.merges == [], "child merged on a non-CI base using retained green CI"
+    assert any("42" in line and "release" in line for line in board.log)
+
+    base[0] = "main"
+    board.poll()
+    assert board.actions.merges == [(True, sha(1))]

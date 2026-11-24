@@ -1167,7 +1167,9 @@ def _stack_wait(ticket: TrackedTicket, head: str | None) -> str | None:
     base = ticket.pr_base or ticket.factory.base_branch
     if base == parent:
         return f"stacked on {parent}: waits for its retarget"
-    ci = ticket.ci.get(head) if head is not None else None
+    if ticket.no_ci_base is not None:
+        return f"stacked child: GitHub CI does not run on {base}, waits for a retarget to a CI base"
+    ci =ticket.ci.get(head) if head is not None else None
     if ci is not None and ci.status == "not-run":
         return f"stacked child: CI not-run on {base}, waits for GitHub CI"
     return None
