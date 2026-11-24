@@ -122,6 +122,7 @@ from lib.pre_ready import (
     PreReadyResult,
     check_environ,
     checks_for,
+    committed_checkout,
     first_failure,
 )
 from lib.queue import (
@@ -1860,25 +1861,29 @@ def _head_check_failure(
     read: Read,
 ) -> tuple[HeadCheck, PreReadyResult] | None:
     """#503, #1463: a fitting ready runs the base factory.md's head checks in
-    the job's worktree at the ready's head, recording each pass. None when
+    a throwaway checkout of the ready's head made from the job's worktree,
+    recording each pass. None when
     every check passed or there is nothing to run."""
     ready = ready_at(expected, args.handoff, read)
     if ready is None:
         return None
     checks = checks_for(waiter.GhContextSource(config), expected.repo, ready.base)
+    if not checks:
+        return None
     worktree = Path(os.environ.get("ORCH_JOB_WORKTREE") or os.getcwd())
-    return first_failure(
-        checks,
-        worktree,
-        ready.head,
-        check_environ(os.environ, approvals(config)),
-        lambda check: retry_locked(
-            lambda: queue.record_check_passed(
-                args.job_id, event=check.passed_event, comment_id=args.handoff,
-                head=ready.head, proof=proof,
-            )
-        ),
-    )
+    with committed_checkout(worktree, ready.head) as checkout:
+        return first_failure(
+            checks,
+            checkout,
+            ready.head,
+            check_environ(os.environ, approvals(config)),
+            lambda check: retry_locked(
+                lambda: queue.record_check_passed(
+                    args.job_id, event=check.passed_event, comment_id=args.handoff,
+                    head=ready.head, proof=proof,
+                )
+            ),
+        )
 
 
 def _job_cancel(argv: list[str]) -> int:

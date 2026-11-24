@@ -8,7 +8,9 @@ import os
 import signal
 import subprocess
 import sys
-from collections.abc import Callable, Mapping
+import tempfile
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -121,6 +123,19 @@ def run(spec: CheckCommand, cwd: Path, head: str, environ: Mapping[str, str]) ->
     if process.returncode != 0:
         return PreReadyResult(False, f"exit {process.returncode}", _decoded(output), head)
     return PreReadyResult(True, "exit 0", _decoded(output), head)
+
+
+@contextmanager
+def committed_checkout(worktree: Path, head: str) -> Iterator[Path]:
+    """A throwaway detached worktree of head made from the job's worktree, so
+    a check sees the committed source and nothing the builder left uncommitted."""
+    with tempfile.TemporaryDirectory(prefix="orch-checkout-") as scratch:
+        path = Path(scratch) / "checkout"
+        _git(worktree, "worktree", "add", "--detach", "--quiet", str(path), head)
+        try:
+            yield path
+        finally:
+            _git(worktree, "worktree", "remove", "--force", str(path))
 
 
 def first_failure(

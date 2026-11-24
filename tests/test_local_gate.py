@@ -113,8 +113,12 @@ class Box:
         self.store = store
         self.work = tmp_path / "work"
         self.work.mkdir()
+        self.base_ran = tmp_path / "base-gate-ran"
+        self.head_ran = tmp_path / "head-gate-ran"
         _git(self.work, "init", "-q")
-        (self.work / "factory.md").write_text(_factory_text("touch head-gate-ran"), encoding="utf-8")
+        (self.work / "factory.md").write_text(
+            _factory_text(f"touch {self.head_ran}"), encoding="utf-8"
+        )
         _git(self.work, "add", ".")
         _git(self.work, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "head")
         self.head = _git(self.work, "rev-parse", "HEAD")
@@ -193,18 +197,42 @@ def test_a_failing_gate_refuses_the_ready_with_its_output(box: Box, capsys) -> N
     assert "the gate said no" in err
     assert box.state() == ("running", None)
     assert box.gate_events() == [(LOCAL_GATE_FAILED, f"handoff {COMMENT}: local_gate failed: exit 1")]
-    assert not (box.work / "head-gate-ran").exists()
+    assert not box.head_ran.exists()
 
 
 def test_a_passing_gate_records_its_head_and_completes(box: Box) -> None:
-    box.ready(_factory_text("touch base-gate-ran"))
+    box.ready(_factory_text(f"touch {box.base_ran}"))
 
     assert box.done() == 0
 
     assert box.state() == ("done", COMMENT)
     assert box.gate_events() == [(LOCAL_GATE_PASSED, f"handoff {COMMENT}: at {box.head}")]
-    assert (box.work / "base-gate-ran").exists()
-    assert not (box.work / "head-gate-ran").exists()
+    assert box.base_ran.exists()
+    assert not box.head_ran.exists()
+
+
+def test_the_gate_sees_only_the_committed_head_not_untracked_files(box: Box, capsys) -> None:
+    (box.work / "fixture.txt").write_text("left out of the commit\n", encoding="utf-8")
+    box.ready(_factory_text("test -f fixture.txt"))
+
+    assert box.done() == 1
+
+    assert "local_gate failed: exit 1" in capsys.readouterr().err
+    assert box.state() == ("running", None)
+    assert box.gate_events() == [(LOCAL_GATE_FAILED, f"handoff {COMMENT}: local_gate failed: exit 1")]
+
+
+def test_the_gate_runs_in_a_checkout_it_leaves_no_trace_of(box: Box) -> None:
+    where = box.work.parent / "where"
+    box.ready(_factory_text(f"pwd > {where}; touch made-by-gate"))
+
+    assert box.done() == 0
+
+    checkout = Path(where.read_text(encoding="utf-8").strip())
+    assert checkout != box.work.resolve()
+    assert not checkout.exists()
+    assert not (box.work / "made-by-gate").exists()
+    assert _git(box.work, "worktree", "list", "--porcelain").count("worktree ") == 1
 
 
 def test_exit_75_refuses_and_never_passes(box: Box, capsys) -> None:
@@ -243,17 +271,17 @@ def test_gate_failures_count_toward_the_invalid_handoff_cap(box: Box, capsys) ->
 
 
 def test_a_failing_pre_ready_runs_no_gate(box: Box) -> None:
-    box.ready(_factory_text("touch base-gate-ran", pre_ready="exit 1"))
+    box.ready(_factory_text(f"touch {box.base_ran}", pre_ready="exit 1"))
 
     assert box.done() == 1
 
     assert box.gate_events() == []
     assert [event for event, _ in _events(box.db, box.job.id)] == [PRE_READY_FAILED]
-    assert not (box.work / "base-gate-ran").exists()
+    assert not box.base_ran.exists()
 
 
 def test_pre_ready_and_gate_both_pass(box: Box) -> None:
-    box.ready(_factory_text("touch base-gate-ran", pre_ready="true"))
+    box.ready(_factory_text(f"touch {box.base_ran}", pre_ready="true"))
 
     assert box.done() == 0
 
@@ -264,13 +292,13 @@ def test_pre_ready_and_gate_both_pass(box: Box) -> None:
 
 
 def test_a_ready_into_a_ci_branch_runs_no_gate(box: Box) -> None:
-    box.ready(_factory_text("touch base-gate-ran; exit 1"), base="main")
+    box.ready(_factory_text(f"touch {box.base_ran}; exit 1"), base="main")
 
     assert box.done() == 0
 
     assert box.state() == ("done", COMMENT)
     assert box.gate_events() == []
-    assert not (box.work / "base-gate-ran").exists()
+    assert not box.base_ran.exists()
 
 
 def test_a_repo_with_no_ci_runs_no_gate(box: Box) -> None:
@@ -283,12 +311,12 @@ def test_a_repo_with_no_ci_runs_no_gate(box: Box) -> None:
 
 
 def test_a_questions_handoff_runs_no_gate(box: Box) -> None:
-    box.ready(_factory_text("touch base-gate-ran; exit 1"))
+    box.ready(_factory_text(f"touch {box.base_ran}; exit 1"))
     serve_handoff(box.store, box.job, "1102", kind="questions", head=None)
 
     assert box.done("1102") == 0
     assert box.gate_events() == []
-    assert not (box.work / "base-gate-ran").exists()
+    assert not box.base_ran.exists()
 
 
 @pytest.fixture
