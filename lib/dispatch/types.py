@@ -15,6 +15,8 @@ from lib.queue import Job
 from lib.update_check import HeadDiff, MovedHead, RebaseScope, UpdateClass
 
 if TYPE_CHECKING:
+    import sqlite3
+
     from lib.dispatch.bookkeeping import LockLedger
     from lib.dispatcher import Dispatcher
 
@@ -367,6 +369,13 @@ class ParentMerged:
 
 
 ParentFacts = ParentOpen | ParentClosed | ParentMerged
+
+
+@dataclass(frozen=True)
+class RetargetProof:
+    onto_from: str
+    head: str
+    parent_heads: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -747,8 +756,6 @@ class Feeder(Protocol):
     holds a ready's review, with the same Grok wake, while the ready's head carries
     another open PR's commits, and returns None when it did; otherwise it
     returns the base the review runs against, the open PR's own base.
-    accept_stack_retarget records a stacked child's new PR base and returns it
-    when its parent merged into that base, else returns None.
     """
 
     ledger: LockLedger | None
@@ -757,7 +764,23 @@ class Feeder(Protocol):
 
     def review_base_unless_stacked(self, ticket: TrackedTicket, head: str) -> str | None: ...
 
-    def accept_stack_retarget(self, ticket: TrackedTicket) -> str | None: ...
+    def stacked_parent_facts(self, ticket: TrackedTicket) -> ParentFacts | None: ...
+
+    def move_stack_base(
+        self,
+        connection: sqlite3.Connection,
+        ticket: TrackedTicket,
+        base: str,
+        proof: RetargetProof,
+    ) -> bool: ...
+
+    def pending_retarget(
+        self, connection: sqlite3.Connection, ticket: TrackedTicket
+    ) -> RetargetProof | None: ...
+
+    def set_pending_retarget(
+        self, connection: sqlite3.Connection, ticket: TrackedTicket, proof: RetargetProof | None
+    ) -> None: ...
 
 
 # (repo, base branch, approved head, updated head, shared_paths) -> whether the update is
@@ -775,6 +798,10 @@ class HoldCarry(Protocol):
 
 class MovedHeadProbe(Protocol):
     def __call__(self, repo: str, base: str, ok: str, head: str) -> MovedHead: ...
+
+
+class StackBoundsProbe(Protocol):
+    def __call__(self, repo: str, old_head: str, parent_heads: tuple[str, ...]) -> str: ...
 
 
 class QaDiff(Protocol):

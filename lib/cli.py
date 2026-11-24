@@ -163,6 +163,7 @@ from lib.update_check import (
     merge_update,
     moved_head_probe,
     rebase_scope,
+    stack_bounds,
 )
 from lib.wait import (
     OWNING_BOTS,
@@ -1445,6 +1446,7 @@ def _runtime(
         hold_carry=_hold_carry,
         qa_diff=_qa_diff,
         moved_head=_moved_head_probe,
+        stack_bounds=_stack_bounds_probe,
     )
     source.error_sink = dispatcher.record_poll_error
     source.warning_sink = lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True)
@@ -1498,6 +1500,13 @@ def _moved_head_probe(repo: str, base: str, ok: str, head: str) -> MovedHead:
         worktrees.work_root(None), repo, (ok, head), worktrees.url_template(None)
     )
     return moved_head_probe(clone, f"refs/remotes/origin/{base}", ok, head)
+
+
+def _stack_bounds_probe(repo: str, old_head: str, parent_heads: tuple[str, ...]) -> str:
+    clone = worktrees.fetched_clone(
+        worktrees.work_root(None), repo, (old_head, *parent_heads), worktrees.url_template(None)
+    )
+    return stack_bounds(clone, old_head, parent_heads)
 
 
 def _feeder(

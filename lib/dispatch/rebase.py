@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import asdict, dataclass, replace
 
 from lib.dispatch.decisions import Decision, record_decisions
 from lib.dispatch.helpers import (
+    _base_mismatch,
     _comment_link,
     _comment_order,
     _detail_field,
@@ -18,11 +19,13 @@ from lib.dispatch.helpers import (
 )
 from lib.dispatch.retry import _harness_job_active, _newest_harness_job
 from lib.dispatch.transitions import write_workflow_state
-from lib.dispatch.types import Comment, TrackedTicket
+from lib.dispatch.types import Comment, ParentMerged, RetargetProof, TrackedTicket
 from lib.handoff import parse_comment
 from lib.job_detail import as_object
 from lib.queue import JobRequest
+from lib.update_check import StackUnbounded
 
+STACK_RETARGET_FAILED = "stack-retarget-failed"
 LEAVES_MERGE_QUEUE = frozenset({"merge-queue", "waiting-external"})
 REBASE_FROM = (
     frozenset({"review", "fixing", "awaiting-ok", "capped", "handed-off"}) | LEAVES_MERGE_QUEUE
@@ -114,7 +117,186 @@ def newest_rebase(connection: sqlite3.Connection, key: tuple[str, str]) -> Rebas
     return RebaseStep(**detail["rebase"])
 
 
+def _on_base(ticket: TrackedTicket, base: str) -> TrackedTicket:
+    return replace(
+        ticket,
+        factory=replace(ticket.factory, base_branch=base),
+        factory_md=ticket.factory_md and replace(ticket.factory_md, base_branch=base),
+        stack=None,
+    )
+
+
 class RebaseMixin:
+    def _advance_stack(self, ticket: TrackedTicket) -> tuple[TrackedTicket, bool]:
+        if self.feeder is None:
+            return ticket, False
+        try:
+            ticket, queued = self._land_stack_parent(ticket)
+            queued = queued or self._queue_pending_stack_rebase(ticket)
+        except StackUnbounded as exc:
+            with self._connect() as connection:
+                self._flag_attention_once(
+                    connection, ticket.repo, ticket.ticket_id, STACK_RETARGET_FAILED,
+                    f"the child's own commits cannot be bounded: {exc}",
+                )
+            return ticket, True
+        except Exception as exc:
+            self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
+            return ticket, True
+        if queued:
+            self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
+            self._write_state_label(ticket, "fixing")
+        return ticket, False
+
+    def _land_stack_parent(self, ticket: TrackedTicket) -> tuple[TrackedTicket, bool]:
+        facts = self.feeder.stacked_parent_facts(ticket)
+        head = ticket.current_head
+        if (
+            not isinstance(facts, ParentMerged)
+            or ticket.merged
+            or ticket.closed
+            or self.stack_bounds is None
+            or head is None
+            or ticket.pr_base not in (None, ticket.factory.base_branch, facts.into)
+        ):
+            return ticket, False
+        proof = RetargetProof(self.stack_bounds(ticket.repo, head, facts.heads), head, facts.heads)
+        self.clear_attention(ticket.repo, ticket.ticket_id, STACK_RETARGET_FAILED)
+        if ticket.pr_base != facts.into:
+            self._review_actions(ticket).set_pull_base(ticket, facts.into)
+        moved = _on_base(replace(ticket, pr_base=facts.into), facts.into)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            queued = self.feeder.move_stack_base(
+                connection, ticket, facts.into, proof
+            ) and self._stack_rebase_in_transaction(connection, moved, proof)
+            connection.commit()
+        return moved, queued
+
+    def _queue_pending_stack_rebase(self, ticket: TrackedTicket) -> bool:
+        head = ticket.current_head
+        with self._connect() as connection:
+            proof = self.feeder.pending_retarget(connection, ticket)
+            if (
+                proof is None
+                or head is None
+                or _base_mismatch(ticket) is not None
+                or self._stack_rebase_row(connection, ticket) is None
+            ):
+                return False
+        if proof.head != head:
+            proof = RetargetProof(
+                self.stack_bounds(ticket.repo, head, proof.parent_heads), head, proof.parent_heads
+            )
+            self.clear_attention(ticket.repo, ticket.ticket_id, STACK_RETARGET_FAILED)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            queued = self._stack_rebase_in_transaction(connection, ticket, proof)
+            connection.commit()
+        return queued
+
+    def _stack_rebase_row(
+        self, connection: sqlite3.Connection, ticket: TrackedTicket
+    ) -> sqlite3.Row | None:
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        row = connection.execute(
+            """
+            SELECT workflow_state, review_round, generation, approved_head, approved_at,
+                approve_comment_id
+            FROM ticket_state
+            WHERE repo = ? AND ticket_id = ?
+            """,
+            key,
+        ).fetchone()
+        if (
+            row is None
+            or row["workflow_state"] not in REBASE_FROM
+            or _harness_job_active(connection, key)
+        ):
+            return None
+        return row
+
+    def _stack_rebase_in_transaction(
+        self, connection: sqlite3.Connection, ticket: TrackedTicket, proof: RetargetProof
+    ) -> bool:
+        if self.feeder.pending_retarget(connection, ticket) is None:
+            return False
+        row = self._stack_rebase_row(connection, ticket)
+        if row is None:
+            return False
+        self.feeder.set_pending_retarget(connection, ticket, None)
+        onto_from = proof.onto_from
+        dedupe_key = f"t-retarget:{_scope(ticket.repo, ticket.ticket_id)}:{onto_from}"
+        if connection.execute(
+            "SELECT 1 FROM jobs WHERE dedupe_key = ?", (dedupe_key,)
+        ).fetchone() is not None:
+            return False
+        cleared = {}
+        if row["workflow_state"] in LEAVES_MERGE_QUEUE:
+            cleared = {name: row[name] for name in APPROVAL}
+            self._clear_approval(connection, ticket, "retarget")
+        self._queue_rebase_fix(
+            connection,
+            ticket,
+            int(row["generation"]),
+            RebaseStep(
+                row["workflow_state"],
+                proof.head,
+                int(row["review_round"]),
+                **cleared,
+                onto_from=onto_from,
+            ),
+            f"retarget:{onto_from}",
+            lambda request: self.queue.enqueue_in_transaction(
+                connection, request, dedupe_key=dedupe_key
+            ),
+        )
+        if self.log is not None:
+            self.log(
+                f"retarget: {ticket.repo}#{ticket.ticket_id} rebase --onto "
+                f"origin/{ticket.factory.base_branch} {onto_from[:12]} queued"
+            )
+        return True
+
+    def _queue_rebase_fix(
+        self,
+        connection: sqlite3.Connection,
+        ticket: TrackedTicket,
+        generation: int,
+        step: RebaseStep,
+        source_comment_id: str,
+        enqueue: Callable[[JobRequest], object],
+    ) -> None:
+        enqueue(
+            JobRequest(
+                repo=ticket.repo,
+                ticket_id=ticket.ticket_id,
+                action="fix",
+                recipient=ticket.factory.builder_harness,
+                source_comment_id=source_comment_id,
+                timeout_seconds=ticket.job_timeout_minutes * 60,
+                generation=generation,
+                head=step.from_head,
+                detail=self._job_detail(
+                    ticket,
+                    action="fix",
+                    head=step.from_head,
+                    round_number=step.round + 1,
+                    cap=self._effective_cap(ticket, connection),
+                    rebase_step=step,
+                    connection=connection,
+                ),
+            )
+        )
+        write_workflow_state(
+            connection,
+            ticket.repo,
+            ticket.ticket_id,
+            "fixing",
+            source="rebase-queued",
+            at=self.queue.now(),
+        )
+
     def _rebase_conflicted(
         self,
         connection: sqlite3.Connection,
@@ -155,6 +337,15 @@ class RebaseMixin:
                     (ticket.repo.lower(), ticket.ticket_id),
                 )
             }
+            retargeted = connection.execute(
+                """
+                SELECT max(created_at) FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND dedupe_key LIKE 't-retarget:%'
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()[0]
+        if retargeted is not None and comment.created_at < retargeted:
+            return True
         return any(
             _comment_order(comment) < _comment_order(rebase)
             for rebase in ticket.comments
@@ -217,39 +408,15 @@ class RebaseMixin:
             self._clear_approval(connection, ticket, "rebase")
         if _harness_job_active(connection, key):
             return "rejected-rebase-job-active", False
-        review_round = int(row["review_round"])
-        self._enqueue_step(
+        self._queue_rebase_fix(
             connection,
             ticket,
-            comment,
-            JobRequest(
-                repo=ticket.repo,
-                ticket_id=ticket.ticket_id,
-                action="fix",
-                recipient=ticket.factory.builder_harness,
-                source_comment_id=comment.id,
-                timeout_seconds=ticket.job_timeout_minutes * 60,
-                generation=int(row["generation"]),
-                head=head,
-                detail=self._job_detail(
-                    ticket,
-                    action="fix",
-                    head=head,
-                    round_number=review_round + 1,
-                    cap=self._effective_cap(ticket, connection),
-                    rebase_step=RebaseStep(row["workflow_state"], head, review_round, **cleared),
-                    connection=connection,
-                ),
+            int(row["generation"]),
+            RebaseStep(row["workflow_state"], head, int(row["review_round"]), **cleared),
+            comment.id,
+            lambda request: self._enqueue_step(
+                connection, ticket, comment, request, dedupe_key=dedupe_key
             ),
-            dedupe_key=dedupe_key,
-        )
-        write_workflow_state(
-            connection,
-            ticket.repo,
-            ticket.ticket_id,
-            "fixing",
-            source="rebase-queued",
-            at=self.queue.now(),
         )
         record_decisions(
             connection,

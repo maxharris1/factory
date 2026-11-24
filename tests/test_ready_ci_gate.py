@@ -281,7 +281,10 @@ def test_a_green_ready_held_for_its_stack_is_no_longer_waiting_on_ci(tmp_path: P
         def review_base_unless_stacked(self, ticket, head):
             return None
 
-        def accept_stack_retarget(self, ticket):
+        def stacked_parent_facts(self, ticket):
+            return None
+
+        def pending_retarget(self, connection, ticket):
             return None
 
     board.dispatcher.feeder = StackHold()

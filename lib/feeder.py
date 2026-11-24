@@ -186,7 +186,14 @@ from lib.device_pool import free_slots, placement_blocked, slots_in_use
 from lib.device_sync import Blocked
 from lib.dispatch.bookkeeping import LockLedger, bookkeeping_write, must_write
 from lib.dispatch.constants import TERMINAL_STATES
-from lib.dispatch.types import BaseCheck, FailedCheck, ParentFacts, ParentMerged, StackParent
+from lib.dispatch.types import (
+    BaseCheck,
+    FailedCheck,
+    ParentFacts,
+    ParentMerged,
+    RetargetProof,
+    StackParent,
+)
 from lib.dispatcher import Comment, TicketRef, TrackedTicket, safe_ship_error
 from lib.evidence.ci import CIEvidence, MainRed, ci_evidence, main_red
 from lib.evidence.criteria import numbered
@@ -314,6 +321,7 @@ _COLUMNS = (
     ("stack_parent_pr", "INTEGER"),
     ("stack_parent_branch", "TEXT"),
     ("stack_parent_head_at_feed", "TEXT"),
+    ("pending_retarget", "TEXT"),
 )
 ORCHESTRATOR = "grok-bot"
 FACTORY_LABEL = "factory"
@@ -2917,50 +2925,72 @@ class Feeder:
         )
         return None if wait is not None else base
 
-    def accept_stack_retarget(self, ticket: TrackedTicket) -> str | None:
-        key = (ticket.repo.lower(), ticket.ticket_id)
+    def stacked_parent_facts(self, ticket: TrackedTicket) -> ParentFacts | None:
         with self.queue.connect() as connection:
             row = connection.execute(
-                f"SELECT base_branch, stack_parent_pr, stack_parent_branch FROM {FEEDER_TABLE} "
-                "WHERE repo = ? AND ticket_id = ?",
-                key,
-            ).fetchone()
-        if row is None or row[1] is None or row[0] != row[2]:
-            return None
-        recorded, parent = row[0], int(row[1])
-        moved = ticket.pr_base
-        if moved is None or moved == recorded:
-            return None
-        if self.github.pull_state(ticket.repo, parent) != "merged":
-            return None
-        if self.github.pull_base(ticket.repo, parent) != moved:
-            return None
-        with self.queue.connect() as connection:
-            connection.execute(
-                f"UPDATE {FEEDER_TABLE} SET base_branch = ? "
-                "WHERE repo = ? AND ticket_id = ? AND base_branch = ?",
-                (moved, *key, recorded),
-            )
-            self.queue.retarget_details(connection, *key, recorded, moved)
-        self.log(
-            f"feeder: {ticket.repo}#{ticket.ticket_id} moved from {recorded} to {moved}"
-            f" after #{parent} merged into it; recorded {moved} as its base"
-        )
-        return moved
-
-    def stack_parent_facts(self, ticket: TrackedTicket) -> ParentFacts | None:
-        with self.queue.connect() as connection:
-            row = connection.execute(
-                f"SELECT stack_parent_pr, stack_parent_head_at_feed FROM {FEEDER_TABLE} "
-                "WHERE repo = ? AND ticket_id = ?",
+                "SELECT stack_parent_pr, stack_parent_head_at_feed, base_branch, "
+                f"stack_parent_branch FROM {FEEDER_TABLE} WHERE repo = ? AND ticket_id = ?",
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchone()
-        if row is None or row[0] is None:
+        if row is None or row[0] is None or row[2] != row[3]:
             return None
         facts = self.github.pull_landing(ticket.repo, int(row[0]))
         if not isinstance(facts, ParentMerged):
             return facts
         return replace(facts, heads=tuple(dict.fromkeys((row[1], *facts.heads))))
+
+    def move_stack_base(
+        self,
+        connection: sqlite3.Connection,
+        ticket: TrackedTicket,
+        base: str,
+        proof: RetargetProof,
+    ) -> bool:
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        row = connection.execute(
+            f"SELECT base_branch, stack_parent_pr FROM {FEEDER_TABLE} "
+            "WHERE repo = ? AND ticket_id = ? AND base_branch = stack_parent_branch",
+            key,
+        ).fetchone()
+        if row is None or row[1] is None:
+            return False
+        recorded = row[0]
+        connection.execute(
+            f"UPDATE {FEEDER_TABLE} SET base_branch = ? "
+            "WHERE repo = ? AND ticket_id = ? AND base_branch = ?",
+            (base, *key, recorded),
+        )
+        self.set_pending_retarget(connection, ticket, proof)
+        self.queue.retarget_details(connection, *key, recorded, base)
+        self.log(
+            f"feeder: {ticket.repo}#{ticket.ticket_id} moved from {recorded} to {base}"
+            f" after #{row[1]} merged into it; recorded {base} as its base"
+        )
+        return True
+
+    def pending_retarget(
+        self, connection: sqlite3.Connection, ticket: TrackedTicket
+    ) -> RetargetProof | None:
+        row = connection.execute(
+            f"SELECT pending_retarget FROM {FEEDER_TABLE} WHERE repo = ? AND ticket_id = ?",
+            (ticket.repo.lower(), ticket.ticket_id),
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        proof = json.loads(row[0])
+        return RetargetProof(proof["onto_from"], proof["head"], tuple(proof["parent_heads"]))
+
+    def set_pending_retarget(
+        self, connection: sqlite3.Connection, ticket: TrackedTicket, proof: RetargetProof | None
+    ) -> None:
+        connection.execute(
+            f"UPDATE {FEEDER_TABLE} SET pending_retarget = ? WHERE repo = ? AND ticket_id = ?",
+            (
+                None if proof is None else json.dumps(asdict(proof)),
+                ticket.repo.lower(),
+                ticket.ticket_id,
+            ),
+        )
 
     def _pull_base(self, repo: str, ticket_id: str, recorded: str, number: int, head: str) -> str:
         base = self.github.pull_base(repo, number)

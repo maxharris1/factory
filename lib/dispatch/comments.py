@@ -57,9 +57,12 @@ class CommentsMixin:
             else:
                 self._reject_route(ticket, error)
             return
-        ticket = self._retargeted(ticket)
+        ticket, held = self._advance_stack(ticket)
         key = (ticket.repo.lower(), ticket.ticket_id)
         self._polled[key] = ticket
+        if held:
+            self._sync_base_mismatch(ticket)
+            return
         try:
             self._title_pull(ticket)
         except Exception as exc:

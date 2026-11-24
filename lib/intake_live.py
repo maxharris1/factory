@@ -67,6 +67,7 @@ from lib.github_actions import (
     _repo_path,
     _status,
 )
+from lib.update_check import StackUnbounded
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
@@ -199,7 +200,7 @@ def _issue_record(item: dict[str, Any]) -> IssueRecord:
     )
 
 
-class StackHeadsUnknown(GitHubAdapterError):
+class StackHeadsUnknown(GitHubAdapterError, StackUnbounded):
     pass
 
 
