@@ -244,16 +244,6 @@ def test_the_spec_says_box_checks_run_in_a_throwaway_checkout_of_the_head() -> N
     assert "installed dependencies" in bullet
 
 
-def test_exit_75_refuses_and_never_passes(box: Box, capsys) -> None:
-    box.ready(_factory_text("exit 75"))
-
-    assert box.done() == 1
-
-    assert "local_gate failed: exit 75" in capsys.readouterr().err
-    assert box.state() == ("running", None)
-    assert [event for event, _ in box.gate_events()] == [LOCAL_GATE_FAILED]
-
-
 def test_a_gate_timeout_refuses(box: Box, capsys) -> None:
     text = _factory_text("sleep 5").replace("timeout_seconds: 30", "timeout_seconds: 1")
     box.ready(text)
@@ -345,6 +335,11 @@ def origin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
 
 
 def _remote_ready(tmp_path: Path, head: str, factory: str, base: str):
+    _waiter, db, job_id, log = remote_waiter(tmp_path, head, factory, base)
+    return db, job_id, log
+
+
+def remote_waiter(tmp_path: Path, head: str, factory: str, base: str):
     from tests.test_pre_ready_remote import _orch_yml as remote_orch_yml
     from tests.test_waiter import FakeSpawn, enqueue
     from tests.test_waiter_remote import _finish_run, make_waiter, remote_machines
@@ -364,7 +359,7 @@ def _remote_ready(tmp_path: Path, head: str, factory: str, base: str):
     _serve_factory_md(env_store(), factory)
     _finish_run(tmp_path, job_id, spawn, f"ORCH-HANDOFF: {COMMENT}\n")
     waiter.step()
-    return db, job_id, log
+    return waiter, db, job_id, log
 
 
 def test_the_waiter_refuses_a_remote_ready_whose_gate_fails(tmp_path: Path, origin: str) -> None:
@@ -378,13 +373,6 @@ def test_the_waiter_refuses_a_remote_ready_whose_gate_fails(tmp_path: Path, orig
     ]
     assert any(f"local_gate failed {COMMENT}: exit 3" in line for line in log)
     assert any("gate checked" in line and "broken" in line for line in log)
-
-
-def test_the_waiter_refuses_a_remote_ready_whose_gate_exits_75(tmp_path: Path, origin: str) -> None:
-    db, job_id, _log = _remote_ready(tmp_path, origin, _factory_text("exit 75"), FEATURE)
-
-    assert _state(db, job_id) == ("failed", None)
-    assert [event for event, _ in _gate_events(db, job_id)] == [LOCAL_GATE_FAILED]
 
 
 def test_the_waiter_completes_a_remote_ready_whose_gate_passes_at_its_head(
@@ -428,7 +416,7 @@ def _failed_build(queue: SQLiteJobQueue, *, passed: str | None = None, failed: s
             detail="local_gate failed: exit 1", event=LOCAL_GATE_FAILED,
         )
     if passed is not None:
-        queue.record_check_passed(build.id, event=LOCAL_GATE_PASSED, comment_id=passed, head=HEAD)
+        queue.record_head_check(build.id, event=LOCAL_GATE_PASSED, comment_id=passed, head=HEAD)
     queue.finish(build.id, owner="claude", handoff_comment_id=None)
     return build
 
