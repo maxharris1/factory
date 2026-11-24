@@ -168,3 +168,33 @@ def test_budget_cleanup_restores_the_original_head(
     assert git(repo, "status", "--porcelain").stdout == ""
     assert git(repo, "rev-parse", "-q", "--verify", "REBASE_HEAD").returncode != 0
     assert "rebase" not in git(repo, "status").stdout
+
+
+ONTO_FROM = "b" * 40
+STEP = {"from_state": "review", "from_head": HEAD, "round": 1}
+
+
+def stacked_job(rebase: dict[str, object]) -> Job:
+    return _job("fix", "claude", 1, HEAD, {
+        "kind": "rebase", "base_branch": "main", "gitBranchName": BRANCH, "rebase": rebase,
+    })
+
+
+@pytest.mark.parametrize("place", ["box", "remote"])
+def test_onto_from_rebases_only_the_commits_above_the_old_base(place: str) -> None:
+    text = render(stacked_job({**STEP, "onto_from": ONTO_FROM}), place)
+    method = section(text, "Method")
+    assert f"`git rebase --onto origin/main {ONTO_FROM}`, without `--rebase-merges`." in method
+    assert "`git rebase origin/main`" not in method
+    assert "`git rev-list --merges origin/main..HEAD` prints nothing" in method
+    assert contradictions_in(text) == []
+
+
+@pytest.mark.parametrize("onto_from", [None, "", "b" * 6, "HEAD~1", f"{ONTO_FROM} --exec x", 7])
+def test_a_rebase_without_a_valid_onto_from_gets_todays_brief(onto_from: object) -> None:
+    today = render(stacked_job(STEP), "box")
+    step = STEP if onto_from is None else {**STEP, "onto_from": onto_from}
+    text = render(stacked_job(step), "box")
+    assert text.split("## Job data\n")[0] == today.split("## Job data\n")[0]
+    assert section(today, "Method") == section(render(rebase_job("main"), "box"), "Method")
+    assert "--onto" not in today
