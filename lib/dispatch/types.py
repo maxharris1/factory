@@ -372,6 +372,13 @@ ParentFacts = ParentOpen | ParentClosed | ParentMerged
 
 
 @dataclass(frozen=True)
+class RetargetProof:
+    onto_from: str
+    head: str
+    parent_heads: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class StackedOn:
     pr: int
     branch: str
@@ -760,15 +767,19 @@ class Feeder(Protocol):
     def stacked_parent_facts(self, ticket: TrackedTicket) -> ParentFacts | None: ...
 
     def move_stack_base(
-        self, connection: sqlite3.Connection, ticket: TrackedTicket, base: str, onto_from: str
+        self,
+        connection: sqlite3.Connection,
+        ticket: TrackedTicket,
+        base: str,
+        proof: RetargetProof,
     ) -> bool: ...
 
-    def pending_onto_from(
+    def pending_retarget(
         self, connection: sqlite3.Connection, ticket: TrackedTicket
-    ) -> str | None: ...
+    ) -> RetargetProof | None: ...
 
-    def clear_pending_onto_from(
-        self, connection: sqlite3.Connection, ticket: TrackedTicket
+    def set_pending_retarget(
+        self, connection: sqlite3.Connection, ticket: TrackedTicket, proof: RetargetProof | None
     ) -> None: ...
 
 

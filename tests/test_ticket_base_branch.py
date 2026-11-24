@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from lib.brief import render_brief
-from lib.dispatch.types import ParentMerged, ParentOpen
+from lib.dispatch.types import ParentMerged, ParentOpen, RetargetProof
 from lib.dispatcher import (
     CIResult,
     Dispatcher,
@@ -719,9 +719,10 @@ def test_a_linear_child_takes_its_parents_merge_target(tmp_path: Path) -> None:
 
     assert feeder.stacked_parent_facts(child) == ParentMerged(into="dev", heads=(sha(2), sha(4)))
     with sqlite3.connect(tmp_path / "orch.db") as connection:
-        assert feeder.move_stack_base(connection, child, "dev", sha(9))
-        assert not feeder.move_stack_base(connection, child, "dev", sha(9))
-        assert feeder.pending_onto_from(connection, child) == sha(9)
+        proof = RetargetProof(sha(9), sha(3), (sha(2), sha(4)))
+        assert feeder.move_stack_base(connection, child, "dev", proof)
+        assert not feeder.move_stack_base(connection, child, "dev", proof)
+        assert feeder.pending_retarget(connection, child) == proof
     assert FedPulls(tmp_path / "orch.db").base(LINEAR_STACK_REPO, "AUT-7") == "dev"
     assert feeder.stacked_parent_facts(child) is None
 

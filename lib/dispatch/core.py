@@ -315,9 +315,12 @@ class DispatcherBase:
     def _observed(self, fresh: TrackedTicket | None) -> TrackedTicket | None:
         if fresh is None:
             return None
+        held = False
         if _base_mismatch(fresh) is not None:
-            fresh = self._advance_stack(fresh)
+            fresh, held = self._advance_stack(fresh)
         self._fresh_reads[(fresh.repo.lower(), fresh.ticket_id)] = fresh
+        if held:
+            raise BaseMismatch(f"PR #{fresh.pr_number} waits for its stack retarget", fresh)
         if fresh.merged:
             return fresh
         if fresh.closed:

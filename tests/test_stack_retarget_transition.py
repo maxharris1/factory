@@ -6,7 +6,9 @@ import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
-from lib.dispatch.types import ParentMerged, ParentOpen, StackParent
+import pytest
+
+from lib.dispatch.types import CIResult, ParentMerged, ParentOpen, StackParent
 from lib.intake_live import StackHeadsUnknown
 from lib.update_check import StackUnbounded
 from tests.merge_queue_support import sha
@@ -46,13 +48,15 @@ class Actions(FakeReviewActions):
 class Bounds:
     def __init__(self, result: str | Exception = ONTO) -> None:
         self.result = result
+        self.by_head: dict[str, str | Exception] = {}
         self.calls: list[tuple] = []
 
     def __call__(self, repo: str, old_head: str, parent_heads: tuple[str, ...]) -> str:
         self.calls.append((repo, old_head, tuple(parent_heads)))
-        if isinstance(self.result, Exception):
-            raise self.result
-        return self.result
+        result = self.by_head.get(old_head, self.result)
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
 def wired(tmp_path: Path, *, text: str | None = None, state: str = "handed-off", **actions):
@@ -289,3 +293,90 @@ def test_a_closed_child_is_not_retargeted(tmp_path: Path) -> None:
     assert dispatcher.review_actions.bases == []
     assert child_row(tmp_path)["base_branch"] == PARENT
     assert rebases(queue) == []
+
+
+def ready_on(tmp_path: Path, github, head: str = sha(3)):
+    child = polled_child(tmp_path, github)
+    ready = comment("ready-9", READY.format(head=head), author="maxharris1", created_at=10**12)
+    return replace(
+        child,
+        current_head=head,
+        comments=(*child.comments, ready),
+        ci={head: CIResult("success")},
+    )
+
+
+def truncated_landing(github):
+    def truncated(repo: str, number: int):
+        raise StackHeadsUnknown(f"PR #{number} has 3 force pushes; read 2")
+
+    return truncated
+
+
+@pytest.mark.parametrize("failure", ["unbounded", "heads-unknown"])
+def test_a_failed_proof_stops_the_poll_from_dispatching_a_ready(
+    tmp_path: Path, failure: str
+) -> None:
+    queue, github, dispatcher = wired(tmp_path)
+    land(github)
+    if failure == "unbounded":
+        dispatcher.stack_bounds.result = StackUnbounded("cannot prove bound")
+    else:
+        github.pull_landing = truncated_landing(github)
+
+    dispatcher.process(ready_on(tmp_path, github))
+
+    assert set(stack_attention(tmp_path)) == {"stack-retarget-failed"}
+    assert queue.outstanding() == ()
+
+
+def busy_retarget(tmp_path: Path):
+    queue, github, dispatcher = wired(tmp_path, state="building")
+    land(github)
+    dispatcher.process(polled_child(tmp_path, github))
+    assert child_row(tmp_path)["base_branch"] == "main"
+    running = queue.claim("claude")
+    queue.finish(running.id, owner="claude", handoff_comment_id="ready-1")
+    with queue.connect() as connection:
+        connection.execute(
+            "UPDATE ticket_state SET workflow_state = 'handed-off', review_round = 1"
+        )
+    return queue, github, dispatcher
+
+
+def test_a_head_that_moved_after_the_proof_is_proven_again_before_its_rebase(
+    tmp_path: Path,
+) -> None:
+    queue, github, dispatcher = busy_retarget(tmp_path)
+    dispatcher.stack_bounds.by_head[sha(8)] = StackUnbounded("merge is not git's own clean merge")
+
+    for _ in range(2):
+        dispatcher.process(ready_on(tmp_path, github, sha(8)))
+
+    assert (STACK_REPO, sha(8), (sha(2), sha(4))) in dispatcher.stack_bounds.calls
+    assert "clean merge" in stack_attention(tmp_path)["stack-retarget-failed"]
+    assert rebases(queue) == []
+    assert queue.outstanding() == ()
+
+    dispatcher.stack_bounds.by_head[sha(8)] = sha(7)
+    dispatcher.process(replace(polled_child(tmp_path, github), current_head=sha(8)))
+
+    (rebase,) = rebases(queue)
+    assert (rebase["rebase"]["onto_from"], rebase["rebase"]["from_head"]) == (sha(7), sha(8))
+    assert "stack-retarget-failed" not in stack_attention(tmp_path)
+
+
+def test_a_pending_rebase_waits_while_the_live_base_is_another_branch(tmp_path: Path) -> None:
+    queue, github, dispatcher = busy_retarget(tmp_path)
+    github.pulls[(STACK_REPO, CHILD_PR)]["base"] = "release"
+
+    dispatcher.process(polled_child(tmp_path, github))
+
+    assert rebases(queue) == []
+    assert queue.outstanding() == ()
+    assert "base-mismatch" in stack_attention(tmp_path)
+
+    github.pulls[(STACK_REPO, CHILD_PR)]["base"] = "main"
+    dispatcher.process(polled_child(tmp_path, github))
+
+    assert [rebase["rebase"]["onto_from"] for rebase in rebases(queue)] == [ONTO]

@@ -186,7 +186,14 @@ from lib.device_pool import free_slots, placement_blocked, slots_in_use
 from lib.device_sync import Blocked
 from lib.dispatch.bookkeeping import LockLedger, bookkeeping_write, must_write
 from lib.dispatch.constants import TERMINAL_STATES
-from lib.dispatch.types import BaseCheck, FailedCheck, ParentFacts, ParentMerged, StackParent
+from lib.dispatch.types import (
+    BaseCheck,
+    FailedCheck,
+    ParentFacts,
+    ParentMerged,
+    RetargetProof,
+    StackParent,
+)
 from lib.dispatcher import Comment, TicketRef, TrackedTicket, safe_ship_error
 from lib.evidence.ci import CIEvidence, MainRed, ci_evidence, main_red
 from lib.evidence.criteria import numbered
@@ -314,7 +321,7 @@ _COLUMNS = (
     ("stack_parent_pr", "INTEGER"),
     ("stack_parent_branch", "TEXT"),
     ("stack_parent_head_at_feed", "TEXT"),
-    ("pending_onto_from", "TEXT"),
+    ("pending_retarget", "TEXT"),
 )
 ORCHESTRATOR = "grok-bot"
 FACTORY_LABEL = "factory"
@@ -2933,7 +2940,11 @@ class Feeder:
         return replace(facts, heads=tuple(dict.fromkeys((row[1], *facts.heads))))
 
     def move_stack_base(
-        self, connection: sqlite3.Connection, ticket: TrackedTicket, base: str, onto_from: str
+        self,
+        connection: sqlite3.Connection,
+        ticket: TrackedTicket,
+        base: str,
+        proof: RetargetProof,
     ) -> bool:
         key = (ticket.repo.lower(), ticket.ticket_id)
         row = connection.execute(
@@ -2945,10 +2956,11 @@ class Feeder:
             return False
         recorded = row[0]
         connection.execute(
-            f"UPDATE {FEEDER_TABLE} SET base_branch = ?, pending_onto_from = ? "
+            f"UPDATE {FEEDER_TABLE} SET base_branch = ? "
             "WHERE repo = ? AND ticket_id = ? AND base_branch = ?",
-            (base, onto_from, *key, recorded),
+            (base, *key, recorded),
         )
+        self.set_pending_retarget(connection, ticket, proof)
         self.queue.retarget_details(connection, *key, recorded, base)
         self.log(
             f"feeder: {ticket.repo}#{ticket.ticket_id} moved from {recorded} to {base}"
@@ -2956,21 +2968,28 @@ class Feeder:
         )
         return True
 
-    def pending_onto_from(
+    def pending_retarget(
         self, connection: sqlite3.Connection, ticket: TrackedTicket
-    ) -> str | None:
+    ) -> RetargetProof | None:
         row = connection.execute(
-            f"SELECT pending_onto_from FROM {FEEDER_TABLE} WHERE repo = ? AND ticket_id = ?",
+            f"SELECT pending_retarget FROM {FEEDER_TABLE} WHERE repo = ? AND ticket_id = ?",
             (ticket.repo.lower(), ticket.ticket_id),
         ).fetchone()
-        return None if row is None else row[0]
+        if row is None or row[0] is None:
+            return None
+        proof = json.loads(row[0])
+        return RetargetProof(proof["onto_from"], proof["head"], tuple(proof["parent_heads"]))
 
-    def clear_pending_onto_from(
-        self, connection: sqlite3.Connection, ticket: TrackedTicket
+    def set_pending_retarget(
+        self, connection: sqlite3.Connection, ticket: TrackedTicket, proof: RetargetProof | None
     ) -> None:
         connection.execute(
-            f"UPDATE {FEEDER_TABLE} SET pending_onto_from = NULL WHERE repo = ? AND ticket_id = ?",
-            (ticket.repo.lower(), ticket.ticket_id),
+            f"UPDATE {FEEDER_TABLE} SET pending_retarget = ? WHERE repo = ? AND ticket_id = ?",
+            (
+                None if proof is None else json.dumps(asdict(proof)),
+                ticket.repo.lower(),
+                ticket.ticket_id,
+            ),
         )
 
     def _pull_base(self, repo: str, ticket_id: str, recorded: str, number: int, head: str) -> str:
