@@ -25,6 +25,7 @@ from lib.device_pool import (
 from lib.dispatch.constants import (
     HANDED_OFF_EXTERNALLY,
     SETTLE_CLEARS,
+    STACK_PARENT_CLOSED,
     STUCK_WAKE_FAILURE_LIMIT,
     _ABANDONED_JOB_DETAIL,
 )
@@ -1005,6 +1006,15 @@ class JobsMixin:
         if self._holds_retry(job, self._authoritative_handoff(job)):
             return
         if self._restored_failure_waits(job):
+            return
+        if job.request.recipient != "grok" and self._stack_parent_closed(
+            job.request.repo, job.request.ticket_id
+        ):
+            self._record_job_event_once(
+                job,
+                STACK_PARENT_CLOSED,
+                "the stack parent closed unmerged; no T6 retry while the child waits for a person",
+            )
             return
         polled = self._polled.get(key)
         if polled is not None and _base_mismatch(polled) is not None:

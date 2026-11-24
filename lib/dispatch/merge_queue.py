@@ -7,6 +7,7 @@ import sqlite3
 
 from lib.dispatch.constants import (
     BASE_UPDATE_GRACE_SECONDS,
+    STACK_PARENT_CLOSED,
     TERMINAL_STATES,
     UPDATE_FAILURES_TO_STOP,
     UPDATE_READY_GRACE_SECONDS,
@@ -52,10 +53,15 @@ from lib.update_check import UpdateClass, UpdateScope
 
 MERGES_BEFORE_OVERLAP_WAITS = 1
 
-_MEMBER = """
+_MEMBER = f"""
     workflow_state IN ('merge-queue', 'updating', 'waiting-external')
     AND approved_head IS NOT NULL
     AND stuck = 0
+    AND NOT EXISTS (
+        SELECT 1 FROM needs_attention AS hold
+        WHERE hold.repo = ticket_state.repo AND hold.ticket_id = ticket_state.ticket_id
+            AND hold.reason = '{STACK_PARENT_CLOSED}'
+    )
 """
 
 

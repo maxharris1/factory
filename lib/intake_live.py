@@ -656,7 +656,7 @@ class GitHubIntakeClient(GitHubReviewActions):
             if state == "OPEN":
                 return ParentOpen()
             if state == "CLOSED":
-                return ParentClosed()
+                return ParentClosed(int(number))
             into, head = pull.get("baseRefName"), pull.get("headRefOid")
             if state != "MERGED" or not _github_branch(into) or not _is_sha(head):
                 raise GitHubAdapterError(f"PR #{number} state, base or head is not readable")

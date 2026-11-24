@@ -284,7 +284,7 @@ HARNESSES = ("claude", "codex", "cursor")
 TRACKERS = ("github", "linear")
 ATTENTION_REASONS = (
     "ship-failed", "dedupe-dropped", "edited-comment", "base-mismatch", "stack-retarget-failed",
-    "deploy-conflict", "linear-reopen-failed", "linear-not-reopened",
+    "stack-parent-closed", "deploy-conflict", "linear-reopen-failed", "linear-not-reopened",
     SLOW_CYCLE, LOCK_ERRORS, CI_INFRA_BLOCKED_REASON, CI_RERUN_REFUSED, CI_STALE_REASON, OK_WITHOUT_APPROVE,
     *FEEDER_ATTENTION_REASONS, account_doctor.REASON,
 )
