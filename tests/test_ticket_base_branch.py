@@ -721,3 +721,49 @@ def test_a_github_ticket_fed_on_the_project_base_polls_with_factory_ref(tmp_path
 
     assert child_row(tmp_path)["base_branch"] == "main"
     assert github_poll(tmp_path, CHILD_PR, factory_ref="dev").factory.base_branch == "dev"
+
+
+def retargeted_after(tmp_path: Path, github: FakeGitHub, dispatcher) -> None:
+    merge_parent(github)
+    github.pulls[(STACK_REPO, CHILD_PR)]["base"] = "main"
+    dispatcher.process(polled_child(tmp_path, github))
+    assert child_row(tmp_path)["base_branch"] == "main"
+    assert stack_attention(tmp_path) == {}
+
+
+def test_a_build_that_failed_before_the_retarget_retries_on_the_new_base(tmp_path: Path) -> None:
+    _, queue, github, dispatcher = fed_child(tmp_path)
+    dispatcher.process(polled_child(tmp_path, github))
+    failed = queue.claim("claude")
+    queue.finish(failed.id, owner="claude", handoff_comment_id=None)
+
+    retargeted_after(tmp_path, github, dispatcher)
+    dispatcher.reconcile_jobs()
+
+    retry = queue.claim("claude")
+    assert retry.request.attempt == 2
+    assert json.loads(retry.request.detail)["base_branch"] == "main"
+
+
+def test_a_build_queued_before_the_retarget_runs_on_the_new_base(tmp_path: Path) -> None:
+    _, queue, github, dispatcher = fed_child(tmp_path)
+    dispatcher.process(polled_child(tmp_path, github))
+
+    retargeted_after(tmp_path, github, dispatcher)
+
+    job = queue.claim("claude")
+    assert json.loads(job.request.detail)["base_branch"] == "main"
+
+
+def test_a_build_running_across_the_retarget_retries_on_the_new_base(tmp_path: Path) -> None:
+    _, queue, github, dispatcher = fed_child(tmp_path)
+    dispatcher.process(polled_child(tmp_path, github))
+    running = queue.claim("claude")
+
+    retargeted_after(tmp_path, github, dispatcher)
+    queue.finish(running.id, owner="claude", handoff_comment_id=None)
+    dispatcher.reconcile_jobs()
+
+    retry = queue.claim("claude")
+    assert retry.request.attempt == 2
+    assert json.loads(retry.request.detail)["base_branch"] == "main"

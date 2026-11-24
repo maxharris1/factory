@@ -294,6 +294,28 @@ class SQLiteJobQueue:
             )
         return _job(row, connection)
 
+    def retarget_details(
+        self, connection: sqlite3.Connection, repo: str, ticket_id: str, old: str, new: str
+    ) -> None:
+        rows = connection.execute(
+            """
+            SELECT rowid, detail FROM jobs
+            WHERE lower(repo) = ? AND ticket_id = ?
+              AND (state IN ('queued', 'running', 'cancelled')
+                   OR (state = 'failed' AND failure_handled = 0))
+            """,
+            (repo.lower(), ticket_id),
+        ).fetchall()
+        for rowid, detail in rows:
+            data = job_detail.as_object(detail)
+            if data is None or data.get("base_branch") != old:
+                continue
+            data["base_branch"] = new
+            connection.execute(
+                "UPDATE jobs SET detail = ? WHERE rowid = ?",
+                (json.dumps(data, separators=(",", ":"), sort_keys=True), rowid),
+            )
+
     def claim(
         self,
         recipient: str,

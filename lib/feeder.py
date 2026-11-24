@@ -2854,6 +2854,7 @@ class Feeder:
                 "WHERE repo = ? AND ticket_id = ? AND base_branch = ?",
                 (moved, *key, recorded),
             )
+            self.queue.retarget_details(connection, *key, recorded, moved)
         self.log(
             f"feeder: {ticket.repo}#{ticket.ticket_id} moved from {recorded} to {moved}"
             f" after #{parent} merged into it; recorded {moved} as its base"
