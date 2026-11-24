@@ -621,7 +621,9 @@ class MergeQueueMixin:
             ci = polled.ci.get(polled.current_head)
             if ci is None or not ci.clears:
                 continue
-            overlap_waits = merged_since_approval >= MERGES_BEFORE_OVERLAP_WAITS
+            overlap_waits = merged_since_approval >= MERGES_BEFORE_OVERLAP_WAITS and (
+                waiting is None or _stack_wait(waiting, waiting.current_head) is None
+            )
             if overlap_waits and self._waits_behind(head, waiting, polled):
                 continue
             try:
@@ -666,9 +668,9 @@ class MergeQueueMixin:
             return "base update out"
         if head is None:
             return "head unread"
-        parent = ticket.stack_parent_branch
-        if parent is not None and (ticket.pr_base or ticket.factory.base_branch) == parent:
-            return f"stacked on {parent}: waits for its retarget"
+        stack_wait = _stack_wait(ticket, head)
+        if stack_wait is not None:
+            return stack_wait
         if ticket.mergeable is not True:
             return f"not mergeable ({ticket.mergeable_state or 'pending'})"
         ci = ticket.ci.get(head)
@@ -1052,6 +1054,8 @@ class MergeQueueMixin:
         approval this poll records before one is chosen."""
         if ticket.factory.finish_line != "merge":
             return True
+        if _stack_wait(ticket, ticket.current_head) is not None:
+            return False
         if self._ticket_pass:
             self._deferred_ships[(ticket.repo.lower(), ticket.ticket_id)] = ticket
             return False
@@ -1156,8 +1160,23 @@ def _failed_update_may_settle(row: sqlite3.Row, polled: TrackedTicket) -> bool:
     return ci is not None and ci.status != "pending"
 
 
+def _stack_wait(ticket: TrackedTicket, head: str | None) -> str | None:
+    parent = ticket.stack_parent_branch
+    if parent is None:
+        return None
+    base = ticket.pr_base or ticket.factory.base_branch
+    if base == parent:
+        return f"stacked on {parent}: waits for its retarget"
+    ci = ticket.ci.get(head) if head is not None else None
+    if ci is not None and ci.status == "not-run":
+        return f"stacked child: CI not-run on {base}, waits for GitHub CI"
+    return None
+
+
 def _waits_on_update_or_ci(ticket: TrackedTicket) -> bool:
     if ticket.mergeable_state in ("dirty", "behind"):
+        return True
+    if _stack_wait(ticket, ticket.current_head) is not None:
         return True
     head = ticket.current_head
     if head is None:
