@@ -185,7 +185,7 @@ from lib.brief_comment import FACTORY_MD_HEADING
 from lib.device_pool import free_slots, placement_blocked, slots_in_use
 from lib.device_sync import Blocked
 from lib.dispatch.bookkeeping import LockLedger, bookkeeping_write, must_write
-from lib.dispatch.constants import TERMINAL_STATES
+from lib.dispatch.constants import OWN_CLOSE_SETTLE_SECONDS, TERMINAL_STATES
 from lib.dispatch.types import (
     BaseCheck,
     FailedCheck,
@@ -322,6 +322,7 @@ _COLUMNS = (
     ("stack_parent_branch", "TEXT"),
     ("stack_parent_head_at_feed", "TEXT"),
     ("pending_retarget", "TEXT"),
+    ("retarget_at", "REAL"),
 )
 ORCHESTRATOR = "grok-bot"
 FACTORY_LABEL = "factory"
@@ -2182,10 +2183,15 @@ class Feeder:
         })
         released: list[Ref] = []
         labelled: list[Ref] = []
+        reopening = self._own_closing({rows[ref].ticket for ref in watched if rows[ref].ticket})
         for ref, pull in sorted(watched.items()):
             if (status := statuses.get(pull)) is not None and status.abandoned:
                 labelled.append(ref)
-            elif not rows[ref].released and _progress(statuses, pull) in (Progress.DONE, Progress.UNFINISHED):
+            elif (
+                not rows[ref].released
+                and rows[ref].ticket not in reopening
+                and _progress(statuses, pull) in (Progress.DONE, Progress.UNFINISHED)
+            ):
                 released.append(ref)
         ended = {*released, *labelled}
         capped = self._capped({row.ticket for row in holders.values() if row.ticket})
@@ -2300,6 +2306,25 @@ class Feeder:
                 (str(repo), str(ticket_id))
                 for repo, ticket_id in connection.execute(
                     f"SELECT repo, ticket_id FROM ticket_state WHERE workflow_state = 'capped'{stuck}"
+                )
+            }
+        return found & tickets
+
+    def _own_closing(self, tickets: set[tuple[str, str]]) -> set[tuple[str, str]]:
+        if not tickets:
+            return set()
+        with self.queue.connect() as connection:
+            if not _has_table(connection, "ticket_state"):
+                return set()
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(ticket_state)")}
+            if not {"repo", "ticket_id", "own_close_step", "own_close_at"} <= columns:
+                return set()
+            found = {
+                (str(repo), str(ticket_id))
+                for repo, ticket_id in connection.execute(
+                    "SELECT repo, ticket_id FROM ticket_state WHERE own_close_step = 'closing' "
+                    "OR own_close_at > ?",
+                    (self.queue.now() - OWN_CLOSE_SETTLE_SECONDS,),
                 )
             }
         return found & tickets
@@ -2956,9 +2981,9 @@ class Feeder:
             return False
         recorded = row[0]
         connection.execute(
-            f"UPDATE {FEEDER_TABLE} SET base_branch = ? "
+            f"UPDATE {FEEDER_TABLE} SET base_branch = ?, retarget_at = ? "
             "WHERE repo = ? AND ticket_id = ? AND base_branch = ?",
-            (base, *key, recorded),
+            (base, self.queue.now(), *key, recorded),
         )
         self.set_pending_retarget(connection, ticket, proof)
         self.queue.retarget_details(connection, *key, recorded, base)

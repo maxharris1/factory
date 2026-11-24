@@ -40,6 +40,8 @@ from lib.dispatch.helpers import (
     _round_number,
     _scope,
     failed_checks,
+    own_close_at_head,
+    record_own_close,
 )
 from lib.dispatch.rebase import RebaseStep, newest_rebase
 from lib.dispatch.retry import _harness_job_active
@@ -241,6 +243,8 @@ class ReadyMixin:
                 return True, "rejected-ready-at-base"
             ticket = fresh
             self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
+        if state == "fixing":
+            self._restart_ci(ticket, head)
         if rebase is not None and _matching_head(head, rebase.from_head) is not None:
             return self._rebase_noop(ticket, rebase)
         answered = self._verdict_after(
@@ -790,8 +794,10 @@ class ReadyMixin:
         if head is None or result is None or self.ci_full_rerun is None:
             return
         # A rerun reuses the run's original merge ref, so it can never pick up
-        # a base workflow change: the merge queue's update-from-main does.
-        changes = [change for change in result.stale if change.kind != "base-workflow"]
+        # a base workflow change or prove CI on a retargeted base.
+        changes = [
+            change for change in result.stale if change.kind not in ("base-workflow", "retarget")
+        ]
         if not changes or self._is_stuck(ticket):
             return
         state = self._review_context(ticket)[0]
@@ -1308,6 +1314,31 @@ class ReadyMixin:
             )
             connection.commit()
         return True, "rebase-noop"
+
+    def _restart_ci(self, ticket: TrackedTicket, head: str) -> None:
+        """A retarget rebase that pushed no head fires no CI on the new base, so
+        close and reopen the PR to fire pull_request: reopened (#1496)."""
+        with self._connect() as connection:
+            rebase = newest_rebase(connection, (ticket.repo.lower(), ticket.ticket_id))
+            record = own_close_at_head(connection, ticket)
+            if (
+                rebase is None
+                or rebase.onto_from is None
+                or _matching_head(head, rebase.from_head) is None
+                or (record is not None and record[0] == "reopened")
+            ):
+                return
+            record_own_close(connection, ticket, head, "closing", self.queue.now())
+        actions = self._review_actions(ticket)
+        actions.close_pull(ticket)
+        actions.reopen(ticket)
+        with self._connect() as connection:
+            record_own_close(connection, ticket, head, "reopened", self.queue.now())
+        if self.log is not None:
+            self.log(
+                f"restarted CI: {ticket.repo}#{ticket.ticket_id} closed and reopened at {head[:12]}"
+                " after a retarget rebase pushed no head"
+            )
 
     def _verdict_after(
         self,

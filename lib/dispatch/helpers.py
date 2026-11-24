@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 
 from lib.dispatch.constants import (
+    OWN_CLOSE_SETTLE_SECONDS,
     _FENCE_OPEN,
     _LIST_MARKER,
     _NO_QUESTIONS,
@@ -42,6 +43,37 @@ def grant_open(
         ).fetchone()
         is None
     )
+
+
+def own_close_at_head(
+    connection: sqlite3.Connection, ticket: TrackedTicket
+) -> tuple[str, float | None] | None:
+    row = connection.execute(
+        "SELECT own_close_head, own_close_step, own_close_at FROM ticket_state "
+        "WHERE repo = ? AND ticket_id = ?",
+        (ticket.repo.lower(), ticket.ticket_id),
+    ).fetchone()
+    if row is None or row[0] is None or _matching_head(row[0], ticket.current_head) is None:
+        return None
+    return row[1], row[2]
+
+
+def own_close_holds(record: tuple[str, float | None] | None, now: float) -> bool:
+    if record is None:
+        return False
+    step, at = record
+    return step == "closing" or (at is not None and now - at < OWN_CLOSE_SETTLE_SECONDS)
+
+
+def record_own_close(
+    connection: sqlite3.Connection, ticket: TrackedTicket, head: str, step: str, at: float
+) -> None:
+    connection.execute(
+        "UPDATE ticket_state SET own_close_head = ?, own_close_step = ?, own_close_at = ? "
+        "WHERE repo = ? AND ticket_id = ?",
+        (head, step, at, ticket.repo.lower(), ticket.ticket_id),
+    )
+    connection.commit()
 
 
 def _base_update_key(ticket: TrackedTicket, head: str) -> str:

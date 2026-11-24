@@ -9,7 +9,7 @@ from pathlib import Path
 from lib.dispatch.constants import CI_RERUN_REFUSED
 from lib.dispatch.types import CIChange, CIResult, CheckRow, ci_fresh
 from lib.github_actions import GhResult, GitHubReviewActions
-from lib.poll_source import LivePollSource, RequiredGlobs
+from lib.poll_source import FedPulls, LivePollSource, RequiredGlobs
 from tests.merge_queue_support import Board, sha
 
 
@@ -17,6 +17,7 @@ def gated_source(factory, raw, head, *, changes=None, github=None, base_sha=None
     source = LivePollSource.__new__(LivePollSource)
     source.github = github
     source.required_globs = changes or RequiredGlobs()
+    source.fed_pulls = FedPulls()
     source.wall = lambda: 2000000000.0
     source._record = lambda *args: None
     pull = {"head": {"sha": head}, "base": {"ref": "main", **({"sha": base_sha} if base_sha else {})}}

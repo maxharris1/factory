@@ -33,7 +33,7 @@ from lib.dispatch.cycle_clock import (
     CycleClock,
 )
 from lib.dispatch.errors_text import poll_error_detail, poll_error_text
-from lib.dispatch.helpers import _matching_head
+from lib.dispatch.helpers import _matching_head, own_close_at_head, own_close_holds, record_own_close
 from lib.dispatch.types import (
     AlreadyDeferred,
     PollCycleFailed,
@@ -651,6 +651,26 @@ class PollMixin:
         actions.reopen(ticket)
         if self.log is not None:
             self.log(f"reopened: {ticket.repo}#{ticket.ticket_id} branch is ahead at {tip}")
+        return True
+
+    def _reopen_own_close(self, ticket: TrackedTicket) -> bool:
+        if not (ticket.closed and not ticket.merged and ticket.current_head is not None):
+            return False
+        now = self.queue.now()
+        with self._connect() as connection:
+            record = own_close_at_head(connection, ticket)
+        if not own_close_holds(record, now):
+            return False
+        if record is not None and record[0] == "reopened":
+            return True
+        self._review_actions(ticket).reopen(ticket)
+        with self._connect() as connection:
+            record_own_close(connection, ticket, ticket.current_head, "reopened", self.queue.now())
+        if self.log is not None:
+            self.log(
+                f"reopened: {ticket.repo}#{ticket.ticket_id} after its own close"
+                f" at {ticket.current_head[:12]}"
+            )
         return True
 
 

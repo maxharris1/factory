@@ -138,6 +138,7 @@ class CheckRow:
     run_id: str | None = None
     job_id: str | None = None
     workflow: str = ""
+    run_created_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -243,7 +244,7 @@ def pr_ci(result: CIResult, factory: FactoryConfig, pr_base: str | None) -> CIRe
     return ci_required(result, factory.ci_required_checks)
 
 
-CIChangeKind = Literal["head-workflow", "required-set", "base-workflow"]
+CIChangeKind = Literal["head-workflow", "required-set", "base-workflow", "retarget"]
 
 
 @dataclass(frozen=True)
@@ -272,13 +273,23 @@ def _gate_units(
     return units or [("CI", [])]
 
 
+def _began(row: CheckRow, change: CIChange) -> float | None:
+    # A rerun or a delayed job of a workflow run keeps the merge ref of the
+    # event that created the run, so after a retarget only the run's creation
+    # says which base it tested.
+    if change.kind == "retarget" and row.run_id is not None:
+        return row.run_created_at
+    return row.started_at
+
+
 def _fresh(row: CheckRow, change: CIChange) -> bool:
     # A run's start time does not say which base it merged: a workflow commit
     # can be pushed long after it was made. Only a head containing the commit
     # runs the base workflow, and such a head raises no base-workflow change.
     if change.kind == "base-workflow":
         return False
-    return row.conclusion == "success" and row.started_at is not None and row.started_at > change.at
+    began = _began(row, change)
+    return row.conclusion == "success" and began is not None and began > change.at
 
 
 def stale_units(
@@ -306,7 +317,34 @@ def _unreported(result: CIResult, changes: tuple[CIChange, ...]) -> tuple[CIChan
     return missing if result.checks and set(result.pending) <= names else ()
 
 
+def _before_retarget(result: CIResult, changes: tuple[CIChange, ...]) -> CIResult:
+    cuts = [change for change in changes if change.kind == "retarget"]
+    if result.status != "failure" or not cuts:
+        return result
+    runs = {row.run_id: row for row in result.checks if row.run_id is not None}
+
+    def stale(check: FailedCheck) -> bool:
+        row = runs.get(check.run_id) if check.run_id is not None else None
+        began = None if row is None else _began(row, cuts[0])
+        return row is not None and (began is None or began <= cuts[0].at)
+
+    kept = tuple(check for check in result.failed if not stale(check))
+    if len(kept) == len(result.failed):
+        return result
+    if kept:
+        return replace(result, log="failed: " + ", ".join(check.name for check in kept), failed=kept)
+    names = [f"{check.name} (stale after retarget)" for check in result.failed]
+    return CIResult(
+        "pending",
+        pending=tuple(dict.fromkeys((*result.pending, *names))),
+        checks=result.checks,
+        statuses=result.statuses,
+        stale=(cuts[0],),
+    )
+
+
 def ci_fresh(result: CIResult, changes: tuple[CIChange, ...], required: tuple[str, ...]) -> CIResult:
+    result = _before_retarget(result, changes)
     if result.status == "pending":
         missing = _unreported(result, changes)
         return replace(result, stale=missing) if missing else result
