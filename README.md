@@ -2064,7 +2064,7 @@ Tokyo Night palette, square corners, 1px elevation rings, Geist for text
 and JetBrains Mono for numbers and labels. Both fonts are vendored under
 `lib/fonts` (SIL OFL 1.1, licenses alongside) and travel inside the page
 script as bytes, registered with `FontFace`, so nothing is fetched and the
-static server's CSP is unchanged; without script the system fonts are used.
+server's CSP is unchanged; without script the system fonts are used.
 Values are only ever set as text
 (`createElement`/`textContent`), never parsed as HTML. Animations (brand
 caret, link pulse, heartbeat shimmer, new-row flash, the current step's
@@ -2210,7 +2210,7 @@ dashboard:
 That is the confirmed target: the files land in
 `/home/cursor-bot/factory-dashboard` on pc-wsl-bots (the same upload by hand
 is `scp -F /home/box/.ssh/config status.json index.html activity.html
-efficiency.html job.html health.html tickets.json pc-wsl-cursor-bot:factory-dashboard/`), and the static server below serves
+efficiency.html job.html health.html tickets.json pc-wsl-cursor-bot:factory-dashboard/`), and the server below serves
 them tailnet-only at <http://pc-wsl-bots.tail68624b.ts.net:8090/>.
 `config/orch.example.yml` carries this section; the shipped `orch.yml` has
 it commented out, so nothing pushes until Max turns it on.
@@ -2245,7 +2245,7 @@ read-only snapshot never looks like a change. The full set (the four pages
 too) still goes out on the first cycle and then after every cycle, or every
 `every_minutes`. A failed start is one redacted line at most once a
 minute. `--once` polls start no watcher, and a stop stops it before exit.
-The page needs the static server to allow `connect-src 'self'`
+The page needs the HTTP server to allow `connect-src 'self'`
 ([`deploy/factory-dashboard-http.py`](deploy/factory-dashboard-http.py)
 sends it); with an older copy of that server the browser blocks the poll
 and the page falls back to reloading.
@@ -2262,7 +2262,7 @@ factory-dashboard && mv -f -- .status.json.push-tmp status.json && mv -f --
 names. An interrupted upload leaves the published set as it was; the
 renames run back to back on the remote host with no network round-trip
 between them, so a reader never sees a half-written file and the set is
-mismatched for at most the instants between local `rename(2)` calls. The static server
+mismatched for at most the instants between local `rename(2)` calls. The HTTP server
 never serves the temp names. `<options>` are `-o BatchMode=yes`; connect
 and keepalive timeouts are left to the host's ssh_config (issue #224), and
 the 20-second per-command timeout still bounds a dead link (issue #106). Every command is an argv list (no
@@ -2287,41 +2287,117 @@ Health component (below). Tests use a
 fake transport and a fake spawn; nothing in this repository runs ssh, scp
 or rsync against a real host.
 
-**Static server (not deployed).**
+**Live server.**
 [`deploy/factory-dashboard-http.service`](deploy/factory-dashboard-http.service)
-is an example systemd user unit for the pc-wsl-bots WSL node. It runs
+is the system unit that serves 8090 on the pc-wsl-bots WSL node. It runs
 [`deploy/factory-dashboard-http.py`](deploy/factory-dashboard-http.py), a
-small standard-library server, instead of `python3 -m http.server` (which
-follows symlinks out of its directory, lists directories, and serves the
-home directory when `--directory` is empty). It answers GET and HEAD (and, with GitHub actions on, POST under `/api`, below) only,
-and only for `/`, `/status.json`, the five pages (`/index.html`,
-`/job.html`, `/activity.html`, `/efficiency.html`, `/health.html`; an older
-copy of the server answers 404 for the last four until it is replaced) and
-`/tickets.json` (404 from a server copied before issue #530): every other path, dot-
-file, `..` or encoded slash is a 404, and no directory is ever listed. Each
-file is opened, with `O_NOFOLLOW`, relative to a descriptor for the
-directory that the server opens once at startup (so swapping the directory
-or an ancestor for a symlink later changes nothing), and served only
-if it is a regular file with a single link, so neither a symlink nor a hard
-link to a file elsewhere is served. It binds only the node's tailnet IPv4
-address, never a wildcard address. Before starting (`ExecStartPre`, and
-again at startup) it refuses a `TAILNET_IP` outside `100.64.0.0/10`, and a
-`DASHBOARD_DIR` that is unset, empty, relative, missing, not a directory,
-`/`, `$HOME` or above `$HOME` (checked after resolving symlinks). If
-Tailscale is down the bind fails and systemd retries; it never falls back
-to another address. The unit is sandboxed: `ProtectSystem=strict`,
-`ProtectHome=read-only`, `~/.ssh`, `~/.gnupg`, `~/.config/gh`, `~/.aws` and
-`~/.netrc` inaccessible, `PrivateTmp`, `PrivateDevices`, `PrivateUsers`,
-`NoNewPrivileges`, IPv4 and Unix sockets only, and the `@system-service`
-system call filter. In a user unit that needs unprivileged user namespaces
-(WSL2 has them); without them the unit fails to start rather than running
-unsandboxed. To install it, Max puts `TAILNET_IP` (from `tailscale ip -4`
-on that node), `DASHBOARD_DIR` and `DASHBOARD_PORT` in
-`~/.config/factory-dashboard/http.env` (no secrets), copies
-`deploy/factory-dashboard-http.py` to `~/.local/lib/factory-dashboard/` and
-the unit to `~/.config/systemd/user/`, then runs `systemctl --user
-daemon-reload` and `enable --now`. WSL needs systemd enabled. Nothing in
-this repository installs, enables or starts it, or pushes anything.
+small standard-library server, from
+`/usr/local/lib/factory-dashboard/factory-dashboard-http.py` as user and
+group `factory-dash`, with `cursor-bot` as a supplementary group so it can
+read the pushed directory. It takes 8090 in place of
+`factory-dashboard.service`, which runs `python3 -m http.server`. That
+server follows symlinks out of its directory, lists directories, and serves
+the working directory when `--directory` is empty.
+`Conflicts=factory-dashboard.service` keeps the two from running at once.
+The HTTP server answers GET and HEAD (and, with GitHub actions on, POST
+under `/api`, below) only. It answers only for `/`, `/status.json`, the
+seven pages (`/index.html`, `/job.html`, `/activity.html`,
+`/efficiency.html`, `/health.html`, `/ticket.html`, `/settings.html`),
+`/tickets.json` and a QA run's evidence under `/qa/runs/<run_id>`. Every
+other path, dot-file, `..` or encoded slash is a 404, and no directory is
+ever listed. Each file is opened, with `O_NOFOLLOW`, relative to a
+descriptor for the directory that the server opens once at startup (so
+swapping the directory or an ancestor for a symlink later changes nothing),
+and served only if it is a regular file with a single link, so neither a
+symlink nor a hard link to a file elsewhere is served. It binds only the
+node's tailnet IPv4 address, never a wildcard address. Before starting
+(`ExecStartPre` runs `--check`, and again at startup) it refuses a
+`TAILNET_IP` outside `100.64.0.0/10`, and a `DASHBOARD_DIR` that is unset,
+empty, relative, missing, not a directory, `/`, `$HOME` or above `$HOME`
+(checked after resolving symlinks). If Tailscale is down the bind fails and
+systemd retries. It never falls back to another address. The unit is
+sandboxed: `ProtectSystem=strict`, `ProtectHome=tmpfs` with only the pushed
+directory bound back read-only (`BindReadOnlyPaths=`) and the spool, relay
+and audit directories bound read-write when set (`BindPaths=`, below),
+`PrivateUsers`, `PrivateTmp`, `PrivateDevices`, `NoNewPrivileges`,
+`RestrictNamespaces`, IPv4 and Unix sockets only, the `@system-service`
+system call filter, and `UMask=0077`. Inside it the rest of `/home` and
+`/root` is empty, so no bot's `~/.ssh` is visible. WSL needs systemd enabled. Until Max runs
+`install` (below), `factory-dashboard.service` still serves 8090.
+
+**Service script.** Run
+[`deploy/dashboard-http-service.sh`](deploy/dashboard-http-service.sh) as
+root on the PC: `deploy/dashboard-http-service.sh install|status|restart|rollback`.
+
+- `install` reads `http.env` first. It exits 78 before changing anything
+  if the file is missing or unreadable, a required key is empty,
+  `DASHBOARD_DIR` is not a directory, or a path key is not an absolute path
+  of only letters, digits and `. _ @ + -` with no `.` or `..` part. It then
+  adds the system user `factory-dash` if it is missing, gives the group
+  read and search on `DASHBOARD_DIR`, copies the app to
+  `/usr/local/lib/factory-dashboard/` and the unit to
+  `/etc/systemd/system/`, and writes the drop-in
+  `factory-dashboard-http.service.d/paths.conf` from the path keys:
+  `BindReadOnlyPaths=` for `DASHBOARD_DIR`, and `BindPaths=` for
+  `DASHBOARD_SETTINGS_SPOOL`, `DASHBOARD_SIGNIN_RELAY` and the directory of
+  `DASHBOARD_ACTIONS_AUDIT` when each is set. Then it moves 8090 over. It
+  disables `factory-dashboard.service`, enables and restarts the HTTP unit
+  (whose `Conflicts=` stops the static server), and waits up to
+  `DASHBOARD_START_WAIT` seconds for it to go live. If a step fails or the
+  unit is not live by then, it disables and stops the HTTP unit, enables
+  and starts `factory-dashboard.service` again, prints the HTTP unit's last
+  50 journal lines, and exits 1.
+- `status` exits 0 only when the HTTP unit is active,
+  `factory-dashboard.service` is not, and the tailnet address in `http.env`
+  answers with `Server: factory-dashboard`. Otherwise it prints `not live:`
+  with the reason and exits 3. It reads the address from `http.env`, so run
+  it as root or set `DASHBOARD_PROBE_ADDR`.
+- `restart` restarts only a unit that is already cut over: enabled, with
+  `factory-dashboard.service` inactive or failed. It then waits for
+  `status`. Otherwise it refuses with exit 3 rather than cut over, because
+  starting the unit would stop the static server through `Conflicts=`.
+- `rollback` puts `factory-dashboard.service` back. It enables and starts
+  that unit, disables and stops the HTTP unit, then confirms that the
+  address answers `Server: SimpleHTTP` and that `/api/session` does not
+  answer 200, so Settings is read-only. It refuses with exit 1 if
+  `/etc/systemd/system/factory-dashboard.service` does not exist, since
+  nothing would then serve 8090.
+
+Exit codes: 0 live (for `rollback`, the static server answers); 1 the
+cutover failed and was reverted, a `systemctl` call failed, or `rollback`
+refused; 3 not live (`restart` refuses with 3; for `rollback`, the units
+switched but the static server is not confirmed); 78 `http.env` is
+incomplete or a path in it is unsafe; 2 usage. Overrides:
+`DASHBOARD_SYSTEMCTL`, `DASHBOARD_ENV_FILE`, `DASHBOARD_PROBE_ADDR`,
+`DASHBOARD_START_WAIT` (seconds, default 15), `DASHBOARD_UNIT_DIR` and
+`DASHBOARD_LIB_DIR`. The cutover changes a running service, so `install`
+runs only with Max's go.
+
+**`http.env`.** The unit reads `/etc/factory-dashboard/http.env`, owner
+root, group `factory-dash`, mode 0640. Max creates it before `install`.
+Three keys are required: `TAILNET_IP` (the node's `tailscale ip -4`),
+`DASHBOARD_DIR` (the directory `dashboard.push.remote_dir` names) and
+`DASHBOARD_PORT=8090`. The GitHub actions below add optional keys:
+`DASHBOARD_GITHUB_CLIENT_ID`, `DASHBOARD_APPROVER`,
+`DASHBOARD_ACTION_CLIENTS`, `DASHBOARD_SETTINGS_SPOOL`,
+`DASHBOARD_ACTIONS_AUDIT` and `DASHBOARD_SIGNIN_RELAY`. The file holds no
+secret. The client id of an OAuth App with device flow on is public.
+Any secret or OAuth value is Max's to create and set himself.
+Nothing in this repository, the script or a factory job reads, creates or
+writes such a value. The script parses only `TAILNET_IP`, `DASHBOARD_PORT` and the path
+keys, and only the address and the paths (in the drop-in) leave the file.
+
+**Account sign-in.** With the settings spool and `DASHBOARD_SIGNIN_RELAY`
+set, the Accounts panel's **Sign in** spools an `op: signin` request for the
+sign-in broker and shows the relay view: the attempt's state, the sign-in
+URL the broker writes (and the code, for Codex), a box for the Claude paste
+code, and **Cancel**. The relay is an absolute,
+existing directory, not a symlink, that gives others no access (the group
+may write, since the push login shares it). A clicked Sign in finishes only
+once the sign-in broker runs on the orch host (issue #1398, PR #1401).
+Without it the attempt stays queued. The server never signs anything in
+itself. It writes only the request, the paste code and the cancel, and it
+removes a code the broker has not taken after 120 seconds.
 
 **GitHub actions (off by default).** With `DASHBOARD_GITHUB_CLIENT_ID` set
 in `http.env`, the server also answers a small JSON API under `/api` so the
@@ -2329,9 +2405,8 @@ pages can comment on a ticket's issue or PR and give the hold OK as Max
 (issue #563). Setup, by Max: register a GitHub OAuth App with device flow
 on (scope `repo`); put its client id, `DASHBOARD_APPROVER=maxharris1` and
 `DASHBOARD_ACTION_CLIENTS` (his phone's and laptop's tailnet IPv4
-addresses, comma separated) in `http.env`; create a dedicated user (for
-example `factory-dash`) with group read on the pushed directory and nothing
-else of the bots', and install the unit under that user. `--check` and
+addresses, comma separated) in `http.env`; then run `install` (above),
+which runs the server as `factory-dash`. `--check` and
 startup refuse actions when the process user or `USER` is a bot account
 (`*-bot`, `grok`, `box`), when the client list is empty, holds a
 non-tailnet address or holds the node's own `TAILNET_IP`.
@@ -2438,7 +2513,10 @@ cannot reach the orch host, and the orch host's credentials stay there:
 
 Setup, by Max: create the spool as an absolute directory, not a symlink,
 owned by the dashboard user with mode 0755; the account the push SSH logs in
-as needs read access. Then add to the orch host's `orch.yml` (or
+as needs read access. `install` binds it read-write through its drop-in, so
+create it before you run `install`, or run `install` again after. `install`
+adds `factory-dash` with no home directory, so create `/home/factory-dash`
+too if you use the path below. Then add to the orch host's `orch.yml` (or
 `orch.local.yml`):
 
 ```yaml
@@ -2462,10 +2540,10 @@ The server posts the comment as Max; no bot posts on his behalf.
    an absolute file path. If the file exists it must be a regular file, not
    a symlink, and not group- or world-writable; its directory must exist and
    not be group- or world-writable. The server opens it once at startup
-   (append only, mode 0600). The unit's sandbox makes the home directory
-   read-only, so add a drop-in (`systemctl --user edit
-   factory-dashboard-http.service`) with `ReadWritePaths=` naming that
-   directory. Without the variable, `/api/act` is 404; setting it without
+   (append only, mode 0600). The unit's sandbox hides the home
+   directories, so `install` writes a `BindPaths=` line for the audit
+   file's directory into its drop-in. Run `install` again after you set or
+   change the variable. Without the variable, `/api/act` is 404; setting it without
    `DASHBOARD_GITHUB_CLIENT_ID` is a configuration error.
 2. `POST /api/act` `{repo, ticket_id, action, expect_state, expect_why,
    words, head}` checks the session, CSRF and approver login (403
