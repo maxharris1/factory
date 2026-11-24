@@ -296,6 +296,18 @@ class SchemaMixin:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS approval_carries (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    from_head TEXT NOT NULL,
+                    to_head TEXT NOT NULL,
+                    carried_at REAL NOT NULL,
+                    PRIMARY KEY (repo, ticket_id, from_head, to_head)
+                )
+                """
+            )
             connection.execute("BEGIN IMMEDIATE")
             verdict_acceptances_existed = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'verdict_acceptances'"

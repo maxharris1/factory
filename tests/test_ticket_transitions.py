@@ -51,6 +51,7 @@ WRITERS = {
     "retry": "lib/dispatch/retry.py",
     "rebase-queued": "lib/dispatch/rebase.py",
     "rebase-noop": "lib/dispatch/ready.py",
+    "retarget-carry": "lib/dispatch/verdict/carry.py",
     "linear-handoff": "lib/dispatch/linear_states.py",
     "linear-resume": "lib/dispatch/linear_states.py",
     "linear-done": "lib/dispatch/linear_states.py",

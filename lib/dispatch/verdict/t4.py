@@ -76,6 +76,8 @@ class T4Mixin:
         stale_state = state not in ("review", "awaiting-ok") and not held_fix
         if state == "waiting-max" and self._paused_for_qa(ticket):
             return False, "waiting-max-qa"
+        if state == "fixing" and self._carry_waits(ticket, approved_head):
+            return False, "approve-carry-waits"
         if stale_state and self._reconcile_handoff(ticket, reading_comment_id=comment.id):
             return True, "handed-off-reconciled"
         if stale_state or reported_round != review_round + 1:
@@ -196,7 +198,7 @@ class T4Mixin:
         result = ticket.ci.get(current_head)
         if ticket.factory.start_before_ci and result is not None and result.status == "success":
             self._record_ci_result(ticket, current_head, "success")
-        covered = self._approval_covers(ticket, approved_head, current_head)
+        covered = self._approval_carries(ticket, approved_head, current_head)
         if not covered:
             return self._queue_patch_review(ticket, comment, current_head)
         if ship == "handoff" and _stack_wait(ticket, current_head) is not None:
@@ -378,7 +380,7 @@ class T4Mixin:
             if not self._held_ci_fix_out(ticket, comment.id):
                 continue
             approved = parse_comment(comment.body).as_dict().get("head")
-            if approved and self._approval_covers(ticket, approved, head):
+            if approved and self._approval_carries(ticket, approved, head):
                 return True
         return False
 

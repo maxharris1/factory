@@ -57,6 +57,7 @@ from lib.dispatch.types import (
     TrackedTicket,
     stale_units,
 )
+from lib.dispatch.verdict.carry import carries
 from lib.dispatch.verdict.shipped import _approved_round
 from lib.factory_md import padded_estimate
 from lib.handoff import HandoffError, parse_comment
@@ -68,7 +69,7 @@ from lib.queue import (
     JobRequest,
     _job,
 )
-from lib.update_check import RebaseScope, UpdateScope
+from lib.update_check import RebaseScope, RetargetDelta, UpdateScope
 
 if TYPE_CHECKING:
     from lib.evidence.ci import CIEvidence
@@ -298,6 +299,15 @@ class ReadyMixin:
             if base is None:
                 return False, "stacked-held"
             ticket = replace(ticket, factory=replace(ticket.factory, base_branch=base))
+        retarget = rebase if rebase is not None and rebase.onto_from is not None else None
+        delta = None
+        if retarget is not None and (pending or result.clears):
+            held = self._approval_held(ticket, retarget)
+            if held and pending:
+                return False, "retarget-carry-ci-pending"
+            delta = self._retarget_delta_read(ticket, retarget, head)
+            if held and carries(delta, ticket.factory.exclusive_paths):
+                return self._carry_retarget_approval(ticket, retarget, head)
         if result is not None and gate_red is None:
             settled = self._settled_red(ticket, comment, head, result)
             if isinstance(settled, str):
@@ -323,7 +333,8 @@ class ReadyMixin:
                 generation=generation,
                 update=update,
                 source=None if rebase is None else "rebase",
-                retarget=rebase if rebase is not None and rebase.onto_from is not None else None,
+                retarget=retarget,
+                delta=delta,
             )
             if not queued:
                 return True, "capped-ready"
@@ -1534,6 +1545,7 @@ class ReadyMixin:
         update: UpdateScope | None = None,
         source: str | None = None,
         retarget: RebaseStep | None = None,
+        delta: RetargetDelta | None = None,
     ) -> tuple[bool, Comment | None]:
         """Queue the next review round for comment, with the later trusted
         verdict that already answered it (_enqueue_step); (False, None), with
@@ -1570,7 +1582,7 @@ class ReadyMixin:
                     update=update,
                     source=source,
                     rebase=(
-                        self._rebase_scope(ticket, comment, head, review_round, retarget)
+                        self._rebase_scope(ticket, comment, head, review_round, retarget, delta)
                         if (review_round > 1 or source == "rebase") and update is None
                         else None
                     ),
@@ -1823,6 +1835,7 @@ class ReadyMixin:
         head: str,
         review_round: int,
         retarget: RebaseStep | None = None,
+        delta: RetargetDelta | None = None,
     ) -> RebaseScope | None:
         last = (
             retarget.from_head
@@ -1843,17 +1856,19 @@ class ReadyMixin:
         return replace(
             scope,
             reviewed_base=retarget.onto_from,
-            overlap=self._parent_overlap(ticket, retarget, head),
+            overlap=(
+                None if delta is None else parent_overlap(delta, ticket.factory.exclusive_paths)
+            ),
             retarget=True,
         )
 
-    def _parent_overlap(
+    def _retarget_delta_read(
         self, ticket: TrackedTicket, retarget: RebaseStep, head: str
-    ) -> tuple[str, ...] | None:
+    ) -> RetargetDelta | None:
         if retarget.parent_head is None or self.retarget_delta is None:
             return None
         try:
-            delta = self.retarget_delta(
+            return self.retarget_delta(
                 ticket.repo,
                 ticket.factory.base_branch,
                 retarget.onto_from,
@@ -1866,7 +1881,6 @@ class ReadyMixin:
                 ticket.repo, ticket.ticket_id, f"retarget-delta:{type(exc).__name__}"
             )
             return None
-        return parent_overlap(delta, ticket.factory.exclusive_paths)
 
     def _record_ci_result(
         self,

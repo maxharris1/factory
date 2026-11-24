@@ -28,7 +28,7 @@ class PendingApprovalMixin:
         review_head = self._latest_review_head(ticket)
         if review_head is None or _matching_head(approved_head, review_head) is None:
             return None
-        if not self._approval_covers(ticket, approved_head, head):
+        if not self._approval_carries(ticket, approved_head, head):
             return None
         return approve, approved_head, approved_round
 

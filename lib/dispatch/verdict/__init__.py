@@ -20,6 +20,7 @@ from lib.dispatch.helpers import (
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import AlreadyMergedShip, CIResult, Comment, TrackedTicket
 from lib.dispatch.verdict.blocked import BlockedMixin
+from lib.dispatch.verdict.carry import ApprovalCarryMixin
 from lib.dispatch.verdict.coverage import ApprovalCoverageMixin
 from lib.dispatch.verdict.latest import LatestVerdictMixin
 from lib.dispatch.verdict.pending import PendingApprovalMixin
@@ -39,6 +40,7 @@ class VerdictMixin(
     T4Mixin,
     BlockedMixin,
     ApprovalRecordMixin,
+    ApprovalCarryMixin,
     ApprovalCoverageMixin,
     PendingApprovalMixin,
     ShippedApprovalMixin,
