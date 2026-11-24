@@ -42,6 +42,7 @@ from lib.dispatch.types import (
     RebaseClassifier,
     Registration,
     RerunOutcome,
+    RetargetDeltaProbe,
     RetryableStateError,
     ReviewActions,
     RouteError,
@@ -88,6 +89,7 @@ class DispatcherBase:
         qa_diff: QaDiff | None = None,
         moved_head: MovedHeadProbe | None = None,
         stack_bounds: StackBoundsProbe | None = None,
+        retarget_delta: RetargetDeltaProbe | None = None,
     ):
         if state_path.resolve() != queue.path.resolve():
             raise QueueError("dispatcher state and queue must use one database")
@@ -122,6 +124,7 @@ class DispatcherBase:
         self._hold_carries: dict[tuple[str, str, str, str, tuple[str, ...]], bool] = {}
         self.moved_head = moved_head
         self.stack_bounds = stack_bounds
+        self.retarget_delta = retarget_delta
         self._moved_heads: dict[tuple[str, str, str, str], MovedHead | None] = {}
         self.approvals = approvals if approvals is not None else Approvals()
         self.ci_logs = ci_logs

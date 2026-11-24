@@ -103,6 +103,7 @@ class RebaseStep:
     approved_at: float | None = None
     approve_comment_id: str | None = None
     onto_from: str | None = None
+    parent_head: str | None = None
 
     @property
     def review_round(self) -> int:
@@ -198,7 +199,9 @@ class RebaseMixin:
             or ticket.pr_base not in (None, ticket.factory.base_branch, facts.into)
         ):
             return ticket, False
-        proof = RetargetProof(self.stack_bounds(ticket.repo, head, facts.heads), head, facts.heads)
+        proof = RetargetProof(
+            self.stack_bounds(ticket.repo, head, facts.heads), head, facts.heads, facts.head
+        )
         self.clear_attention(ticket.repo, ticket.ticket_id, STACK_RETARGET_FAILED)
         if ticket.pr_base != facts.into:
             self._review_actions(ticket).set_pull_base(ticket, facts.into)
@@ -223,8 +226,8 @@ class RebaseMixin:
             ):
                 return False
         if proof.head != head:
-            proof = RetargetProof(
-                self.stack_bounds(ticket.repo, head, proof.parent_heads), head, proof.parent_heads
+            proof = replace(
+                proof, onto_from=self.stack_bounds(ticket.repo, head, proof.parent_heads), head=head
             )
             self.clear_attention(ticket.repo, ticket.ticket_id, STACK_RETARGET_FAILED)
         with self._connect() as connection:
@@ -283,6 +286,7 @@ class RebaseMixin:
                 int(row["review_round"]),
                 **cleared,
                 onto_from=onto_from,
+                parent_head=proof.parent_head,
             ),
             f"retarget:{onto_from}",
             lambda request: self.queue.enqueue_in_transaction(

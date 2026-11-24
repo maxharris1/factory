@@ -12,7 +12,7 @@ from lib.factory_md import FactoryConfig, no_ci_base
 from lib.hold import LabelEvent, MergeUpdate
 from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES
 from lib.queue import Job
-from lib.update_check import HeadDiff, MovedHead, RebaseScope, UpdateClass
+from lib.update_check import HeadDiff, MovedHead, RebaseScope, RetargetDelta, UpdateClass
 
 if TYPE_CHECKING:
     import sqlite3
@@ -403,6 +403,7 @@ class ParentClosed:
 @dataclass(frozen=True)
 class ParentMerged:
     into: str
+    head: str
     heads: tuple[str, ...]
 
 
@@ -414,6 +415,7 @@ class RetargetProof:
     onto_from: str
     head: str
     parent_heads: tuple[str, ...]
+    parent_head: str | None = None
 
 
 @dataclass(frozen=True)
@@ -840,6 +842,12 @@ class MovedHeadProbe(Protocol):
 
 class StackBoundsProbe(Protocol):
     def __call__(self, repo: str, old_head: str, parent_heads: tuple[str, ...]) -> str: ...
+
+
+class RetargetDeltaProbe(Protocol):
+    def __call__(
+        self, repo: str, base: str, onto_from: str, from_head: str, parent_head: str, head: str
+    ) -> RetargetDelta: ...
 
 
 class QaDiff(Protocol):

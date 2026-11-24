@@ -848,7 +848,7 @@ def test_pull_landing_reads_a_merged_parent_with_no_force_push() -> None:
     gh.route(landing(), landing_page([], base="release"))
 
     assert GitHubIntakeClient(gh).pull_landing("owner/app", 113) == ParentMerged(
-        into="release", heads=(HEAD_AT_MERGE,)
+        into="release", head=HEAD_AT_MERGE, heads=(HEAD_AT_MERGE,)
     )
 
 
@@ -857,7 +857,7 @@ def test_pull_landing_counts_only_force_pushes_not_other_timeline_events() -> No
     gh.route(landing(), landing_page([pushed(BEFORE_1), pushed(BEFORE_2)]))
 
     assert GitHubIntakeClient(gh).pull_landing("owner/app", 113) == ParentMerged(
-        into="main", heads=(HEAD_AT_MERGE, BEFORE_1, BEFORE_2)
+        into="main", head=HEAD_AT_MERGE, heads=(HEAD_AT_MERGE, BEFORE_1, BEFORE_2)
     )
 
 
@@ -876,7 +876,7 @@ def test_pull_landing_collects_every_force_push_across_pages() -> None:
     gh.route(landing("c1"), landing_page([pushed(BEFORE_2), pushed(BEFORE_1)], remaining=2))
 
     assert GitHubIntakeClient(gh).pull_landing("owner/app", 113) == ParentMerged(
-        into="main", heads=(HEAD_AT_MERGE, BEFORE_1, BEFORE_2)
+        into="main", head=HEAD_AT_MERGE, heads=(HEAD_AT_MERGE, BEFORE_1, BEFORE_2)
     )
     assert gh.keys() == [landing(), landing("c1")]
 

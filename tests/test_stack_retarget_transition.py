@@ -34,7 +34,7 @@ from tests.test_feeder_stack_parent import PARENT
 from tests.test_feeder_target import targeted
 
 ONTO = sha(9)
-LANDED = ParentMerged(into="main", heads=(sha(4), sha(2)))
+LANDED = ParentMerged(into="main", head=sha(4), heads=(sha(4), sha(2)))
 
 
 class Actions(FakeReviewActions):
@@ -519,3 +519,58 @@ def test_a_held_child_still_wakes_the_project_bot_after_a_delivery_outage(
     ]
     assert harness_jobs(queue) == before
     assert set(stack_attention(tmp_path)) == {"stack-parent-closed"}
+
+
+def stored_proof(tmp_path: Path) -> dict | None:
+    stored = child_row(tmp_path)["pending_retarget"]
+    return None if stored is None else json.loads(stored)
+
+
+def test_the_retarget_records_the_parents_head_at_merge_on_its_proof_and_rebase(
+    tmp_path: Path,
+) -> None:
+    queue, github, dispatcher = wired(tmp_path, state="building")
+    land(github)
+
+    dispatcher.process(polled_child(tmp_path, github))
+
+    assert stored_proof(tmp_path)["parent_head"] == sha(4)
+    with queue.connect() as connection:
+        proof = dispatcher.feeder.pending_retarget(connection, polled_child(tmp_path, github))
+    assert proof.parent_head == sha(4)
+
+    running = queue.claim("claude")
+    queue.finish(running.id, owner="claude", handoff_comment_id="ready-1")
+    with queue.connect() as connection:
+        connection.execute("UPDATE ticket_state SET workflow_state = 'handed-off', review_round = 1")
+    dispatcher.process(polled_child(tmp_path, github))
+
+    (rebase,) = rebases(queue)
+    assert (rebase["rebase"]["onto_from"], rebase["rebase"]["parent_head"]) == (ONTO, sha(4))
+    assert stored_proof(tmp_path) is None
+
+
+def test_a_head_proven_again_keeps_the_parents_head_at_merge(tmp_path: Path) -> None:
+    queue, github, dispatcher = busy_retarget(tmp_path)
+    dispatcher.stack_bounds.by_head[sha(8)] = sha(7)
+
+    dispatcher.process(replace(polled_child(tmp_path, github), current_head=sha(8)))
+
+    (rebase,) = rebases(queue)
+    assert (rebase["rebase"]["from_head"], rebase["rebase"]["parent_head"]) == (sha(8), sha(4))
+
+
+def test_a_proof_stored_without_the_parents_head_reads_none(tmp_path: Path) -> None:
+    queue, github, dispatcher = busy_retarget(tmp_path)
+    legacy = {key: value for key, value in stored_proof(tmp_path).items() if key != "parent_head"}
+    with queue.connect() as connection:
+        connection.execute("UPDATE feeder_items SET pending_retarget = ?", (json.dumps(legacy),))
+        proof = dispatcher.feeder.pending_retarget(connection, polled_child(tmp_path, github))
+
+    assert proof.parent_head is None
+
+    dispatcher.process(polled_child(tmp_path, github))
+
+    (rebase,) = rebases(queue)
+    assert rebase["rebase"]["onto_from"] == ONTO
+    assert "parent_head" not in rebase["rebase"]

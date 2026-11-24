@@ -125,6 +125,34 @@ def stack_bounds(clone: Path, old_head: str, parent_heads: Sequence[str]) -> str
     return base
 
 
+@dataclass(frozen=True)
+class RetargetDelta:
+    own_patch_before: str | None
+    own_patch_after: str | None
+    child_files: frozenset[str]
+    parent_files: frozenset[str]
+
+
+def retarget_delta(
+    clone: Path, onto_from: str, from_head: str, parent_head: str, new_head: str, base_ref: str
+) -> RetargetDelta:
+    old_base = _resolve(clone, onto_from)
+    old = _resolve(clone, from_head)
+    parent = _resolve(clone, parent_head)
+    new = _resolve(clone, new_head)
+    return RetargetDelta(
+        _patch_id(clone, old_base, old),
+        _patch_id(clone, _merge_base(clone, new, base_ref), new),
+        _changed_paths(clone, old_base, old),
+        _changed_paths(clone, old_base, parent),
+    )
+
+
+def _changed_paths(clone: Path, start: str, end: str) -> frozenset[str]:
+    listed = _output(clone, "diff", "--name-only", "-z", *_PLAIN_DIFF, start, end)
+    return frozenset(path.decode("utf-8") for path in listed.split(b"\0") if path)
+
+
 def merge_update(clone: Path, approved_head: str, head: str, base_ref: str) -> MergeUpdate:
     """What lib.hold.ok_carries needs to judge whether an ok at
     approved_head covers head (issue #574). Raises ValueError (or an

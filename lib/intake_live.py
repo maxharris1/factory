@@ -670,7 +670,9 @@ class GitHubIntakeClient(GitHubReviewActions):
                     raise StackHeadsUnknown(
                         f"PR #{number} has {total} force pushes; read {len(befores)}"
                     )
-                return ParentMerged(into=into, heads=tuple(dict.fromkeys((head, *befores))))
+                return ParentMerged(
+                    into=into, head=head, heads=tuple(dict.fromkeys((head, *befores)))
+                )
         raise StackHeadsUnknown(f"PR #{number} force pushes exceed the page cap")
 
     def open_draft_pull(self, repo: str, *, branch: str, base: str, title: str, body: str) -> int:
