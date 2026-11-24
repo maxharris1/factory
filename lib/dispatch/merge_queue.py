@@ -21,7 +21,8 @@ from lib.dispatch.helpers import (
     _queue_state,
     _scope,
     _stack_wait,
-    own_close_step_at_head,
+    own_close_at_head,
+    own_close_holds,
 )
 from lib.dispatch.retry import _harness_job_active
 from lib.dispatch.transitions import write_workflow_state
@@ -1086,7 +1087,7 @@ class MergeQueueMixin:
                 """,
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchone()
-            own_closing = own_close_step_at_head(connection, ticket) == "closing"
+            own_closing = own_close_holds(own_close_at_head(connection, ticket), self.queue.now())
         if row is None or row["workflow_state"] in TERMINAL_STATES or own_closing:
             return False
         # GitHub auto-closes a PR whose branch has no commits beyond base (#705).

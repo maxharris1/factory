@@ -183,7 +183,8 @@ def test_a_pr_the_factory_closed_to_restart_ci_keeps_its_hold(tmp_path: Path) ->
     set_state(tmp_path, "501", "review")
     with sqlite3.connect(tmp_path / "orch.db") as connection:
         connection.execute("ALTER TABLE ticket_state ADD COLUMN own_close_step TEXT")
-        connection.execute("UPDATE ticket_state SET own_close_step = 'closing'")
+        connection.execute("ALTER TABLE ticket_state ADD COLUMN own_close_at REAL")
+        connection.execute("UPDATE ticket_state SET own_close_step = 'closing', own_close_at = ?", (now[0],))
     github.statuses = {ref(501): CLOSED_PULL}
     github.issues[HOME] = [issue(2, created_at=2.0, body="Touches: lib/x.py")]
     assert feeder.feed_once().fed == ()
@@ -191,6 +192,10 @@ def test_a_pr_the_factory_closed_to_restart_ci_keeps_its_hold(tmp_path: Path) ->
     assert rows(tmp_path / "orch.db")["1"]["released"] == 0
 
     with sqlite3.connect(tmp_path / "orch.db") as connection:
-        connection.execute("UPDATE ticket_state SET own_close_step = 'reopened'")
-    now[0] += 60
+        connection.execute("UPDATE ticket_state SET own_close_step = 'reopened', own_close_at = ?", (now[0],))
+    now[0] += 30
+    assert feeder.feed_once().fed == ()
+    assert rows(tmp_path / "orch.db")["1"]["released"] == 0
+
+    now[0] += 31
     assert fed_heads(github, feeder.feed_once()) == ["factory/issue-2"]

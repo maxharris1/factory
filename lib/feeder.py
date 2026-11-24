@@ -185,7 +185,7 @@ from lib.brief_comment import FACTORY_MD_HEADING
 from lib.device_pool import free_slots, placement_blocked, slots_in_use
 from lib.device_sync import Blocked
 from lib.dispatch.bookkeeping import LockLedger, bookkeeping_write, must_write
-from lib.dispatch.constants import TERMINAL_STATES
+from lib.dispatch.constants import OWN_CLOSE_SETTLE_SECONDS, TERMINAL_STATES
 from lib.dispatch.types import (
     BaseCheck,
     FailedCheck,
@@ -2317,12 +2317,14 @@ class Feeder:
             if not _has_table(connection, "ticket_state"):
                 return set()
             columns = {row[1] for row in connection.execute("PRAGMA table_info(ticket_state)")}
-            if not {"repo", "ticket_id", "own_close_step"} <= columns:
+            if not {"repo", "ticket_id", "own_close_step", "own_close_at"} <= columns:
                 return set()
             found = {
                 (str(repo), str(ticket_id))
                 for repo, ticket_id in connection.execute(
-                    "SELECT repo, ticket_id FROM ticket_state WHERE own_close_step = 'closing'"
+                    "SELECT repo, ticket_id FROM ticket_state WHERE own_close_step = 'closing' "
+                    "OR own_close_at > ?",
+                    (self.queue.now() - OWN_CLOSE_SETTLE_SECONDS,),
                 )
             }
         return found & tickets

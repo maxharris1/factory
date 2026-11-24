@@ -861,6 +861,10 @@ class GitHubReviewActions:
         committer = _object(_object(commit.get("commit")).get("committer"))
         return _created_at(committer.get("date"))
 
+    def run_created_at(self, repo: str, run_id: str) -> float:
+        run = _object(self._json(f"{_repo_path(repo)}/actions/runs/{run_id}"))
+        return _created_at(run.get("created_at"))
+
     def ci_status(self, repo: str, head: str) -> CIResult:
         """Check runs and commit statuses on head.
 

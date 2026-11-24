@@ -40,7 +40,7 @@ from lib.dispatch.helpers import (
     _round_number,
     _scope,
     failed_checks,
-    own_close_step_at_head,
+    own_close_at_head,
     record_own_close,
 )
 from lib.dispatch.rebase import RebaseStep, newest_rebase
@@ -1320,19 +1320,20 @@ class ReadyMixin:
         close and reopen the PR to fire pull_request: reopened (#1496)."""
         with self._connect() as connection:
             rebase = newest_rebase(connection, (ticket.repo.lower(), ticket.ticket_id))
+            record = own_close_at_head(connection, ticket)
             if (
                 rebase is None
                 or rebase.onto_from is None
                 or _matching_head(head, rebase.from_head) is None
-                or own_close_step_at_head(connection, ticket) == "reopened"
+                or (record is not None and record[0] == "reopened")
             ):
                 return
-            record_own_close(connection, ticket, head, "closing")
+            record_own_close(connection, ticket, head, "closing", self.queue.now())
         actions = self._review_actions(ticket)
         actions.close_pull(ticket)
         actions.reopen(ticket)
         with self._connect() as connection:
-            record_own_close(connection, ticket, head, "reopened")
+            record_own_close(connection, ticket, head, "reopened", self.queue.now())
         if self.log is not None:
             self.log(
                 f"restarted CI: {ticket.repo}#{ticket.ticket_id} closed and reopened at {head[:12]}"

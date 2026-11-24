@@ -45,6 +45,7 @@ from lib.dispatcher import (
 )
 from lib.dispatch.types import (
     AlreadyDeferred,
+    CheckRow,
     CIChange,
     LinearState,
     LinearStateRead,
@@ -759,6 +760,7 @@ class LivePollSource:
         self._head_read_last_used: dict[tuple[str, str, str], float] = {}
         self._linear_issue_cache: dict[str, dict[str, Any] | None] = {}
         self._etag_cache: dict[tuple[str, ...], tuple[str, str, bool]] = {}
+        self._run_created: dict[tuple[str, str], float] = {}
         self._candidate_comments: dict[tuple[str, str], tuple[str, int, tuple[Comment, ...]]] = {}
         self._last_reads: dict[tuple[str, str], LastRead] = {}
         self._linear_branches: dict[str, str] = {}
@@ -2190,6 +2192,17 @@ class LivePollSource:
             merged=True,
         )
 
+    def _with_run_created(self, repo: str, ci: CIResult) -> CIResult:
+        def created(row: CheckRow) -> CheckRow:
+            if row.run_id is None:
+                return row
+            key = (repo.lower(), row.run_id)
+            if key not in self._run_created:
+                self._run_created[key] = self.github.run_created_at(repo, row.run_id)
+            return replace(row, run_created_at=self._run_created[key])
+
+        return replace(ci, checks=tuple(map(created, ci.checks)))
+
     def _gated_ci(
         self,
         repo: str,
@@ -2211,6 +2224,7 @@ class LivePollSource:
         retarget_at = self.fed_pulls.retarget_at(repo, ticket_id)
         if retarget_at is not None:
             changes.append(CIChange("retarget", retarget_at))
+            ci = self._with_run_created(repo, ci)
         if ci.status != "success" or not factory.ci_force_rerun_paths:
             return ci_fresh(ci, tuple(changes), factory.ci_required_checks)
         unread = CIResult("pending", pending=("CI freshness (unread)",), checks=ci.checks)

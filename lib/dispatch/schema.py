@@ -210,6 +210,7 @@ class SchemaMixin:
                     "reopen_hold": "TEXT",
                     "own_close_head": "TEXT",
                     "own_close_step": "TEXT",
+                    "own_close_at": "REAL",
                 },
             )
             connection.execute(
