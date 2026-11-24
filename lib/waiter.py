@@ -147,7 +147,7 @@ from lib.dispatch.constants import LOCAL_GATE_WAITING
 from lib.factory_md import FactoryContext, parse_factory_context
 from lib.load import load_yaml
 from lib.machines_yml import Device, MachinesConfig, orch_host
-from lib import account_doctor, containers, device_deploy, job_token, leftovers, stacks
+from lib import account_doctor, codex_sandbox, containers, device_deploy, job_token, leftovers, stacks
 from lib.device_monitor import remote_target
 from lib.harness_env import ApproverProfileExposed, harness_environ
 from lib.handoff_check import (
@@ -912,6 +912,7 @@ class Waiter:
                 account_doctor.check_login(
                     self.transport, self.pool.config, device, placement.harness, account, self.environ
                 )
+            marker_finish = remote or codex_sandbox.is_sandboxed_exec(self.harness.command)
             job_dir = self._job_dir(job.id)
             argv = job_run_argv(
                 self.orch,
@@ -921,18 +922,19 @@ class Waiter:
                 machines=self.machines,
                 command=self.harness.command,
                 worktree=not remote,  # worktrees are box-only
-                status_file=job_dir / STATUS_FILE if remote else None,
+                status_file=job_dir / STATUS_FILE if marker_finish else None,
             )
             brief = self._brief(
                 job,
                 remote_device=device.name if remote else None,
                 factory_root=factory_root,
+                handoff_via_marker=marker_finish,
             )
             brief_path = job_dir / "brief.md"
             _write_private(brief_path, brief.encode("utf-8"))
             offset = 0
             lock = -1
-            if remote:
+            if marker_finish:
                 # Only this run's output counts: whatever run.log already
                 # holds is an earlier run's (#87 F1.5).
                 (job_dir / STATUS_FILE).unlink(missing_ok=True)
@@ -958,7 +960,7 @@ class Waiter:
             self._fail(job, claim)
             return None
         self._children[job.id] = (child, claim)
-        if remote:
+        if marker_finish:
             self._remote[job.id] = (job_dir, offset)
             try:
                 _write_private(
@@ -1119,7 +1121,12 @@ class Waiter:
         return skill_preflight.checkout_root(device, self.recipient, FACTORY_CHECKOUT)
 
     def _brief(
-        self, job: Job, *, remote_device: str | None = None, factory_root: str | None = None
+        self,
+        job: Job,
+        *,
+        remote_device: str | None = None,
+        factory_root: str | None = None,
+        handoff_via_marker: bool = False,
     ) -> str:
         try:
             result = self.context.load(job.request.repo)
@@ -1133,6 +1140,7 @@ class Waiter:
             context_note=result.note,
             remote_device=remote_device,
             factory_root=factory_root,
+            handoff_via_marker=handoff_via_marker,
         )
 
     def _job_dir(self, job_id: str) -> Path:
@@ -1260,7 +1268,9 @@ class Waiter:
                 self.log(f"job {job_id}: orch job run exited {code}")
                 remote = self._remote.pop(job_id, None)
                 if remote is not None:
-                    self._finish_remote(job_id, remote[0], code, proof, offset=remote[1])
+                    self._finish_remote(
+                        job_id, remote[0], code, proof, offset=remote[1], runner=child.pid
+                    )
                 else:
                     self._settle(job_id, child.pid, code, proof)
         self._remove_scratch_once_workers_exit()
@@ -1351,7 +1361,14 @@ class Waiter:
         self._scratch_failures = failures
 
     def _finish_remote(
-        self, job_id: str, job_dir: Path, code: int, proof: Proof | None, *, offset: int = 0
+        self,
+        job_id: str,
+        job_dir: Path,
+        code: int,
+        proof: Proof | None,
+        *,
+        offset: int = 0,
+        runner: int | None = None,
     ) -> None:
         """`orch job done` on the box for a remote run, from its marker line.
 
@@ -1359,9 +1376,10 @@ class Waiter:
         this run's output (after `offset` in run.log, lib/handoff_marker.py)
         names a comment id.
         Anything else fails the job for T6 (#87 F1.5), but only when no
-        remote worker was started: once one was, the job stays running
-        until the poller's device check confirms the worker gone and fails
-        it then, so a retry never runs beside it (#87 r2 F2.1).
+        worker is still running: once a remote worker was started, or while a
+        local runner/worker is still alive (sandboxed local Codex runs settle
+        via marker too), the job stays running until the poller confirms the
+        worker gone and fails it then, so a retry never runs beside it (#87 r2 F2.1).
         """
         try:
             with open(job_dir / "run.log", "rb") as handle:
@@ -1376,6 +1394,7 @@ class Waiter:
         refused = None if handoff is None else self._refused_handoff(job_id, handoff, proof)
         if refused is not None:
             handoff = None
+        placement: Placement | None = None
         if handoff is None:
             try:
                 placement = self.pool.placement(job_id)
@@ -1383,11 +1402,32 @@ class Waiter:
                 self.log(f"job {job_id}: could not read its slot ({_one_line(exc)}); left to T6")
                 self._forget_remote(job_dir)
                 return
+            if (
+                placement is not None
+                and placement.runner_pid is not None
+                and (runner is None or placement.runner_pid != runner)
+                and self.alive(placement.runner_pid, placement.runner_start)
+            ):
+                self.log(f"job {job_id}: still run by pid {placement.runner_pid}; left to it")
+                self._forget_remote(job_dir)
+                return
             if placement is not None and placement.remote_started:
                 self.log(
                     f"job {job_id}: remote run ended without a handoff (exit {code}); "
                     "its worker may still run, so the poller fails it once the device "
                     "confirms it gone"
+                )
+                self._forget_remote(job_dir)
+                return
+            if (
+                placement is not None
+                and placement.worker_pid is not None
+                and self.alive(placement.worker_pid, placement.worker_start)
+            ):
+                self.log(
+                    f"job {job_id}: orch job run exited {code} but its worker (pid "
+                    f"{placement.worker_pid}) still runs; not failed while it runs, "
+                    "the poller's dead-job check fails it for T6 once both are gone"
                 )
                 self._forget_remote(job_dir)
                 return

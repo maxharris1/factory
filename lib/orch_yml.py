@@ -419,11 +419,23 @@ def _harness_bot_logins(config: OrchConfig) -> dict[str, tuple[str, ...]]:
     }
 
 
+_HARNESS_APP_BOTS = frozenset({"claude-bot", "codex-bot", "cursor-bot"})
+
+
+def _overlap_severity(config: OrchConfig, bots: Sequence[str]) -> Severity:
+    if config.github_app is None or not config.github_app.enabled:
+        return "warning"
+    apps = set(config.github_app.apps)
+    if any(bot in apps for bot in bots) or _HARNESS_APP_BOTS <= apps:
+        return "error"
+    return "warning"
+
+
 def bot_approver_findings(config: OrchConfig) -> list[Finding]:
     carried = _harness_bot_logins(config)
     return [
         Finding(
-            "warning",
+            _overlap_severity(config, carried[login.casefold()]),
             f"login {login} carries harness bot {', '.join(carried[login.casefold()])} "
             "and is in approver_logins: that bot could lift its own cap",
         )
@@ -443,7 +455,7 @@ def hold_approver_findings(config: OrchConfig, hold: HoldConfig | None) -> list[
     if bots:
         findings.append(
             Finding(
-                "warning",
+                _overlap_severity(config, bots),
                 f"hold.approver {hold.approver} carries harness bot {', '.join(bots)}: "
                 "that bot could clear its own hold",
             )

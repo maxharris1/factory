@@ -376,10 +376,10 @@ class HoldsMixin:
     def _approver_go(self, comment: Comment, fields: Mapping[str, str]) -> bool:
         """With the switch on, an approver's go may lift a cap even when the
         approver is not trusted for grok-bot; it starts nothing else (#122)."""
+        identity = (fields.get("from"), fields.get("role"))
         return (
             self.approvals.app_trust
-            and fields.get("from") == "grok-bot"
-            and fields.get("role") == "orchestrator"
+            and identity in (("grok-bot", "orchestrator"), ("approver", "approver"))
             and self.approvals.may_approve(comment.author)
         )
 

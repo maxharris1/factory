@@ -39,7 +39,16 @@ def patch(path: str, *lines: str) -> bytes:
 
 def test_the_table_covers_the_five_families() -> None:
     assert {name for name, _ in PATTERNS} == {
-        "private-key", "github-token", "aws-access-key", "slack-token", "api-key"
+        "private-key",
+        "github-token",
+        "aws-access-key",
+        "slack-token",
+        "api-key",
+        "xai-api-key",
+        "linear-api-key",
+        "google-api-key",
+        "jwt",
+        "orch-job-proof",
     }
 
 

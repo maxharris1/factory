@@ -34,7 +34,8 @@ if TYPE_CHECKING:
 TAIL_LINES = 40
 TAIL_CHARS = 4000
 DRAIN_SECONDS = 1
-JOB_CONTROL_VARIABLES = frozenset({PROOF_ENV, "ORCH_DB"})
+JOB_CONTROL_VARIABLES = frozenset({PROOF_ENV, "ORCH_DB", "LINEAR_API_KEY"})
+SECRET_ENV_PREFIXES = ("FACTORY_WEBHOOK_", "FACTORY_CLAUDE_FIRE_", "QA_S3_")
 ORCH_INTERPRETER_ENV = "ORCH_PYTHON"
 UNAVAILABLE_EXIT = os.EX_TEMPFAIL
 
@@ -99,7 +100,11 @@ def checks_for(source: GhContextSource, repo: str, pr_base: str | None) -> tuple
 
 def check_environ(environ: Mapping[str, str], approvals: Approvals | None) -> dict[str, str]:
     env = harness_environ(environ, approvals)
-    kept = {name: value for name, value in env.items() if name not in JOB_CONTROL_VARIABLES}
+    kept = {
+        name: value
+        for name, value in env.items()
+        if name not in JOB_CONTROL_VARIABLES and not name.startswith(SECRET_ENV_PREFIXES)
+    }
     return {**kept, ORCH_INTERPRETER_ENV: sys.executable}
 
 

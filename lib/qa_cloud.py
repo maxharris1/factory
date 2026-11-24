@@ -849,20 +849,9 @@ class QaWorker:
 
     def _stale(self, job: Job, detail: Detail, stale: Stale) -> None:
         self.log(f"qa run {detail.run_id}: head moved from {stale.start[:12]} to {stale.head[:12]}")
-        request = job.request
-        wake = JobRequest(
-            repo=request.repo, ticket_id=request.ticket_id, action="qa-head-moved", recipient="grok",
-            source_comment_id=request.source_comment_id, timeout_seconds=request.timeout_seconds,
-            generation=request.generation, head=stale.head,
-            detail=json.dumps({
-                "run_id": detail.run_id, "from": stale.start, "to": stale.head,
-                "link": f"https://github.com/{request.repo}/pull/{detail.pr}",
-            }),
-        )
         with self.queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             record_stale(connection, detail.run_id, self.queue.now())
-            self.queue.enqueue_in_transaction(connection, wake, dedupe_key=f"qa-head-moved:{detail.run_id}")
             connection.commit()
         self.queue.finish(job.id, owner=QA_RECIPIENT, handoff_comment_id=None)
         self._plans.pop(detail.run_id, None)

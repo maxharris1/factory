@@ -8,11 +8,18 @@ from lib.followups import followups_active
 from lib.queue import Job
 
 
-def finish_section(job: Job, bot: str, remote_device: str | None = None) -> str:
-    if remote_device is not None:
+def finish_section(
+    job: Job, bot: str, remote_device: str | None = None, *, handoff_via_marker: bool = False
+) -> str:
+    if remote_device is not None or handoff_via_marker:
+        reason = (
+            f"This device ({remote_device}) has no orch database"
+            if remote_device is not None
+            else "This sandboxed run has no orch database access"
+        )
         return (
             "## Finish the job\n"
-            f"- This device ({remote_device}) has no orch database: do not run `orch job done`.\n"
+            f"- {reason}: do not run `orch job done`.\n"
             "- After the handoff comment is posted, make the very last line of your output exactly this, "
             "with the id the post command printed in place of `<comment-id>`:\n\n"
             "ORCH-HANDOFF: <comment-id>\n\n"

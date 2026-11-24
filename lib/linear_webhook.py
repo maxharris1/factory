@@ -606,7 +606,6 @@ class WebhookApp:
         if not self._signed(raw, lowered.get("linear-signature")):
             self.log("linear-webhook: rejected signature")
             return WebhookResult(401, "rejected", "signature")
-        self._received(self.clock())
         try:
             event = json.loads(raw)
         except (UnicodeDecodeError, ValueError):
@@ -618,6 +617,7 @@ class WebhookApp:
         if not _fresh(event.get("webhookTimestamp"), now):
             self.log("linear-webhook: rejected stale timestamp")
             return WebhookResult(401, "rejected", "timestamp")
+        self._received(now)
         return self._record(event, now)
 
     def _received(self, now: float) -> None:

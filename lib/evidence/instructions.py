@@ -112,12 +112,17 @@ def _trigger(
         cause = "answers"
     else:
         return None, None, None
-    trusted = ORCHESTRATOR in trusted_bots(trusted_logins, comment.author) or (
-        kind == "go"
-        and action in ("fix", "review")
-        and comment.author.casefold() in {login.casefold() for login in approvers}
+    approver_author = comment.author.casefold() in {login.casefold() for login in approvers}
+    is_approver_identity = fields.get("from") == "approver" and fields.get("role") == "approver"
+    is_orchestrator_identity = fields.get("from") == ORCHESTRATOR and fields.get("role") == "orchestrator"
+    trusted_orchestrator = is_orchestrator_identity and (
+        ORCHESTRATOR in trusted_bots(trusted_logins, comment.author)
+        or (kind == "go" and action in ("fix", "review") and approver_author)
     )
-    if not trusted or fields.get("from") != ORCHESTRATOR or fields.get("role") != "orchestrator":
+    trusted_approver = is_approver_identity and (
+        approver_author or ORCHESTRATOR in trusted_bots(trusted_logins, comment.author)
+    )
+    if not (trusted_orchestrator or trusted_approver):
         return None, None, None
     prose = None if comment.edited_at is not None else handoff.body.strip()
     return cause, prose, comment.url

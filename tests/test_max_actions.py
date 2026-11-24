@@ -84,8 +84,8 @@ def test_the_server_binds_the_same_actions_to_a_head() -> None:
     }
 
 
-GO = {"kind": "go", "from": "grok-bot", "role": "orchestrator", "state": "building"}
-ANSWERS = {"kind": "answers", "from": "grok-bot", "role": "orchestrator"}
+GO = {"kind": "go", "from": "approver", "role": "approver", "state": "building"}
+ANSWERS = {"kind": "answers", "from": "approver", "role": "approver"}
 CLOSE = {**ANSWERS, "state": "abandoned"}
 
 
@@ -103,7 +103,7 @@ def body(action: str, words: str = "Ship it.", *, repo: str = "owner/repo",
     ("split", CLOSE),
     ("another-round", GO),
     ("answer", ANSWERS),
-    ("retry", {"kind": "retry", "from": "grok-bot", "role": "orchestrator"}),
+    ("retry", {"kind": "retry", "from": "approver", "role": "approver"}),
     ("resume", GO),
     ("close", CLOSE),
     ("hand-off", {**ANSWERS, "state": "handed-off"}),

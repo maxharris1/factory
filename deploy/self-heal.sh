@@ -270,12 +270,17 @@ once() {
         say "skipping the pass: orch-move export is draining (${drain})" >>"$LOG"
         return 0
     fi
-    if [[ -r "$WEBHOOK_ENV" ]]; then
-        set -a
-        # shellcheck disable=SC1090
-        . "$WEBHOOK_ENV" >/dev/null 2>&1
-        set +a
-    fi
+    with_webhook_env() {
+        (
+            if [[ -r "$WEBHOOK_ENV" ]]; then
+                set -a
+                # shellcheck disable=SC1090
+                . "$WEBHOOK_ENV" >/dev/null 2>&1
+                set +a
+            fi
+            "$@"
+        )
+    }
     export ORCH_DB="${ORCH_DB:-${STATE}/orch.db}"
     export PYTHONUNBUFFERED=1
     if [[ -f "${CONFIG}/app-token-autostart" && -x "${HERE}/app-token-service.sh" ]]; then
@@ -283,12 +288,12 @@ once() {
     fi
     set +e
     before="$(head_sha)"
-    "$ORCH" heal deploy --state "$STATE" >>"$LOG" 2>&1 8>&- </dev/null ||
+    with_webhook_env "$ORCH" heal deploy --state "$STATE" >>"$LOG" 2>&1 8>&- </dev/null ||
         say "orch heal deploy exited $?; healing anyway" >>"$LOG"
     after="$(head_sha)"
     "$ORCH" settings apply --state "$STATE" >>"$LOG" 2>&1 8>&- </dev/null ||
         say "orch settings apply exited $?; healing anyway" >>"$LOG"
-    "$ORCH" health --json 2>>"$LOG" 8>&- | "$ORCH" heal --health-json - --state "$STATE" 8>&-
+    "$ORCH" health --json 2>>"$LOG" 8>&- | with_webhook_env "$ORCH" heal --health-json - --state "$STATE" 8>&-
     statuses=("${PIPESTATUS[@]}")
     factory_detach "$ORCH" heal devices --state "$STATE" >>"$LOG" 2>&1 </dev/null 8>&- 9>&-
     if [[ -n "$after" && "$before" != "$after" ]]; then

@@ -85,9 +85,14 @@ def account_tokens(harness: str, home: str | None = None) -> tuple[str, ...]:
     return () if home is None else _isolation(harness).tokens
 
 
+CLAUDE_SECURE_STORAGE_ENV = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
+
+
 def account_environ(base: Mapping[str, str], harness: str, home: str | None) -> dict[str, str]:
     """base as the account at home sees it; None is the device's own login."""
-    dropped = account_tokens(harness, home)
+    dropped = set(account_tokens(harness, home))
+    if harness == "claude" and home is not None:
+        dropped.add(CLAUDE_SECURE_STORAGE_ENV)
     env = {name: value for name, value in base.items() if name not in dropped}
     if home is not None:
         env[_isolation(harness).home] = home

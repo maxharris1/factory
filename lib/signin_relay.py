@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import re
 import secrets
 import shlex
+import stat
 import subprocess
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -62,9 +64,10 @@ def _view(view: Mapping[str, object]) -> bytes:
 
 
 class LocalRelay:
-    def __init__(self, spool: Path, relay: Path):
+    def __init__(self, spool: Path, relay: Path, *, expected_owner: str | None = None):
         self.spool = Path(spool)
         self.relay = Path(relay)
+        self.expected_owner = expected_owner
 
     def poll(self) -> SpoolListing:
         return LocalSpool(self.spool).read()
@@ -92,8 +95,26 @@ class LocalRelay:
         except FileNotFoundError:
             return None
         try:
-            with os.fdopen(os.open(temp, os.O_RDONLY | os.O_NOFOLLOW), "rb") as handle:
-                return handle.read(MAX_REQUEST_BYTES)
+            fd = os.open(temp, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode):
+                    raise SpoolError(f"relay file {name} is not a regular file")
+                if self.expected_owner is not None:
+                    try:
+                        owner_name = pwd.getpwuid(info.st_uid).pw_name
+                    except KeyError:
+                        owner_name = None
+                    if owner_name != self.expected_owner:
+                        raise SpoolError(
+                            f"relay file {name} owned by {owner_name!r}, expected {self.expected_owner!r}"
+                        )
+                with os.fdopen(fd, "rb") as handle:
+                    fd = -1
+                    return handle.read(MAX_REQUEST_BYTES)
+            finally:
+                if fd >= 0:
+                    os.close(fd)
         finally:
             temp.unlink(missing_ok=True)
 
@@ -115,11 +136,16 @@ if ! mv -- {name} "$t" 2>/dev/null; then
   exit 0
 fi
 if [ -L "$t" ] || [ ! -f "$t" ]; then rm -f -- "$t"; exit 4; fi
-printf '+'
+{owner_check}printf '+'
 head -c {limit} -- "$t"
 s=$?
 rm -f -- "$t"
 exit $s
+"""
+
+_OWNER_CHECK = """\
+owner=$(stat -c %U -- "$t" 2>/dev/null || stat -f %Su -- "$t" 2>/dev/null || true)
+if [ "$owner" != {owner} ]; then rm -f -- "$t"; exit 4; fi
 """
 
 
@@ -129,11 +155,13 @@ def _options(ssh_config: str | None) -> list[str]:
 
 class SshRelay:
     def __init__(self, host: str, user: str, spool: str, relay: str, *,
-                 ssh_config: str | None = None, transport: ByteTransport | None = None):
+                 ssh_config: str | None = None, transport: ByteTransport | None = None,
+                 expected_owner: str | None = None):
         self.host = host
         self.user = user
         self.spool = spool
         self.relay = relay
+        self.expected_owner = expected_owner
         self.options = _options(ssh_config)
         self.transport = transport or SshTransport(
             mux=ssh_mux.Multiplexer(binary="ssh", options=self.options))
@@ -160,7 +188,13 @@ class SshRelay:
 
     def take(self, rid: str, kind: Kind) -> bytes | None:
         name = shlex.quote(_name(rid, kind))
+        owner_check = (
+            _OWNER_CHECK.format(owner=shlex.quote(self.expected_owner))
+            if self.expected_owner is not None
+            else ""
+        )
         out = self._run(_TAKE.format(relay=shlex.quote(self.relay), name=name,
+                                     owner_check=owner_check,
                                      limit=MAX_REQUEST_BYTES)).stdout
         return out[len(_CLAIMED):] if out.startswith(_CLAIMED) else None
 
@@ -171,7 +205,7 @@ def relay_for(settings: SettingsConfig, push: PushConfig | None, *,
     if settings.relay is None:
         return None
     if push is None or push.transport != "ssh":
-        return LocalRelay(Path(settings.spool), Path(settings.relay))
+        return LocalRelay(Path(settings.spool), Path(settings.relay), expected_owner=settings.spool_owner)
     argv = ["ssh", *_options(push.ssh_config), "-G", "--", push.host]
     try:
         result = runner(argv, capture_output=True, text=True, timeout=SSH_TIMEOUT_SECONDS, check=False)
@@ -183,4 +217,5 @@ def relay_for(settings: SettingsConfig, push: PushConfig | None, *,
                      if line.startswith("user ")), None)
     if not user:
         raise SpoolError(f"ssh -G {push.host} names no user (exit {result.returncode})")
-    return SshRelay(push.host, user, settings.spool, settings.relay, ssh_config=push.ssh_config)
+    return SshRelay(push.host, user, settings.spool, settings.relay,
+                    ssh_config=push.ssh_config, expected_owner=settings.spool_owner)
