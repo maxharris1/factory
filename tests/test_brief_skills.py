@@ -44,9 +44,11 @@ def test_every_named_path_is_absolute_inside_factory_root_and_pinned(
     action: str, recipient: str, extra: dict
 ) -> None:
     pin = load_pin(ROOT)
-    pinned = {f"skills/pstack/{rel}" for rel, _ in pin.files} | {
-        f"skills/factory/{rel}" for rel, _ in pin.factory
-    }
+    pinned = (
+        {f"skills/pstack/{rel}" for rel, _ in pin.files}
+        | {f"skills/factory/{rel}" for rel, _ in pin.factory}
+        | {f"skills/cursor-team-kit/{rel}" for rel, _ in pin.kit}
+    )
     for remote in (None, "pc"):
         named = _named(_brief(action, recipient, extra, remote_device=remote))
         assert named, "no path named"

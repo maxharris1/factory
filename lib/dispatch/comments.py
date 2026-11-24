@@ -293,9 +293,11 @@ class CommentsMixin:
                     raise
                 if isinstance(exc, RetryableStateError):
                     raise
-                if kind == "verdict" and fields["verdict"] == "BLOCKED" and is_locked(exc):
-                    raise RetryableStateError("blocked") from exc
+                if is_locked(exc):
+                    raise RetryableStateError(kind) from exc
                 if kind not in ("verdict", "questions", "answers"):
+                    raise
+                if isinstance(exc, (KeyError, AttributeError, TypeError, AssertionError)):
                     raise
                 self._ship_raised(ticket, comment, exc)
                 self._mark_handled(

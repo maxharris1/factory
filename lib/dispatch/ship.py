@@ -341,6 +341,18 @@ class ShipMixin:
                 # head (a label put back after the OK, or an unread hold
                 # input) keeps the ship waiting; the re-drive is kept.
                 continue
+            if ticket.factory.qa is not None and ticket.factory.qa.gate == "block":
+                self._record_unhandled_qa(ticket)
+                gated = self._approve_qa(
+                    ticket,
+                    comment,
+                    head,
+                    _round_number(approve_in_force[1].get("round")),
+                )
+                if gated is not None:
+                    if gated[0]:
+                        self._set_redrive(ticket, comment_id, "spent", "eligible")
+                    continue
             if not self._set_redrive(ticket, comment_id, "spent", "eligible"):
                 continue
             if policy == "merge" and ticket.factory.finish_line == "merge":

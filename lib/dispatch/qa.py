@@ -324,6 +324,7 @@ class QaMixin:
         live: LiveScenarios | None,
         *,
         attempt: int = 1,
+        dedupe_key: str | None = None,
     ) -> None:
         run_id = uuid.uuid4().hex
         retry = "" if attempt == 1 else f":attempt-{attempt}"
@@ -368,7 +369,11 @@ class QaMixin:
                     sort_keys=True,
                 ),
             ),
-            dedupe_key=f"qa:{_scope(ticket.repo, ticket.ticket_id)}:{run.scope}:{head}:{runner}:{arm}{retry}",
+            dedupe_key=(
+                dedupe_key
+                if dedupe_key is not None
+                else f"qa:{_scope(ticket.repo, ticket.ticket_id)}:{run.scope}:{head}:{runner}:{arm}{retry}"
+            ),
         )
         connection.execute(
             """
@@ -625,12 +630,92 @@ class QaMixin:
                 """,
                 (last["run_id"],),
             )
+            resumed_before = connection.execute(
+                """
+                SELECT 1 FROM qa_runs
+                WHERE repo = ? AND ticket_id = ? AND head = ? AND arm = 'primary'
+                  AND reason = 'resumed-qa'
+                LIMIT 1
+                """,
+                (*key, head),
+            ).fetchone()
             self._queue_qa_run(
                 connection, ticket, qa, comment, head, last["patch_id"], int(last["round"]),
                 generation, Run(last["scope"], scenarios), last["runner"], "primary",
                 live, attempt=int(last["attempt"]) + 1,
+                dedupe_key=f"qa-retry:{last['run_id']}" if resumed_before is not None else None,
             )
             connection.commit()
+
+    def _resume_qa_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        ticket: TrackedTicket,
+        comment: Comment,
+        head: str | None,
+        generation: int,
+        dedupe_key: str,
+    ) -> None:
+        from lib.evidence.scenarios import LiveScenarios, Scenario
+
+        qa = ticket.factory.qa
+        if qa is None or head is None:
+            return
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        last = connection.execute(
+            """
+            SELECT qa_runs.run_id, qa_runs.patch_id, qa_runs.round, qa_runs.attempt,
+                   qa_runs.scope, qa_runs.runner, jobs.detail
+            FROM qa_runs JOIN jobs ON jobs.id = qa_runs.job_id
+            WHERE qa_runs.repo = ? AND qa_runs.ticket_id = ? AND qa_runs.head = ?
+              AND qa_runs.arm = 'primary'
+            ORDER BY qa_runs.rowid DESC LIMIT 1
+            """,
+            (*key, head),
+        ).fetchone()
+        connection.execute(
+            """
+            UPDATE qa_runs SET state = 'cancelled', reason = 'resumed-qa'
+            WHERE repo = ? AND ticket_id = ? AND head = ? AND arm = 'primary'
+              AND (
+                  result = 'BLOCKED'
+                  OR (state = 'reported' AND result = 'FAIL' AND cause = 'drift')
+                  OR (state = 'cancelled' AND reason IN ('job-failed', 'job-cancelled', 'env-retry'))
+              )
+            """,
+            (*key, head),
+        )
+        if last is None:
+            return
+        detail = json.loads(last["detail"])
+        scenarios = tuple(detail.get("scenarios") or ())
+        live = LiveScenarios(
+            scenarios=tuple(
+                Scenario(
+                    item["id"], item["criterion"], item["steps"], item["passes"], item["pack"],
+                    tuple(item["saves"]),
+                )
+                for item in detail.get("live") or ()
+            ),
+            regression=tuple(detail.get("regression") or ()),
+            new=tuple(detail.get("new") or ()),
+        )
+        self._queue_qa_run(
+            connection,
+            ticket,
+            qa,
+            comment,
+            head,
+            last["patch_id"],
+            int(last["round"]),
+            generation,
+            Run(last["scope"], scenarios),
+            last["runner"],
+            "primary",
+            live,
+            attempt=1,
+            dedupe_key=dedupe_key,
+        )
 
     def _park_qa(self, ticket: TrackedTicket, comment: Comment, head: str) -> None:
         self._pause_for_qa(ticket, comment, head)
@@ -916,6 +1001,8 @@ def _tagged(body: str, tag: str) -> tuple[str, ...]:
 
 
 def _env_failure(row: sqlite3.Row) -> bool:
+    if row["reason"] == "resumed-qa":
+        return False
     return row["result"] == "BLOCKED" or (
         row["state"] == "cancelled" and row["reason"] in ("job-failed", "job-cancelled")
     )

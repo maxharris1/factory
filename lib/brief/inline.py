@@ -20,8 +20,15 @@ def quoted_section(title: str, text: str, url: str | None, limit: int) -> str:
     return "\n".join([*lines, fenced(text[:limit] + "\n" + marker), marker])
 
 
+def _format_criterion(item_id: str, text: str) -> str:
+    prefix = f"{item_id}:"
+    if text.lstrip().lower().startswith(prefix.lower()):
+        return text.lstrip()
+    return f"{item_id}: {text}"
+
+
 def ticket_section(ticket: TicketText, *, review: bool, criteria_url: str) -> str | None:
-    listed = "\n".join(f"{item_id}: {text}" for item_id, text in ticket.criteria)
+    listed = "\n".join(_format_criterion(item_id, text) for item_id, text in ticket.criteria)
     brief = [_ticket_block(ticket.brief, ticket.brief_source)] if ticket.brief else []
     criteria = [_ticket_block(text, ticket.criteria_source) for text in (ticket.criteria_text, listed) if text]
     lines = ["## Ticket"]

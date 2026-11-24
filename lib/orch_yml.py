@@ -490,6 +490,24 @@ def qa_storage_findings(
     return []
 
 
+def refused_harness_findings(config: OrchConfig, factory: object) -> list[Finding]:
+    """Refuse a factory.md whose builder or reviewer harness is in orch.yml refused_harnesses."""
+    if not config.refused_harnesses:
+        return []
+    refused = set(config.refused_harnesses)
+    findings: list[Finding] = []
+    for role, attr in (("builder.harness", "builder_harness"), ("reviewer.harness", "reviewer_harness")):
+        harness = getattr(factory, attr, None)
+        if isinstance(harness, str) and harness in refused:
+            findings.append(
+                Finding(
+                    "error",
+                    f"{role} {harness!r} is listed in orch.yml refused_harnesses",
+                )
+            )
+    return findings
+
+
 def project_device_findings(config: OrchConfig, machines: MachinesConfig) -> list[Finding]:
     findings: list[Finding] = []
     for project in config.projects:
@@ -548,9 +566,11 @@ class ProjectPins:
     def __init__(self, path: Path):
         self.path = path
         self.last: dict[str, frozenset[str]] | None = None
+        self._refused: frozenset[str] = frozenset()
 
     def __call__(self) -> dict[str, frozenset[str]] | None:
         if not self.path.exists():
+            self._refused = frozenset()
             return {}
         config, findings = load_orch_yml(self.path, allow_placeholders=True)
         if config is not None and not any(item.severity == "error" for item in findings):
@@ -559,7 +579,11 @@ class ProjectPins:
                 for project in config.projects
                 if project.devices is not None
             }
+            self._refused = config.refused_harnesses
         return self.last
+
+    def refused_harnesses(self) -> frozenset[str]:
+        return self._refused
 
 
 def _read(path: Path, *, overlay: bool = True) -> tuple[dict | None, list[Finding]]:

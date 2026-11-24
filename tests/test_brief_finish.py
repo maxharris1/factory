@@ -53,7 +53,10 @@ def test_every_gh_line_unsets_all_four_tokens(kind: str) -> None:
 def test_no_bare_prove_it_works_no_deslop_and_no_timeout_line(kind: str) -> None:
     for text in _briefs(kind):
         assert not re.search(r"(?<!principle-)prove-it-works", text)
-        assert "deslop" not in text
+        without_pinned_deslop = re.sub(
+            r"^- `/[^`]+/skills/cursor-team-kit/deslop/SKILL\.md`$", "", text, flags=re.MULTILINE
+        )
+        assert "deslop" not in without_pinned_deslop
         assert not re.search(r"^- timeout:", text, re.MULTILINE)
 
 

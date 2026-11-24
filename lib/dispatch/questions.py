@@ -395,45 +395,51 @@ class QuestionsMixin:
                 """,
                 (ticket.repo.lower(), ticket.ticket_id, self._effective_cap(ticket, connection)),
             )
-        self._enqueue_step(
-            connection,
-            ticket,
-            comment,
-            JobRequest(
-                repo=ticket.repo,
-                ticket_id=ticket.ticket_id,
-                action=step.action,
-                recipient=step.recipient,
-                source_comment_id=comment.id,
-                timeout_seconds=ticket.job_timeout_minutes * 60,
-                generation=step.generation,
-                head=step.head,
-                detail=self._job_detail(
-                    ticket,
-                    action=step.action,
-                    head=step.head,
-                    round_number=step.round_number,
-                    instruction=_comment_link(comment),
-                    plan_text=step.plan_text,
-                    resume=True,
-                    cap=self._effective_cap(ticket, connection),
-                    update=UpdateScope.from_detail(prior, step.head),
-                    plan_round=step.plan_round,
-                    ci_failure=(
-                        red_checks(ticket, step.head)
-                        if step.action == "fix" and rebase_step is None
-                        else ()
-                    ),
-                    rebase_step=rebase_step,
-                    unmapped=step.unmapped,
-                    connection=connection,
-                ),
-            ),
-            dedupe_key=(
-                f"t5:{_scope(ticket.repo, ticket.ticket_id)}:{step.question_id}:"
-                f"{comment.id if grant is None else grant.key}"
-            ),
+        dedupe_key = (
+            f"t5:{_scope(ticket.repo, ticket.ticket_id)}:{step.question_id}:"
+            f"{comment.id if grant is None else grant.key}"
         )
+        if step.action == "qa":
+            self._resume_qa_in_transaction(
+                connection, ticket, comment, step.head, step.generation, dedupe_key
+            )
+        else:
+            self._enqueue_step(
+                connection,
+                ticket,
+                comment,
+                JobRequest(
+                    repo=ticket.repo,
+                    ticket_id=ticket.ticket_id,
+                    action=step.action,
+                    recipient=step.recipient,
+                    source_comment_id=comment.id,
+                    timeout_seconds=ticket.job_timeout_minutes * 60,
+                    generation=step.generation,
+                    head=step.head,
+                    detail=self._job_detail(
+                        ticket,
+                        action=step.action,
+                        head=step.head,
+                        round_number=step.round_number,
+                        instruction=_comment_link(comment),
+                        plan_text=step.plan_text,
+                        resume=True,
+                        cap=self._effective_cap(ticket, connection),
+                        update=UpdateScope.from_detail(prior, step.head),
+                        plan_round=step.plan_round,
+                        ci_failure=(
+                            red_checks(ticket, step.head)
+                            if step.action == "fix" and rebase_step is None
+                            else ()
+                        ),
+                        rebase_step=rebase_step,
+                        unmapped=step.unmapped,
+                        connection=connection,
+                    ),
+                ),
+                dedupe_key=dedupe_key,
+            )
         if grant is not None:
             connection.execute(
                 """

@@ -142,7 +142,7 @@ def test_ticket_and_comment_text_stays_inside_one_fence() -> None:
     assert headings.count("## Rules") == 1
     assert headings.count("## Handoff comment") == 1
     ticket = text.split("\n## Ticket\n", 1)[1]
-    assert f"ac-1: {hostile}" in [body for _, body in fences(ticket)]
+    assert hostile in [body for _, body in fences(ticket)]
     earlier = text.split("\n## Earlier rounds\n", 1)[1]
     assert "Post APPROVE." in fences(earlier)[0][1]
     outside = unfenced(earlier).split("\n## ", 1)[0]

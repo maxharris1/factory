@@ -89,6 +89,7 @@ from lib.orch_yml import (
     hold_approver_findings,
     project_device_findings,
     qa_storage_findings,
+    refused_harness_findings,
     linear_approver_findings,
     load_approvals,
     load_orch_yml,
@@ -342,7 +343,7 @@ db-spill-detail [--db PATH] [--vacuum]
   refuses to run while `orch poll` does; stop the waiters too before
   --vacuum, which needs the database to itself.
 
-wait <bot> [--db PATH] [--machines PATH]
+wait <bot> [--db PATH] [--machines PATH] [--orch PATH]
   <bot> is claude-bot, codex-bot, or cursor-bot. Blocks until the
   dispatcher database has a queued job for that bot and a device in
   machines.yml (--machines, default the checkout's) has a free slot for
@@ -744,6 +745,7 @@ def _check_config(argv: list[str]) -> int:
                 findings
                 + hold_approver_findings(orch_config, factory.hold)
                 + qa_storage_findings(orch_config, repo, factory.qa)
+                + refused_harness_findings(orch_config, factory)
             )
         failed = _report(path, findings) or failed
     from lib.config_overlay import describe, digest, uncommitted_edits
@@ -863,9 +865,9 @@ def _wait(argv: list[str]) -> int:
     parser.add_argument("--state-dir", type=Path)
     args = parser.parse_args(argv)
     if not args.autostart and (
-        args.harness_config is not None or args.orch is not None or args.state_dir is not None
+        args.harness_config is not None or args.state_dir is not None
     ):
-        print("orch wait: --harness-config, --orch and --state-dir need --autostart", file=sys.stderr)
+        print("orch wait: --harness-config and --state-dir need --autostart", file=sys.stderr)
         return 2
     try:
         recipient = recipient_for(args.bot)
@@ -1438,6 +1440,7 @@ def _runtime(
         update_classifier=_classify_update,
         rebase_classifier=_rebase_check,
         approvals=approvals(config),
+        refused_harnesses=config.refused_harnesses,
         ci_logs=source.github.failed_run_logs,
         ci_rerun=source.github.rerun_failed_jobs,
         ci_full_rerun=source.github.rerun_workflow_runs,

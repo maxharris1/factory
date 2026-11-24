@@ -126,15 +126,24 @@ def run(args: list[str], db: Path | None = None, **env: str) -> subprocess.Compl
     )
 
 
-def start_wait(bot: str, db: Path, **env: str) -> subprocess.Popen[str]:
+def start_wait(bot: str, db: Path, *, orch: Path | None = None, **env: str) -> subprocess.Popen[str]:
+    cmd = [sys.executable, str(ORCH), "wait", bot, "--db", str(db)]
+    if orch is not None:
+        cmd += ["--orch", str(orch)]
     return subprocess.Popen(
-        [sys.executable, str(ORCH), "wait", bot, "--db", str(db)],
+        cmd,
         cwd=ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         env={**os.environ, "PYTHONUNBUFFERED": "1", **env},
     )
+
+
+def _unrestricted_orch(tmp_path: Path) -> Path:
+    path = tmp_path / "orch.yml"
+    path.write_text("poll_seconds: 30\nprojects:\n  - repo: owner/repo\n", encoding="utf-8")
+    return path
 
 
 def state_of(db: Path, job_id: str) -> sqlite3.Row:
@@ -483,7 +492,7 @@ def test_wait_and_job_never_exec_a_harness(tmp_path: Path) -> None:
         script.chmod(0o755)
     path = f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
     db, _ = make_db(tmp_path)
-    proc = start_wait("cursor-bot", db, PATH=path)
+    proc = start_wait("cursor-bot", db, orch=_unrestricted_orch(tmp_path), PATH=path)
     try:
         wait_until_sleeping(proc)
         job = SQLiteJobQueue(db, clock=time.time).enqueue(
@@ -913,12 +922,13 @@ def test_a_broken_stdout_in_the_cli_exits_one_without_a_traceback(
     tmp_path: Path, bot: str
 ) -> None:
     db, queue = make_db(tmp_path)
+    orch = _unrestricted_orch(tmp_path)
     job = queue.enqueue(request(recipient=OWNING_BOTS[bot]), dedupe_key="a")
     read_end, write_end = os.pipe()
     os.close(read_end)
     try:
         result = subprocess.run(
-            [sys.executable, str(ORCH), "wait", bot, "--db", str(db)],
+            [sys.executable, str(ORCH), "wait", bot, "--db", str(db), "--orch", str(orch)],
             cwd=ROOT,
             stdout=write_end,
             stderr=subprocess.PIPE,

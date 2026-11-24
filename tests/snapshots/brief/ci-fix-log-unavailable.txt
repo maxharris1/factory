@@ -13,7 +13,7 @@ The factory could not fetch the `check-config` log. Get it with `env -u GH_TOKEN
 1. Check out the PR branch (`gitBranchName` in Job data) and confirm `git rev-parse HEAD` is 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6.
 2. First decide whether this PR caused the failure. If it's infrastructure, don't patch the repo; rerun the failed check and post `ready` at the same head. Rerun it with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh run rerun 123456 --failed`, once, and skip steps 3 to 5.
 3. If this PR caused it: a test that fails on the current head and covers the whole class of the failure. Then fix the class. Run only that test and the tests for the files you touched, plus a short smoke set, in the foreground; never the whole suite, in the background or in chunks. Then run the router's "Before ready" steps.
-4. Bring the base in before `ready`: `git fetch origin dev`, then either `git rebase origin/dev` and push with `git push --force-with-lease`, or `git merge origin/dev` and push. If the base changed files you touched, rerun their tests.
+4. Before `ready`: `git fetch origin dev`, then `git rebase origin/dev` (`--force-with-lease`) or `git merge origin/dev` (`git push`). Rerun touched tests if base changed them.
 5. Push, then post the ready handoff below with the head you pushed.
 Title the PR with the source issue, then a Conventional Commits title: `#<issue>: type(scope): subject` (the issue's number, not the PR's), or `<KEY>: type(scope): subject` for a Linear ticket. Fix any other title with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh pr edit --title`.
 CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
@@ -51,6 +51,7 @@ Read the router (the first path) and the pstack files it names, at these absolut
 - `/srv/orch/factory/skills/pstack/skills/poteto-mode/playbooks/feature.md`
 - `/srv/orch/factory/skills/pstack/skills/tdd/SKILL.md`
 - `/srv/orch/factory/skills/pstack/skills/poteto-mode/playbooks/opening-a-pr.md`
+- `/srv/orch/factory/skills/cursor-team-kit/deslop/SKILL.md`
 - `/srv/orch/factory/skills/pstack/skills/principle-prove-it-works/SKILL.md`
 - `/srv/orch/factory/skills/pstack/skills/no-comments/SKILL.md`
 - `/srv/orch/factory/skills/pstack/agents/comment-sicko.md`
@@ -209,7 +210,7 @@ The factory could not fetch the `check-config` log. Get it with `env -u GH_TOKEN
 1. Check out the PR branch (`gitBranchName` in Job data) and confirm `git rev-parse HEAD` is 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6.
 2. First decide whether this PR caused the failure. If it's infrastructure, don't patch the repo; rerun the failed check and post `ready` at the same head. Rerun it with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh run rerun 123456 --failed`, once, and skip steps 3 to 5.
 3. If this PR caused it: a test that fails on the current head and covers the whole class of the failure. Then fix the class. Run only that test and the tests for the files you touched, plus a short smoke set, in the foreground; never the whole suite, in the background or in chunks. Then run the router's "Before ready" steps.
-4. Bring the base in before `ready`: `git fetch origin dev`, then either `git rebase origin/dev` and push with `git push --force-with-lease`, or `git merge origin/dev` and push. If the base changed files you touched, rerun their tests.
+4. Before `ready`: `git fetch origin dev`, then `git rebase origin/dev` (`--force-with-lease`) or `git merge origin/dev` (`git push`). Rerun touched tests if base changed them.
 5. Push, then post the ready handoff below with the head you pushed.
 Title the PR with the source issue, then a Conventional Commits title: `#<issue>: type(scope): subject` (the issue's number, not the PR's), or `<KEY>: type(scope): subject` for a Linear ticket. Fix any other title with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh pr edit --title`.
 CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
@@ -247,6 +248,7 @@ Read the router (the first path) and the pstack files it names, at these absolut
 - `/home/claude-bot/factory/skills/pstack/skills/poteto-mode/playbooks/feature.md`
 - `/home/claude-bot/factory/skills/pstack/skills/tdd/SKILL.md`
 - `/home/claude-bot/factory/skills/pstack/skills/poteto-mode/playbooks/opening-a-pr.md`
+- `/home/claude-bot/factory/skills/cursor-team-kit/deslop/SKILL.md`
 - `/home/claude-bot/factory/skills/pstack/skills/principle-prove-it-works/SKILL.md`
 - `/home/claude-bot/factory/skills/pstack/skills/no-comments/SKILL.md`
 - `/home/claude-bot/factory/skills/pstack/agents/comment-sicko.md`

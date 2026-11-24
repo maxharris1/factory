@@ -71,7 +71,7 @@ STOPPED_POLL_SECONDS = 300
 MERGED_BEFORE_HANDOFF = "merged before handoff"
 LINEAR_HANDOFF_QUERY = "orch:v1 kind=brief OR orch:v1 kind=go"
 REVISE_ROUND_STATES = ("review", "awaiting-ok")
-APPROVE_ROUND_STATES = (*REVISE_ROUND_STATES, "fixing", "merge-queue", "waiting-external")
+APPROVE_ROUND_STATES = (*REVISE_ROUND_STATES, "fixing", "merge-queue", "waiting-external", "ship")
 GROK_WAKE_REASONS = (
     "blocked",
     "capped",

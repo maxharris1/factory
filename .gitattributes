@@ -1,2 +1,4 @@
 skills/pstack/** -text linguist-vendored
+skills/factory/** -text
+skills/cursor-team-kit/** -text
 skills/skills.lock -text

@@ -166,6 +166,11 @@ class ReadyMixin:
         expected = f"{builder_harness}-bot"
         if not self._trusted(ticket, comment, fields, expected, role="builder"):
             return True, "rejected-ready-author"
+        if (
+            builder_harness in self.refused_harnesses
+            or ticket.factory.reviewer_harness in self.refused_harnesses
+        ):
+            return True, "rejected-ready-refused-harness"
         registration = (
             Registration.REGISTERED
             if ticket.ready_starts_review and self._job_builder_harness(ticket) is None
