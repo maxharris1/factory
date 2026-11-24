@@ -105,7 +105,7 @@ def test_linear_discovery_rotation_reaches_every_candidate() -> None:
 
     assert [len(found) for found in cycles] == [capacity] * len(cycles)
     assert set().union(*cycles) == {item["identifier"] for item in pending}
-    assert deferrals == ["Linear poll budget deferred discovery x1"] * len(cycles)
+    assert deferrals == ["Linear poll budget deferred discovery (search) x1"] * len(cycles)
     assert errors == []
 
 
@@ -115,12 +115,12 @@ def test_linear_discovery_rotation_reaches_every_candidate() -> None:
         (
             LINEAR_TRACKED_RESERVE,
             LINEAR_TRACKED_RESERVE,
-            "Linear poll budget deferred discovery x1",
+            "Linear poll budget deferred discovery (search) x1",
         ),
         (
             0,
             0,
-            "Linear poll budget deferred discovery x1; "
+            "Linear poll budget deferred discovery (search) x1; "
             f"Linear poll budget deferred tracked ticket x{LINEAR_TRACKED_RESERVE}",
         ),
     ],

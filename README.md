@@ -890,9 +890,10 @@ configured projects, completed, canceled or deleted is dropped quietly.
 A tracked ticket is reread in full only when it is dirty, has an active job,
 or its last read is `reconcile_seconds` old; otherwise its last read is
 reused and the ticket is still rebuilt, so the GitHub PR head, CI and PR
-comments stay current. The full brief/go search runs at startup and then
-every `reconcile_seconds`, and stays due until it completes without a budget
-or error cutoff, so a missed webhook costs at most one reconcile interval.
+comments stay current. Dirty rows are read before the full brief/go search,
+which runs at startup and then every `reconcile_seconds`, and stays due
+until its pass has read every hit it listed, so a missed webhook costs about
+one reconcile interval.
 A dirty row is deleted only after its issue was read in that cycle and only
 if no newer event arrived meanwhile; an unread row (budget deferral, error)
 waits for the next cycle. A tracked ticket the dispatcher no longer polls

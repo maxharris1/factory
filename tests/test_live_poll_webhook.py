@@ -20,7 +20,7 @@ from lib import cli
 from lib.dispatcher import LINEAR_HANDOFF_QUERY, TicketRef
 from lib.linear_webhook import DirtyRow, LinearDirtyQueue, WebhookApp, ensure_tables
 from lib.orch_yml import LinearWebhookConfig
-from lib.poll_source import PollCycleError
+from lib.poll_source import HTTPResult, PollCycleError
 from lib.queue import JobRequest
 from tests.test_live_poll import config
 from tests.test_live_poll_no_webhook import (
@@ -799,3 +799,194 @@ def test_a_miss_is_recorded_through_orch_db_and_shown_as_a_warning(tmp_path: Pat
     assert health is not None and health.missed == (("AUT-1", 1000.0),)
     assert health.warning(1000.0) == (
         "Linear webhook missed 1 delivery in 24h (newest AUT-1, found 0s ago)")
+
+
+SATURATED_HITS = [f"AUT-{index:02d}" for index in range(60)]
+SATURATED_TRACKED = frozenset(SATURATED_HITS[:7])
+SATURATED_UNTRACKED = {f"id-{identifier}" for identifier in SATURATED_HITS[7:]}
+
+
+def _saturated(dirty_identifiers, *, deferrals=None):
+    linear = Linear(
+        [issue(identifier) for identifier in [*SATURATED_HITS, *dirty_identifiers]],
+        hits=SATURATED_HITS,
+    )
+    clock = Clock()
+    source, _gh = source_for(
+        webhook_config(), linear, clock=clock, deferrals=deferrals
+    )
+    dirty = FakeDirty()
+    source.linear_dirty = dirty
+    return linear, clock, source, dirty
+
+
+def test_dirty_rows_are_read_before_a_saturated_reconcile_search() -> None:
+    queued = [f"AUT-{index}" for index in range(100, 105)]
+    linear, clock, source, dirty = _saturated(queued)
+    tracked = refs(*sorted(SATURATED_TRACKED))
+    cycle(source, tracked, exclude=SATURATED_TRACKED)
+    linear.take()
+    clock.now += 60
+    for index, identifier in enumerate(queued):
+        dirty.add(f"id-{identifier}", identifier, float(index))
+
+    candidates, found = cycle(source, tracked, exclude=SATURATED_TRACKED)
+    reads = linear.take()
+
+    dirty_reads = [
+        position
+        for position, (_kind, key) in enumerate(reads)
+        if key in {f"id-{identifier}" for identifier in queued}
+    ]
+    searches = [
+        position for position, (kind, _key) in enumerate(reads) if kind == "search"
+    ]
+    assert len(dirty_reads) == len(queued)
+    assert max(dirty_reads) < min(searches, default=len(reads))
+    assert set(queued) <= {ticket.ticket_id for ticket in candidates}
+    assert dirty.rows == {}
+    assert {ticket.ticket_id for ticket in found} == SATURATED_TRACKED
+
+
+def test_saturated_reconcile_closes_its_pass_and_dirty_rows_are_read_every_cycle() -> None:
+    queued = [f"AUT-{200 + index}" for index in range(40)]
+    deferrals: list[str] = []
+    linear, clock, source, dirty = _saturated(queued, deferrals=deferrals)
+    tracked = refs(*sorted(SATURATED_TRACKED))
+    searched: list[int] = []
+    hit_reads: list[set[str]] = []
+
+    for index, identifier in enumerate(queued):
+        dirty.add(f"id-{identifier}", identifier, float(index))
+        deferrals.clear()
+        candidates, _ = cycle(source, tracked, exclude=SATURATED_TRACKED)
+        reads = linear.take()
+        assert ("issue", f"id-{identifier}") in reads, f"cycle {index} read no dirty row"
+        assert identifier in {ticket.ticket_id for ticket in candidates}
+        assert not any("(dirty)" in item for item in deferrals), deferrals
+        assert dirty.rows == {}
+        if any(kind == "search" for kind, _key in reads):
+            searched.append(index)
+        hit_reads.append({key for kind, key in reads if key in SATURATED_UNTRACKED})
+        clock.now += 60
+
+    covered: set[str] = set()
+    closed = next(
+        index
+        for index, reads in enumerate(hit_reads)
+        if (covered := covered | reads) == SATURATED_UNTRACKED
+    )
+    assert 0 < closed < 10
+    reopened = closed + 900 // 60
+    assert searched == [
+        *range(0, closed + 1),
+        *range(reopened, min(len(queued), reopened + closed + 1)),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("unread", "listed", "read", "after"),
+    [
+        (None, {"a", "b", "c"}, {"a"}, {"b", "c"}),
+        ({"b", "c"}, {"a", "b", "c"}, {"b"}, {"c"}),
+        (None, {"a", "b"}, {"a", "b"}, None),
+        ({"b", "c"}, {"a", "b"}, set(), {"b"}),
+        ({"b"}, {"a", "b", "d"}, set(), {"b"}),
+        ({"b", "c"}, None, {"b"}, {"c"}),
+        ({"b"}, None, {"b"}, None),
+        (None, None, {"a"}, None),
+    ],
+    ids=[
+        "open",
+        "continue",
+        "close-in-one-cycle",
+        "vanished-hit",
+        "new-hit-waits",
+        "incomplete-keeps-pass",
+        "incomplete-closes-when-read",
+        "incomplete-opens-none",
+    ],
+)
+def test_reconcile_pass_transitions(unread, listed, read, after) -> None:
+    from lib.poll_source import _reconcile_pass
+
+    result = _reconcile_pass(
+        None if unread is None else frozenset(unread),
+        None if listed is None else frozenset(listed),
+        frozenset(read),
+    )
+
+    assert result == (None if after is None else frozenset(after))
+
+
+class FlakyLinear(Linear):
+    def __init__(self, *args, failing_term: str, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.failing_term = failing_term
+
+    def __call__(self, url, headers, body, timeout):
+        request = json.loads(body)
+        term = request["variables"].get("term")
+        if term is not None and term == self.failing_term:
+            self.failing_term = None
+            self.log.append(("search", term))
+            return HTTPResult(500, "")
+        return super().__call__(url, headers, body, timeout)
+
+
+def test_reconcile_pass_stays_open_when_a_search_term_fails() -> None:
+    linear = FlakyLinear(
+        [issue("AUT-1"), issue("AUT-2"), issue("AUT-3")],
+        failing_term="orch:v1 kind=go",
+    )
+    clock = Clock()
+    errors: list = []
+    source, _gh = source_for(webhook_config(), linear, clock=clock, errors=errors)
+    source.linear_dirty = FakeDirty()
+
+    with pytest.raises(PollCycleError):
+        cycle(source, ())
+    assert linear.take()[:2] == SEARCHES
+    clock.now += 60
+    cycle(source, ())
+    second = linear.take()
+    clock.now += 60
+    cycle(source, ())
+
+    assert second[:2] == SEARCHES
+    reads = [key for kind, key in second if kind == "issue"]
+    assert sorted(reads) == ["id-AUT-1", "id-AUT-2", "id-AUT-3"]
+    assert linear.take() == []
+    assert [repo for repo, _ticket, _error in errors] == ["linear"]
+
+
+def test_discovery_deferrals_name_the_path_in_poll_deferrals(tmp_path: Path) -> None:
+    database = tmp_path / "orch.db"
+    dispatcher = _dispatcher(database)
+    queued = [f"AUT-{300 + index}" for index in range(25)]
+    linear, clock, source, dirty = _saturated(queued)
+    source.deferral_sink = dispatcher.record_poll_deferral
+
+    cycle(source, ())
+    clock.now += 60
+    for index, identifier in enumerate(queued):
+        dirty.add(f"id-{identifier}", identifier, float(index))
+    cycle(source, ())
+
+    with sqlite3.connect(database) as connection:
+        details = [
+            row[0]
+            for row in connection.execute(
+                "SELECT detail FROM poll_deferrals ORDER BY rowid"
+            )
+        ]
+        budget = connection.execute(
+            "SELECT count(*) FROM poll_deferrals "
+            "WHERE detail LIKE '%Linear poll budget%'"
+        ).fetchone()[0]
+    assert details == [
+        "Linear poll budget deferred discovery (search) x1",
+        "Linear poll budget deferred discovery (dirty) x1; "
+        "Linear poll budget deferred discovery (search) x2",
+    ]
+    assert budget == 2
