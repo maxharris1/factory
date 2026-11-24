@@ -48,7 +48,7 @@ exist yet holds the ticket `waiting-blocked` with needs-attention
 fails is `refused-intake` with its reasons, takes no room and no holds,
 posts nothing, raises needs-attention (`intake-refused`) and queues one
 Grok `refused` wake per distinct defect set. It is re-checked every poll,
-so a fixed ticket feeds. A ticket already feeding or fed is not re-checked.
+so a fixed ticket feeds. A ticket fed, or feeding with its branch recorded, is not re-checked.
 An optional `Features:` line names QA journeys (lib/journeys.py, #1029); each
 poll reads the qa.verify skill's feature map at the base once, refuses ids the
 map contradicts or a project with no qa.verify, and leaves a ticket eligible while that read fails.
@@ -883,6 +883,11 @@ class _StateWrite(NamedTuple):
     issue: str
 
 
+def _ticket_ref(repo: str, value: str) -> Ref:
+    number = value.removeprefix("#")
+    return github_ref(repo, number) if number.isdigit() else Ref("linear", repo.lower(), value)
+
+
 def _state_write(
     candidate: _Candidate, state: str, *, error: str | None = None, reason: str | None = None
 ) -> _StateWrite:
@@ -1163,15 +1168,22 @@ class Feeder:
         states = {candidate.ref: self._state(candidate) for candidate in candidates}
         begun = {c.ref for c in candidates if self._row(c)["branch"] is not None}
         split = {c.ref for c in candidates if states[c.ref] == "split-parent"}
-        malformed = {c.ref for c in candidates if states[c.ref] in UNSTARTED and c.template.defects}
+        refusable = {
+            c.ref
+            for c in candidates
+            if states[c.ref] in UNSTARTED or (states[c.ref] in IN_FLIGHT and c.ref not in begun)
+        }
+        malformed = {c.ref for c in candidates if c.ref in refusable and c.template.defects}
         targets, target_errors = self._target_holds(candidates, begun, split | malformed, read_repos, now)
-        parent_holds, parent_errors = self._stack_parents(candidates, states, split | malformed | targets.keys())
+        parent_holds, parent_errors = self._stack_parents(
+            candidates, refusable, begun, split | malformed | targets.keys()
+        )
         targets.update(parent_holds)
         unread, map_errors = self._add_map_defects(candidates, states, targets.keys())
         refused = {
             candidate.ref
             for candidate in candidates
-            if states[candidate.ref] in UNSTARTED
+            if candidate.ref in refusable
             and candidate.template.defects
             and candidate.ref not in split
         }
@@ -2007,16 +2019,24 @@ class Feeder:
         return holds, errors
 
     def _stack_parents(
-        self, candidates: Sequence[_Candidate], states: Mapping[Ref, str], skip: Collection[Ref]
+        self,
+        candidates: Sequence[_Candidate],
+        refusable: Collection[Ref],
+        begun: Collection[Ref],
+        skip: Collection[Ref],
     ) -> tuple[dict[Ref, Wait], int]:
-        """Drop each stacked candidate's parent from its blockers, or refuse it
-        when no blocker names the parent (#1449)."""
         holds: dict[Ref, Wait] = {}
         errors = 0
-        tickets: dict[Ref, set[Ref]] | None = None
+        aliases: dict[Ref, set[Ref]] | None = None
         for candidate in candidates:
-            target = candidate.template.target_branch
-            if target is None or states[candidate.ref] not in UNSTARTED or candidate.ref in skip:
+            if candidate.ref not in refusable or candidate.ref in skip:
+                continue
+            if candidate.ref not in begun:
+                target = candidate.template.target_branch
+            else:
+                row = self._row(candidate)
+                target = row["base_branch"] if row["target_source"] == "ticket" else None
+            if target is None:
                 continue
             repo = candidate.project.repo
             try:
@@ -2029,15 +2049,14 @@ class Feeder:
             if number is None:
                 continue
             pull = github_ref(repo, number)
-            if tickets is None:
-                tickets = {}
-                for ref, row in self._feeder_rows().items():
-                    if row.pull is not None:
-                        tickets.setdefault(row.pull, set()).add(ref)
-            parent = frozenset({pull, *tickets.get(pull, ())})
+            if aliases is None:
+                aliases = self._tickets_by_pull()
+            parent = frozenset({pull, *aliases.get(pull, ())})
             lines = stacked_lines(candidate.lines, parent)
             if lines is not None:
                 candidate.lines = lines
+                continue
+            if candidate.ref in begun:
                 continue
             defect = Defect(
                 "stack-without-depends",
@@ -2046,6 +2065,20 @@ class Feeder:
             )
             candidate.template = replace(candidate.template, defects=(*candidate.template.defects, defect))
         return holds, errors
+
+    def _tickets_by_pull(self) -> dict[Ref, set[Ref]]:
+        aliases: dict[Ref, set[Ref]] = {}
+        for ref, row in self._feeder_rows().items():
+            if row.pull is not None:
+                aliases.setdefault(row.pull, set()).add(ref)
+        with self.queue.connect() as connection:
+            sources = read_sources(connection)
+        for (repo, ticket_id), (source, number) in sources.items():
+            if number is not None and number.isdigit():
+                aliases.setdefault(github_ref(repo, number), set()).update(
+                    _ticket_ref(repo, value) for value in (ticket_id, source)
+                )
+        return aliases
 
     # -- gates (#156) ----------------------------------------------------------------
 

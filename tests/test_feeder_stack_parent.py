@@ -1,14 +1,27 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from lib.feeder import _pull_body
-from tests.test_feeder import LINEAR_FACTORY_MD, LINEAR_ORCH, FakeGitHub, FakeLinear, issue, make_feeder, rows
+from lib.feeder_gates import Progress, RefStatus, github_ref
+from tests.test_feeder import (
+    LINEAR_FACTORY_MD,
+    LINEAR_ORCH,
+    FakeGitHub,
+    FakeLinear,
+    dispatcher_for,
+    issue,
+    linear_issue,
+    make_feeder,
+    rows,
+)
 from tests.test_feeder_holds import grok_wakes
 from tests.test_feeder_target import LINEAR_REPO, linear_ticket, pull_on, targeted
 from tests.test_feeder_template import body
+from tests.test_pr_title import titled_ticket
 
 HOME = "owner/app"
 PARENT = "factory/issue-6"
@@ -175,3 +188,93 @@ def test_an_interrupted_freeze_classifies_the_parent_of_the_retried_target(tmp_p
     assert parent_columns(rows(tmp_path / "orch.db")["7"]) == (114, other, C)
     assert "Stacked on #114. Merge #114 first." in pull_on(github, CHILD)["body"]
     assert f"(stacked on #114 at `{C}`)" in github.posted[(HOME, 501)][0].body
+
+
+def interrupt_freeze(feeder, github: FakeGitHub, tmp_path: Path) -> None:
+    with feeder.queue.connect() as connection:
+        connection.execute(
+            "CREATE TRIGGER fail_branch BEFORE UPDATE OF branch ON feeder_items "
+            "BEGIN SELECT RAISE(FAIL, 'injected'); END"
+        )
+    assert feeder.feed_once().errors == 1
+    assert rows(tmp_path / "orch.db")["7"]["branch"] is None
+    with feeder.queue.connect() as connection:
+        connection.execute("DROP TRIGGER fail_branch")
+
+
+def test_an_interrupted_freeze_still_refuses_an_unnamed_stacked_target(tmp_path: Path) -> None:
+    github = with_parent(HOME)
+    github.branches[(HOME, "feature/original")] = B
+    feeder, _, _, _ = make_feeder(tmp_path, github=github)
+    github.issues[HOME] = [issue(7, body=body(extra="Target branch: feature/original"), template=False)]
+    interrupt_freeze(feeder, github, tmp_path)
+
+    github.issues[HOME] = [issue(7, body=body(extra=f"Target branch: {PARENT}"), template=False)]
+    report = feeder.feed_once()
+
+    assert (report.fed, report.refused) == ((), 1)
+    assert rows(tmp_path / "orch.db")["7"]["state"] == "refused-intake"
+
+
+def freeze_then_hold(tmp_path: Path, github: FakeGitHub, ticket: str, base: str):
+    feeder, _, _, _ = make_feeder(tmp_path, github=github)
+    github.issues[HOME] = [issue(7, body=ticket, template=False)]
+    github.fail["pull"] = 1
+    assert feeder.feed_once().errors == 1
+    sha = github.branches.pop((HOME, base))
+    assert feeder.feed_once().blocked == 1
+    assert (rows(tmp_path / "orch.db")["7"]["branch"], rows(tmp_path / "orch.db")["7"]["base_branch"]) == (CHILD, base)
+    github.branches[(HOME, base)] = sha
+    return feeder
+
+
+def test_a_frozen_base_ignores_a_later_stacked_ticket_target(tmp_path: Path) -> None:
+    github = with_parent(HOME)
+    github.branches[(HOME, "feature/original")] = B
+    feeder = freeze_then_hold(tmp_path, github, body(extra="Target branch: feature/original"), "feature/original")
+
+    github.issues[HOME] = [issue(7, body=body(extra=f"Target branch: {PARENT}"), template=False)]
+    report = feeder.feed_once()
+
+    assert (len(report.fed), report.refused) == (1, 0)
+    assert pull_on(github, CHILD)["base"] == "feature/original"
+
+
+def test_a_frozen_stacked_base_feeds_while_its_parent_is_open(tmp_path: Path) -> None:
+    github = with_parent(HOME)
+    github.statuses = {github_ref(HOME, 113): RefStatus(Progress.OPEN, is_pull=True)}
+    feeder = freeze_then_hold(tmp_path, github, stacked(), PARENT)
+
+    github.issues[HOME] = [issue(7, body=body(depends="Depends on: #113"), template=False)]
+    report = feeder.feed_once()
+
+    assert (len(report.fed), report.refused) == (1, 0)
+    assert pull_on(github, CHILD)["base"] == PARENT
+
+
+@pytest.mark.parametrize(
+    ("tickets", "repo", "ticket_id", "source", "depends", "blocked_by"),
+    [
+        ("linear", "acme/linear-app", "AUT-6", "AUT-6", "Depends on: none", (("AUT-6", "started"),)),
+        ("github", HOME, "113", "#6", "Depends on: #6", ()),
+    ],
+)
+def test_a_dispatcher_known_parent_ticket_is_a_valid_dependency(
+    tmp_path: Path, tickets: str, repo: str, ticket_id: str, source: str, depends: str, blocked_by: tuple
+) -> None:
+    github = with_parent(repo)
+    linear = FakeLinear()
+    setup = {"orch": LINEAR_ORCH, "factory_text": LINEAR_FACTORY_MD} if tickets == "linear" else {}
+    feeder, queue, _, _ = make_feeder(tmp_path, github=github, linear=linear, **setup)
+    dispatcher_for(tmp_path, queue, feeder).process(titled_ticket(
+        "Parent work", source=source, ticket_id=ticket_id, pr_number="113", tickets=tickets, repo=repo,
+    ))
+    child = body(depends=depends, extra=f"Target branch: {PARENT}")
+    if tickets == "linear":
+        linear.issues = [replace(linear_issue("AUT-7"), body=child, blocked_by=blocked_by)]
+    else:
+        github.issues[repo] = [issue(7, body=child, template=False)]
+
+    report = feeder.feed_once()
+
+    assert (len(report.fed), report.refused) == (1, 0)
