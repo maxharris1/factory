@@ -243,7 +243,7 @@ def pr_ci(result: CIResult, factory: FactoryConfig, pr_base: str | None) -> CIRe
     return ci_required(result, factory.ci_required_checks)
 
 
-CIChangeKind = Literal["head-workflow", "required-set", "base-workflow"]
+CIChangeKind = Literal["head-workflow", "required-set", "base-workflow", "retarget"]
 
 
 @dataclass(frozen=True)

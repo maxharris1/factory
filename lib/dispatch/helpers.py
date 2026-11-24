@@ -44,6 +44,28 @@ def grant_open(
     )
 
 
+def own_close_step(connection: sqlite3.Connection, ticket: TrackedTicket) -> str | None:
+    """The step of the factory's own close and reopen at the current head (#1496)."""
+    row = connection.execute(
+        "SELECT own_close_head, own_close_step FROM ticket_state WHERE repo = ? AND ticket_id = ?",
+        (ticket.repo.lower(), ticket.ticket_id),
+    ).fetchone()
+    if row is None or row[0] is None or _matching_head(row[0], ticket.current_head) is None:
+        return None
+    return row[1]
+
+
+def record_own_close(
+    connection: sqlite3.Connection, ticket: TrackedTicket, head: str, step: str
+) -> None:
+    connection.execute(
+        "UPDATE ticket_state SET own_close_head = ?, own_close_step = ? "
+        "WHERE repo = ? AND ticket_id = ?",
+        (head, step, ticket.repo.lower(), ticket.ticket_id),
+    )
+    connection.commit()
+
+
 def _base_update_key(ticket: TrackedTicket, head: str) -> str:
     return f"base-update:{_scope(ticket.repo, ticket.ticket_id)}:{head}"
 

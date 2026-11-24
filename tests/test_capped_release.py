@@ -14,7 +14,7 @@ import pytest
 
 from lib.feeder import FEEDER_TABLE, ensure_tables
 from tests.test_feeder import issue, make_feeder, rows
-from tests.test_feeder_gates import HOME, OPEN_PULL, fed_heads, ref, states
+from tests.test_feeder_gates import CLOSED_PULL, HOME, OPEN_PULL, fed_heads, ref, states
 
 TICKET_STATE = """
 CREATE TABLE IF NOT EXISTS ticket_state (
@@ -176,3 +176,21 @@ def test_a_capped_holder_left_in_flight_frees_its_paths(tmp_path: Path, stalled)
     assert "factory/issue-2" in fed_heads(github, feeder.feed_once())
     assert states(tmp_path)["3"] == ("waiting-blocked", "waiting on #1 (conflicts with it)")
     assert log.count("feeder: released locks of owner/app#1 (capped)") == 1
+
+
+def test_a_pr_the_factory_closed_to_restart_ci_keeps_its_hold(tmp_path: Path) -> None:
+    feeder, github, log, now = fed_holder(tmp_path)
+    set_state(tmp_path, "501", "review")
+    with sqlite3.connect(tmp_path / "orch.db") as connection:
+        connection.execute("ALTER TABLE ticket_state ADD COLUMN own_close_step TEXT")
+        connection.execute("UPDATE ticket_state SET own_close_step = 'closing'")
+    github.statuses = {ref(501): CLOSED_PULL}
+    github.issues[HOME] = [issue(2, created_at=2.0, body="Touches: lib/x.py")]
+    assert feeder.feed_once().fed == ()
+    assert states(tmp_path)["2"] == ("waiting-blocked", "waiting on file lib/x.py held by #1")
+    assert rows(tmp_path / "orch.db")["1"]["released"] == 0
+
+    with sqlite3.connect(tmp_path / "orch.db") as connection:
+        connection.execute("UPDATE ticket_state SET own_close_step = 'reopened'")
+    now[0] += 60
+    assert fed_heads(github, feeder.feed_once()) == ["factory/issue-2"]

@@ -562,6 +562,15 @@ class FedPulls:
         ).fetchone()
         return None if row is None or None in row else (int(row[0]), str(row[1]))
 
+    def retarget_at(self, repo: str, ticket_id: str) -> float | None:
+        if "retarget_at" not in self._columns():
+            return None
+        row = self._connection.execute(
+            f"SELECT retarget_at FROM {FEEDER_TABLE} WHERE repo = ? AND ticket_id = ?",
+            (repo.lower(), ticket_id),
+        ).fetchone()
+        return None if row is None or row[0] is None else float(row[0])
+
     def _columns(self) -> set[str]:
         return {row[1] for row in self._connection.execute(f"PRAGMA table_info({FEEDER_TABLE})")}
 
@@ -2199,6 +2208,9 @@ class LivePollSource:
                 repo, factory.base_branch, factory.ci_required_checks, self.wall()
             )
         )
+        retarget_at = self.fed_pulls.retarget_at(repo, ticket_id)
+        if retarget_at is not None:
+            changes.append(CIChange("retarget", retarget_at))
         if ci.status != "success" or not factory.ci_force_rerun_paths:
             return ci_fresh(ci, tuple(changes), factory.ci_required_checks)
         unread = CIResult("pending", pending=("CI freshness (unread)",), checks=ci.checks)

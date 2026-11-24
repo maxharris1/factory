@@ -208,6 +208,8 @@ class SchemaMixin:
                     "external_at": "REAL",
                     "closed_at": "REAL",
                     "reopen_hold": "TEXT",
+                    "own_close_head": "TEXT",
+                    "own_close_step": "TEXT",
                 },
             )
             connection.execute(
