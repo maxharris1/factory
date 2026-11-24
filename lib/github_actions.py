@@ -434,6 +434,27 @@ class GitHubReviewActions:
             "state=open",
         )
 
+    def set_pull_base(self, ticket: TrackedTicket, base: str) -> None:
+        base = _branch(base)
+        endpoint = f"{_repo_path(ticket.repo)}/pulls/{_pr_number(ticket)}"
+        if _object(_object(self._json(endpoint)).get("base")).get("ref") == base:
+            return
+        patched = _object(self._json("-X", "PATCH", endpoint, "-f", f"base={base}"))
+        moved = _object(patched.get("base")).get("ref")
+        if moved != base:
+            raise GitHubAdapterError(f"PR base moved to {moved!r}, not {base}")
+
+    def close_pull(self, ticket: TrackedTicket) -> None:
+        endpoint = f"{_repo_path(ticket.repo)}/pulls/{_pr_number(ticket)}"
+        pull = _object(self._json(endpoint))
+        if pull.get("merged") is True:
+            raise AlreadyMergedError(f"PR #{_pr_number(ticket)} is merged; it cannot be closed")
+        if pull.get("state") == "closed":
+            return
+        closed = _object(self._json("-X", "PATCH", endpoint, "-f", "state=closed"))
+        if closed.get("state") != "closed":
+            raise GitHubAdapterError(f"close of PR #{_pr_number(ticket)} was not confirmed")
+
     def handoff(self, ticket: TrackedTicket, head: str) -> str | None:
         self._mark_ready(ticket, head)
         return None

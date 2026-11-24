@@ -33,7 +33,11 @@ Reads:
   the timeline's copy wins. A search that returns fewer issues than its
   total_count, as past the 1,000-result ceiling, fails the read rather than
   returning a partial set;
-* issue_record: one issue's state, close reason and body (`issues/<n>`).
+* issue_record: one issue's state, close reason and body (`issues/<n>`);
+* pull_landing: a stacked child's parent PR as open, closed or merged, and
+  for a merged one its merge target and every head its branch held (the
+  head at merge plus each force push's before commit, every timeline page);
+  a timeline it cannot read in full raises StackHeadsUnknown.
 
 Writes (each one exactly once per call; the feeder makes them idempotent):
 the empty start commit (git data API: the base commit's tree, one parent),
@@ -51,6 +55,7 @@ from urllib.parse import quote
 
 from lib.branch_stack import OpenPull
 from lib.dispatch.constants import GITHUB_STATE_LABEL_PREFIX
+from lib.dispatch.types import ParentClosed, ParentFacts, ParentMerged, ParentOpen
 from lib.dispatcher import Comment
 from lib.feeder import IntakeIssue, IssueRecord
 from lib.feeder_gates import Progress, Ref, RefStatus
@@ -130,6 +135,15 @@ OPEN_PULL_COMMITS_QUERY = (
     "pageInfo { hasNextPage endCursor } } } }"
 )
 OPEN_PULLS_TTL = 60.0
+PULL_LANDING_MAX_PAGES = 20
+PULL_LANDING_QUERY = (
+    "query($owner: String!, $name: String!, $number: Int!, $after: String) "
+    "{ repository(owner: $owner, name: $name) { pullRequest(number: $number) { "
+    "state baseRefName headRefOid "
+    "timelineItems(itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT], first: 100, after: $after) "
+    "{ totalCount pageInfo { hasNextPage endCursor } "
+    "nodes { ... on HeadRefForcePushedEvent { beforeCommit { oid } } } } } } }"
+)
 PULL_COMMITS_PAGE = 250
 PULL_COMMITS_MAX_PAGES = 40
 _ISSUE_UNFINISHED = {"NOT_PLANNED": "closed as not planned", "DUPLICATE": "closed as duplicate"}
@@ -183,6 +197,10 @@ def _issue_record(item: dict[str, Any]) -> IssueRecord:
         reason=reason if isinstance(reason, str) else None,
         body=_text(item.get("body")),
     )
+
+
+class StackHeadsUnknown(GitHubAdapterError):
+    pass
 
 
 def _github_branch(name: object) -> bool:
@@ -623,6 +641,37 @@ class GitHubIntakeClient(GitHubReviewActions):
             raise GitHubAdapterError("pull request base branch is not readable")
         return ref
 
+    def pull_landing(self, repo: str, number: int) -> ParentFacts:
+        owner, _, name = _repo_path(repo).removeprefix("repos/").partition("/")
+        befores: list[str] = []
+        after: str | None = None
+        for _ in range(PULL_LANDING_MAX_PAGES):
+            document = self._json(
+                "graphql", "-f", f"query={PULL_LANDING_QUERY}",
+                "-f", f"owner={owner}", "-f", f"name={name}", "-F", f"number={int(number)}",
+                *(("-f", f"after={after}") if after is not None else ()),
+            )
+            pull = _graphql_repository(document).get("pullRequest")
+            if not isinstance(pull, dict):
+                raise GitHubAdapterError(f"{repo}#{number} is not a pull request")
+            state = pull.get("state")
+            if state == "OPEN":
+                return ParentOpen()
+            if state == "CLOSED":
+                return ParentClosed()
+            into, head = pull.get("baseRefName"), pull.get("headRefOid")
+            if state != "MERGED" or not _github_branch(into) or not _is_sha(head):
+                raise GitHubAdapterError(f"PR #{number} state, base or head is not readable")
+            total, page, after = _force_push_page(number, pull.get("timelineItems"))
+            befores.extend(page)
+            if after is None:
+                if len(befores) != total:
+                    raise StackHeadsUnknown(
+                        f"PR #{number} has {total} force pushes; read {len(befores)}"
+                    )
+                return ParentMerged(into=into, heads=tuple(dict.fromkeys((head, *befores))))
+        raise StackHeadsUnknown(f"PR #{number} force pushes exceed the page cap")
+
     def open_draft_pull(self, repo: str, *, branch: str, base: str, title: str, body: str) -> int:
         made = self._json(
             "-X", "POST", f"{_repo_path(repo)}/pulls",
@@ -698,8 +747,32 @@ def _graphql_repository(document: object) -> dict[str, Any]:
     data = document.get("data") if isinstance(document, dict) else None
     repository = data.get("repository") if isinstance(data, dict) else None
     if not isinstance(repository, dict) or document.get("errors"):
-        raise GitHubAdapterError("open pull request read returned no repository")
+        raise GitHubAdapterError("GraphQL read returned no repository")
     return repository
+
+
+def _is_sha(value: object) -> bool:
+    return isinstance(value, str) and _SHA.fullmatch(value) is not None
+
+
+def _force_push_page(number: int, items: object) -> tuple[int, tuple[str, ...], str | None]:
+    """One timeline page: the total force-push count, each push's before
+    commit, and the cursor of the next page when more remain."""
+    nodes = items.get("nodes") if isinstance(items, dict) else None
+    total = items.get("totalCount") if isinstance(items, dict) else None
+    page = items.get("pageInfo") if isinstance(items, dict) else None
+    if not isinstance(nodes, list) or type(total) is not int or not isinstance(page, dict):
+        raise StackHeadsUnknown(f"PR #{number} force pushes are not readable")
+    commits = [node.get("beforeCommit") if isinstance(node, dict) else None for node in nodes]
+    befores = tuple(commit.get("oid") if isinstance(commit, dict) else None for commit in commits)
+    if not all(_is_sha(before) for before in befores):
+        raise StackHeadsUnknown(f"PR #{number} has a force push with no before commit")
+    if page.get("hasNextPage") is not True:
+        return total, befores, None
+    cursor = page.get("endCursor")
+    if not isinstance(cursor, str) or not cursor:
+        raise StackHeadsUnknown(f"PR #{number} force push page has no cursor")
+    return total, befores, cursor
 
 
 def _open_pull(node: object) -> tuple[int, OpenPull]:

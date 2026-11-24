@@ -186,7 +186,7 @@ from lib.device_pool import free_slots, placement_blocked, slots_in_use
 from lib.device_sync import Blocked
 from lib.dispatch.bookkeeping import LockLedger, bookkeeping_write, must_write
 from lib.dispatch.constants import TERMINAL_STATES
-from lib.dispatch.types import BaseCheck, FailedCheck, StackParent
+from lib.dispatch.types import BaseCheck, FailedCheck, ParentFacts, ParentMerged, StackParent
 from lib.dispatcher import Comment, TicketRef, TrackedTicket, safe_ship_error
 from lib.evidence.ci import CIEvidence, MainRed, ci_evidence, main_red
 from lib.evidence.criteria import numbered
@@ -699,6 +699,8 @@ class GitHubIntake(Protocol):
     def pull_state(self, repo: str, number: int) -> str: ...
 
     def pull_base(self, repo: str, number: int) -> str: ...
+
+    def pull_landing(self, repo: str, number: int) -> ParentFacts: ...
 
     def open_draft_pull(
         self, repo: str, *, branch: str, base: str, title: str, body: str
@@ -2937,6 +2939,20 @@ class Feeder:
             f" after #{parent} merged into it; recorded {moved} as its base"
         )
         return moved
+
+    def stack_parent_facts(self, ticket: TrackedTicket) -> ParentFacts | None:
+        with self.queue.connect() as connection:
+            row = connection.execute(
+                f"SELECT stack_parent_pr, stack_parent_head_at_feed FROM {FEEDER_TABLE} "
+                "WHERE repo = ? AND ticket_id = ?",
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        facts = self.github.pull_landing(ticket.repo, int(row[0]))
+        if not isinstance(facts, ParentMerged):
+            return facts
+        return replace(facts, heads=tuple(dict.fromkeys((row[1], *facts.heads))))
 
     def _pull_base(self, repo: str, ticket_id: str, recorded: str, number: int, head: str) -> str:
         base = self.github.pull_base(repo, number)
