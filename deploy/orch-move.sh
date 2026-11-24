@@ -292,7 +292,12 @@ import_db() {
         [[ -e "${CONFIG}/waiter-autostart-${bot}" ]] || continue
         service "${HERE}/waiter-service.sh" "$bot" start
     done
-    service "${HERE}/self-heal.sh" start
+    if command -v systemctl >/dev/null 2>&1 &&
+        systemctl --user is-enabled factory-self-heal.timer >/dev/null 2>&1; then
+        say "factory-self-heal.timer is enabled; skipping self-heal loop start"
+    else
+        service "${HERE}/self-heal.sh" start
+    fi
     linear start
     ((FAILED == 0)) || refuse "placed ${db}; start what failed above by hand"
 }

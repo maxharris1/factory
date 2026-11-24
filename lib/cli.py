@@ -1094,59 +1094,64 @@ def _poll(argv: list[str]) -> int:
                 machines_path=args.machines,
             )
             try:
-                if _migrate_usage(path):
-                    print(f"orch poll: migrated usage readings in {path} (#772)", file=sys.stderr)
-            except (BackupError, OSError, sqlite3.Error) as exc:
-                print(
-                    f"orch poll: usage migration not done ({' '.join(str(exc).split())}); "
-                    "readings keep the harness-wide shape",
-                    file=sys.stderr,
-                )
-            pusher, push_seconds = _dashboard_pusher(path, args.orch)
-            after_poll = _AfterPoll(
-                CycleBackup(
-                    path,
-                    default_backup_path(),
-                    lambda *error: dispatcher.record_poll_error(*error),
-                    every=backup_every(),
-                ),
-                pusher,
-                _merge_kick(dispatcher, args.orch),
-            )
-            if args.once:
-                PollLoop(dispatcher, source).run(max_polls=1, after_poll=after_poll)
-            else:
-                stopper = StopAtBoundary()
-                loop = PollLoop(dispatcher, source, sleep=stopper.sleep)
-                # dashboard.push.live: watch orch.db for changes between and
-                # during cycles; stopped on the way out, so a stop starts no push.
-                watcher = pusher if isinstance(pusher, LivePusher) else None
-                if watcher is not None:
-                    watcher.start()
-                # Heartbeats (#92): the poller's own row and the per-device
-                # SSH reachability probe, each in its own daemon thread.
-                beats = health.poller_beats(path, args.machines, cycle=loop.cycle_state).start()
-                push_timer = (
-                    health._Loop("dashboard-push-timer", push_timer_tick(push_seconds),
-                                 lambda: pusher.on_timer(push_seconds), block_signals=False)
-                    if pusher is not None else None
-                )
-                if push_timer is not None:
-                    push_timer.start()
-                signal.signal(signal.SIGTERM, stopper.on_term)
                 try:
-                    loop.run(
-                        on_error=lambda exc: dispatcher.record_poll_exception(
-                            "poll", "-", exc
-                        ),
-                        after_poll=after_poll,
+                    if _migrate_usage(path):
+                        print(f"orch poll: migrated usage readings in {path} (#772)", file=sys.stderr)
+                except (BackupError, OSError, sqlite3.Error) as exc:
+                    print(
+                        f"orch poll: usage migration not done ({' '.join(str(exc).split())}); "
+                        "readings keep the harness-wide shape",
+                        file=sys.stderr,
                     )
-                finally:
-                    if push_timer is not None:
-                        push_timer.stop()
+                pusher, push_seconds = _dashboard_pusher(path, args.orch)
+                after_poll = _AfterPoll(
+                    CycleBackup(
+                        path,
+                        default_backup_path(),
+                        lambda *error: dispatcher.record_poll_error(*error),
+                        every=backup_every(),
+                    ),
+                    pusher,
+                    _merge_kick(dispatcher, args.orch),
+                )
+                if args.once:
+                    PollLoop(dispatcher, source).run(max_polls=1, after_poll=after_poll)
+                else:
+                    stopper = StopAtBoundary()
+                    loop = PollLoop(dispatcher, source, sleep=stopper.sleep)
+                    # dashboard.push.live: watch orch.db for changes between and
+                    # during cycles; stopped on the way out, so a stop starts no push.
+                    watcher = pusher if isinstance(pusher, LivePusher) else None
                     if watcher is not None:
-                        watcher.stop()
-                    beats.stop()
+                        watcher.start()
+                    # Heartbeats (#92): the poller's own row and the per-device
+                    # SSH reachability probe, each in its own daemon thread.
+                    beats = health.poller_beats(path, args.machines, cycle=loop.cycle_state).start()
+                    push_timer = (
+                        health._Loop("dashboard-push-timer", push_timer_tick(push_seconds),
+                                     lambda: pusher.on_timer(push_seconds), block_signals=False)
+                        if pusher is not None else None
+                    )
+                    if push_timer is not None:
+                        push_timer.start()
+                    signal.signal(signal.SIGTERM, stopper.on_term)
+                    try:
+                        loop.run(
+                            on_error=lambda exc: dispatcher.record_poll_exception(
+                                "poll", "-", exc
+                            ),
+                            after_poll=after_poll,
+                        )
+                    finally:
+                        if push_timer is not None:
+                            push_timer.stop()
+                        if watcher is not None:
+                            watcher.stop()
+                        beats.stop()
+            finally:
+                close = getattr(source, "close", None)
+                if callable(close):
+                    close()
     except (
         GrokDeliveryError,
         PollCycleFailed,
@@ -1832,14 +1837,15 @@ def _check_handoff(
     try:
         with queue.connect() as connection:
             row = connection.execute("SELECT * FROM jobs WHERE id = ?", (args.job_id,)).fetchone()
-        if row is None or row["state"] != "running":
-            return None
+            if row is None or row["state"] != "running":
+                return None
+            job = job_from_row(row, connection)
         config_path = args.orch if args.orch is not None else ROOT / "orch.yml"
         config, findings = load_orch_yml(config_path, allow_placeholders=True)
         errors = [item.message for item in findings if item.severity == "error"]
         if config is None or errors:
             raise ValueError(f"{config_path}: {errors[0] if errors else 'invalid configuration'}")
-        expected = expected_for(job_from_row(row, connection), args.bot)
+        expected = expected_for(job, args.bot)
         read = gh_reader()
         found = handoff_problems(expected, args.handoff, read, config.trusted_logins)
         event, checked = SUBMITTED_INVALID, None

@@ -923,8 +923,25 @@ class Applier:
                 _write(path, data, mode, exclusive=True)
             except FileExistsError:
                 continue
+            self._prune_backups(preserve=path)
             return path
         raise OSError("no free backup name")
+
+    def _prune_backups(self, keep: int = 20, *, preserve: Path | None = None) -> None:
+        prefix = f"{self.machines.name}.bak-settings-"
+        try:
+            backups = sorted(
+                p for p in self.machines.parent.iterdir()
+                if p.is_file() and not p.is_symlink() and p.name.startswith(prefix)
+            )
+        except OSError:
+            return
+        if preserve is not None:
+            backups = [p for p in backups if p != preserve]
+            keep = max(0, keep - 1)
+        stale_items = backups[:-keep] if keep > 0 and len(backups) > keep else (backups if keep == 0 else ())
+        for stale in stale_items:
+            stale.unlink(missing_ok=True)
 
     def _restart(self, *, stop_on_failure: bool) -> tuple[tuple[str, ...], str | None]:
         done: list[str] = []

@@ -139,3 +139,44 @@ def commit_record(root: Path, job_id: str) -> int:
 
 def pending(root: Path) -> set[str]:
     return {path.parent.name for path in (root / KEPT_ROOT).glob(f"*/{PENDING}")}
+
+
+KEPT_RETENTION_DAYS = 14.0
+
+
+def prune_kept(
+    root: Path, *, now: float, retention_days: float = KEPT_RETENTION_DAYS
+) -> int:
+    """Remove committed jobs-kept/<id>/ archives older than retention_days."""
+    kept_root = root / KEPT_ROOT
+    if not kept_root.is_dir():
+        return 0
+    cutoff = now - retention_days * 86400.0
+    pruned = 0
+    try:
+        entries = list(kept_root.iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        if entry.is_symlink() or not entry.is_dir():
+            continue
+        marker = entry / KEPT_JSON
+        if not marker.is_file():
+            continue
+        archived_at: float | None = None
+        try:
+            data = json.loads(marker.read_text(encoding="utf-8"))
+            at = data.get("at")
+            if isinstance(at, (int, float)) and not isinstance(at, bool):
+                archived_at = float(at)
+        except (OSError, ValueError):
+            pass
+        if archived_at is None:
+            try:
+                archived_at = marker.stat().st_mtime
+            except OSError:
+                continue
+        if archived_at < cutoff:
+            if scratch.remove(entry) is None:
+                pruned += 1
+    return pruned

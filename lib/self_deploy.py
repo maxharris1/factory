@@ -120,7 +120,9 @@ SKILLS_PATHS = ("skills/",)
 STATE_NAME = "self-deploy.state.json"
 LOCK_NAME = "self-deploy.lock"
 BACKUP_DIR = "self-deploy"
+KEEP_BACKUPS = 10
 INSTALL_LOG = "self-deploy-install.log"
+INSTALL_PENDING = "install-pending"
 FETCH_TIMEOUT = 60
 GIT_TIMEOUT = 120
 FETCH_ESCALATE_SECONDS = 30 * 60
@@ -400,7 +402,26 @@ def _backup(git: Git, state_dir: Path, dirty: Sequence[str], now: float) -> Path
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
     (folder / "local.patch").write_bytes(git.out("diff", "--binary", "HEAD"))
+    _prune_backups(root, preserve=folder)
     return folder
+
+
+def _prune_backups(
+    root: Path, keep: int = KEEP_BACKUPS, *, preserve: Path | None = None
+) -> None:
+    try:
+        entries = sorted(
+            (p for p in root.iterdir() if p.is_dir() and not p.is_symlink()),
+            key=lambda p: p.name,
+        )
+    except OSError:
+        return
+    if preserve is not None:
+        entries = [p for p in entries if p != preserve]
+        keep = max(0, keep - 1)
+    stale = entries[:-keep] if keep > 0 and len(entries) > keep else (entries if keep == 0 else ())
+    for old_dir in stale:
+        shutil.rmtree(old_dir, ignore_errors=True)
 
 
 def _restore(git: Git, folder: Path, old: str, dirty: Sequence[str]) -> bool:
@@ -493,6 +514,25 @@ def run_pass(
             return Outcome(UP_TO_DATE, old=old, new=new), {}
         if queue is not None:
             _settle(queue, device, checkout, now)
+        pending_install = state_dir / INSTALL_PENDING
+        if pending_install.is_file():
+            env = {k: v for k, v in environ.items() if k not in webhook.secret_names}
+            if queue is not None:
+                _mark_deploying(queue, device, checkout, old, new, now)
+            try:
+                install_started = clock()
+                code = install([str(checkout / "deploy" / "install.sh"), "--update"], env,
+                               state_dir / INSTALL_LOG)
+                install_result = (code, clock() - install_started)
+            finally:
+                if queue is not None:
+                    _release(queue, device)
+            if code != 0:
+                return (
+                    Outcome(INSTALL_FAILED, f"deploy/install.sh --update exited {code}", old, new),
+                    {"install": install_result},
+                )
+            pending_install.unlink(missing_ok=True)
         stale = _stale_homes(checkout, homes)
         if not stale:
             return Outcome(UP_TO_DATE, old=old, new=new), {}
@@ -594,6 +634,16 @@ def _apply(
         code = install([str(checkout / "deploy" / "install.sh"), "--update"], env,
                        state_dir / INSTALL_LOG)
         extra["install"] = (code, clock() - install_started)
+        pending_install = state_dir / INSTALL_PENDING
+        if code != 0:
+            try:
+                pending_install.write_text(
+                    json.dumps({"commit": new, "exit": code}) + "\n", encoding="utf-8"
+                )
+            except OSError:
+                pass
+        else:
+            pending_install.unlink(missing_ok=True)
     targets = (homes if git.names("diff", "--name-only", "-z", old, new, "--", *SKILLS_PATHS)
                else _stale_homes(checkout, homes))
     if targets:
@@ -712,7 +762,7 @@ def deploy(
         if outcome.kind == ROLLED_BACK:
             key = f"{outcome.kind}:{outcome.new}"
             escalation = outcome.detail
-        if outcome.kind == DEPLOYED and "install" in extra and extra["install"][0] != 0:
+        if outcome.kind in (DEPLOYED, INSTALL_FAILED) and "install" in extra and extra["install"][0] != 0:
             key = f"install:{outcome.new}"
             escalation = f"deploy/install.sh --update exited {extra['install'][0]}"
         elif (outcome.kind in (DEPLOYED, INSTALL_FAILED) and "skills" in extra

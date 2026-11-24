@@ -228,6 +228,7 @@ MARKER_TAIL_BYTES = 64 * 1024
 # Per remote job, in its job directory: what a restarted waiter needs to
 # finish the run (#87 F1.4), and the exit status `orch job run` leaves.
 REMOTE_RECORD = "remote.json"
+REMOTE_PROOF = "remote.proof"
 STATUS_FILE = "exit"
 RUN_LOCK = "run.lock"
 HOME_RETRY_SECONDS = 60.0
@@ -572,14 +573,14 @@ class AdoptedRun:
     def _running(self) -> bool:
         try:
             fd = os.open(self.lock_path, os.O_RDONLY | os.O_NOFOLLOW)
-        except FileNotFoundError:
-            return not self.gone(self.pid, self.start)
         except OSError:
-            return True
+            return not self.gone(self.pid, self.start)
         try:
             fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        except OSError:
-            return True
+        except OSError as exc:
+            if isinstance(exc, BlockingIOError) or exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                return True
+            return not self.gone(self.pid, self.start)
         finally:
             os.close(fd)
         return False
@@ -972,6 +973,11 @@ class Waiter:
                         sort_keys=True,
                     ).encode("utf-8"),
                 )
+                if claim.token is not None:
+                    _write_private(
+                        job_dir / REMOTE_PROOF,
+                        claim.token.encode("utf-8"),
+                    )
             except OSError as exc:
                 self.log(
                     f"{label}: could not record the remote run ({_one_line(exc)}); "
@@ -1231,8 +1237,10 @@ class Waiter:
                 return  # try again at the next step
             if state != ("running", self.recipient):
                 path.unlink(missing_ok=True)
+                (job_dir / REMOTE_PROOF).unlink(missing_ok=True)
                 continue
-            self._children[job_id] = (AdoptedRun(pid, start, job_dir, self.gone), None)
+            adopted_proof = _read_private_proof(job_dir / REMOTE_PROOF)
+            self._children[job_id] = (AdoptedRun(pid, start, job_dir, self.gone), adopted_proof)
             self._remote[job_id] = (job_dir, offset)
             self.log(f"job {job_id}: adopted the remote run (pid {pid}) of an earlier waiter")
         self._recovered = True
@@ -1423,13 +1431,14 @@ class Waiter:
         try:
             with self.queue.connect() as connection:
                 row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
-            if row is None or row["state"] != "running":
-                return None
+                if row is None or row["state"] != "running":
+                    return None
+                job = job_from_row(row, connection)
             config, findings = load_orch_yml(self.orch_yml, allow_placeholders=True)
             errors = [item.message for item in findings if item.severity == "error"]
             if config is None or errors:
                 raise ValueError(f"{self.orch_yml}: {errors[0] if errors else 'invalid configuration'}")
-            expected = expected_for(job_from_row(row, connection), self.bot)
+            expected = expected_for(job, self.bot)
             read = retrying(gh_reader(), lambda line: self.log(f"job {job_id}: {line}"))
             found = handoff_problems(expected, comment_id, read, config.trusted_logins)
             if not found:
@@ -1602,10 +1611,11 @@ class Waiter:
             )
 
     def _forget_remote(self, job_dir: Path) -> None:
-        try:
-            (job_dir / REMOTE_RECORD).unlink(missing_ok=True)
-        except OSError as exc:
-            self.log(f"could not remove {job_dir / REMOTE_RECORD}: {_one_line(exc)}")
+        for name in (REMOTE_RECORD, REMOTE_PROOF):
+            try:
+                (job_dir / name).unlink(missing_ok=True)
+            except OSError as exc:
+                self.log(f"could not remove {job_dir / name}: {_one_line(exc)}")
 
     def _settle(self, job_id: str, runner: int, code: int, proof: Proof | None) -> None:
         """A run that ended while its job still runs hands the job to T6 now.
@@ -1776,6 +1786,30 @@ def _write_private(path: Path, data: bytes) -> None:
     with os.fdopen(fd, "wb") as handle:
         handle.write(data)
     os.chmod(path, 0o600)
+
+
+def _read_private_proof(path: Path) -> Proof | None:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or (info.st_mode & (stat.S_IRWXG | stat.S_IRWXO))
+        ):
+            return None
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            token = handle.read(4096).decode("utf-8", errors="strict").strip()
+        return Proof(token) if token else None
+    except (OSError, UnicodeError):
+        return None
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def _private_nofollow(path: str, flags: int) -> int:

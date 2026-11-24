@@ -855,6 +855,7 @@ def test_move_db_manifest_refuses_a_copy_whose_spilled_job_has_no_file(
     _queue_spilled_job(live)
     db = tmp_path / "export" / "orch.db"
     backup(live, db)
+    shutil.rmtree(db.parent / "job-detail", ignore_errors=True)
     out = tmp_path / "export" / "manifest.json"
 
     assert _manifest(db, out) == 1
