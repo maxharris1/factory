@@ -1,9 +1,0 @@
-decision	choice	why
-playbook	figure-it-out at low rigor, one owner, no code helpers	the plan fixed every shape; each unit edits common.py and shell.py, so fan-out only adds merges; 60 min budget
-link clock	lost when now - max(lastOk, shownAt) > LINK_LOST_MS; updateLink leaves link, label and caret alone while hidden	hidden time never counts; a visible failing poll still ages to LINK LOST
-harness	link tests derive from the Activity harness (captured 1500 ms poll timers), not the base harness	faking every timer in the base harness broke four derived harnesses (realSetTimeout redeclared)
-ticket links	_thread_key, _job_hrefs, ticket_href and their script twins move to common.py	one rule for the strip and the Activity panel, server and script
-skip link	script prevents the default and focuses main#hud; without script the fragment link focuses main via tabindex=-1	a #hud hash would run the hashchange re-render and Tickets hash routing
-system browser test	#hud row checks focus on main and an unchanged hash	the skip link moves focus, not the hash, by design
-screenshots	CDP via tests/test_dashboard_system._Chrome; TMPDIR set to a short path for the run	chrome --screenshot aborts on this box, and the job TMPDIR is too long for Chrome's singleton socket
-ac-8	revert loop over 10 code pieces; each fails its tests	output in the ready handoff

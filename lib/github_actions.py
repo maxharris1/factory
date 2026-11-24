@@ -266,13 +266,6 @@ def git_patch_id(diff: str, timeout: float) -> str:
     return fields[0]
 
 
-def review_actions_for(tickets: str) -> ReviewActions:
-    """factory.md's tickets: picks the adapter, as ship: picks ship_mode."""
-    if tickets == "github":
-        return GitHubReviewActions()
-    raise ValueError(f"no ReviewActions adapter for tickets: {tickets}")
-
-
 class GitHubReviewActions:
     def __init__(
         self,

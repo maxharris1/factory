@@ -79,6 +79,7 @@ def test_statechart_fetch_survives_github_rate_limit(tmp_path: Path) -> None:
         ),
     )
     env["TLA2TOOLS"] = str(tmp_path / "tla2tools.jar")
+    env["STATECHART_NO_VENDORED"] = "1"
 
     result = run_check(env)
 

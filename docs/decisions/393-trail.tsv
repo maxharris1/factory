@@ -1,5 +1,0 @@
-decision	choice	why
-exit status (round 4, f-2)	a collection leak sets a config stash flag; pytest_sessionfinish turns an OK exit status into TESTS_FAILED	pytest.exit(returncode=0) overrides session.testsfailed; one rule at session end covers every leak path instead of patching each Exit
-interrupted collector (round 4, f-2)	the make_collect_report except branch keeps add_note and adds no collect report	pytest 9.2 re-raises only KeyboardInterrupt and SystemExit from a collector (_pytest/runner.py:409); pytest.exit there becomes a collection error, and SystemExit's INTERNALERROR path prints only the traceback note
-attribution (round 4, f-3)	plugins registered while a collector under a Module collects are mapped to that module's path; __file__ wins when present	Max asked to attribute via the registering module; the collection context names it without stack inspection, and a class defined elsewhere still names the registering test module
-dropped tests (round 4)	no tests for pytest.exit(0) at import or in pytest_generate_tests	both already fail the run on b41b33b, because pytest turns them into collection errors

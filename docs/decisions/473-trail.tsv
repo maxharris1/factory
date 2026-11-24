@@ -1,6 +1,0 @@
-decision	choice	why
-root cause	socket.create_connection gave each resolved address the full timeout and handed no socket to the cutoff until one connected	the reviewer's repro with eight stalled localhost addresses left both workers running past the 0.3 s deadline and the next cycle refused
-fix	open each address in _Tracked, register the socket with the cutoff before connect, and give connect only the time left before the request deadline	the deadline bound holds even where shutdown does not interrupt a blocking connect; the cutoff still shuts the in-flight socket when it fires
-scope	connect phase only; getaddrinfo itself is not bounded	the finding is about TCP connects; a hung DNS lookup cannot be cancelled from Python and is a separate question
-test	real stalled TCP connects (full listen backlog) and eight patched DNS answers, then a healthy read next cycle	checks the behaviour the AC names, not the worker counter
-socket creation error	creating or registering the socket sits inside the per-address try, so an unsupported family falls through to the next address	independent review found the first version failed the whole read, unlike create_connection; a test pins it

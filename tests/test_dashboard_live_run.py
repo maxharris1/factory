@@ -241,9 +241,3 @@ def test_live_text_keeps_the_artboard_line_heights(tmp_path: Path) -> None:
 def test_compact_rounds_half_up_like_the_script() -> None:
     assert [compact(n) for n in (0, 999, 1000, 1250, 6890, 9999, 10000, 184321, 999499, 1_250_000)] == [
         "0", "999", "1.0k", "1.3k", "6.9k", "10.0k", "10k", "184k", "999k", "1.3M"]
-
-
-def test_live_run_screenshots_are_committed() -> None:
-    shots = Path(__file__).resolve().parent.parent / "docs" / "screenshots"
-    for width in (1440, 375):
-        assert (shots / f"issue-149-ticket-detail-{width}.png").stat().st_size > 0, width

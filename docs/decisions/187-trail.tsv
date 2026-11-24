@@ -1,7 +1,0 @@
-decision	choice	why
-where to refuse ac=unmet APPROVE	parse_header_line raises HandoffError	every reader (T2 _verdict_after, T4, _answered_by, orch job done) already treats an unparsed header as no verdict, so one rule replaces five ac checks
-APPROVE with no ac	still parses and ships	the plan probe that required ac=met failed 429 tests; the criteria ask only that ac=unmet not ship
-how a refused verdict gives its review back	_requeue_refused_reviews queues the done review job again as attempt 2 through _enqueue_step	queue.requeue moves only cancelled jobs; attempt 2 bounds the loop to one retry a round
-which done reviews qualify	state review or awaiting-ok, job head is the PR head, job round is review_round+1, no other trusted answer, no queued or running review	a refusal in an older round or at an old head is no review the ticket still owes
-wake on a refused verdict	widen the post-handler wake to stale- and superseded- verdict outcomes	stale-revise on a head mismatch and superseded-approve woke nobody before; wake_grok_once keys stale and rejected wakes on the comment, so a T3/T4 wake is not doubled
-model and chart	T4Approve comment says ac=met and a refusal is a stutter step; the drawn label is unchanged	relabelling forces SPEC 4.1, PLAN.md and the SVG to be redrawn, and no java here to run check.sh; a stutter step draws no edge

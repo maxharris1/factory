@@ -1,5 +1,0 @@
-decision	choice	why
-where an older full window was lost (f-6)	store() passes its incoming readings to reevaluate(), which folds them into per-window evidence beside the stored rows	the usage_readings upsert refuses an older reading once a newer no-reading holds the device row, so evidence read only from the table never saw the full window
-how healthy evidence moves a limit (f-7)	when every window is free at its observation, until becomes MIN(until, free); otherwise until becomes the latest free_at as before	a healthy reading never has a reason to push a limit later, and moving an ended row to now made paused_through cover all time, so the lag bound never ran
-what stays the same	a full reading after recovery still re-pauses the lane until its reset	the existing newer-full and later-limit tests pin that behavior
-how to prove it	two tests named after the findings, plus the reviewer's own repro file run verbatim	both new tests failed on the base (healthy_then_full claimed; stuck (0, None)); the repro file went from 2 failed to 3 passed

@@ -1,9 +1,0 @@
-decision	choice	why
-playbook	Feature, one owner, no code helper in this round	the round after Max's answer is one test, harness fixes and re-recorded digests; the lanes code was built in the paused round
-fold vs wraps (ac-4, ac-7 vs #140)	Max: option 2, keep chip, full label and update-from-main wrap; relax only the fold test	answers comment 6924885220
-how the fold test is relaxed	assert the 15-slot fold at 1440x900 on a board whose tiles are all one row, and assert that precondition in the same test	it keeps the real laptop viewport #140 was about; a taller viewport would pick an arbitrary height and stop pinning 900px at all
-which tiles become one-row	_one_row turns claimed, stale, dead, overdue and update-from-main slots into build slots; device and job ids stay	measured: with _one_row disabled the wrap guard names box-3, box-4, pc-4 (state chips) and mac-0 (update-from-main line 3)
-fold check still bites	min-height 124px to 150px on .tile fails the fold at mac bottom 928px against floor 868px	measured locally in headless Chromium
-mixed board checks	the clipped-action and round-pip checks still run on the full mixed board in the same test	ac-7 must hold on the tiles that wrap
-stale layout tests	test_dashboard_layout now expects no PR or ticket kind word and lowercase overdue	ac-1 and ac-3 remove the kind tag and the OVERDUE chip; these failed on the branch head once Node ran
-fake DOM title	the Node harness serializes a non-empty title property	slotTile sets tile.title as a property, so ac-2's tooltip assertion could not see it in the script render

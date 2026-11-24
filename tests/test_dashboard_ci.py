@@ -387,11 +387,6 @@ def test_the_phone_page_has_no_sideways_scroll(tmp_path: Path) -> None:
     assert found["scrollWidth"] <= 375, found
 
 
-def test_review_screenshots_are_committed() -> None:
-    for name in SHOTS:
-        assert (ROOT / "docs" / "screenshots" / name).stat().st_size > 0, name
-
-
 def _pooled(connection: sqlite3.Connection) -> None:
     ci_fixture(connection)
     for name in ("pc-wsl-bots-1", "pc-wsl-bots-2", "pc-wsl-bots-3"):

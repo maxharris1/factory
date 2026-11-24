@@ -37,10 +37,8 @@ from lib.machines_yml import Account, Device, MachinesConfig
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.remote import TAG_ENV, Exchanged, RemoteTarget, SshTransport, ssh_argv
 from lib.telemetry import Scrubber, Session, harness_argv, stream_flags
-from lib.usage import reserve_check
 from lib.usage_readings import (
     Reading,
-    TelemetryUsage,
     parse_codex,
     parse_get_usage,
     parse_rate_limit_event,
@@ -474,7 +472,7 @@ def test_a_later_claude_login_without_limits_clears_the_stored_numbers(tmp_path:
         entry = _accounts(read_usage(connection, CAPTURED + 660, BOX))["claude"]
     assert entry["state"] == "no reading" and entry["headroom"] is None
     assert entry["five_hour"]["used"] is None and entry["seven_day"]["used"] is None
-    assert _source(db, CAPTURED + 660).read("claude") is None
+    assert _account_headroom(db, "claude", "claude-default", CAPTURED + 660) is None
 
 
 def test_a_remote_codex_job_is_not_read_on_the_box(tmp_path: Path) -> None:
@@ -1191,39 +1189,16 @@ def _with_rows(db: Path, *rows: tuple[str, float | None, int, float], harness: s
         )
 
 
-def _source(db: Path, now: float, accounts: dict[str, str] | None = None) -> TelemetryUsage:
-    used = accounts if accounts is not None else {"claude": "claude-default", "codex": "codex-default"}
-    return TelemetryUsage(lambda: sqlite3.connect(db), account_for=used.get, clock=lambda: now)
-
-
-def test_one_fresh_window_is_an_unverified_report_and_never_blocks(tmp_path: Path) -> None:
-    db = tmp_path / "orch.db"
-    _with_rows(db, ("seven_day", 0.9, SEVEN_DAY_RESET, CAPTURED))
-    report = _source(db, CAPTURED + 60).read("claude")
-    assert report is not None and report.verified is False
-    assert report.remaining == pytest.approx(0.1)
-    assert reserve_check("claude", _source(db, CAPTURED + 60)).reason == "no-verified-source"
-
-
-def test_both_fresh_windows_are_verified_and_the_reserve_applies(tmp_path: Path) -> None:
-    db = tmp_path / "orch.db"
-    _with_rows(db, ("seven_day", 0.3, SEVEN_DAY_RESET, CAPTURED), ("five_hour", 0.85, FIVE_HOUR_RESET, CAPTURED),
-               harness="codex")
-    report = _source(db, CAPTURED + 60).read("codex")
-    assert report is not None and report.verified is True
-    assert report.remaining == pytest.approx(0.15)
-    check = reserve_check("codex", _source(db, CAPTURED + 60))
-    assert (check.start, check.reason) == (False, "reroute")
-
-
-def test_stale_or_missing_readings_give_no_report(tmp_path: Path) -> None:
-    db = tmp_path / "orch.db"
-    assert _source(db, CAPTURED).read("claude") is None  # no table
-    _with_rows(db, ("five_hour", 0.5, FIVE_HOUR_RESET, CAPTURED))
-    assert _source(db, FIVE_HOUR_RESET + 1).read("claude") is None  # the window reset
-    assert _source(db, CAPTURED + usage_readings.STALE_SECONDS + 1).read("claude") is None
-    assert _source(db, CAPTURED).read("codex") is None
-    assert _source(db, CAPTURED).read("cursor") is None
+def _account_headroom(db: Path, harness: str, account: str, now: float) -> float | None:
+    try:
+        with sqlite3.connect(db) as connection:
+            rows = usage_readings.stored(connection, account) or []
+    except sqlite3.Error:
+        return None
+    readings = usage_readings.newest_by_account(
+        row for row in rows if row.harness == harness
+    ).get(account, {})
+    return usage_readings.headroom(list(readings.values()), now)
 
 
 def _store_account(db: Path, account: str, device: str, *rows: tuple[str, float, int, float]) -> None:
@@ -1241,10 +1216,10 @@ def test_two_accounts_of_one_bot_keep_their_own_windows_and_headroom(tmp_path: P
                    ("seven_day", 0.5, SEVEN_DAY_RESET, CAPTURED))
     _store_account(db, "codex-b", "pc", ("five_hour", 0.2, FIVE_HOUR_RESET + 3600, CAPTURED),
                    ("seven_day", 0.3, SEVEN_DAY_RESET - 86400, CAPTURED))
-    a = _source(db, CAPTURED + 60, {"codex": "codex-a"}).read("codex")
-    b = _source(db, CAPTURED + 60, {"codex": "codex-b"}).read("codex")
-    assert a is not None and a.verified and a.remaining == pytest.approx(0.1)
-    assert b is not None and b.verified and b.remaining == pytest.approx(0.7)
+    a = _account_headroom(db, "codex", "codex-a", CAPTURED + 60)
+    b = _account_headroom(db, "codex", "codex-b", CAPTURED + 60)
+    assert a == pytest.approx(0.1)
+    assert b == pytest.approx(0.7)
     with sqlite3.connect(db) as connection:
         rows = connection.execute(
             "SELECT account, device, window, used, resets_at FROM usage_readings ORDER BY account, window"
@@ -1263,9 +1238,8 @@ def test_an_account_on_two_devices_reads_the_newest_reading_of_each_window(tmp_p
                    ("seven_day", 0.5, SEVEN_DAY_RESET, CAPTURED))
     _store_account(db, "codex-a", "pc", ("five_hour", 0.2, FIVE_HOUR_RESET, CAPTURED),
                    ("seven_day", 0.6, SEVEN_DAY_RESET, CAPTURED + 60))
-    report = _source(db, CAPTURED + 120, {"codex": "codex-a"}).read("codex")
-    assert report is not None and report.remaining == pytest.approx(0.1)
-    assert _source(db, CAPTURED + 120, {"codex": "codex-b"}).read("codex") is None
+    assert _account_headroom(db, "codex", "codex-a", CAPTURED + 120) == pytest.approx(0.1)
+    assert _account_headroom(db, "codex", "codex-b", CAPTURED + 120) is None
 
 
 # --- the snapshot ------------------------------------------------------------------------
@@ -1791,8 +1765,7 @@ def test_before_the_migration_a_job_writes_the_old_row_shape(tmp_path: Path) -> 
     _pre_account_db(db)
     _store_account(db, "codex-a", "box", ("five_hour", 0.3, FIVE_HOUR_RESET, CAPTURED + 60))
     assert "account" not in _columns(db), "orch job run never adds the column"
-    report = _source(db, CAPTURED + 120, {"codex": "codex-default"}).read("codex")
-    assert report is not None and report.remaining == pytest.approx(0.7)
+    assert _account_headroom(db, "codex", "codex-default", CAPTURED + 120) == pytest.approx(0.7)
 
 
 def test_orch_usage_migrate_says_whether_it_migrated(
@@ -1842,8 +1815,7 @@ def _store_on(db: Path, account: str, device: str, used: float, at: float, *, ow
 
 
 def _headroom(db: Path, account: str, now: float) -> float | None:
-    report = _source(db, now, {"codex": account}).read("codex")
-    return None if report is None else report.remaining
+    return _account_headroom(db, "codex", account, now)
 
 
 def _lane_readings(db: Path, account: str) -> dict[str, float | None]:
@@ -2080,7 +2052,7 @@ def test_capture_and_reads_open_no_file_but_the_database_and_the_jobs_rollout(
     claude = _session(tmp_path / "orch.db")
     claude.add_usage(parse_get_usage(GET_USAGE, CAPTURED))
     claude.finish(0)
-    assert _source(tmp_path / "orch.db", CAPTURED + 1).read("codex") is not None
+    assert _account_headroom(tmp_path / "orch.db", "codex", "codex-default", CAPTURED + 1) is not None
     with sqlite3.connect(tmp_path / "orch.db") as connection:
         read_usage(connection, CAPTURED + 1, BOX)
     assert all(path.startswith(str(tmp_path)) for path in opened), opened

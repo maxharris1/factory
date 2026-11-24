@@ -33,17 +33,12 @@ from lib.orchestrate import (
     stuck_comment,
 )
 from lib.schema import AUT0_REPO
-from lib.usage import StaticUsage, UsageReport
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "grok" / "orchestrate-project" / "SKILL.md"
 PROJECTS = tuple(
     relative for relative in EXAMPLE_PATHS if relative.endswith("/factory.md")
 )
-
-
-def reports(*items: UsageReport) -> StaticUsage:
-    return StaticUsage({item.harness: item for item in items})
 
 
 def write_factory(directory: Path, data: dict, body: str = "") -> Path:
@@ -281,46 +276,42 @@ def test_choose_route_uses_route_job_and_keeps_a_cross_family_reviewer() -> None
     assert urgent.urgent is True
 
 
-def test_choose_route_builds_fit_from_the_route_job_result() -> None:
+def test_choose_route_falls_back_when_built_by_matches_reviewer_family() -> None:
     base = request_for("examples/cleffy/factory.md", likely_files=("a", "b", "c", "d"))
-    request = replace(
-        base,
-        config=replace(
-            base.config,
-            reviewer_harness="cursor",
-            reviewer_model="gpt-5",
-        ),
-    )
-    source = reports(UsageReport("cursor", 0.0, True))
-    decision = choose_route(request, usage=source)
-    assert decision.builder_harness == "claude"
-    assert decision.builder_model is None
-    assert decision.reviewer_harness == "codex"
-    assert decision.reviewer_model is None
-    assert decision.builder_family == "anthropic"
-    assert decision.reviewer_family == "openai"
+    request = replace(base, built_by=("codex", None))
+    decision = choose_route(request)
+    assert decision.builder_harness == "codex"
+    assert decision.reviewer_harness == "claude"
+    assert decision.builder_family == "openai"
+    assert decision.reviewer_family == "anthropic"
     assert decision.job == "plan"
     assert decision.file_count == 4
-    assert decision.reviewer_harness != request.config.reviewer_harness
-    urgent = choose_route(replace(request, urgent=True), usage=source)
-    assert urgent.reviewer_harness == "cursor"
-    assert urgent.reviewer_model == "gpt-5"
-    assert urgent.urgent is True
-
-
-def test_choose_route_raises_when_the_route_is_not_ok() -> None:
-    request = request_for("examples/cleffy/factory.md")
-    source = reports(
-        UsageReport("claude", 0.0, True),
-        UsageReport("codex", 0.0, True),
-        UsageReport("cursor", 0.0, True),
+    assert decision.reviewer_fallback is True
+    assert decision.builder_fallback is False
+    assert decision.builder_using_reserve is False
+    assert decision.reviewer_using_reserve is False
+    body = parse_comment(_go_after_questions(decision, "none")).body
+    assert body.endswith(
+        "**Routing**\n"
+        "Reviewer is a fallback from factory.md's reviewer.\n"
+        "For information; the dispatcher runs factory.md's pair.\n"
     )
-    with pytest.raises(RouteError, match="^reserve$"):
-        choose_route(request, usage=source)
-    decision = choose_route(replace(request, urgent=True), usage=source)
-    assert decision.builder_harness == "claude"
-    assert decision.reviewer_harness == "codex"
-    assert decision.builder_family != decision.reviewer_family
+    plain = choose_route(base)
+    assert (
+        plain.builder_using_reserve,
+        plain.reviewer_using_reserve,
+        plain.builder_fallback,
+        plain.reviewer_fallback,
+    ) == (False, False, False, False)
+    assert "**Routing**" not in parse_comment(_go_after_questions(plain, "none")).body
+
+
+def test_choose_route_refuses_unknown_built_by() -> None:
+    base = request_for("examples/cleffy/factory.md")
+    with pytest.raises(RouteError, match="built_by harness"):
+        choose_route(replace(base, built_by=("grok", None)))
+    with pytest.raises(RouteError, match="built_by family not established"):
+        choose_route(replace(base, built_by=("cursor", None)))
 
 
 def test_same_family_reviewer_is_refused() -> None:
@@ -351,69 +342,6 @@ def test_same_family_reviewer_is_refused() -> None:
             choose_route(replace(request, config=config))
     families = assert_cross_family("cursor", "claude-opus", "codex", None)
     assert families == ("anthropic", "openai")
-
-
-def test_choose_route_records_reserve_and_fallback() -> None:
-    base = request_for("examples/cleffy/factory.md")
-    request = replace(
-        base,
-        config=replace(base.config, reviewer_harness="cursor", reviewer_model="gpt-5"),
-    )
-    source = reports(UsageReport("cursor", 0.0, True))
-    fallback = choose_route(request, usage=source)
-    assert (
-        fallback.builder_using_reserve,
-        fallback.reviewer_using_reserve,
-        fallback.builder_fallback,
-        fallback.reviewer_fallback,
-    ) == (False, False, False, True)
-    body = parse_comment(_go_after_questions(fallback, "none")).body
-    assert body.endswith(
-        "**Routing**\n"
-        "Reviewer is a fallback from factory.md's reviewer.\n"
-        "For information; the dispatcher runs factory.md's pair.\n"
-    )
-    reserve = choose_route(replace(request, urgent=True), usage=source)
-    assert (
-        reserve.builder_using_reserve,
-        reserve.reviewer_using_reserve,
-        reserve.builder_fallback,
-        reserve.reviewer_fallback,
-    ) == (False, True, False, False)
-    body = parse_comment(_go_after_questions(reserve, "none")).body
-    assert "**Routing**\nReviewer is using its usage reserve.\n" in body
-    builder_side = choose_route(
-        replace(
-            base,
-            config=replace(
-                base.config,
-                builder_harness="cursor",
-                builder_model="gpt-5",
-                reviewer_harness="claude",
-            ),
-        ),
-        usage=source,
-    )
-    assert (builder_side.builder_harness, builder_side.reviewer_harness) == (
-        "claude",
-        "codex",
-    )
-    assert (builder_side.builder_fallback, builder_side.reviewer_fallback) == (True, True)
-    body = parse_comment(_go_after_questions(builder_side, "none")).body
-    assert body.endswith(
-        "**Routing**\n"
-        "Builder is a fallback from factory.md's builder.\n"
-        "Reviewer is a fallback from factory.md's reviewer.\n"
-        "For information; the dispatcher runs factory.md's pair.\n"
-    )
-    plain = choose_route(base)
-    assert (
-        plain.builder_using_reserve,
-        plain.reviewer_using_reserve,
-        plain.builder_fallback,
-        plain.reviewer_fallback,
-    ) == (False, False, False, False)
-    assert "**Routing**" not in parse_comment(_go_after_questions(plain, "none")).body
 
 
 def test_choose_route_takes_the_builder_that_built() -> None:
@@ -567,8 +495,6 @@ def test_skill_matches_the_spec_path_and_the_interface() -> None:
         "auth.json",
         ".runner",
         "GH_TOKEN",
-        "lib.usage.route_job(config, *, usage=None, resumed_paused_step=False, past_ship=False, marked_urgent=False, built_by=None) -> JobRoute",
-        "route_job(config, marked_urgent=urgent)",
         "projects[].factory_ref",
         "`project.config.base_branch` is not `factory_ref`, refuse",
         "`scope_changed=True`",
@@ -579,7 +505,7 @@ def test_skill_matches_the_spec_path_and_the_interface() -> None:
     assert "set `scope_changed` on any later" not in text
     assert "choose_fit" not in text
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "lib.usage.route_job(config, marked_urgent=urgent)" in readme
+    assert "lib.usage.route_job" not in readme
     assert "choose_fit" not in readme
     source = (ROOT / "lib" / "orchestrate.py").read_text(encoding="utf-8")
     assert "choose_fit" not in source
@@ -603,7 +529,6 @@ def test_skill_matches_the_spec_path_and_the_interface() -> None:
                 modules.add(node.module)
     assert modules <= {
         "__future__",
-        "importlib",
         "re",
         "collections.abc",
         "dataclasses",

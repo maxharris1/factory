@@ -1,5 +1,0 @@
-decision	choice	why
-scope	decision note plus one pin test, no lib/ change	#131 already queues one update-from-main job, re-reviews at the approved round and merges (plan comment 6900794978)
-gap pinned	tests/test_base_drift.py: REVISE on the update re-review queues a fix at 2/3, its review runs at 2/3, APPROVE merges sha(3)	the ticket's "behavior-changing update gets a normal round" had no test
-test is not vacuous	mutating ready.py so the update path charges a round (reentry = review_round + 1) fails the test; reverted	prove the pin catches a regression
-rename	keep the merge-only brief kind name	no AC asks for it; job rows and snapshots store the name; conflicts with #196 #203 #206 #207

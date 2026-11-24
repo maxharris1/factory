@@ -73,7 +73,8 @@ def run_check(tmp_path: Path, curl_fails: int,
            if key not in {"TLA2TOOLS", "STATECHART"}}
     env.update(PATH=f"{bin_dir}:{os.environ['PATH']}", HOME=str(tmp_path / "home"),
                XDG_CACHE_HOME=str(tmp_path / "cache"), FAKE_LOG=str(log),
-               FAKE_CURL_FAILS=str(curl_fails), FAKE_GIT_FAILS=str(git_fails))
+               FAKE_CURL_FAILS=str(curl_fails), FAKE_GIT_FAILS=str(git_fails),
+               STATECHART_NO_VENDORED="1")
     proc = subprocess.run(["sh", str(SCRIPT)], env=env, capture_output=True,
                           text=True, timeout=60)
     return proc, log
@@ -162,6 +163,7 @@ def run_rate_limited_check(tmp_path: Path, fetcher: str, fails: int) -> tuple[su
         "CALLS": str(calls),
         "FAILS": str(fails),
         "LAUNCHED": str(tmp_path / "launched"),
+        "STATECHART_NO_VENDORED": "1",
     }
     if fetcher == "git":
         tool(bin_dir, "git", RATE_LIMITED_GIT)

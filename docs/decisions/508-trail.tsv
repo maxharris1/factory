@@ -1,7 +1,0 @@
-decision	choice	why
-where the rule lives	lib/approve_rule.py approve_refusal, called by handoff_check and T4	parse_comment re-reads accepted APPROVEs (ship-intent replay, hold, CI pending, merge queue); a stricter parser would read them under the new rule, which the ticket forbids
-how old verdicts keep shipping	approve_rule_floor.since; T4 skips the rule for comments created before it	in-flight APPROVEs are unhandled, so a handled-rowid floor cannot tell them apart; a fresh database gets 0 so tests and new installs run the full rule
-what counts as an open blocking item	a list item whose leading paragraph opens with [blocking], outside blockquotes and code	same CommonMark reading as lib/evidence/findings.py; [closed], [minor] and [follow-up] never match
-ac=unmet outcome	UnmetApproveError subclass; T7 maps it to rejected-approve-ac-unmet	one outcome family, one wake shape and one eval counter for all refused approvals; every except HandoffError reader is unchanged
-fixtures	VerdictTemplate in tests/test_hooks.py adds ac=met to APPROVE when the call gives none; literal headers edited by sed	one edit covers 137 VERDICT.format calls in 30 files; no test deleted
-pre-existing failure	test_claude_print_mode_gets_the_bg_wait_ceiling_on_the_box[codex-None] fails locally on main too	environment of this box, not this change

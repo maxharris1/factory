@@ -848,11 +848,6 @@ def write_screenshots(out: Path) -> list[Path]:
         chrome.close()
 
 
-def test_review_screenshots_are_committed() -> None:
-    for name in SHOTS:
-        assert (ROOT / "docs" / "screenshots" / name).stat().st_size > 0, name
-
-
 if __name__ == "__main__":
     if sys.argv[1:2] != ["--shots"] or len(sys.argv) != 3 or CHROME is None:
         sys.exit("usage: python -m tests.test_dashboard_lanes --shots <dir>  (needs Chrome or Chromium)")

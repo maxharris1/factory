@@ -1,7 +1,0 @@
-decision	choice	why
-who owns a member's base update	the merge queue, for every ticket _merge_queue_members returns; the ready path checks that predicate, not WATCHED_STATES	waiting-external after:Max members got a #255 merge-only fix beside the queue's update-from-main (probe: got 2)
-T6 on a failed merge-only fix of a member	no retry and no link-drop requeue; event queue-owns-update	TQ runs before T6 in one poll, so by then it has already queued update-from-main for that head
-how TQ sees a base update still out	any queued or running fix at the head whose detail kind is merge-only	the old base-update: dedupe key missed t6-retry: rows of the same job
-rejected: only widen the key match (plan alt A)	not alone	in the failing poll the retry does not exist yet when TQ runs
-rejected: run T6 before TQ (plan alt B)	no	reorders every job outcome against the merge pass for one case
-rejected comment-sicko rename of _base_update_out	kept the name	tests/test_dispatch_split.py pins it in the frozen pre-split method list; renaming is out of scope

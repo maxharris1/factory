@@ -8,6 +8,5 @@
 - lib.wait: blocking orch wait and the orch job helpers on lib.queue
 - lib.orchestrate: orchestrate-project intake, questions, routing, and stops
 - lib.pstack_pin: pinned pstack, install-skills, and the doctor canary
-- lib.usage: best-fit routing and the usage reserve. F1-07 calls route_job
-- lib.eval_report: weekly eval report from a local log directory
+- lib.eval_report: weekly eval report from a local log directory or orch.db snapshot
 """

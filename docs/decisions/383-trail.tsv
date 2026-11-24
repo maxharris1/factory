@@ -1,3 +1,0 @@
-decision	choice	why
-legacy fallback answer (round 4, f-2)	a pre-upgrade handled row with no verdict metadata answers a review only if its stored outcome is not one a builder ready produces (READY_OUTCOMES, rejected-ready-*, update-*)	the ready may be absent from the snapshot, so the stored outcome is the only record of its kind; no verdict handler returns any of those strings
-blacklist over whitelist	classify ready outcomes rather than list verdict outcomes	a missed verdict outcome would hide a real answer and bring back the f-1 stall; ready outcomes come from two functions (_t2, _settle_update) and are easy to list

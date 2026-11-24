@@ -1,7 +1,0 @@
-decision	choice	why
-gate shape	ubuntu changes job plus a job-level if on macos	a skipped check run is not run for ci_status and passes a GitHub required check; a path-filtered workflow would leave a required check pending forever
-push to main	changes steps run only on pull_request; on push they skip, the job succeeds, and macos runs through the event_name branch	the plan ran the diff on every event, but push events carry no pull_request.base.sha so the diff would fail and turn main red
-path list	ci.yml, lib/job_run.py, lib/remote.py, tests/test_process_discovery.py, requirements.txt, requirements-dev.txt; exact-line match	the ticket's list plus dependency files; hot shared imports stay out so macos does not run on most PRs, and push-to-main still covers them
-fail closed	set -euo pipefail with the diff captured in a variable	a missing base commit fails the changes job (red run) instead of silently skipping macos
-test	tests/test_ci_workflow.py runs the real step script against real git diffs and parses ci.yml	13 cases failed on the old ci.yml (no changes job) and pass now
-rename detection	git diff --no-renames in the changes step	f-1: with rename detection --name-only lists only the destination, so renaming a macOS path away skipped macos; --no-renames lists the deleted source too. test (2/3) red on ef29ad5 was test_dashboard_ticket_detail.py (CDP "Inspected target navigated or closed"), which this PR does not touch

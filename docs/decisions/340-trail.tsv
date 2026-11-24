@@ -1,5 +1,0 @@
-decision	choice	why
-cleanup	reap_home(tmp_path) in the finalizer of test_install_retires_the_legacy_launchers, replacing the loop that killed recorded child pids	every launcher shell and its sleep child carry HOME=tmp_path, so reap_home finds them however far startup got; a pid list filled after all twenty spawns is empty when spawn twenty raises (19 children leaked on main, measured with the probe)
-rejected	record each child pid right after its own spawn	still misses a child forked after the shell is spawned but before its pid file lands, and keeps a second cleanup path beside reap_home
-order	reap_home before the poller wait loop	SIGTERM then SIGKILL reach parents and children together; the wait loop then collects the Popen zombies
-regression	commit the Codex round-2 probe unchanged as tests/test_deploy_partial_spawn.py	the ticket names it as the acceptance check; it failed on main 190f3db (LEFT_RUNNING had 19 pids) and passes with the fix

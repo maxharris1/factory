@@ -1,6 +1,0 @@
-decision	choice	why
-where to fix	the TR replay sets the workflow state of the job it re-queues, not a looser _t3/_t4 staleness check	loosening the check would weaken ac-3; a retry that re-queues a review has put the ticket in review whatever drifted before
-data shape	_REPLAY_STATE table {plan: planning, review: review} replaces the one-off plan branch	one lookup per replayed action instead of an elif per action
-awaiting-ok exception	dropped; a replayed review always sets review	the delegate found no reachable path; every reader of awaiting-ok (t3, t4, questions, ready) also accepts review, and t4 still checks holds through _hold_in_play
-tests	reproduce the real desync (failed review label write, then edited ready) before getting stuck	this is the #334 trace; 8 new tests fail on main and pass on the branch
-T2 desync	left for a follow-up ticket	the enqueue-then-label order lives in ready.py/core.py, outside this ticket's Touches

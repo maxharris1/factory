@@ -1,24 +1,19 @@
 """Grok Bot `orchestrate-project` interface (docs/SPEC.md F1-07).
 
-Stable names for F1-08, which owns best fit and the usage reserve:
+Stable names for orchestrator routing and handoffs:
 
 - `RouteRequest` — input. Do not add a required field.
-- `FitChoice` — harness pair built from a `route_job` result.
-- `RouteDecision` — what `orch:go` posts. Families and `job` are set here,
-  with the reserve and fallback flags `choose_route` read from the route.
+- `FitChoice` — harness pair built for a ticket.
+- `RouteDecision` — what `orch:go` posts. Families and `job` are set here.
 - `choose_route(request)` — checks the factory.md pair with
-  `assert_cross_family`, then calls `lib.usage.route_job(config, marked_urgent=urgent)` once.
+  `assert_cross_family` and selects a cross-family reviewer against
+  `request.built_by` when set.
 - `route_from_fit(request, fit)` — cross-family check, then a decision.
 - `assert_cross_family(...)` — the check-config family rule. Same family raises.
-
-`choose_route` does not rank fits and does not read a usage source.
-`lib.usage` must not import `FitChoice`. The import stays inside
-`choose_route` so the two modules do not cycle.
 """
 
 from __future__ import annotations
 
-import importlib
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -360,14 +355,14 @@ def choose_route(
     request: RouteRequest,
     usage: object | None = None,
 ) -> RouteDecision:
-    """Adapt `lib.usage.route_job(config, marked_urgent=urgent)` into a decision.
+    """Resolve builder and cross-family reviewer from factory.md (and built_by).
 
     The factory.md pair must pass `assert_cross_family` first, so a config
     check-config would refuse is refused here rather than routed around.
-    The import is lazy so this module does not cycle with `lib.usage`.
-    `lib.usage` must not import `FitChoice`. A route that is not ok raises
-    `RouteError`. `usage` and `request.built_by` are forwarded.
+    When `request.built_by` is set and shares a family with factory.md's
+    reviewer, picks the first cross-family harness in schema order.
     """
+    del usage  # dead cross-harness reserve removed; kept as optional kwarg for caller compatibility
     _check_request(request)
     config = request.config
     assert_cross_family(
@@ -376,37 +371,43 @@ def choose_route(
         config.reviewer_harness,
         config.reviewer_model,
     )
-    usage_mod = importlib.import_module("lib.usage")
-    try:
-        route = usage_mod.route_job(
-            config,
-            usage=usage,
-            marked_urgent=request.urgent,
-            built_by=request.built_by,
-        )
-    except ValueError as exc:
-        raise RouteError(str(exc)) from exc
-    if not route.ok:
-        reason = route.reason
-        if not isinstance(reason, str) or reason.strip() == "":
-            raise RouteError("route not ok")
-        raise RouteError(reason)
-    builder = route.builder
-    reviewer = route.reviewer
+    if request.built_by is None:
+        builder_harness = config.builder_harness
+        builder_model = config.builder_model
+    else:
+        builder_harness, builder_model = request.built_by
+        if builder_harness not in HARNESSES:
+            raise RouteError(f"built_by harness {builder_harness!r} is unknown")
+    builder_family, _ = resolved_family(builder_harness, builder_model)
+    if builder_family is None:
+        raise RouteError(f"built_by family not established for {builder_harness!r}")
+
+    reviewer_candidates: list[tuple[str, str | None]] = [
+        (config.reviewer_harness, config.reviewer_model),
+        *((harness, None) for harness in HARNESSES if harness != config.reviewer_harness),
+    ]
+    chosen_reviewer: tuple[str, str | None] | None = None
+    for cand_harness, cand_model in reviewer_candidates:
+        cand_family, _ = resolved_family(cand_harness, cand_model)
+        if cand_family is None or cand_family == builder_family:
+            continue
+        chosen_reviewer = (cand_harness, cand_model)
+        break
+    if chosen_reviewer is None:
+        raise RouteError("no-fit")
+
     fit = FitChoice(
-        builder_harness=builder.harness,
-        builder_model=builder.model,
-        reviewer_harness=reviewer.harness,
-        reviewer_model=reviewer.model,
+        builder_harness=builder_harness,
+        builder_model=builder_model,
+        reviewer_harness=chosen_reviewer[0],
+        reviewer_model=chosen_reviewer[1],
     )
     return replace(
         route_from_fit(request, fit),
-        builder_using_reserve=builder.using_reserve,
-        reviewer_using_reserve=reviewer.using_reserve,
-        builder_fallback=(
-            request.built_by is None and builder.harness != config.builder_harness
-        ),
-        reviewer_fallback=reviewer.harness != config.reviewer_harness,
+        builder_using_reserve=False,
+        reviewer_using_reserve=False,
+        builder_fallback=False,
+        reviewer_fallback=chosen_reviewer[0] != config.reviewer_harness,
     )
 
 

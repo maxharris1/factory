@@ -1,5 +1,0 @@
-decision	choice	why
-where the cause link is remembered	first statement of CommentsMixin.process, before _routed	remembering a link belongs to reading the ticket; the rejected-route and closed-abandon early returns skipped it, so the stuck wake fell back to comment:<id>
-rejected: pass the read ticket into _reject_route	not built	threads a parameter through three stuck-wake helpers for one caller and still leaves the link unremembered, failing the AC
-rejected: put the refused ticket in _polled	not built	reconcile_jobs, the merge queue and retry paths read _polled and would act on the refused routing
-proof	new test fails on main with comment:go-1 and passes with the fix; Codex round-4 probe fails without and passes with the fix	the probe is the reviewer's own reproducer, run unchanged

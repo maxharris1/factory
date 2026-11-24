@@ -1,5 +1,0 @@
-decision	choice	why
-tie-break (finding 1)	sort earlier verdicts by (round, _comment_order) in repeat.py and findings.py _verdicts	_comment_order already orders same-second comments by numeric GitHub id elsewhere in dispatch; ids grow with posting order, so the later repost wins
-id boundary (finding 2)	_ID_END now refuses a hyphen followed by any run of hyphens, underscores, asterisks or backticks that reaches a letter or digit	one shared regex serves blocking_ids, carry and close, so the refusal reaches all three; a hyphen that ends at a space or punctuation still separates
-criteria.py	left as is	lib/evidence/criteria.py sorts verdicts by created_at too, but the ticket names only repeat.py and findings.py; noted in the handoff as open
--- separator	not added	criterion status after -- was never parsed before this change and fails closed (no park); out of scope
