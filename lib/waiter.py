@@ -169,8 +169,10 @@ from lib.pre_ready import ContextUnavailable, check_environ, checks_for, first_f
 from lib.pre_ready import run as run_check
 from lib.pstack_pin import LOCK_PATH, ROOT as FACTORY_CHECKOUT
 from lib.queue import (
+    LOCAL_GATE_EVENTS,
     LOCAL_GATE_FAILED,
     LOCAL_GATE_PASSED,
+    LOCAL_GATE_RETRY,
     LOCAL_GATE_UNAVAILABLE,
     ClaimProofError,
     Job,
@@ -1516,8 +1518,9 @@ class Waiter:
 
     def _retry_waiting_gates(self) -> None:
         """#1464: rerun ci.local_gate for a local-gate-waiting ready. Records a
-        gate event on the job that posted it; the job's state never changes."""
-        gate_events = (LOCAL_GATE_PASSED, LOCAL_GATE_FAILED, LOCAL_GATE_UNAVAILABLE)
+        gate event on the job that posted it; the job's state never changes.
+        A local-gate-retry is recorded before any work, so a retry that dies
+        or cannot check out still waits LOCAL_GATE_RETRY_SECONDS."""
         try:
             with self.queue.connect() as connection:
                 tables = connection.execute(
@@ -1526,18 +1529,18 @@ class Waiter:
                 ).fetchone()[0]
                 rows = [] if tables < 2 else connection.execute(
                     """
-                    SELECT waits.comment_id, events.job_id, jobs.repo, events.event,
-                        events.detail, events.recorded_at
+                    SELECT waits.comment_id, events.id, events.job_id, jobs.repo,
+                        events.event, events.detail, events.recorded_at
                     FROM ci_waits AS waits
                     JOIN job_events AS events
                       ON events.repo = waits.repo AND events.ticket_id = waits.ticket_id
                      AND substr(events.detail, 1, length('handoff ' || waits.comment_id || ':'))
                          = 'handoff ' || waits.comment_id || ':'
                     JOIN jobs ON jobs.id = events.job_id
-                    WHERE waits.reason = ? AND jobs.recipient = ? AND events.event IN (?, ?, ?)
+                    WHERE waits.reason = ? AND jobs.recipient = ? AND events.event IN (?, ?, ?, ?)
                     ORDER BY events.id
                     """,
-                    (LOCAL_GATE_WAITING, self.recipient, *gate_events),
+                    (LOCAL_GATE_WAITING, self.recipient, *LOCAL_GATE_EVENTS),
                 ).fetchall()
         except (sqlite3.Error, OSError) as exc:
             self.log(f"local_gate retry: waiting gates not read ({_one_line(exc)})")
@@ -1545,11 +1548,20 @@ class Waiter:
         newest = {row["comment_id"]: row for row in rows}
         for comment_id, row in newest.items():
             age = self.queue.now() - float(row["recorded_at"])
-            if row["event"] != LOCAL_GATE_UNAVAILABLE or age < LOCAL_GATE_RETRY_SECONDS:
+            if (
+                row["event"] not in (LOCAL_GATE_UNAVAILABLE, LOCAL_GATE_RETRY)
+                or age < LOCAL_GATE_RETRY_SECONDS
+            ):
                 continue
             job_id, repo = str(row["job_id"]), str(row["repo"])
             head = str(row["detail"]).removeprefix(f"handoff {comment_id}: at ").partition(":")[0]
             try:
+                if not retry_locked(
+                    lambda: self.queue.reserve_gate_retry(
+                        job_id, comment_id=comment_id, head=head, seen=int(row["id"])
+                    )
+                ):
+                    continue
                 config, findings = load_orch_yml(self.orch_yml, allow_placeholders=True)
                 errors = [item.message for item in findings if item.severity == "error"]
                 if config is None or errors:

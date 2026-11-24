@@ -77,6 +77,7 @@ _AFTER_BUILD_STATES = frozenset({"review", "fixing", "awaiting-ok", "handed-off"
 _UNANNOUNCED_GREEN_STATES = frozenset({"building", "fixing", "review"})
 _UNANNOUNCED_GREEN_SOURCE = "unannounced-green-head"
 _CI_LOG_READS = 64
+READY_TAKEOVERS = ("queued-review", "answered-review", "queued-ci-fix")
 _REENTERS_FROM = {"handoff": ("handed-off", "merge-queue"), "rebase": ("fixing",)}
 
 
@@ -262,6 +263,8 @@ class ReadyMixin:
         if state in ("fixing", "awaiting-ok") and self._held_approve_covers(ticket, head):
             return True, "held-ci-fix-ready"
         gate = self._local_gate_hold(ticket, comment.id)
+        if gate is not None and self._taken_over(ticket, comment):
+            return True, "ready-superseded-by-ready"
         if gate is not None and gate[0] == LOCAL_GATE_UNAVAILABLE:
             return False, LOCAL_GATE_WAITING
         gate_red = None if gate is None else CIResult(
@@ -344,6 +347,26 @@ class ReadyMixin:
             self._set_workflow_state(ticket, "fixing")
         return True, "queued-ci-fix"
 
+    def _taken_over(self, ticket: TrackedTicket, comment: Comment) -> bool:
+        """#1464: a later ready already queued review or a CI fix."""
+        with self._connect() as connection:
+            handled = {
+                row["comment_id"]
+                for row in connection.execute(
+                    f"""
+                    SELECT comment_id FROM handled_comments
+                    WHERE repo = ? AND ticket_id = ?
+                      AND outcome IN ({", ".join("?" * len(READY_TAKEOVERS))})
+                    """,
+                    (ticket.repo.lower(), ticket.ticket_id, *READY_TAKEOVERS),
+                )
+            }
+        return any(
+            _comment_order(comment) < _comment_order(later)
+            for later in ticket.comments
+            if later.id in handled
+        )
+
     def _local_gate_hold(self, ticket: TrackedTicket, comment_id: str) -> tuple[str, str] | None:
         """#1464: None once the gate passed at this ready, since a pass is never undone."""
         if not any(check.name == "local_gate" for check in planned(ticket.factory, ticket.pr_base)):
@@ -415,6 +438,11 @@ class ReadyMixin:
                     "DELETE FROM ci_waits WHERE repo = ? AND ticket_id = ? AND comment_id = ?",
                     (*key, comment.id),
                 )
+                if outcome in READY_TAKEOVERS:
+                    connection.execute(
+                        "DELETE FROM ci_waits WHERE repo = ? AND ticket_id = ? AND reason = ?",
+                        (*key, LOCAL_GATE_WAITING),
+                    )
                 return
             head = current or reported_head
             result = ticket.ci.get(head) or ticket.ci.get(reported_head)

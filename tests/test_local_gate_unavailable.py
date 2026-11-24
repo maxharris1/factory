@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import copy
 import json
+import multiprocessing
+import os
 import sqlite3
 import subprocess
 from dataclasses import replace
@@ -339,3 +342,115 @@ def test_the_waiter_retries_nothing_once_the_wait_is_gone(tmp_path: Path, origin
     waiter.step()
 
     assert not marker.exists()
+
+
+def _due_unavailable(tmp_path: Path, origin: str, retry: str):
+    waiter, db, job_id, log = remote_waiter(tmp_path, origin, _factory_text("exit 75"), FEATURE)
+    _waiting(db, COMMENT, origin)
+    _age_events(db, 601)
+    _serve_factory_md(env_store(), _factory_text(retry))
+    return waiter, db, job_id, log
+
+
+def test_a_retry_that_dies_before_its_result_still_waits_600_seconds(
+    tmp_path: Path, origin: str
+) -> None:
+    marker = tmp_path / "attempts"
+    waiter, _db, _job_id, _log = _due_unavailable(
+        tmp_path, origin, f"echo run >> {marker}; exit 75"
+    )
+
+    def run_then_die() -> None:
+        waiter.queue.record_head_check = lambda *args, **kwargs: os._exit(19)
+        waiter._retry_waiting_gates()
+
+    child = multiprocessing.get_context("fork").Process(target=run_then_die)
+    child.start()
+    child.join(30)
+    assert child.exitcode == 19
+    assert marker.read_text().splitlines() == ["run"]
+
+    copy.copy(waiter)._retry_waiting_gates()
+
+    assert marker.read_text().splitlines() == ["run"]
+
+
+def test_a_retry_that_cannot_check_out_waits_600_seconds(
+    tmp_path: Path, origin: str, monkeypatch
+) -> None:
+    waiter, db, job_id, log = _due_unavailable(tmp_path, origin, "exit 0")
+    monkeypatch.setenv("ORCH_WORK_ROOT", str(tmp_path / "retry-work"))
+    monkeypatch.setenv("ORCH_GIT_URL_TEMPLATE", str(tmp_path / "missing" / "{repo}.git"))
+
+    waiter.step()
+    waiter.step()
+
+    attempts = [line for line in log if "local_gate retry" in line and "not run" in line]
+    assert len(attempts) == 1
+    assert LOCAL_GATE_PASSED not in [event for event, _ in _gate(db, job_id)]
+
+    _age_events(db, 601)
+    waiter.step()
+    attempts = [line for line in log if "local_gate retry" in line and "not run" in line]
+    assert len(attempts) == 2
+
+
+@pytest.mark.job_bound
+def test_a_newer_ready_that_queued_review_retires_the_older_wait(
+    tmp_path: Path, origin: str
+) -> None:
+    from lib.dispatcher import Dispatcher
+    from tests.test_dispatcher import (
+        READY,
+        TRUSTED_LOGINS,
+        FakeGrokDelivery,
+        FakeReviewActions,
+        comment,
+    )
+
+    marker = tmp_path / "obsolete-gate-ran"
+    waiter, db, old_id, _log = remote_waiter(tmp_path, origin, _factory_text("exit 75"), FEATURE)
+    queue = waiter.queue
+    dispatcher = Dispatcher(
+        db, queue, trusted_logins=TRUSTED_LOGINS, review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+    )
+    queue.enqueue(
+        JobRequest(
+            repo="owner/repo", ticket_id="42", action="build", recipient="claude",
+            source_comment_id="second", timeout_seconds=5400, detail="{}",
+        ),
+        dedupe_key="second",
+    )
+    newer = queue.claim("claude")
+    assert newer is not None
+    queue.record_head_check(newer.id, event=LOCAL_GATE_PASSED, comment_id="1102", head=origin)
+    queue.finish(newer.id, owner="claude", handoff_comment_id="1102")
+    snapshot = _gated(COMMENT)
+    snapshot = replace(
+        snapshot,
+        comments=(
+            comment(COMMENT, READY.format(head=origin), author="claude-login", created_at=200),
+            comment("1102", READY.format(head=origin), author="claude-login", created_at=201),
+        ),
+        current_head=origin,
+        ci={origin: next(iter(snapshot.ci.values()))},
+    )
+
+    dispatcher.process(snapshot)
+    assert _actions(queue) == ["review"]
+    assert _wait(queue) is None
+
+    _age_events(db, 601)
+    _serve_factory_md(env_store(), _factory_text(f"touch {marker}; exit 1"))
+    waiter._retry_waiting_gates()
+    assert not marker.exists()
+
+    queue.record_head_check(
+        old_id, event=LOCAL_GATE_FAILED, comment_id=COMMENT, head=origin,
+        reason="local_gate failed: exit 1",
+    )
+    dispatcher.process(snapshot)
+
+    assert _actions(queue) == ["review"]
+    assert _wait(queue) is None
