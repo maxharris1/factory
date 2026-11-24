@@ -1,4 +1,6 @@
-"""A project's `review.pre_ready` check, run before a builder's ready counts (#503)."""
+"""The checks a builder's ready must pass at its head before it counts:
+factory.md's `review.pre_ready` (#503), then `ci.local_gate` on a PR into a
+base CI never runs on (#1463)."""
 
 from __future__ import annotations
 
@@ -6,14 +8,17 @@ import os
 import signal
 import subprocess
 import sys
-from collections.abc import Mapping
+import tempfile
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from lib.factory_md import CheckCommand
+from lib.factory_md import CheckCommand, FactoryConfig, no_ci_base
 from lib.harness_env import harness_environ
 from lib.job_token import PROOF_ENV
+from lib.queue import LOCAL_GATE_FAILED, LOCAL_GATE_PASSED, PRE_READY_FAILED, PRE_READY_PASSED
 from lib.redact_output import redact_output
 
 if TYPE_CHECKING:
@@ -35,22 +40,41 @@ class PreReadyResult:
     head: str
 
 
+@dataclass(frozen=True)
+class HeadCheck:
+    name: str
+    spec: CheckCommand
+    passed_event: str
+    failed_event: str
+
+
 class ContextUnavailable(Exception):
     """The base factory.md could not be read, so nothing is decided."""
 
 
-def spec_for(source: GhContextSource, repo: str) -> CheckCommand | None:
-    """review.pre_ready from factory.md at the repo's factory_ref."""
+def planned(factory: FactoryConfig, pr_base: str | None) -> tuple[HeadCheck, ...]:
+    checks: list[HeadCheck] = []
+    if factory.pre_ready is not None:
+        checks.append(HeadCheck("pre_ready", factory.pre_ready, PRE_READY_PASSED, PRE_READY_FAILED))
+    if factory.ci_local_gate is not None and no_ci_base(factory, pr_base) is not None:
+        checks.append(
+            HeadCheck("local_gate", factory.ci_local_gate, LOCAL_GATE_PASSED, LOCAL_GATE_FAILED)
+        )
+    return tuple(checks)
+
+
+def checks_for(source: GhContextSource, repo: str, pr_base: str | None) -> tuple[HeadCheck, ...]:
+    """The planned checks from factory.md at the repo's factory_ref, never the PR head."""
     config = source.config
     project = None if config is None else next(
         (item for item in config.projects if item.repo.lower() == repo.lower()), None
     )
     if project is None or project.factory_ref is None:
-        return None
+        return ()
     loaded = source.load(repo)
     if loaded.context is None:
         raise ContextUnavailable(loaded.note or f"{repo} factory.md could not be read")
-    return loaded.context.config.pre_ready
+    return planned(loaded.context.config, pr_base)
 
 
 def check_environ(environ: Mapping[str, str], approvals: Approvals | None) -> dict[str, str]:
@@ -99,6 +123,34 @@ def run(spec: CheckCommand, cwd: Path, head: str, environ: Mapping[str, str]) ->
     if process.returncode != 0:
         return PreReadyResult(False, f"exit {process.returncode}", _decoded(output), head)
     return PreReadyResult(True, "exit 0", _decoded(output), head)
+
+
+@contextmanager
+def committed_checkout(worktree: Path, head: str) -> Iterator[Path]:
+    """A throwaway detached worktree of head made from the job's worktree, so
+    a check sees the committed source and nothing the builder left uncommitted."""
+    with tempfile.TemporaryDirectory(prefix="orch-checkout-") as scratch:
+        path = Path(scratch) / "checkout"
+        _git(worktree, "worktree", "add", "--detach", "--quiet", str(path), head)
+        try:
+            yield path
+        finally:
+            _git(worktree, "worktree", "remove", "--force", str(path))
+
+
+def first_failure(
+    checks: tuple[HeadCheck, ...],
+    cwd: Path,
+    head: str,
+    environ: Mapping[str, str],
+    passed: Callable[[HeadCheck], None],
+) -> tuple[HeadCheck, PreReadyResult] | None:
+    for check in checks:
+        result = run(check.spec, cwd, head, environ)
+        if not result.passed:
+            return check, result
+        passed(check)
+    return None
 
 
 def _drain(process: subprocess.Popen[bytes]) -> bytes | None:

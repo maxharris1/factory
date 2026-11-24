@@ -470,7 +470,7 @@ def pre_ready_setup(
 
     git("init", "-q")
     (work / "factory.md").write_text(
-        "---\nreview:\n  pre_ready:\n    command: touch head-command-ran\n"
+        f"---\nreview:\n  pre_ready:\n    command: touch {tmp_path / 'head-command-ran'}\n"
         "    timeout_seconds: 5\n---\n",
         encoding="utf-8",
     )
@@ -534,13 +534,15 @@ def test_a_ready_whose_pre_ready_fails_is_refused_with_its_output(
     assert "the last line" in err
     assert (row(db, job.id)["state"], row(db, job.id)["handoff_comment_id"]) == ("running", None)
     assert pre_ready_events(db, job.id) == ["handoff 1101: pre_ready failed: exit 1"]
-    assert not (work / "head-command-ran").exists()
+    assert not (tmp_path / "head-command-ran").exists()
 
 
 def test_a_ready_whose_pre_ready_passes_completes(
     tmp_path: Path, store: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    db, job, orch, work = pre_ready_setup(tmp_path, store, monkeypatch, "touch base-command-ran")
+    db, job, orch, work = pre_ready_setup(
+        tmp_path, store, monkeypatch, f"touch {tmp_path / 'base-command-ran'}"
+    )
 
     assert done_with(db, job, orch) == 0
 
@@ -549,8 +551,8 @@ def test_a_ready_whose_pre_ready_passes_completes(
         ["git", "rev-parse", "HEAD"], cwd=work, capture_output=True, text=True, check=True
     ).stdout.strip()
     assert pre_ready_events(db, job.id, PRE_READY_PASSED) == [f"handoff 1101: at {head}"]
-    assert (work / "base-command-ran").exists()
-    assert not (work / "head-command-ran").exists()
+    assert (tmp_path / "base-command-ran").exists()
+    assert not (tmp_path / "head-command-ran").exists()
 
 
 def test_a_pre_ready_timeout_is_refused(
@@ -564,16 +566,29 @@ def test_a_pre_ready_timeout_is_refused(
     assert row(db, job.id)["state"] == "running"
 
 
-def test_a_worktree_off_the_ready_head_runs_nothing(
+def test_a_ready_head_the_worktree_lacks_runs_nothing(
     tmp_path: Path, store: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    db, job, orch, work = pre_ready_setup(tmp_path, store, monkeypatch, "touch base-command-ran")
-    (work / "factory.md").write_text("dirty\n", encoding="utf-8")
+    db, job, orch, work = pre_ready_setup(
+        tmp_path, store, monkeypatch, f"touch {tmp_path / 'base-command-ran'}"
+    )
+    serve_handoff(store, job, "1101", pr_head="b" * 40)
 
     assert done_with(db, job, orch) == 1
 
     assert "pre_ready failed: not at head" in capsys.readouterr().err
-    assert not (work / "base-command-ran").exists()
+    assert not (tmp_path / "base-command-ran").exists()
+
+
+def test_pre_ready_sees_the_committed_head_not_uncommitted_edits(
+    tmp_path: Path, store: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db, job, orch, work = pre_ready_setup(tmp_path, store, monkeypatch, "grep -q head-command factory.md")
+    (work / "factory.md").write_text("dirty\n", encoding="utf-8")
+
+    assert done_with(db, job, orch) == 0
+
+    assert row(db, job.id)["state"] == "done"
 
 
 def test_an_unreadable_base_factory_md_exits_without_recording(

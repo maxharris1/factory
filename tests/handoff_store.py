@@ -66,6 +66,7 @@ def serve_handoff(
     number: int | None = None,
     repo: str | None = None,
     pr_head: str = HEAD,
+    pr_base: str | None = None,
     branch: str | None = None,
     is_pr: bool = True,
     body: str | None = None,
@@ -99,7 +100,11 @@ def serve_handoff(
     serve(
         store,
         f"repos/{repo}/pulls/{number}",
-        {"number": number, "head": {"sha": pr_head, "ref": branch or expected.branch or "topic"}},
+        {
+            "number": number,
+            "head": {"sha": pr_head, "ref": branch or expected.branch or "topic"},
+            **({"base": {"ref": pr_base}} if pr_base is not None else {}),
+        },
     )
 
 

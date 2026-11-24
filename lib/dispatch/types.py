@@ -8,7 +8,7 @@ from enum import Enum
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Literal, Protocol
 
-from lib.factory_md import FactoryConfig
+from lib.factory_md import FactoryConfig, no_ci_base
 from lib.hold import LabelEvent, MergeUpdate
 from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES
 from lib.queue import Job
@@ -191,12 +191,6 @@ class CIResult:
 # #615: not-run is a head on a base CI never runs on (factory.md ci.branches)
 # that reported nothing. It clears the CI gates but is never a recorded green.
 CI_STATUSES = ("pending", "success", "failure", "not-run")
-
-
-def no_ci_base(factory: FactoryConfig, pr_base: str | None) -> str | None:
-    if factory.ci_branches is None or pr_base is None or pr_base in factory.ci_branches:
-        return None
-    return pr_base
 
 
 def ci_on_base(result: CIResult, base_without_ci: str | None) -> CIResult:

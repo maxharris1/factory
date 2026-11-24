@@ -84,6 +84,11 @@ _PRIORITY_COLUMNS = (
 SUBMITTED_INVALID = "submitted-invalid"
 PRE_READY_FAILED = "pre-ready-failed"
 PRE_READY_PASSED = "pre-ready-passed"
+LOCAL_GATE_FAILED = "local-gate-failed"
+LOCAL_GATE_PASSED = "local-gate-passed"
+CHECK_FAILED_EVENTS = (PRE_READY_FAILED, LOCAL_GATE_FAILED)
+CHECK_PASSED_EVENTS = (PRE_READY_PASSED, LOCAL_GATE_PASSED)
+INVALID_HANDOFF_EVENTS = (SUBMITTED_INVALID, *CHECK_FAILED_EVENTS)
 MAX_INVALID_HANDOFFS = 3
 
 
@@ -512,8 +517,8 @@ class SQLiteJobQueue:
             )
             count = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM job_events WHERE job_id = ? AND event IN (?, ?)",
-                    (job_id, SUBMITTED_INVALID, PRE_READY_FAILED),
+                    "SELECT COUNT(*) FROM job_events WHERE job_id = ? AND event IN (?, ?, ?)",
+                    (job_id, *INVALID_HANDOFF_EVENTS),
                 ).fetchone()[0]
             )
             if count >= MAX_INVALID_HANDOFFS:
@@ -529,8 +534,8 @@ class SQLiteJobQueue:
             connection.commit()
         return count, _job(updated, connection)
 
-    def record_pre_ready_passed(
-        self, job_id: str, *, comment_id: str, head: str, proof: Proof | None = None
+    def record_check_passed(
+        self, job_id: str, *, event: str, comment_id: str, head: str, proof: Proof | None = None
     ) -> None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -544,7 +549,7 @@ class SQLiteJobQueue:
                 SELECT id, lower(repo), ticket_id, action, recipient, ?, ?, ?
                 FROM jobs WHERE id = ?
                 """,
-                (PRE_READY_PASSED, f"handoff {comment_id}: at {head}", self.now(), job_id),
+                (event, f"handoff {comment_id}: at {head}", self.now(), job_id),
             )
             connection.commit()
 

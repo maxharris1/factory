@@ -88,3 +88,11 @@ def test_the_plan_brief_says_the_parent_issue_closes_when_its_last_part_merges(n
     text = dict(BRIEFS)[name]
     assert "closes this one" not in text
     assert "The parent issue closes when its last part merges." in text
+
+
+@pytest.mark.parametrize("name", ["build-pre-ready#0", "fix-pre-ready#0"])
+def test_the_pre_ready_line_names_a_fresh_checkout_of_the_committed_head(name: str) -> None:
+    text = dict(BRIEFS)[name]
+    assert "in your worktree at the head" not in text
+    assert "in a fresh checkout of the head you name" in text
+    assert "uncommitted or untracked" in text

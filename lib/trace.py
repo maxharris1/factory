@@ -13,9 +13,9 @@ from lib.dispatch.helpers import (
     _UPDATE_NO_HANDOFF_OUTCOMES,
 )
 from lib.job_state import RELEASED_UNSTARTED, RUN_DIED, RUN_EXITED
-from lib.queue import PRE_READY_FAILED, PRE_READY_PASSED, SUBMITTED_INVALID
+from lib.queue import CHECK_PASSED_EVENTS, INVALID_HANDOFF_EVENTS
 
-HANDOFF_EVENTS = (SUBMITTED_INVALID, PRE_READY_PASSED, PRE_READY_FAILED)
+HANDOFF_EVENTS = (*INVALID_HANDOFF_EVENTS, *CHECK_PASSED_EVENTS)
 UNREGISTERED = "rejected-unregistered-"
 
 _HANDOFF = re.compile(r"handoff (?P<comment>\S+): (?P<reason>.*)", re.S)
@@ -93,7 +93,7 @@ def attempts(db: Path, repo: str, ticket_id: str) -> list[Attempt]:
         handoff = _HANDOFF.fullmatch(detail) if event in HANDOFF_EVENTS else None
         if handoff is not None:
             handed[job_id] = handoff["comment"]
-            if event in (SUBMITTED_INVALID, PRE_READY_FAILED):
+            if event in INVALID_HANDOFF_EVENTS:
                 failed[handoff["comment"]] = f"{event}: {handoff['reason']}"
 
     linked: dict[str, tuple[str, str]] = {}

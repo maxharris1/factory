@@ -7,7 +7,7 @@ import pytest
 
 from lib.dispatcher import CIResult, TrackedTicket
 from lib.factory_md import CheckCommand
-from lib.queue import PRE_READY_FAILED, Job, JobRequest, SQLiteJobQueue
+from lib.queue import PRE_READY_FAILED, PRE_READY_PASSED, Job, JobRequest, SQLiteJobQueue
 from tests.test_dispatcher import READY, comment, handled_outcome, setup, ticket
 
 pytestmark = pytest.mark.job_bound
@@ -41,7 +41,7 @@ def _failed_build(
             event=PRE_READY_FAILED,
         )
     if passed is not None:
-        queue.record_pre_ready_passed(build.id, comment_id=passed, head=HEAD)
+        queue.record_check_passed(build.id, event=PRE_READY_PASSED, comment_id=passed, head=HEAD)
     queue.finish(build.id, owner="claude", handoff_comment_id=None)
     return build
 

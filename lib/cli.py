@@ -114,14 +114,20 @@ from lib.handoff_check import (
     expected_for,
     gh_reader,
     problems as handoff_problems,
-    ready_head,
+    ready_at,
 )
-from lib.pre_ready import ContextUnavailable, PreReadyResult, check_environ, spec_for
-from lib.pre_ready import run as run_pre_ready
+from lib.pre_ready import (
+    ContextUnavailable,
+    HeadCheck,
+    PreReadyResult,
+    check_environ,
+    checks_for,
+    committed_checkout,
+    first_failure,
+)
 from lib.queue import (
     BUSY_TIMEOUT_SECONDS,
     MAX_INVALID_HANDOFFS,
-    PRE_READY_FAILED,
     SLOTS_TABLE,
     SUBMITTED_INVALID,
     ClaimProofError,
@@ -1808,17 +1814,11 @@ def _check_handoff(
         found = handoff_problems(expected, args.handoff, read, config.trusted_logins)
         event, checked = SUBMITTED_INVALID, None
         if not found:
-            checked = _pre_ready_check(config, expected, args.handoff, read)
-            if checked is None:
+            failed = _head_check_failure(queue, args, proof, config, expected, read)
+            if failed is None:
                 return None
-            if checked.passed:
-                retry_locked(
-                    lambda: queue.record_pre_ready_passed(
-                        args.job_id, comment_id=args.handoff, head=checked.head, proof=proof
-                    )
-                )
-                return None
-            found, event = [f"pre_ready failed: {checked.reason}"], PRE_READY_FAILED
+            check, checked = failed
+            found, event = [f"{check.name} failed: {checked.reason}"], check.failed_event
         count, job = retry_locked(
             lambda: queue.record_invalid_handoff(
                 args.job_id,
@@ -1852,19 +1852,38 @@ def _check_handoff(
     return 1
 
 
-def _pre_ready_check(
-    config: OrchConfig, expected: Expected, comment_id: str, read: Read
-) -> PreReadyResult | None:
-    """#503: a fitting ready runs the base factory.md's review.pre_ready in
-    the job's worktree at the ready's head. None when there is nothing to run."""
-    head = ready_head(expected, comment_id, read)
-    if head is None:
+def _head_check_failure(
+    queue: SQLiteJobQueue,
+    args: argparse.Namespace,
+    proof: Proof,
+    config: OrchConfig,
+    expected: Expected,
+    read: Read,
+) -> tuple[HeadCheck, PreReadyResult] | None:
+    """#503, #1463: a fitting ready runs the base factory.md's head checks in
+    a throwaway checkout of the ready's head made from the job's worktree,
+    recording each pass. None when
+    every check passed or there is nothing to run."""
+    ready = ready_at(expected, args.handoff, read)
+    if ready is None:
         return None
-    spec = spec_for(waiter.GhContextSource(config), expected.repo)
-    if spec is None:
+    checks = checks_for(waiter.GhContextSource(config), expected.repo, ready.base)
+    if not checks:
         return None
     worktree = Path(os.environ.get("ORCH_JOB_WORKTREE") or os.getcwd())
-    return run_pre_ready(spec, worktree, head, check_environ(os.environ, approvals(config)))
+    with committed_checkout(worktree, ready.head) as checkout:
+        return first_failure(
+            checks,
+            checkout,
+            ready.head,
+            check_environ(os.environ, approvals(config)),
+            lambda check: retry_locked(
+                lambda: queue.record_check_passed(
+                    args.job_id, event=check.passed_event, comment_id=args.handoff,
+                    head=ready.head, proof=proof,
+                )
+            ),
+        )
 
 
 def _job_cancel(argv: list[str]) -> int:
