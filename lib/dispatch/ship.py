@@ -267,7 +267,7 @@ class ShipMixin:
         REVISE or another APPROVE, spends the re-drive with no write, so of
         several eligible intents on one ticket only the latest APPROVE can
         hand off. That APPROVE's head field must also still cover the
-        intent's head, by T4's rule (_approval_covers), so an APPROVE
+        intent's head, by T4's rule (_approval_carries), so an APPROVE
         edited in place to name another head spends the re-drive. A ticket
         already merged, handed off or done, or one with a completed handoff
         intent at the intent's head, is never handed off again: its
@@ -318,7 +318,7 @@ class ShipMixin:
                 or self._review_context(ticket)[0]
                 in ("merged", "handed-off", "done", *WATCHED_STATES)
                 or self._has_completed_ship_at(ticket, str(row["head"]), policy)
-                or not self._approval_covers(
+                or not self._approval_carries(
                     ticket, approve_in_force[1].get("head", ""), str(row["head"])
                 )
             ):

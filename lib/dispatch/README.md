@@ -52,6 +52,7 @@ blocking findings, with no caller yet (#1035).
 | Verdicts: BLOCKED | `verdict/blocked.py` (`BlockedMixin`) | `_t_blocked`: stop the ticket and wake Grok once. `_blocked_by_another`: whether a verdict other than this comment blocked the ticket |
 | Verdicts: approval recording | `verdict/record.py` (`ApprovalRecordMixin`) | `_record_approval`: the covering APPROVE the merge queue orders and gates on |
 | Verdicts: approval coverage | `verdict/coverage.py` (`ApprovalCoverageMixin`) | `_approval_covers`: whether an APPROVE covers a head, by T4's rule |
+| Verdicts: retarget approval carry | `verdict/carry.py` (`ApprovalCarryMixin`) | `_approval_carries`: `_approval_covers` or a recorded `approval_carries` chain; `_carry_retarget_approval` restores a stacked child's approval after its retarget rebase (#1522) |
 | Verdicts: pending approval | `verdict/pending.py` (`PendingApprovalMixin`) | `_red_ci_approval_covering`: the APPROVE T4 left on red CI that covers a ready's head (T2, #493) |
 | Verdicts: shipped approval | `verdict/shipped.py` (`ShippedApprovalMixin`) | `_shipped_approval`: the APPROVE whose ship intent completed last (T2) |
 | Verdicts: previewed head | `verdict/preview.py` (`PreviewedHeadMixin`) | `_previewed_head`: the head an ok of an `after:<approver>` APPROVE may ship |

@@ -481,7 +481,7 @@ class MergeQueueMixin:
         with self._connect() as connection:
             if _harness_job_active(connection, (ticket.repo.lower(), ticket.ticket_id)):
                 return False
-        return not self._approval_covers(ticket, str(row["approved_head"]), head)
+        return not self._approval_carries(ticket, str(row["approved_head"]), head)
 
     def _settle_failed_update_head(self, polled: TrackedTicket) -> None:
         row = next(
@@ -686,7 +686,7 @@ class MergeQueueMixin:
         if ci is None or not ci.clears:
             return f"CI {'missing' if ci is None else ci.status} at {head[:12]}"
         approved = str(row["approved_head"])
-        if not self._approval_covers(ticket, approved, head):
+        if not self._approval_carries(ticket, approved, head):
             return f"approval at {approved[:12]} does not cover {head[:12]}"
         qa_wait = self._queue_qa_wait(ticket, row, head)
         if qa_wait is not None:
