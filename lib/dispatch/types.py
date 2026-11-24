@@ -351,6 +351,25 @@ class StackParent:
 
 
 @dataclass(frozen=True)
+class ParentOpen:
+    pass
+
+
+@dataclass(frozen=True)
+class ParentClosed:
+    pass
+
+
+@dataclass(frozen=True)
+class ParentMerged:
+    into: str
+    heads: tuple[str, ...]
+
+
+ParentFacts = ParentOpen | ParentClosed | ParentMerged
+
+
+@dataclass(frozen=True)
 class StackedOn:
     pr: int
     branch: str
@@ -537,6 +556,14 @@ class ReviewActions(Protocol):
         ...
 
     def reopen(self, ticket: TrackedTicket) -> None:
+        ...
+
+    def set_pull_base(self, ticket: TrackedTicket, base: str) -> None:
+        """Retarget the ticket's PR onto base. A repeat is a no-op."""
+        ...
+
+    def close_pull(self, ticket: TrackedTicket) -> None:
+        """Close the ticket's unmerged PR. A repeat is a no-op."""
         ...
 
     def handoff(self, ticket: TrackedTicket, head: str) -> str | None:

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from lib.brief import render_brief
+from lib.dispatch.types import ParentMerged, ParentOpen
 from lib.dispatcher import (
     CIResult,
     Dispatcher,
@@ -668,6 +669,29 @@ def test_an_unreadable_parent_stays_base_mismatch_and_records_the_error(tmp_path
     unaccepted(tmp_path, github, queue, dispatcher, "main")
 
     assert stack_poll_errors(tmp_path) == ["KeyError"]
+
+
+def test_a_stacked_child_reads_its_merged_parents_heads_feed_head_first(tmp_path: Path) -> None:
+    feeder, _, github, _ = fed_child(tmp_path)
+    github.landings[(STACK_REPO, PARENT_PR)] = ParentMerged(into="main", heads=(sha(4), sha(2), sha(5)))
+
+    assert feeder.stack_parent_facts(polled_child(tmp_path, github)) == ParentMerged(
+        into="main", heads=(sha(2), sha(4), sha(5))
+    )
+
+
+def test_an_open_stacked_parent_reads_as_open(tmp_path: Path) -> None:
+    feeder, _, github, _ = fed_child(tmp_path)
+    github.landings[(STACK_REPO, PARENT_PR)] = ParentOpen()
+
+    assert feeder.stack_parent_facts(polled_child(tmp_path, github)) == ParentOpen()
+
+
+def test_an_unstacked_ticket_has_no_parent_facts_and_reads_nothing(tmp_path: Path) -> None:
+    feeder, _, github, _ = fed_child(tmp_path, target=None)
+
+    assert feeder.stack_parent_facts(polled_child(tmp_path, github)) is None
+    assert not [call for call in github.calls if call.startswith("landing:")]
 
 
 def test_a_linear_child_takes_its_parents_merge_target(tmp_path: Path) -> None:

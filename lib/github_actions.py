@@ -122,6 +122,7 @@ BASE_RUN_PAGES = 3
 _OWNER = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
 _REPO_NAME = re.compile(r"[A-Za-z0-9._-]{1,100}")
 _BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*")
+_NOT_A_BRANCH = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]|\.\.|@\{|//|/\.|\.lock(/|$)|^[./-]|[./]$")
 _NUMBER = re.compile(r"[1-9][0-9]{0,9}")
 _SHA = re.compile(r"[0-9a-f]{40}")
 _BINARY_DIFF = re.compile(r"^(?:Binary files |GIT binary patch)", re.MULTILINE)
@@ -433,6 +434,28 @@ class GitHubReviewActions:
             "-f",
             "state=open",
         )
+
+    def set_pull_base(self, ticket: TrackedTicket, base: str) -> None:
+        if not _github_branch(base):
+            raise GitHubAdapterError(f"branch {base!r} is not a branch name git accepts")
+        endpoint = f"{_repo_path(ticket.repo)}/pulls/{_pr_number(ticket)}"
+        if _object(_object(self._json(endpoint)).get("base")).get("ref") == base:
+            return
+        patched = _object(self._json("-X", "PATCH", endpoint, "-f", f"base={base}"))
+        moved = _object(patched.get("base")).get("ref")
+        if moved != base:
+            raise GitHubAdapterError(f"PR base moved to {moved!r}, not {base}")
+
+    def close_pull(self, ticket: TrackedTicket) -> None:
+        endpoint = f"{_repo_path(ticket.repo)}/pulls/{_pr_number(ticket)}"
+        pull = _object(self._json(endpoint))
+        if pull.get("merged") is True:
+            raise AlreadyMergedError(f"PR #{_pr_number(ticket)} is merged; it cannot be closed")
+        if pull.get("state") == "closed":
+            return
+        closed = _object(self._json("-X", "PATCH", endpoint, "-f", "state=closed"))
+        if closed.get("state") != "closed":
+            raise GitHubAdapterError(f"close of PR #{_pr_number(ticket)} was not confirmed")
 
     def handoff(self, ticket: TrackedTicket, head: str) -> str | None:
         self._mark_ready(ticket, head)
@@ -1613,6 +1636,10 @@ def _branch(branch: str) -> str:
     ):
         raise GitHubAdapterError(f"branch {branch!r} is not a plain branch name")
     return branch
+
+
+def _github_branch(name: object) -> bool:
+    return isinstance(name, str) and name not in ("", "@") and not _NOT_A_BRANCH.search(name)
 
 
 def _number(value: str) -> str:

@@ -25,6 +25,7 @@ from lib.dispatcher import (
 from lib.dispatch.types import BaseCheck, CheckRow, PoolRunner, PullReview, RunJob
 from lib.github_actions import (
     GH,
+    AlreadyMergedError,
     GhResult,
     GitHubAdapterError,
     GitHubReviewActions,
@@ -416,6 +417,88 @@ def test_reopen_patches_the_pull_state_to_open() -> None:
     actions.reopen(pr())
 
     assert gh.keys() == [reopen]
+
+
+def pull_json(*, base: str = "main", state: str = "open", merged: bool = False) -> GhResult:
+    return GhResult(
+        0, json.dumps({"number": 42, "state": state, "merged": merged, "base": {"ref": base}}), ""
+    )
+
+
+RETARGET = ("-X", "PATCH", f"{REPO}/pulls/42", "-f", "base=release")
+CLOSE = ("-X", "PATCH", f"{REPO}/pulls/42", "-f", "state=closed")
+
+
+def test_set_pull_base_patches_once_and_a_repeat_is_a_no_op() -> None:
+    actions, gh = adapter()
+    gh.route(PULL, pull_json(), pull_json(base="release"))
+    gh.route(RETARGET, pull_json(base="release"))
+
+    actions.set_pull_base(pr(), "release")
+    actions.set_pull_base(pr(), "release")
+
+    assert gh.keys() == [PULL, RETARGET, PULL]
+
+
+@pytest.mark.parametrize("base", ["release/_stable", "_hotfix", "feat/a+b"])
+def test_set_pull_base_patches_a_branch_name_git_accepts(base: str) -> None:
+    actions, gh = adapter()
+    retarget = ("-X", "PATCH", f"{REPO}/pulls/42", "-f", f"base={base}")
+    gh.route(PULL, pull_json())
+    gh.route(retarget, pull_json(base=base))
+
+    actions.set_pull_base(pr(), base)
+
+    assert gh.keys() == [PULL, retarget]
+
+
+@pytest.mark.parametrize("base", ["", "a..b", "-main", "main.lock", "a b", "a//b", "@"])
+def test_set_pull_base_refuses_a_name_git_refuses(base: str) -> None:
+    actions, gh = adapter()
+
+    with pytest.raises(GitHubAdapterError, match="branch"):
+        actions.set_pull_base(pr(), base)
+
+    assert gh.keys() == []
+
+
+def test_set_pull_base_raises_when_the_patch_is_not_confirmed() -> None:
+    actions, gh = adapter()
+    gh.route(PULL, pull_json())
+    gh.route(RETARGET, pull_json())
+
+    with pytest.raises(GitHubAdapterError, match="release"):
+        actions.set_pull_base(pr(), "release")
+
+
+def test_close_pull_patches_once_and_a_repeat_is_a_no_op() -> None:
+    actions, gh = adapter()
+    gh.route(PULL, pull_json(), pull_json(state="closed"))
+    gh.route(CLOSE, pull_json(state="closed"))
+
+    actions.close_pull(pr())
+    actions.close_pull(pr())
+
+    assert gh.keys() == [PULL, CLOSE, PULL]
+
+
+def test_close_pull_raises_when_the_patch_is_not_confirmed() -> None:
+    actions, gh = adapter()
+    gh.route(PULL, pull_json())
+    gh.route(CLOSE, pull_json())
+
+    with pytest.raises(GitHubAdapterError, match="close"):
+        actions.close_pull(pr())
+
+
+def test_close_pull_refuses_a_merged_pull() -> None:
+    actions, gh = adapter()
+    gh.route(PULL, pull_json(state="closed", merged=True))
+
+    with pytest.raises(AlreadyMergedError):
+        actions.close_pull(pr())
+
+    assert gh.keys() == [PULL]
 
 
 @pytest.mark.parametrize(

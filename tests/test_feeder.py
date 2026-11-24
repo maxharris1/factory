@@ -19,7 +19,7 @@ from lib import device_sync
 from lib.branch_stack import OpenPull
 from lib.device_monitor import DeviceMonitor
 from lib.device_pool import DevicePool
-from lib.dispatch.types import BaseCheck
+from lib.dispatch.types import BaseCheck, ParentFacts
 from lib.dispatcher import Comment, Dispatcher, TicketRef, TrackedTicket
 from lib.factory_md import parse_factory_context
 from lib.feeder import (
@@ -166,6 +166,7 @@ class FakeGitHub:
         self.tree_reads: list[tuple[str, str, str]] = []
         self.filed: dict[tuple[str, int], dict] = {}
         self.run_logs: dict[tuple[str, str], dict[str, str]] = {}
+        self.landings: dict[tuple[str, int], ParentFacts] = {}
         self._next_pr = 500
         self._next_issue = 899
         self._next_comment = 9000
@@ -226,6 +227,10 @@ class FakeGitHub:
 
     def pull_base(self, repo: str, number: int) -> str:
         return self.pulls[(repo, number)]["base"]
+
+    def pull_landing(self, repo: str, number: int) -> ParentFacts:
+        self.calls.append(f"landing:{repo}:{number}")
+        return self.landings[(repo, number)]
 
     def open_draft_pull(self, repo: str, *, branch: str, base: str, title: str, body: str) -> int:
         self._maybe_fail("pull")
