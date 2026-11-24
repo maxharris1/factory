@@ -204,7 +204,7 @@ export_db() {
     for bot in "${BOTS[@]}"; do
         drains+=("$(drain_file "$bot")")
     done
-    printf '%s\n' "$DRAIN_MARK" | "${HERE}/self-heal.sh" wait-idle tee "${drains[@]}" >/dev/null || status=$?
+    "${HERE}/self-heal.sh" wait-idle tee "${drains[@]}" <<<"$DRAIN_MARK" >/dev/null || status=$?
     if ((status != 0)); then
         echo "orch-move: self-heal.sh wait-idle exited ${status}; removed the drain files, stopped nothing" >&2
         exit 1
