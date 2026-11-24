@@ -63,13 +63,13 @@ from lib.followups import split_parent
 from lib.github_actions import (
     GitHubAdapterError,
     GitHubReviewActions,
+    _github_branch,
     _repo_path,
     _status,
 )
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
-_NOT_A_BRANCH = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]|\.\.|@\{|//|/\.|\.lock(/|$)|^[./-]|[./]$")
 # Every page of an issue's blocks relations is read (#157 review): a blocker
 # past the first page still holds the ticket. Past the cap the read fails.
 # The intake query reads the first 10 (it pages 50 issues at once); a further
@@ -141,7 +141,7 @@ PULL_LANDING_QUERY = (
     "{ repository(owner: $owner, name: $name) { pullRequest(number: $number) { "
     "state baseRefName headRefOid "
     "timelineItems(itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT], first: 100, after: $after) "
-    "{ totalCount pageInfo { hasNextPage endCursor } "
+    "{ filteredCount pageInfo { hasNextPage endCursor } "
     "nodes { ... on HeadRefForcePushedEvent { beforeCommit { oid } } } } } } }"
 )
 PULL_COMMITS_PAGE = 250
@@ -201,10 +201,6 @@ def _issue_record(item: dict[str, Any]) -> IssueRecord:
 
 class StackHeadsUnknown(GitHubAdapterError):
     pass
-
-
-def _github_branch(name: object) -> bool:
-    return isinstance(name, str) and name not in ("", "@") and not _NOT_A_BRANCH.search(name)
 
 
 def _branch_path(branch: str) -> str:
@@ -645,6 +641,7 @@ class GitHubIntakeClient(GitHubReviewActions):
         owner, _, name = _repo_path(repo).removeprefix("repos/").partition("/")
         befores: list[str] = []
         after: str | None = None
+        total: int | None = None
         for _ in range(PULL_LANDING_MAX_PAGES):
             document = self._json(
                 "graphql", "-f", f"query={PULL_LANDING_QUERY}",
@@ -662,7 +659,10 @@ class GitHubIntakeClient(GitHubReviewActions):
             into, head = pull.get("baseRefName"), pull.get("headRefOid")
             if state != "MERGED" or not _github_branch(into) or not _is_sha(head):
                 raise GitHubAdapterError(f"PR #{number} state, base or head is not readable")
-            total, page, after = _force_push_page(number, pull.get("timelineItems"))
+            remaining, page, after = _force_push_page(number, pull.get("timelineItems"))
+            total = len(befores) + remaining if total is None else total
+            if len(befores) + remaining != total:
+                raise StackHeadsUnknown(f"PR #{number} force pushes changed while paging")
             befores.extend(page)
             if after is None:
                 if len(befores) != total:
@@ -757,20 +757,20 @@ def _is_sha(value: object) -> bool:
 
 def _force_push_page(number: int, items: object) -> tuple[int, tuple[str, ...], str | None]:
     nodes = items.get("nodes") if isinstance(items, dict) else None
-    total = items.get("totalCount") if isinstance(items, dict) else None
+    remaining = items.get("filteredCount") if isinstance(items, dict) else None
     page = items.get("pageInfo") if isinstance(items, dict) else None
-    if not isinstance(nodes, list) or type(total) is not int or not isinstance(page, dict):
+    if not isinstance(nodes, list) or type(remaining) is not int or not isinstance(page, dict):
         raise StackHeadsUnknown(f"PR #{number} force pushes are not readable")
     commits = [node.get("beforeCommit") if isinstance(node, dict) else None for node in nodes]
     befores = tuple(commit.get("oid") if isinstance(commit, dict) else None for commit in commits)
     if not all(_is_sha(before) for before in befores):
         raise StackHeadsUnknown(f"PR #{number} has a force push with no before commit")
     if page.get("hasNextPage") is not True:
-        return total, befores, None
+        return remaining, befores, None
     cursor = page.get("endCursor")
     if not isinstance(cursor, str) or not cursor:
         raise StackHeadsUnknown(f"PR #{number} force push page has no cursor")
-    return total, befores, cursor
+    return remaining, befores, cursor
 
 
 def _open_pull(node: object) -> tuple[int, OpenPull]:

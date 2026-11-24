@@ -122,6 +122,7 @@ BASE_RUN_PAGES = 3
 _OWNER = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
 _REPO_NAME = re.compile(r"[A-Za-z0-9._-]{1,100}")
 _BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*")
+_NOT_A_BRANCH = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]|\.\.|@\{|//|/\.|\.lock(/|$)|^[./-]|[./]$")
 _NUMBER = re.compile(r"[1-9][0-9]{0,9}")
 _SHA = re.compile(r"[0-9a-f]{40}")
 _BINARY_DIFF = re.compile(r"^(?:Binary files |GIT binary patch)", re.MULTILINE)
@@ -435,7 +436,8 @@ class GitHubReviewActions:
         )
 
     def set_pull_base(self, ticket: TrackedTicket, base: str) -> None:
-        base = _branch(base)
+        if not _github_branch(base):
+            raise GitHubAdapterError(f"branch {base!r} is not a branch name git accepts")
         endpoint = f"{_repo_path(ticket.repo)}/pulls/{_pr_number(ticket)}"
         if _object(_object(self._json(endpoint)).get("base")).get("ref") == base:
             return
@@ -1634,6 +1636,10 @@ def _branch(branch: str) -> str:
     ):
         raise GitHubAdapterError(f"branch {branch!r} is not a plain branch name")
     return branch
+
+
+def _github_branch(name: object) -> bool:
+    return isinstance(name, str) and name not in ("", "@") and not _NOT_A_BRANCH.search(name)
 
 
 def _number(value: str) -> str:

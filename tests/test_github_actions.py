@@ -440,6 +440,28 @@ def test_set_pull_base_patches_once_and_a_repeat_is_a_no_op() -> None:
     assert gh.keys() == [PULL, RETARGET, PULL]
 
 
+@pytest.mark.parametrize("base", ["release/_stable", "_hotfix", "feat/a+b"])
+def test_set_pull_base_patches_a_branch_name_git_accepts(base: str) -> None:
+    actions, gh = adapter()
+    retarget = ("-X", "PATCH", f"{REPO}/pulls/42", "-f", f"base={base}")
+    gh.route(PULL, pull_json())
+    gh.route(retarget, pull_json(base=base))
+
+    actions.set_pull_base(pr(), base)
+
+    assert gh.keys() == [PULL, retarget]
+
+
+@pytest.mark.parametrize("base", ["", "a..b", "-main", "main.lock", "a b", "a//b", "@"])
+def test_set_pull_base_refuses_a_name_git_refuses(base: str) -> None:
+    actions, gh = adapter()
+
+    with pytest.raises(GitHubAdapterError, match="branch"):
+        actions.set_pull_base(pr(), base)
+
+    assert gh.keys() == []
+
+
 def test_set_pull_base_raises_when_the_patch_is_not_confirmed() -> None:
     actions, gh = adapter()
     gh.route(PULL, pull_json())

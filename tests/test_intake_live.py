@@ -818,14 +818,16 @@ def landing_page(
     state: str = "MERGED",
     base: object = "main",
     head: object = HEAD_AT_MERGE,
-    total: int | None = None,
+    remaining: int | None = None,
     cursor: str | None = None,
     has_next: bool = False,
 ) -> GhResult:
+    filtered = len(nodes) if remaining is None else remaining
     return ok({"data": {"repository": {"pullRequest": {
         "state": state, "baseRefName": base, "headRefOid": head,
         "timelineItems": {
-            "totalCount": len(nodes) if total is None else total,
+            "totalCount": filtered + 27,
+            "filteredCount": filtered,
             "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
             "nodes": nodes,
         },
@@ -835,7 +837,7 @@ def landing_page(
 @pytest.mark.parametrize(("state", "facts"), [("OPEN", ParentOpen()), ("CLOSED", ParentClosed())])
 def test_pull_landing_reads_an_unmerged_parent_without_paging(state: str, facts: object) -> None:
     gh = RecordedGh()
-    gh.route(landing(), landing_page([], state=state, total=150, cursor="c1", has_next=True))
+    gh.route(landing(), landing_page([], state=state, remaining=150, cursor="c1", has_next=True))
 
     assert GitHubIntakeClient(gh).pull_landing("owner/app", 113) == facts
     assert gh.keys() == [landing()]
@@ -850,10 +852,28 @@ def test_pull_landing_reads_a_merged_parent_with_no_force_push() -> None:
     )
 
 
+def test_pull_landing_counts_only_force_pushes_not_other_timeline_events() -> None:
+    gh = RecordedGh()
+    gh.route(landing(), landing_page([pushed(BEFORE_1), pushed(BEFORE_2)]))
+
+    assert GitHubIntakeClient(gh).pull_landing("owner/app", 113) == ParentMerged(
+        into="main", heads=(HEAD_AT_MERGE, BEFORE_1, BEFORE_2)
+    )
+
+
+def test_pull_landing_refuses_a_force_push_count_that_moves_between_pages() -> None:
+    gh = RecordedGh()
+    gh.route(landing(), landing_page([pushed(BEFORE_1)], remaining=2, cursor="c1", has_next=True))
+    gh.route(landing("c1"), landing_page([pushed(BEFORE_2)], remaining=2))
+
+    with pytest.raises(StackHeadsUnknown):
+        GitHubIntakeClient(gh).pull_landing("owner/app", 113)
+
+
 def test_pull_landing_collects_every_force_push_across_pages() -> None:
     gh = RecordedGh()
-    gh.route(landing(), landing_page([pushed(BEFORE_1)], total=3, cursor="c1", has_next=True))
-    gh.route(landing("c1"), landing_page([pushed(BEFORE_2), pushed(BEFORE_1)], total=3))
+    gh.route(landing(), landing_page([pushed(BEFORE_1)], remaining=3, cursor="c1", has_next=True))
+    gh.route(landing("c1"), landing_page([pushed(BEFORE_2), pushed(BEFORE_1)], remaining=2))
 
     assert GitHubIntakeClient(gh).pull_landing("owner/app", 113) == ParentMerged(
         into="main", heads=(HEAD_AT_MERGE, BEFORE_1, BEFORE_2)
@@ -866,11 +886,20 @@ def test_pull_landing_collects_every_force_push_across_pages() -> None:
     [
         landing_page([{"beforeCommit": None}]),
         landing_page([pushed(BEFORE_1), None]),
-        landing_page([pushed(BEFORE_1)], total=2),
-        landing_page([pushed(BEFORE_1)], total=2, has_next=True),
+        landing_page([pushed(BEFORE_1)], remaining=2),
+        landing_page([pushed(BEFORE_1)], remaining=2, has_next=True),
         landing_page([pushed("not-a-sha")]),
+        ok({"data": {"repository": {"pullRequest": {
+            "state": "MERGED", "baseRefName": "main", "headRefOid": HEAD_AT_MERGE,
+            "timelineItems": {
+                "totalCount": 1, "pageInfo": {"hasNextPage": False}, "nodes": [pushed(BEFORE_1)],
+            },
+        }}}}),
     ],
-    ids=["null-before", "null-node", "truncated", "next-page-without-cursor", "malformed-before"],
+    ids=[
+        "null-before", "null-node", "truncated", "next-page-without-cursor", "malformed-before",
+        "no-filtered-count",
+    ],
 )
 def test_pull_landing_refuses_an_incomplete_force_push_history(page: GhResult) -> None:
     gh = RecordedGh()
@@ -882,9 +911,11 @@ def test_pull_landing_refuses_an_incomplete_force_push_history(page: GhResult) -
 
 def test_pull_landing_refuses_a_timeline_past_the_page_cap() -> None:
     gh = RecordedGh()
-    page = landing_page([pushed(BEFORE_1)], total=1000, cursor="c1", has_next=True)
-    gh.route(landing(), page)
-    gh.route(landing("c1"), page)
+    gh.route(landing(), landing_page([pushed(BEFORE_1)], remaining=1000, cursor="c1", has_next=True))
+    gh.route(landing("c1"), *(
+        landing_page([pushed(BEFORE_1)], remaining=1000 - page, cursor="c1", has_next=True)
+        for page in range(1, 20)
+    ))
 
     with pytest.raises(StackHeadsUnknown, match="page cap"):
         GitHubIntakeClient(gh).pull_landing("owner/app", 113)
