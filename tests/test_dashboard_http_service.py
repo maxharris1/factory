@@ -29,7 +29,14 @@ case "$verb" in
         [[ "$state" == enabled ]]
         ;;
     restart)
+        if [[ -f "$dir/fail.restart" ]]; then
+            echo "Interactive authentication required." >&2
+            exit 1
+        fi
         echo active >"$dir/active.$unit"
+        for other in "$dir"/active.*; do
+            [[ "$other" == "$dir/active.$unit" ]] || echo inactive >"$other"
+        done
         ;;
     *) exit 1 ;;
 esac
@@ -49,6 +56,9 @@ class Units:
             (self.dir / f"active.{unit}").write_text(active + "\n", encoding="utf-8")
         if enabled is not None:
             (self.dir / f"enabled.{unit}").write_text(enabled + "\n", encoding="utf-8")
+
+    def fail_restart(self) -> None:
+        (self.dir / "fail.restart").touch()
 
     def calls(self) -> list[str]:
         log = self.dir / "calls.log"
@@ -181,7 +191,35 @@ def test_status_reads_only_the_address_from_the_env_file(
     assert "SENTINEL" not in result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("contents", [None, "TAILNET_IP=127.0.0.1\n"], ids=["missing", "no-port"])
+@pytest.mark.parametrize("template", [
+    'TAILNET_IP="127.0.0.1"\nDASHBOARD_PORT="{port}"\n',
+    "TAILNET_IP='127.0.0.1'\nDASHBOARD_PORT='{port}'\n",
+    "  TAILNET_IP=127.0.0.1\n\tDASHBOARD_PORT={port}\n",
+    "TAILNET_IP = 127.0.0.1  \nDASHBOARD_PORT=  {port}\t\n",
+    "TAILNET_IP=127.0.0.1\r\nDASHBOARD_PORT={port}\r\n",
+    "TAILNET_IP=10.255.255.1\nDASHBOARD_PORT={dead}\nTAILNET_IP=127.0.0.1\nDASHBOARD_PORT={port}\n",
+    "# TAILNET_IP=10.255.255.1\n; DASHBOARD_PORT={dead}\nTAILNET_IP=127.0.0.1\nDASHBOARD_PORT={port}\n",
+    'TAILNET_IP=127.0.0.1\nDASHBOARD_PORT="{port}"\nDASHBOARD_DIR="/a \\"quoted\\" dir"\n',
+    "TAILNET_IP=127.0.0.1\nDASHBOARD_PORT={port}",
+], ids=["double-quoted", "single-quoted", "leading-whitespace", "whitespace-around-equals",
+        "crlf", "last-assignment-wins", "comments", "other-quoted-values", "no-final-newline"])
+def test_status_reads_the_address_as_systemd_environmentfile_does(
+        tmp_path: Path, units: Units, app: HTTPServer, template: str) -> None:
+    _live(units)
+    env_file = tmp_path / "http.env"
+    env_file.write_text(template.format(port=app.server_address[1], dead=_free_port()),
+                        encoding="utf-8")
+    result = _run(units, "status", DASHBOARD_ENV_FILE=str(env_file))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"serves {_addr(app)}" in result.stdout
+
+
+@pytest.mark.parametrize("contents", [
+    None,
+    "TAILNET_IP=127.0.0.1\n",
+    "export TAILNET_IP=127.0.0.1\nexport DASHBOARD_PORT=8090\n",
+    "#TAILNET_IP=127.0.0.1\n#DASHBOARD_PORT=8090\n",
+], ids=["missing", "no-port", "export-prefix", "commented-out"])
 def test_status_is_3_when_the_address_is_unknown(
         tmp_path: Path, units: Units, contents: str | None) -> None:
     _live(units)
@@ -212,6 +250,28 @@ def test_restart_is_3_when_the_app_never_goes_live(units: Units, static_server: 
     assert result.returncode == 3
     assert f"restart {HTTP_UNIT}" in units.calls()
     assert "not live: " in result.stdout
+
+
+@pytest.mark.parametrize("static_state", ["active", "activating", "reloading"])
+def test_restart_refuses_while_the_static_unit_serves(
+        units: Units, app: HTTPServer, static_state: str) -> None:
+    units.set(HTTP_UNIT, active="inactive", enabled="enabled")
+    units.set(STATIC_UNIT, active=static_state)
+    result = _run(units, "restart", DASHBOARD_PROBE_ADDR=_addr(app))
+    assert result.returncode == 3
+    assert STATIC_UNIT in result.stderr
+    assert "cutover" in result.stderr
+    assert not any(call.startswith("restart") for call in units.calls())
+    assert (units.dir / f"active.{STATIC_UNIT}").read_text(encoding="utf-8").strip() == static_state
+
+
+def test_restart_fails_when_systemctl_restart_fails(units: Units, app: HTTPServer) -> None:
+    _live(units)
+    units.fail_restart()
+    result = _run(units, "restart", DASHBOARD_PROBE_ADDR=_addr(app))
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert f"systemctl restart {HTTP_UNIT} failed" in result.stderr
+    assert "live: " in result.stdout
 
 
 def test_restart_refuses_a_disabled_unit_without_a_cutover(units: Units, app: HTTPServer) -> None:
