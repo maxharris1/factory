@@ -201,7 +201,29 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
         "rebased": job.request.action == "review" and detail.get("source") == "rebase",
         "size_flag": _size_flag(detail) if job.request.action == "review" else None,
         "qa": context is not None and context.config.qa is not None,
+        "stack": _stack(detail.get("stack")),
     }
+
+
+def _stack(stack: object) -> dict | None:
+    if not isinstance(stack, dict):
+        return None
+    pr, branch, sha = stack.get("pr"), stack.get("branch"), stack.get("sha")
+    if type(pr) is not int or pr < 1 or not isinstance(branch, str) or not isinstance(sha, str):
+        return None
+    if not (_BRANCH.fullmatch(branch) and _HEAD.fullmatch(sha)):
+        return None
+    return {"pr": pr, "branch": branch, "sha": sha}
+
+
+def stack_lines(facts: dict) -> tuple[str, ...]:
+    if (stack := facts["stack"]) is None:
+        return ()
+    pr, branch, head = stack["pr"], stack["branch"], facts["head"] or "<pr-head>"
+    return (
+        f"Stacked on #{pr} (`{branch}` @ {stack['sha']}). This diff is `{branch}...{head}`, this PR's own work. "
+        f"Parent code is reviewed on #{pr}; raise it only where this change breaks it, as [follow-up].",
+    )
 
 
 def _qa_criteria(detail: dict[str, object]) -> tuple[str, ...] | None:
@@ -329,6 +351,8 @@ def job_section(job: Job, bot: str, kind: str, facts: dict, remote_device: str |
         pr_line = f"- PR: #{pr}"
     else:
         pr_line = "- PR: unknown"
+    stack = facts["stack"]
+    stacked = f" (stacked on #{stack['pr']} at {stack['sha']})" if stack else ""
     lines = [
         "## Job",
         f"- action: {request.action}",
@@ -339,7 +363,7 @@ def job_section(job: Job, bot: str, kind: str, facts: dict, remote_device: str |
         (f"- ticket: {facts['ticket']}" if facts["ticket"] else "- ticket: not a plain id (see `ticket_id` in Job data)")
         + (f" ({facts['url']})" if facts["url"] else ""),
         f"- head: {facts['head']}" if facts["head"] else "- head: none given (see the PR or the base branch)",
-        f"- base branch: {facts['base']}" if facts["base"] else "- base branch: see factory.md",
+        (f"- base branch: {facts['base']}" if facts["base"] else "- base branch: see factory.md") + stacked,
         f"- risk: {facts['risk']}" if facts["risk"] else "- risk: unknown (ask in a questions comment)",
         *(
             [f"- round: {facts['round']}"]

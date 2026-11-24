@@ -344,6 +344,13 @@ LINEAR_STATE_PHASES = (
 
 
 @dataclass(frozen=True)
+class StackParent:
+    pr: int
+    branch: str
+    sha: str
+
+
+@dataclass(frozen=True)
 class TrackedTicket:
     repo: str
     ticket_id: str
@@ -408,6 +415,7 @@ class TrackedTicket:
     changed_lines: int | None = None
     pr_base: str | None = None
     pr_commits: int | None = None
+    stack: StackParent | None = None
 
     @property
     def no_ci_base(self) -> str | None:

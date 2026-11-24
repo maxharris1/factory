@@ -742,6 +742,8 @@ class DetailMixin:
             context["ci_failure"] = {"failed_checks": list(ci_failure)}
         if qa_findings is not None:
             context["qa_findings"] = asdict(qa_findings)
+        if ticket.stack is not None:
+            context["stack"] = asdict(ticket.stack)
         if (no_ci_base := ticket.no_ci_base) is not None:
             context.update(no_ci_base=no_ci_base, local_checks=list(ticket.factory.ci_local_checks))
         if resume:
