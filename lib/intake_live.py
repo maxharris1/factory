@@ -19,7 +19,8 @@ Reads:
 * linear_intake: issues in any of a repo's projects and in the workflow
   state (assigned to a listed user, for a project with linear_assignees),
   every page of them, and for each, who moved it there: the actor of the
-  latest history entry whose toState is that state;
+  latest history entry whose toState is that state, or the creator when the
+  issue was created in that state;
 * tree_paths: every file path at a commit, or under one folder of it
   (one recursive `git/trees` read of `<sha>` or `<sha>:<folder>`), and
   whether GitHub truncated it, to find the verify skill (#1029);
@@ -89,9 +90,9 @@ LINEAR_RELATIONS_QUERY = (
 # uses (poll_source.py LINEAR_ISSUE_QUERY), so the node key is gitBranchName.
 _LINEAR_INTAKE_SELECTION = (
     "{ nodes { id identifier title description url gitBranchName: branchName priority createdAt "
-    "project { id } assignee { id } "
+    "project { id } assignee { id } creator { id } "
     "labels(first: 20) { nodes { name } } "
-    "history(first: 25) { nodes { createdAt actor { id } toState { name } } } "
+    "history(first: 25) { nodes { createdAt actor { id } toState { name } } pageInfo { hasNextPage } } "
     f"inverseRelations(first: {LINEAR_INTAKE_RELATIONS}) {_RELATION_FIELDS} }} "
     "pageInfo { hasNextPage endCursor } }"
 )
@@ -904,14 +905,20 @@ class LinearIntakeClient:
             issue_id = node.get("id")
             if not isinstance(identifier, str) or not isinstance(issue_id, str):
                 continue
+            history = node.get("history") or {}
             moves = [
                 entry
-                for entry in ((node.get("history") or {}).get("nodes") or [])
+                for entry in (history.get("nodes") or [])
                 if isinstance(entry, dict)
                 and ((entry.get("toState") or {}).get("name")) == state
             ]
             moves.sort(key=lambda entry: _text(entry.get("createdAt")))
-            actor = ((moves[-1].get("actor") or {}).get("id")) if moves else None
+            if moves:
+                actor = (moves[-1].get("actor") or {}).get("id")
+            elif (history.get("pageInfo") or {}).get("hasNextPage") is not True:
+                actor = (node.get("creator") or {}).get("id")
+            else:
+                actor = None
             priority = node.get("priority")
             project = (node.get("project") or {}).get("id")
             assignee = (node.get("assignee") or {}).get("id")

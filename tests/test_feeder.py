@@ -689,6 +689,21 @@ def test_a_linear_move_by_an_untrusted_user_is_ignored(tmp_path: Path) -> None:
     assert github.pulls == {} and linear.posted == {}
 
 
+def test_an_issue_with_no_applied_by_is_logged_and_skipped(tmp_path: Path) -> None:
+    linear = FakeLinear()
+    linear.issues = [linear_issue("AUT-2539", applied_by=None)]
+    feeder, _, github, _ = make_feeder(tmp_path, orch=LINEAR_ORCH, linear=linear,
+                                       factory_text=LINEAR_FACTORY_MD)
+    lines: list[str] = []
+    feeder.log = lines.append
+
+    assert feeder.feed_once().fed == ()
+    assert github.pulls == {} and linear.posted == {}
+    assert [line for line in lines if "AUT-2539" in line] == [
+        "feeder: acme/linear-app#AUT-2539 skipped: no applied_by"
+    ]
+
+
 def test_started_ticket_back_in_intake_state_is_not_fed(tmp_path: Path) -> None:
     linear = FakeLinear()
     linear.issues = [linear_issue("AUT-2282"), linear_issue("AUT-9")]
