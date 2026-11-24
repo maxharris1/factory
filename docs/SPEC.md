@@ -935,7 +935,10 @@ same-cycle handoff, and permits up to 16 direct issue reads: at most 1,200
 requests and about 726,720 complexity per hour if all process headroom is
 used. Every additional search page is counted against both budgets and
 reduces direct reads. A page-limit or budget cutoff is recorded as a
-non-error deferral, at most one aggregated row per cycle.
+non-error deferral, at most one aggregated row per cycle. A budget cutoff
+names its path: `Linear poll budget deferred discovery (search)` for the
+search and its hit reads, `Linear poll budget deferred discovery (dirty)` for
+dirty rows.
 Tracked reads and discovery fair-share the remaining budget, and tracked
 reads rotate across cycles so a deferred ticket is served later. Search hits
 already tracked are not fetched directly again, and a direct issue read is
@@ -1041,12 +1044,12 @@ issue outside the configured projects, completed, canceled or deleted is
 dropped quietly. A tracked ticket is reread in full only when it is dirty,
 has an active job, or its last read is `reconcile_seconds` old; otherwise its
 last read is reused and the ticket is still rebuilt each cycle, so its
-GitHub PR head, CI and PR comments stay current. The full brief/go search
-runs at startup and then every `reconcile_seconds` (default 900; it stays due
-until it completes without a budget or error cutoff), so a missed webhook
-costs at most one reconcile interval. A dirty row is deleted only after its
-issue was read in that cycle and only if no newer event replaced it; a
-tracked ticket the dispatcher no longer polls (merged, done or abandoned,
+GitHub PR head, CI and PR comments stay current. Dirty rows are read before
+the full brief/go search, which runs at startup and then every
+`reconcile_seconds` (default 900; it stays due until its pass has read every
+hit it listed), so a missed webhook costs about one reconcile interval. A
+dirty row is deleted only after its issue was read in that cycle and only if
+no newer event replaced it; a tracked ticket the dispatcher no longer polls (merged, done or abandoned,
 with nothing left to replay or settle) is not read with or without a
 webhook, so its row is deleted unread; a handed-off one is still polled
 (issue #108). A read that finds the issue gone drops the reused read too. If the

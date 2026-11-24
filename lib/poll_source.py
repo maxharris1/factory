@@ -198,6 +198,8 @@ HEAD_READ_IDLE_SECONDS = 12 * STOPPED_POLL_SECONDS
 FULL_READ_SECONDS = 600.0
 LINEAR_SEARCH_MAX_PAGES = 2
 LINEAR_TRACKED_RESERVE = 7
+LINEAR_SEARCH_DEFERRAL = "Linear poll budget deferred discovery (search)"
+LINEAR_DIRTY_DEFERRAL = "Linear poll budget deferred discovery (dirty)"
 _HTTP_STATUS = re.compile(r"(?:\(|\b)HTTP\s+([0-9]{3})\)?")
 
 
@@ -682,6 +684,11 @@ class RequiredGlobs:
         )
 
 
+class _Search(NamedTuple):
+    tickets: tuple[TrackedTicket, ...]
+    listed: frozenset[str] | None
+
+
 class LastRead(NamedTuple):
     probe_before_read: str | None
     read_at: float
@@ -796,6 +803,7 @@ class LivePollSource:
         self._polling_recorded = False
         self._webhook_full_cycle = False
         self._last_reconcile: float | None = None
+        self._reconcile_unread: frozenset[str] | None = None
         self._linear_documents: dict[str, tuple[float, dict[str, Any]]] = {}
         # Linear cadence (GitHub may poll every 30 seconds). GitHub is read
         # every cycle; Linear work runs on every `_linear_every`-th cycle, so
@@ -937,6 +945,7 @@ class LivePollSource:
         assert webhook is not None
         return (
             self._webhook_full_cycle
+            or self._reconcile_unread is not None
             or self._last_reconcile is None
             or self.clock() - self._last_reconcile >= webhook.reconcile_seconds
         )
@@ -1091,18 +1100,24 @@ class LivePollSource:
         if not projects or not self._linear_due:
             return ()
         if self.config.linear_webhook is None:
-            return self._searched_candidates(projects, query, exclude, reserve)
-        found: tuple[TrackedTicket, ...] = ()
-        if self._reconcile_due():
-            errors = len(self._cycle_errors)
-            deferrals = sum(self._cycle_deferrals.values())
-            found = self._searched_candidates(projects, query, exclude, reserve)
-            if (
-                len(self._cycle_errors) == errors
-                and sum(self._cycle_deferrals.values()) == deferrals
-            ):
-                self._last_reconcile = self.clock()
-        return found + self._dirty_candidates(projects, exclude, reserve)
+            return self._searched_candidates(projects, query, exclude, reserve).tickets
+        before = frozenset(self._linear_issue_cache)
+        tickets = self._dirty_candidates(projects, exclude, reserve)
+        if not self._reconcile_due():
+            return tickets
+        unread = self._reconcile_unread
+        dirty_reads = self._linear_issue_cache.keys() - before
+        search = self._searched_candidates(
+            projects, query, exclude | dirty_reads, reserve
+        )
+        self._reconcile_unread = _reconcile_pass(
+            unread, search.listed, frozenset(self._linear_issue_cache)
+        )
+        if self._reconcile_unread is None and (
+            unread is not None or search.listed is not None
+        ):
+            self._last_reconcile = self.clock()
+        return tickets + search.tickets
 
     def _dirty_candidates(
         self,
@@ -1148,7 +1163,7 @@ class LivePollSource:
                 LINEAR_ISSUE_QUERY,
                 reserve=tracked_reserve + LINEAR_PROCESS_HEADROOM,
             ):
-                self._defer("Linear poll budget deferred discovery")
+                self._defer(LINEAR_DIRTY_DEFERRAL)
                 break
             project: Project | None = None
             try:
@@ -1172,12 +1187,14 @@ class LivePollSource:
         query: str,
         exclude: frozenset[str],
         reserve: int,
-    ) -> tuple[TrackedTicket, ...]:
+    ) -> _Search:
         tickets: list[TrackedTicket] = []
         issues: dict[str, dict[str, Any]] = {}
         terms = _linear_terms(query)
         tracked_reserve = min(reserve, LINEAR_TRACKED_RESERVE)
+        complete_listing = True
         for index, term in enumerate(terms):
+            deferred = self._cycle_deferrals.get(LINEAR_SEARCH_DEFERRAL, 0)
             try:
                 found = self._linear_issues(
                     term,
@@ -1192,7 +1209,10 @@ class LivePollSource:
                 )
             except Exception as exc:
                 self._record("linear", "-", exc)
+                complete_listing = False
                 continue
+            if self._cycle_deferrals.get(LINEAR_SEARCH_DEFERRAL, 0) != deferred:
+                complete_listing = False
             for issue in found:
                 issue_id = issue.get("id")
                 if isinstance(issue_id, str):
@@ -1208,18 +1228,21 @@ class LivePollSource:
             else 0
         )
         ordered_candidates = candidate_items[start:] + candidate_items[:start]
+        listed = (
+            frozenset(
+                issue_id
+                for issue_id, issue in issues.items()
+                if issue_id and _hit_project(issue, projects, exclude) is not None
+            )
+            if complete_listing
+            else None
+        )
         for issue in ordered_candidates:
             ticket_id = _ticket_hint(issue)
-            if ticket_id in exclude:
+            project = _hit_project(issue, projects, exclude)
+            if project is None:
                 continue
-            project: Project | None = None
             try:
-                project_value = issue.get("project")
-                if not isinstance(project_value, dict):
-                    continue
-                project = projects.get(project_value.get("id"))
-                if project is None:
-                    continue
                 issue_id = issue.get("id")
                 if not isinstance(issue_id, str) or not issue_id:
                     raise PollSourceError("Linear search issue has no id")
@@ -1227,7 +1250,7 @@ class LivePollSource:
                     LINEAR_ISSUE_QUERY,
                     reserve=tracked_reserve + LINEAR_PROCESS_HEADROOM,
                 ):
-                    self._defer("Linear poll budget deferred discovery")
+                    self._defer(LINEAR_SEARCH_DEFERRAL)
                     break
                 self._linear_candidate_cursor = _linear_candidate_key(issue)
                 complete = self._linear_issue(issue_id)
@@ -1241,9 +1264,8 @@ class LivePollSource:
                 if ticket.factory.tickets == "linear":
                     tickets.append(ticket)
             except Exception as exc:
-                repo = project.repo if project is not None else "linear"
-                self._record(repo, ticket_id, exc)
-        return tuple(tickets)
+                self._record(project.repo, ticket_id, exc)
+        return _Search(tuple(tickets), listed)
 
     def tracked_tickets(
         self,
@@ -1646,7 +1668,7 @@ class LivePollSource:
                 LINEAR_SEARCH_QUERY,
                 reserve=reserve,
             ):
-                self._defer("Linear poll budget deferred discovery")
+                self._defer(LINEAR_SEARCH_DEFERRAL)
                 break
             document = self._linear_request(
                 {
@@ -3323,6 +3345,32 @@ def _linear_terms(query: str) -> tuple[str, ...]:
 
 def _linear_candidate_key(issue: Mapping[str, Any]) -> tuple[str, str]:
     return (_ticket_hint(issue), str(issue.get("id", "")))
+
+
+def _hit_project(
+    issue: Mapping[str, Any],
+    projects: Mapping[str, Project],
+    exclude: frozenset[str],
+) -> Project | None:
+    if _ticket_hint(issue) in exclude:
+        return None
+    project = issue.get("project")
+    project_id = project.get("id") if isinstance(project, dict) else None
+    return projects.get(project_id) if isinstance(project_id, str) else None
+
+
+def _reconcile_pass(
+    unread: frozenset[str] | None,
+    listed: frozenset[str] | None,
+    read: frozenset[str],
+) -> frozenset[str] | None:
+    if listed is None:
+        left = None if unread is None else unread - read
+    elif unread is None:
+        left = listed - read
+    else:
+        left = (unread & listed) - read
+    return left or None
 
 
 def _closed_key(ref: TicketRef) -> tuple[str, str]:

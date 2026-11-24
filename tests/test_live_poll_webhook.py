@@ -987,6 +987,6 @@ def test_discovery_deferrals_name_the_path_in_poll_deferrals(tmp_path: Path) -> 
     assert details == [
         "Linear poll budget deferred discovery (search) x1",
         "Linear poll budget deferred discovery (dirty) x1; "
-        "Linear poll budget deferred discovery (search) x1",
+        "Linear poll budget deferred discovery (search) x2",
     ]
     assert budget == 2
