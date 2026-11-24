@@ -36,7 +36,7 @@ from tests.test_feeder import (
     rows,
 )
 from tests.test_feeder import issue as feeder_issue
-from tests.test_feeder_stack_parent import PARENT
+from tests.test_feeder_stack_parent import PARENT, stacked
 from tests.test_feeder_target import LINEAR_REPO as LINEAR_STACK_REPO
 from tests.test_feeder_target import linear_ticket, targeted
 from tests.test_dispatcher import (
@@ -532,7 +532,7 @@ def fed_child(tmp_path: Path, *, target: str | None = PARENT):
     github.branch_commits[(STACK_REPO, PARENT)] = (sha(1), sha(2))
     github.pulls[(STACK_REPO, PARENT_PR)] = {"head": PARENT, "base": "main", "title": "t", "body": ""}
     feeder, queue, _, _ = make_feeder(tmp_path, github=github)
-    text = targeted(f"Target branch: {target}") if target else targeted("")
+    text = stacked(target, PARENT_PR) if target else targeted("")
     github.issues[STACK_REPO] = [feeder_issue(7, body=text, template=False)]
     assert len(feeder.feed_once().fed) == 1
     github.parent_reads.clear()
@@ -676,7 +676,7 @@ def test_a_linear_child_takes_its_parents_merge_target(tmp_path: Path) -> None:
     github.branch_commits[(LINEAR_STACK_REPO, PARENT)] = (sha(1), sha(2))
     github.pulls[(LINEAR_STACK_REPO, PARENT_PR)] = {"head": PARENT, "base": "dev", "title": "t", "body": ""}
     linear = FakeLinear()
-    linear.issues = [linear_ticket(targeted(f"Target branch: {PARENT}"))]
+    linear.issues = [linear_ticket(stacked(PARENT, PARENT_PR))]
     feeder, _, _, _ = make_feeder(
         tmp_path, orch=LINEAR_ORCH, github=github, linear=linear, factory_text=LINEAR_FACTORY_MD
     )
