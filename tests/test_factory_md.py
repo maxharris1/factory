@@ -973,7 +973,6 @@ def test_ci_force_rerun_paths_empty_list_turns_the_path_trigger_off(tmp_path: Pa
         ({"required_checks": [""]}, "ci.required_checks[0] must be a non-empty job name glob"),
         ({"required_checks": ["  "]}, "ci.required_checks[0] must be a non-empty job name glob"),
         ({"required_checks": [3]}, "ci.required_checks[0] must be a non-empty job name glob"),
-        ({"required_checks": ["ci-ok"], "bogus": 1}, "unknown field 'ci.bogus'"),
         ({"force_rerun_paths": ".github/workflows/**"}, "ci.force_rerun_paths must be a list"),
         ({"force_rerun_paths": None}, "ci.force_rerun_paths must be a list"),
         (
@@ -988,13 +987,11 @@ def test_ci_force_rerun_paths_empty_list_turns_the_path_trigger_off(tmp_path: Pa
             {"force_rerun_paths": [3]},
             "ci.force_rerun_paths[0] must be a repo-relative path or glob",
         ),
-        ({"force_rerun_paths": [], "bogus": 1}, "unknown field 'ci.bogus'"),
         ({"branches": []}, "ci.branches must be a non-empty list"),
         ({"branches": "dev"}, "ci.branches must be a non-empty list"),
         ({"branches": ["dev", "bad branch"]}, "ci.branches[1] must be a branch name"),
         ({"branches": ["dev"], "local_checks": "Jest"}, "ci.local_checks must be a list"),
         ({"branches": ["dev"], "local_checks": [3]}, "ci.local_checks[0] must be a short label"),
-        ({"branches": ["dev"], "on_push": True}, "unknown field 'ci.on_push'"),
     ],
 )
 def test_a_bad_ci_mapping_is_refused_even_when_lenient(
@@ -1006,6 +1003,26 @@ def test_a_bad_ci_mapping_is_refused_even_when_lenient(
     assert messages(path) == [message]
     lenient, _ = parse_factory_md(path.read_text(encoding="utf-8"), strict=False)
     assert lenient is None
+
+
+@pytest.mark.parametrize(
+    ("ci", "message"),
+    [
+        ({"required_checks": ["ci-ok"], "bogus": 1}, "unknown field 'ci.bogus'"),
+        ({"force_rerun_paths": [], "bogus": 1}, "unknown field 'ci.bogus'"),
+        ({"branches": ["dev"], "on_push": True}, "unknown field 'ci.on_push'"),
+    ],
+)
+def test_unknown_ci_keys_are_errors_when_strict_and_warnings_when_lenient(
+    tmp_path: Path, ci: object, message: str
+) -> None:
+    data = copy.deepcopy(VALID)
+    data["ci"] = ci
+    path = write_factory(tmp_path, data)
+    assert messages(path) == [message]
+    lenient, findings = parse_factory_md(path.read_text(encoding="utf-8"), strict=False)
+    assert lenient is not None
+    assert [(f.severity, f.message) for f in findings] == [("warning", message)]
 
 
 def test_check_config_refuses_an_empty_ci_branch_list(tmp_path: Path) -> None:

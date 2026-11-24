@@ -20,6 +20,9 @@ The brief names one playbook, picked by the ticket's `Type:` line. No line means
 ## Owner duties
 
 1. Delegate the code. Delegate code-writing to a helper as Feature step 4 and Bug fix step 3 say (Refactoring step 5 for mechanical edits). Helpers take their models from the brief's model lines. A helper returns a diff or a commit. It never posts, pushes or opens a PR.
+
+### Before ready
+
 2. Reach code-ready before `ready`, as Autopilot-full step 2 says, in this order:
    - Strip slop with `<kit>/deslop/SKILL.md` over the diff.
    - Run the comments pass with `<pstack>/skills/no-comments/SKILL.md`. It spawns `<pstack>/agents/comment-sicko.md`.
@@ -32,7 +35,6 @@ The brief names one playbook, picked by the ticket's `Type:` line. No line means
 
 - The PR title is `#<issue>: type(scope): subject`, a Conventional Commits title after the issue prefix. Edit the feeder's PR with `gh pr edit`, run as the brief says. Keep the `Fixes #<issue>` line in the body.
 - Claude spawns `poteto-agent` and `comment-sicko` unprefixed, not as the adapter's `pstack:poteto-agent`, because `orch install-skills` links pstack's agents into `~/.claude/agents/`.
-- figure-it-out's decision trail goes in `docs/decisions/<issue>-trail.tsv`, one file per ticket.
 
 Unclear intent is a `questions` handoff. Classify the fork per poteto-mode first, and ask only for a product call no run can settle. Use your own bot in `from=`. Every other handoff header comes from the brief, with its placeholders filled.
 

@@ -54,7 +54,7 @@ def lead(job: Job, facts: dict) -> Lead:
     return Lead(
         f"Build {ticket_ref(facts)} so every acceptance criterion is met.",
         (
-            "Follow the router in Skills below.",
+            "Follow the router in Skills.",
             f"1. {read_ticket_line(facts)} {plan_line}",
             f"2. Work on {branch}. Write tests first, as the `tdd` skill says.",
             f"3. Run only the tests for the files you touched plus a short smoke set, {TEST_SCOPE} "
@@ -79,9 +79,9 @@ def lead(job: Job, facts: dict) -> Lead:
 def base_step(number: int, facts: dict) -> str:
     base = facts["base"] or "<base branch>"
     return (
-        f"{number}. Bring the base in before `ready`: `git fetch origin {base}`, then either "
-        f"`git rebase origin/{base}` and push with `git push --force-with-lease`, or "
-        f"`git merge origin/{base}` and push. If the base changed files you touched, rerun their tests."
+        f"{number}. Before `ready`: `git fetch origin {base}`, then `git rebase origin/{base}` "
+        f"(`--force-with-lease`) or `git merge origin/{base}` (`git push`). "
+        "Rerun touched tests if base changed them."
     )
 
 

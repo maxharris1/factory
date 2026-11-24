@@ -5,8 +5,10 @@ import sqlite3
 from collections.abc import Iterable
 from typing import Literal
 
+from lib.dispatch.rebase import answers_rebase_review
 from lib.dispatch.types import Comment, RoundGrant, TrackedTicket
 from lib.dispatch.verdict.repeat import StopRecord
+from lib.handoff import HandoffError, parse_comment
 from lib.rule_engine import (
     Escalate,
     FindingId,
@@ -91,21 +93,29 @@ class RuleEngineMixin:
                     "SELECT review_round, stuck FROM ticket_state WHERE repo = ? AND ticket_id = ?",
                     (ticket.repo.lower(), ticket.ticket_id),
                 ).fetchone()
-                ruling = decide(
-                    StopFacts(
-                        site="cap",
-                        stop=stop,
-                        verdict_id=subject,
-                        finding_ids=ids,
-                        repeat_stops=0,
-                        prior_grants=prior,
-                        round=int(state["review_round"]),
-                        cap=self._effective_cap(ticket, connection),
-                        stuck=bool(state["stuck"]),
+                round_number = int(state["review_round"])
+                if answers_rebase_review(connection, ticket, round_number):
+                    ruling = Ruling("first-cap-grant", Escalate("rebase-review"), ())
+                    self._log_ruling(connection, ticket, "cap", subject, ruling, ids)
+                    granted = False
+                else:
+                    auto_prior = self._auto_extra_finding_ids(connection, ticket, verdict.id)
+                    combined_prior = None if (prior is None or auto_prior is None) else prior | auto_prior
+                    ruling = decide(
+                        StopFacts(
+                            site="cap",
+                            stop=stop,
+                            verdict_id=subject,
+                            finding_ids=ids,
+                            repeat_stops=0,
+                            prior_grants=combined_prior,
+                            round=round_number,
+                            cap=self._effective_cap(ticket, connection),
+                            stuck=bool(state["stuck"]),
+                        )
                     )
-                )
-                self._log_ruling(connection, ticket, "cap", subject, ruling, ids)
-                granted = isinstance(ruling.outcome, Grant)
+                    self._log_ruling(connection, ticket, "cap", subject, ruling, ids)
+                    granted = isinstance(ruling.outcome, Grant)
             else:
                 granted = logged["outcome"] == "granted" and logged["notice_status"] != "void"
             connection.commit()
@@ -113,6 +123,33 @@ class RuleEngineMixin:
             return False
         self._apply_engine_grants(ticket)
         return True
+
+    def _auto_extra_finding_ids(
+        self, connection: sqlite3.Connection, ticket: TrackedTicket, verdict_id: str
+    ) -> frozenset[FindingId] | None:
+        rows = connection.execute(
+            """
+            SELECT comment_id FROM auto_extra_comments
+            WHERE repo = ? AND ticket_id = ? AND comment_id != ?
+            """,
+            (ticket.repo.lower(), ticket.ticket_id, verdict_id),
+        ).fetchall()
+        if not rows:
+            return frozenset()
+        from lib.evidence.findings import blocking_ids
+
+        bodies = {item.id: item.body for item in ticket.comments}
+        found: list[str] = []
+        for row in rows:
+            body = bodies.get(str(row["comment_id"]))
+            if body is None:
+                return None
+            try:
+                parsed = parse_comment(body)
+            except HandoffError:
+                return None
+            found.extend(blocking_ids(parsed.body))
+        return frozenset(_valid_ids(found))
 
     def _rule_on_repeat(
         self,
@@ -135,6 +172,8 @@ class RuleEngineMixin:
             "SELECT stuck FROM ticket_state WHERE repo = ? AND ticket_id = ?",
             (ticket.repo.lower(), ticket.ticket_id),
         ).fetchone()
+        auto_prior = self._auto_extra_finding_ids(connection, ticket, verdict.id)
+        combined_prior = None if (prior is None or auto_prior is None) else prior | auto_prior
         ruling = decide(
             StopFacts(
                 site="repeat",
@@ -142,7 +181,7 @@ class RuleEngineMixin:
                 verdict_id=subject,
                 finding_ids=ids,
                 repeat_stops=stops,
-                prior_grants=prior,
+                prior_grants=combined_prior,
                 round=round_number,
                 cap=self._effective_cap(ticket, connection),
                 stuck=bool(state["stuck"]),

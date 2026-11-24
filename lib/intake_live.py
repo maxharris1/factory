@@ -86,13 +86,20 @@ LINEAR_RELATIONS_QUERY = (
     "query($issue: String!, $after: String) { issue(id: $issue) { "
     f"inverseRelations(first: {LINEAR_RELATIONS_PAGE}, after: $after) {_RELATION_FIELDS} }} }}"
 )
+LINEAR_HISTORY_PAGE = 50
+LINEAR_HISTORY_MAX_PAGES = 20
+_HISTORY_FIELDS = "{ nodes { createdAt actor { id } toState { name } } pageInfo { hasNextPage endCursor } }"
+LINEAR_HISTORY_QUERY = (
+    "query($issue: String!, $after: String) { issue(id: $issue) { "
+    f"history(first: {LINEAR_HISTORY_PAGE}, after: $after) {_HISTORY_FIELDS} }} }}"
+)
 # Linear's Issue field is branchName; it is read under the alias the poller
 # uses (poll_source.py LINEAR_ISSUE_QUERY), so the node key is gitBranchName.
 _LINEAR_INTAKE_SELECTION = (
     "{ nodes { id identifier title description url gitBranchName: branchName priority createdAt "
     "project { id } assignee { id } creator { id } "
     "labels(first: 20) { nodes { name } } "
-    "history(first: 25) { nodes { createdAt actor { id } toState { name } } pageInfo { hasNextPage } } "
+    f"history(first: 25) {_HISTORY_FIELDS} "
     f"inverseRelations(first: {LINEAR_INTAKE_RELATIONS}) {_RELATION_FIELDS} }} "
     "pageInfo { hasNextPage endCursor } }"
 )
@@ -905,17 +912,17 @@ class LinearIntakeClient:
             issue_id = node.get("id")
             if not isinstance(identifier, str) or not isinstance(issue_id, str):
                 continue
-            history = node.get("history") or {}
+            history_entries, history_complete = self._history(issue_id, node)
             moves = [
                 entry
-                for entry in (history.get("nodes") or [])
+                for entry in history_entries
                 if isinstance(entry, dict)
                 and ((entry.get("toState") or {}).get("name")) == state
             ]
             moves.sort(key=lambda entry: _text(entry.get("createdAt")))
             if moves:
                 actor = (moves[-1].get("actor") or {}).get("id")
-            elif (history.get("pageInfo") or {}).get("hasNextPage") is not True:
+            elif history_complete:
                 actor = (node.get("creator") or {}).get("id")
             else:
                 actor = None
@@ -966,6 +973,24 @@ class LinearIntakeClient:
         raise GitHubAdapterError(
             f"Linear intake has over {LINEAR_INTAKE_MAX_PAGES} pages; not fed"
         )
+
+    def _history(self, issue_id: str, node: dict[str, Any]) -> tuple[list[object], bool]:
+        """All history entries needed to find who moved the issue to the intake state."""
+        connection = node.get("history") or {}
+        found: list[object] = []
+        for _ in range(LINEAR_HISTORY_MAX_PAGES):
+            if not isinstance(connection, dict):
+                return found, False
+            found.extend(connection.get("nodes") or [])
+            page = connection.get("pageInfo") or {}
+            if not isinstance(page, dict) or page.get("hasNextPage") is not True:
+                return found, True
+            cursor = page.get("endCursor")
+            if not isinstance(cursor, str) or not cursor:
+                return found, False
+            data = self._request(LINEAR_HISTORY_QUERY, {"issue": issue_id, "after": cursor})
+            connection = (data.get("issue") or {}).get("history")
+        return found, False
 
     def _relations(self, issue_id: str, node: dict[str, Any]) -> list[object]:
         """Every inverse relation of the issue: the intake page, then the rest."""

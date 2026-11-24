@@ -591,6 +591,9 @@ class DevicePool:
         pins = self.pins()
         if pins is None:
             return None
+        refused = getattr(self.pins, "refused_harnesses", None)
+        if callable(refused) and harness in refused():
+            return None
         now = self.queue.now()
         with self.queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")

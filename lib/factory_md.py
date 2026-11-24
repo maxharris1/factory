@@ -163,9 +163,9 @@ EXAMPLE_PATHS = (
 )
 
 # Prefixes drawn from names the spec uses. This is not an allow-list.
-ADVISORY_MODEL_PREFIXES = ("claude", "codex", "cursor", "gpt", "grok")
+ADVISORY_MODEL_PREFIXES = ("claude", "codex", "cursor", "fable", "gpt", "grok")
 
-_ANTHROPIC_WORD = re.compile(r"^(?:claude|sonnet|opus|haiku)(?=$|[-._:0-9])")
+_ANTHROPIC_WORD = re.compile(r"^(?:claude|sonnet|opus|haiku|fable)(?=$|[-._:0-9])")
 _OPENAI_WORD = re.compile(r"^(?:gpt|codex)(?=$|[-._:0-9])")
 _OPENAI_O_SERIES = re.compile(r"^o[0-9]+(?=$|[-._:])")
 _OTHER_MODEL_LINES = ("opus-mt", "gpt-j", "gpt-neo")
@@ -1046,7 +1046,7 @@ def _ci(
     if not isinstance(value, dict):
         findings.append(Finding("error", "ci must be a mapping"))
         return None, (), (), DEFAULT_CI_FORCE_RERUN_PATHS, None
-    findings.extend(_unknown(value, _CI_KEYS, "ci", "error"))
+    findings.extend(_unknown(value, _CI_KEYS, "ci", unknown))
     branches = _ci_branches(value, findings)
     checks = value.get("local_checks", [])
     if not isinstance(checks, list):
@@ -1060,7 +1060,7 @@ def _ci(
     if rerun is None:
         findings.append(Finding("error", "ci.force_rerun_paths must be a list"))
     rerun_paths = _path_list(rerun, "ci.force_rerun_paths", findings)
-    gate = _command_spec(value, "local_gate", "ci.", LOCAL_GATE_MAX_TIMEOUT, findings, "error")
+    gate = _command_spec(value, "local_gate", "ci.", LOCAL_GATE_MAX_TIMEOUT, findings, unknown)
     return branches, tuple(str(item) for item in checks), required, rerun_paths, gate
 
 
@@ -1080,19 +1080,20 @@ def _ci_branches(value: dict, findings: list[Finding]) -> tuple[str, ...] | None
 def _qa(data: dict, strict: bool) -> tuple[QaConfig | None, list[Finding]]:
     if "qa" not in data:
         return None, []
+    unknown = "error" if strict else "warning"
     problems: list[Finding] = []
-    qa = _qa_config(data["qa"], problems)
+    qa = _qa_config(data["qa"], problems, unknown)
     if strict or not any(item.severity == "error" for item in problems):
         return qa, problems
     warnings = [Finding("warning", item.message) for item in problems]
     return None, [*warnings, Finding("warning", "qa is off: its block is invalid")]
 
 
-def _qa_config(value: object, problems: list[Finding]) -> QaConfig | None:
+def _qa_config(value: object, problems: list[Finding], unknown: str = "error") -> QaConfig | None:
     if not isinstance(value, dict):
         problems.append(Finding("error", "qa must be a mapping"))
         return None
-    problems.extend(_unknown(value, _QA_KEYS, "qa", "error"))
+    problems.extend(_unknown(value, _QA_KEYS, "qa", unknown))
     enabled = value.get("enabled")
     if "enabled" not in value:
         problems.append(Finding("error", "missing required field 'qa.enabled'"))
@@ -1100,7 +1101,7 @@ def _qa_config(value: object, problems: list[Finding]) -> QaConfig | None:
         problems.append(Finding("error", "qa.enabled must be true or false"))
     required = enabled is True
     gate = _qa_choice(value.get("gate"), "qa.gate", QA_GATES, problems) or "report"
-    runners = _qa_runners(value, required, problems)
+    runners = _qa_runners(value, required, problems, unknown)
     shootout = value.get("shootout", False)
     if not isinstance(shootout, bool):
         problems.append(Finding("error", "qa.shootout must be true or false"))
@@ -1111,9 +1112,9 @@ def _qa_config(value: object, problems: list[Finding]) -> QaConfig | None:
     if required and value.get("profile") is None:
         problems.append(Finding("error", "missing required field 'qa.profile'"))
     profile = _qa_choice(value.get("profile"), "qa.profile", QA_PROFILES, problems)
-    lane = _qa_lane(value.get("lane"), required, problems)
-    fixtures = _qa_mapping(value.get("fixtures"), "qa.fixtures", {"load"}, problems)
-    evidence = _qa_mapping(value.get("evidence"), "qa.evidence", {"video", "trace"}, problems)
+    lane = _qa_lane(value.get("lane"), required, problems, unknown)
+    fixtures = _qa_mapping(value.get("fixtures"), "qa.fixtures", {"load"}, problems, unknown)
+    evidence = _qa_mapping(value.get("evidence"), "qa.evidence", {"video", "trace"}, problems, unknown)
     verify = value.get("verify")
     if verify is not None and (not isinstance(verify, str) or _SKILL.fullmatch(verify) is None):
         problems.append(Finding("error", "qa.verify must be a skill name"))
@@ -1154,7 +1155,9 @@ def _qa_config(value: object, problems: list[Finding]) -> QaConfig | None:
     )
 
 
-def _qa_runners(qa: dict, required: bool, problems: list[Finding]) -> tuple[QaRunner, ...]:
+def _qa_runners(
+    qa: dict, required: bool, problems: list[Finding], unknown: str = "error"
+) -> tuple[QaRunner, ...]:
     raw = qa.get("runners")
     names: list[str] = []
     if raw is None:
@@ -1181,7 +1184,7 @@ def _qa_runners(qa: dict, required: bool, problems: list[Finding]) -> tuple[QaRu
             continue
         if name not in names:
             continue
-        block = _qa_mapping(qa.get(key), field, {"environment", "model"}, problems)
+        block = _qa_mapping(qa.get(key), field, {"environment", "model"}, problems, unknown)
         environment = block.get("environment")
         model = _model(block["model"], f"{field}.model", problems) if "model" in block else None
         if environment is None:
@@ -1193,8 +1196,10 @@ def _qa_runners(qa: dict, required: bool, problems: list[Finding]) -> tuple[QaRu
     return tuple(runners[name] for name in names if name in runners)
 
 
-def _qa_lane(value: object, required: bool, problems: list[Finding]) -> QaLane | None:
-    lane = _qa_mapping(value, "qa.lane", {"boot", "doctor", "recover", "base_url"}, problems)
+def _qa_lane(
+    value: object, required: bool, problems: list[Finding], unknown: str = "error"
+) -> QaLane | None:
+    lane = _qa_mapping(value, "qa.lane", {"boot", "doctor", "recover", "base_url"}, problems, unknown)
     boot = _qa_text(lane.get("boot"), "qa.lane.boot", problems)
     recover = _qa_text(lane.get("recover"), "qa.lane.recover", problems)
     doctor = _qa_list(lane.get("doctor"), "qa.lane.doctor", _is_filled, "a non-empty string", problems)
@@ -1209,13 +1214,15 @@ def _qa_lane(value: object, required: bool, problems: list[Finding]) -> QaLane |
     return QaLane(boot=boot, base_url=base_url, doctor=doctor, recover=recover)
 
 
-def _qa_mapping(value: object, field: str, keys: set[str], problems: list[Finding]) -> dict:
+def _qa_mapping(
+    value: object, field: str, keys: set[str], problems: list[Finding], unknown: str = "error"
+) -> dict:
     if value is None:
         return {}
     if not isinstance(value, dict):
         problems.append(Finding("error", f"{field} must be a mapping"))
         return {}
-    problems.extend(_unknown(value, keys, field, "error"))
+    problems.extend(_unknown(value, keys, field, unknown))
     return value
 
 

@@ -29,6 +29,11 @@ class T1Mixin:
             routed = _route_go(ticket, fields)
             if routed is None:
                 return True, "rejected-go-same-family"
+            if (
+                routed.factory.builder_harness in self.refused_harnesses
+                or routed.factory.reviewer_harness in self.refused_harnesses
+            ):
+                return True, "rejected-go-refused-harness"
             ticket = routed
             resumed = (
                 self._overrule_stop(ticket, comment)

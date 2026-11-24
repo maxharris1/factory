@@ -179,10 +179,10 @@ from typing import Literal, NamedTuple, Protocol
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
-from lib import attention, live_settings
+from lib import attention, lane_limit, live_settings
 from lib.branch_stack import OpenPull, stack_wait, stacked_pulls
 from lib.brief_comment import FACTORY_MD_HEADING
-from lib.device_pool import free_slots, placement_blocked, slots_in_use
+from lib.device_pool import account_loads, choose_pair, free_slots, placement_blocked, slots_in_use
 from lib.device_sync import Blocked
 from lib.dispatch.bookkeeping import LockLedger, bookkeeping_write, must_write
 from lib.dispatch.constants import OWN_CLOSE_SETTLE_SECONDS, TERMINAL_STATES
@@ -1246,6 +1246,20 @@ class Feeder:
                     blocked_on.append((candidate, wait))
                 blocked += 1
                 continue
+            if (
+                candidate.harness in self.config.refused_harnesses
+                or candidate.context.config.reviewer_harness in self.config.refused_harnesses
+            ):
+                refused_role = (
+                    f"builder harness {candidate.harness}"
+                    if candidate.harness in self.config.refused_harnesses
+                    else f"reviewer harness {candidate.context.config.reviewer_harness}"
+                )
+                reason = f"{refused_role} is in refused_harnesses"
+                writes.append(_state_write(candidate, "waiting-blocked", reason=reason))
+                blocked += 1
+                self.log(f"feeder: {candidate.issue.repo}#{candidate.issue.key} refused: {reason}")
+                continue
             if room.get(candidate.harness, 0) <= 0:
                 if state not in IN_FLIGHT:
                     writes.append(_state_write(candidate, "waiting-capacity"))
@@ -1255,6 +1269,7 @@ class Feeder:
             room[candidate.harness] = room.get(candidate.harness, 0) - 1
             sharing = holds.co_holders(candidate.ref, candidate.lines)
             holds.take(candidate.ref, (), _holding(candidate.lines, candidate.ref in capped))
+            self._go_published = False
             try:
                 ref = self._feed(candidate, now, holds)
             except _Held as held:
@@ -1271,6 +1286,8 @@ class Feeder:
                 self.log(f"feeder: {candidate.issue.repo}#{candidate.issue.key} refused: {reason}")
                 continue
             except Exception as exc:  # one ticket's failure never stops the poll
+                if not self._go_published:
+                    holds.drop(candidate.ref)
                 errors += 1
                 writes.append(_state_write(candidate, "error", error=safe_ship_error(exc)))
                 self.log(
@@ -2009,6 +2026,7 @@ class Feeder:
                                 f"{_ticket_name(issue)} is held: {wait.reason}; "
                                 "it feeds on the first poll the branch exists."
                             ),
+                            "link": issue.url,
                             "ticket_url": issue.url,
                         },
                         sort_keys=True,
@@ -2492,6 +2510,7 @@ class Feeder:
                     {
                         "project_bot": project.grok_bot,
                         "detail": detail,
+                        "link": first.issue.url,
                         "ticket_url": first.issue.url,
                         "blocked": [candidate.issue.key for candidate, _ in waiting],
                     },
@@ -2519,7 +2538,23 @@ class Feeder:
         with self.queue.connect() as connection:
             machines, blocked = self._placement(connection, now)
             used = slots_in_use(connection, machines)
+            loads = account_loads(connection, machines, now) if machines is not None else None
             for harness in harnesses:
+                if harness in self.config.refused_harnesses:
+                    room[harness] = 0
+                    continue
+                serving = None if machines is None else machines.serving(harness)
+                if lane_limit.recipient_paused(connection, harness, now, serving) is not None:
+                    room[harness] = 0
+                    continue
+                if (
+                    machines is not None
+                    and loads is not None
+                    and (loads.held or loads.closed or loads.signed_out)
+                    and choose_pair(machines, harness, used, blocked, loads) is None
+                ):
+                    room[harness] = 0
+                    continue
                 free = free_slots(machines, harness, used, blocked) if machines else 0
                 sharing = sorted({harness, *(
                     other
@@ -2884,7 +2919,10 @@ class Feeder:
         self._record(candidate, brief_comment_id=brief_id)
         go_id = row["go_comment_id"] or _existing(existing, "go", authors)
         if go_id is None:
+            self._go_published = True
             go_id = post(_go(issue, state=state, risk=risk, number=number, visible=linear))
+        else:
+            self._go_published = True
         self._record(candidate, go_comment_id=go_id, state="fed", fed_at=now, error=None)
         return TicketRef(repo, ticket_id, issue.tracker)
 
@@ -3067,6 +3105,7 @@ class Feeder:
                     {
                         "project_bot": project_bot,
                         "detail": f"{held}: {wait.reason}; {until} once that merges.",
+                        "link": ticket_url,
                         "ticket_url": ticket_url,
                         "pulls": list(pulls),
                     },

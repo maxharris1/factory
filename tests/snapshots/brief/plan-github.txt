@@ -46,6 +46,7 @@ Read the router (the first path) and the pstack files it names, at these absolut
 - `/srv/orch/factory/skills/pstack/skills/how/SKILL.md`
 - `/srv/orch/factory/skills/pstack/skills/architect/SKILL.md`
 - `/srv/orch/factory/skills/pstack/skills/poteto-mode/playbooks/opening-a-pr.md`
+- `/srv/orch/factory/skills/cursor-team-kit/deslop/SKILL.md`
 - `/srv/orch/factory/skills/pstack/skills/principle-prove-it-works/SKILL.md`
 - `/srv/orch/factory/skills/pstack/skills/no-comments/SKILL.md`
 - `/srv/orch/factory/skills/pstack/agents/comment-sicko.md`
@@ -230,6 +231,7 @@ Read the router (the first path) and the pstack files it names, at these absolut
 - `/home/claude-bot/factory/skills/pstack/skills/how/SKILL.md`
 - `/home/claude-bot/factory/skills/pstack/skills/architect/SKILL.md`
 - `/home/claude-bot/factory/skills/pstack/skills/poteto-mode/playbooks/opening-a-pr.md`
+- `/home/claude-bot/factory/skills/cursor-team-kit/deslop/SKILL.md`
 - `/home/claude-bot/factory/skills/pstack/skills/principle-prove-it-works/SKILL.md`
 - `/home/claude-bot/factory/skills/pstack/skills/no-comments/SKILL.md`
 - `/home/claude-bot/factory/skills/pstack/agents/comment-sicko.md`

@@ -25,7 +25,7 @@ from lib.dispatcher import Comment
 from lib.handoff import HandoffError, parse_comment
 from lib.journeys import QaPlan
 from lib.orchestrate import APPROVAL_TOKEN_VARIABLES, answers_for, go_comment
-from lib.pstack_pin import FACTORY_DIR, PSTACK_DIR, ROOT, load_pin
+from lib.pstack_pin import FACTORY_DIR, KIT_DIR, PSTACK_DIR, ROOT, load_pin
 from lib.queue import Job
 from tests.regenerate_brief_snapshots import CASES, FACTORY_MD, _job, render_snapshot
 from tests.test_approver_credential import MAX, AppFlow
@@ -557,6 +557,7 @@ def pinned_paths() -> set[str]:
     return {
         *(f"{PSTACK_DIR.as_posix()}/{rel}" for rel in pin.hashes()),
         *(f"{FACTORY_DIR.as_posix()}/{rel}" for rel in pin.factory_hashes()),
+        *(f"{KIT_DIR.as_posix()}/{rel}" for rel in pin.kit_hashes()),
     }
 
 
@@ -607,7 +608,7 @@ def promised_files(brief_text: object) -> set[str]:
 
 
 def assert_named_files_exist(kind: str, text: str, promised: set[str]) -> None:
-    roots = (ROOT, ROOT / PSTACK_DIR, ROOT / FACTORY_DIR)
+    roots = (ROOT, ROOT / PSTACK_DIR, ROOT / FACTORY_DIR, ROOT / KIT_DIR)
     for rel in NAMED.findall(FENCED.sub("", text)):
         if rel.startswith(".claude/") or rel in promised:
             continue

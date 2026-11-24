@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from pathlib import Path
 
 from lib.dispatch.bookkeeping import LockLedger
@@ -78,6 +78,7 @@ class DispatcherBase:
         update_classifier: UpdateClassifier | None = None,
         rebase_classifier: RebaseClassifier | None = None,
         approvals: Approvals | None = None,
+        refused_harnesses: Collection[str] = (),
         ci_logs: Callable[[str, str], Mapping[str, str]] | None = None,
         ci_rerun: Callable[[str, Sequence[str]], RerunOutcome] | None = None,
         ci_full_rerun: Callable[[str, Sequence[str]], RerunOutcome] | None = None,
@@ -127,6 +128,7 @@ class DispatcherBase:
         self.retarget_delta = retarget_delta
         self._moved_heads: dict[tuple[str, str, str, str], MovedHead | None] = {}
         self.approvals = approvals if approvals is not None else Approvals()
+        self.refused_harnesses = frozenset(refused_harnesses)
         self.ci_logs = ci_logs
         self._ci_log_reads: dict[tuple[str, str, tuple[str | None, ...]], Mapping[str, str]] = {}
         self._ci_log_failures: set[tuple[str, str, tuple[str | None, ...]]] = set()

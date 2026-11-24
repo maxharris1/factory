@@ -18,11 +18,12 @@ import yaml
 
 from lib.machines_yml import BOT_TOKEN, workdir_problem
 from lib.pstack_models import brief_lines
-from lib.pstack_pin import FACTORY_DIR, PSTACK_DIR, ROOT, load_pin
+from lib.pstack_pin import FACTORY_DIR, KIT_DIR, PSTACK_DIR, ROOT, load_pin
 from lib.ticket_type import TICKET_TYPES
 
 _SKILL_PATH = re.compile(r"^\.claude/skills/[a-z0-9-]+/SKILL\.md$")
 _UNREADABLE = (OSError, ValueError, yaml.YAMLError)
+_SECTION_DIRS = {"files": PSTACK_DIR, "factory": FACTORY_DIR, "kit": KIT_DIR}
 
 
 @dataclass(frozen=True)
@@ -32,7 +33,7 @@ class Pinned:
 
     @property
     def path(self) -> str:
-        base = PSTACK_DIR if self.section == "files" else FACTORY_DIR
+        base = _SECTION_DIRS[self.section]
         return f"{base.as_posix()}/{self.rel}"
 
     def under(self, root: str) -> str:
@@ -45,6 +46,10 @@ def _pstack(rel: str) -> Pinned:
 
 def _factory(rel: str) -> Pinned:
     return Pinned("factory", rel)
+
+
+def _kit(rel: str) -> Pinned:
+    return Pinned("kit", rel)
 
 
 AGENT_FILES = (_pstack("agents/comment-sicko.md"), _pstack("agents/poteto-agent.md"))
@@ -90,6 +95,7 @@ def builder_files(action: str, ticket_type: str | None) -> tuple[Pinned, ...]:
         PLAYBOOKS[ticket_type or "feature"],
         *ACTION_FILES.get(action, ()),
         _pstack("skills/poteto-mode/playbooks/opening-a-pr.md"),
+        _kit("deslop/SKILL.md"),
         _pstack("skills/principle-prove-it-works/SKILL.md"),
         _pstack("skills/no-comments/SKILL.md"),
         *AGENT_FILES,
@@ -124,7 +130,7 @@ def resolve(
         pin = load_pin(pin_root)
     except _UNREADABLE as exc:
         return f"skills/skills.lock cannot be read ({exc})"
-    pinned = {"files": pin.hashes(), "factory": pin.factory_hashes()}
+    pinned = {"files": pin.hashes(), "factory": pin.factory_hashes(), "kit": pin.kit_hashes()}
     files = (*(builder_files(action, ticket_type) if role == "builder" else REVIEWER_FILES), adapter)
     missing = [item.under(factory_root) for item in files if item.rel not in pinned[item.section]]
     if missing:

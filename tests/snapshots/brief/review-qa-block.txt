@@ -87,8 +87,8 @@ The acceptance criteria below are from https://github.com/owner/repo/pull/42#iss
 - ac-2: The button opens the sign-up form with the free plan chosen.
 ````
 ````ticket
-ac-1: ac-1: The pricing page shows a `Start free` button above the plans.
-ac-2: ac-2: The button opens the sign-up form with the free plan chosen.
+ac-1: The pricing page shows a `Start free` button above the plans.
+ac-2: The button opens the sign-up form with the free plan chosen.
 ````
 
 ## Handoff comment
@@ -287,8 +287,8 @@ The acceptance criteria below are from https://github.com/owner/repo/pull/42#iss
 - ac-2: The button opens the sign-up form with the free plan chosen.
 ````
 ````ticket
-ac-1: ac-1: The pricing page shows a `Start free` button above the plans.
-ac-2: ac-2: The button opens the sign-up form with the free plan chosen.
+ac-1: The pricing page shows a `Start free` button above the plans.
+ac-2: The button opens the sign-up form with the free plan chosen.
 ````
 
 ## Handoff comment

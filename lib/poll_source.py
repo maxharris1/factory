@@ -141,9 +141,19 @@ query FactoryIssue($id: String!) {
     }
     comments(first: 250) {
       nodes { id body createdAt editedAt url user { id } }
-      pageInfo { hasNextPage }
+      pageInfo { hasNextPage endCursor }
     }
     labels(first: 50) { nodes { name } pageInfo { hasNextPage } }
+  }
+}
+""".strip()
+LINEAR_COMMENTS_QUERY = """
+query FactoryComments($id: String!, $after: String!) {
+  issue(id: $id) {
+    comments(first: 250, after: $after) {
+      nodes { id body createdAt editedAt url user { id } }
+      pageInfo { hasNextPage endCursor }
+    }
   }
 }
 """.strip()
@@ -185,8 +195,10 @@ LINEAR_COMPLEXITY_PER_HOUR = 3_000_000
 LINEAR_SHARE = 0.5
 LINEAR_SEARCH_COMPLEXITY = 116
 LINEAR_ISSUE_COMPLEXITY = 779
+LINEAR_COMMENTS_COMPLEXITY = 505
 LINEAR_STATES_COMPLEXITY = 250
 LINEAR_STATES_PAGE = 100
+LINEAR_COMMENTS_MAX_PAGES = 20
 BRANCH_LOOKUPS_PER_REPO = 10
 ORCHESTRATOR = "grok-bot"
 RISKY_PATH = re.compile(r"migration|realtime")
@@ -2444,23 +2456,7 @@ class LivePollSource:
             if cached.merged and tracked:
                 self._linear_merged(project, identifier, allow_merged)
             return cached
-        comments_data = _object(issue.get("comments"), "Linear comments")
-        comments_page = _object(
-            comments_data.get("pageInfo"),
-            "Linear comments pageInfo",
-        )
-        if comments_page.get("hasNextPage") is True:
-            raise PollSourceError("Linear issue has more than 250 comments")
-        linear_comments = tuple(
-            sorted(
-                (
-                    comment
-                    for item in _array(comments_data.get("nodes"), "Linear comment nodes")
-                    if (comment := _linear_comment(item)) is not None
-                ),
-                key=lambda item: (item.created_at, item.id),
-            )
-        )
+        linear_comments = self._linear_comments(issue, identifier)
         comments = linear_comments
         brief = canonical_brief(linear_comments, self._trusted)
         head = _latest_head(linear_comments)
@@ -2566,6 +2562,49 @@ class LivePollSource:
         )
         self._ticket_cache[cache_key] = ticket
         return ticket
+
+    def _linear_comments(
+        self, issue: Mapping[str, Any], identifier: str
+    ) -> tuple[Comment, ...]:
+        comments_data = _object(issue.get("comments"), "Linear comments")
+        comments_page = _object(
+            comments_data.get("pageInfo"),
+            "Linear comments pageInfo",
+        )
+        raw_nodes = list(_array(comments_data.get("nodes"), "Linear comment nodes"))
+        seen_cursors: set[str] = set()
+        pages = 1
+        issue_id = _optional_string(issue.get("id")) or identifier
+        while comments_page.get("hasNextPage") is True:
+            cursor = comments_page.get("endCursor")
+            if not isinstance(cursor, str) or not cursor:
+                raise PollSourceError("Linear issue has more than 250 comments")
+            if cursor in seen_cursors or pages >= LINEAR_COMMENTS_MAX_PAGES:
+                raise PollSourceError(
+                    f"Linear issue has more than {250 * LINEAR_COMMENTS_MAX_PAGES} comments"
+                )
+            seen_cursors.add(cursor)
+            document = self._linear_request(
+                {
+                    "query": LINEAR_COMMENTS_QUERY,
+                    "variables": {"id": issue_id, "after": cursor},
+                }
+            )
+            data = _object(document.get("data"), "Linear comments data")
+            page_issue = _object(data.get("issue"), "Linear comments issue")
+            comments_data = _object(page_issue.get("comments"), "Linear comments")
+            comments_page = _object(
+                comments_data.get("pageInfo"),
+                "Linear comments pageInfo",
+            )
+            raw_nodes.extend(_array(comments_data.get("nodes"), "Linear comment nodes"))
+            pages += 1
+        by_id: dict[str, Comment] = {}
+        for item in raw_nodes:
+            comment = _linear_comment(item)
+            if comment is not None:
+                by_id[comment.id] = comment
+        return tuple(sorted(by_id.values(), key=lambda item: (item.created_at, item.id)))
 
     def _intake_risk(
         self, repo: str, ticket_id: str, comments: Sequence[Comment]
@@ -3384,6 +3423,8 @@ def _linear_ref_key(ref: TicketRef) -> tuple[str, str]:
 def _linear_request_complexity(query: object) -> int:
     if query == LINEAR_SEARCH_QUERY:
         return LINEAR_SEARCH_COMPLEXITY
+    if query == LINEAR_COMMENTS_QUERY:
+        return LINEAR_COMMENTS_COMPLEXITY
     if query == LINEAR_STATES_QUERY:
         return LINEAR_STATES_COMPLEXITY
     return LINEAR_ISSUE_COMPLEXITY

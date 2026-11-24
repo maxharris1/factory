@@ -99,8 +99,8 @@ The acceptance criteria below are from https://github.com/owner/repo/pull/42#iss
 - ac-2: The button opens sign-up with no card field.
 ````
 ````ticket
-ac-1: ac-1: The pricing page shows a `Start free` button above the plans.
-ac-2: ac-2: The button opens sign-up with no card field.
+ac-1: The pricing page shows a `Start free` button above the plans.
+ac-2: The button opens sign-up with no card field.
 ````
 
 ## Handoff comment
@@ -325,8 +325,8 @@ The acceptance criteria below are from https://github.com/owner/repo/pull/42#iss
 - ac-2: The button opens sign-up with no card field.
 ````
 ````ticket
-ac-1: ac-1: The pricing page shows a `Start free` button above the plans.
-ac-2: ac-2: The button opens sign-up with no card field.
+ac-1: The pricing page shows a `Start free` button above the plans.
+ac-2: The button opens sign-up with no card field.
 ````
 
 ## Handoff comment
