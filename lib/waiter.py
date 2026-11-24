@@ -156,7 +156,7 @@ from lib.handoff_check import (
     ReadError,
     expected_for,
     gh_reader,
-    ready_head,
+    ready_at,
     retrying,
 )
 from lib.handoff_check import problems as handoff_problems
@@ -164,11 +164,9 @@ from lib.handoff_marker import handoff_marker
 from lib.heal import _webhook
 from lib.health import LOADED_VERSION, checkout_sha
 from lib.orch_yml import Approvals, OrchConfig, approvals, load_orch_yml
-from lib.pre_ready import ContextUnavailable, check_environ, spec_for
-from lib.pre_ready import run as run_pre_ready
+from lib.pre_ready import ContextUnavailable, check_environ, checks_for, first_failure
 from lib.pstack_pin import LOCK_PATH, ROOT as FACTORY_CHECKOUT
 from lib.queue import (
-    PRE_READY_FAILED,
     ClaimProofError,
     Job,
     Proof,
@@ -1426,7 +1424,7 @@ class Waiter:
             read = retrying(gh_reader(), lambda line: self.log(f"job {job_id}: {line}"))
             found = handoff_problems(expected, comment_id, read, config.trusted_logins)
             if not found:
-                return self._refused_by_pre_ready(job_id, comment_id, proof, config, expected, read)
+                return self._refused_by_head_checks(job_id, comment_id, proof, config, expected, read)
             detail = "; ".join(found)
             retry_locked(
                 lambda: self.queue.record_invalid_handoff(
@@ -1445,7 +1443,7 @@ class Waiter:
         self.log(f"job {job_id}: {reason}")
         return reason
 
-    def _refused_by_pre_ready(
+    def _refused_by_head_checks(
         self,
         job_id: str,
         comment_id: str,
@@ -1454,40 +1452,45 @@ class Waiter:
         expected: Expected,
         read: Read,
     ) -> str | None:
-        """#503: a fitting ready runs the base factory.md's review.pre_ready
+        """#503, #1463: a fitting ready runs the base factory.md's head checks
         at the ready's head, in a throwaway worktree of the shared clone (the
         remote run's checkout is on its device)."""
-        head = ready_head(expected, comment_id, read)
-        if head is None:
+        ready = ready_at(expected, comment_id, read)
+        if ready is None:
             return None
         source = GhContextSource(config, retry_log=lambda line: self.log(f"job {job_id}: {line}"))
-        spec = spec_for(source, expected.repo)
-        if spec is None:
+        checks = checks_for(source, expected.repo, ready.base)
+        if not checks:
             return None
         with detached_checkout(
-            work_root(None), expected.repo, head, url_template(None)
+            work_root(None), expected.repo, ready.head, url_template(None)
         ) as checkout:
-            result = run_pre_ready(
-                spec, checkout, head, check_environ(os.environ, approvals(config))
+            failed = first_failure(
+                checks,
+                checkout,
+                ready.head,
+                check_environ(os.environ, approvals(config)),
+                lambda check: retry_locked(
+                    lambda: self.queue.record_check_passed(
+                        job_id, event=check.passed_event, comment_id=comment_id,
+                        head=ready.head, proof=proof,
+                    )
+                ),
             )
-        if result.passed:
-            retry_locked(
-                lambda: self.queue.record_pre_ready_passed(
-                    job_id, comment_id=comment_id, head=head, proof=proof
-                )
-            )
+        if failed is None:
             return None
-        detail = f"pre_ready failed: {result.reason}"
+        check, result = failed
+        detail = f"{check.name} failed: {result.reason}"
         retry_locked(
             lambda: self.queue.record_invalid_handoff(
                 job_id, owner=self.recipient, comment_id=comment_id, detail=detail,
-                proof=proof, event=PRE_READY_FAILED,
+                proof=proof, event=check.failed_event,
             )
         )
-        reason = f"pre_ready failed {comment_id}: {result.reason}"
+        reason = f"{check.name} failed {comment_id}: {result.reason}"
         self.log(f"job {job_id}: {reason}")
         if result.tail:
-            self.log(f"job {job_id}: pre_ready output:\n{result.tail}")
+            self.log(f"job {job_id}: {check.name} output:\n{result.tail}")
         return reason
 
     def _forget_remote(self, job_dir: Path) -> None:

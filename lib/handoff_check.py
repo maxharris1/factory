@@ -272,6 +272,7 @@ def _posted_at(created_at: object) -> float | None:
 class _Pull:
     sha: str
     ref: str
+    base: str | None = None
 
 
 def _pull(repo: str, number: int, read: Read) -> _Pull | None:
@@ -279,13 +280,14 @@ def _pull(repo: str, number: int, read: Read) -> _Pull | None:
         pull = read(f"repos/{repo}/pulls/{number}")
     except NotFound:
         return None
-    head = pull.get("head")
+    head, base = pull.get("head"), pull.get("base")
+    base_ref = (str(base.get("ref") or "") or None) if isinstance(base, Mapping) else None
     if not isinstance(head, Mapping):
-        return _Pull(sha="", ref="")
+        return _Pull(sha="", ref="", base=base_ref)
     sha, ref = str(head.get("sha") or ""), str(head.get("ref") or "")
     if ref and pull.get("state") == "closed" and not pull.get("merged"):
         sha = _branch_tip(repo, ref, read) or sha
-    return _Pull(sha=sha, ref=ref)
+    return _Pull(sha=sha, ref=ref, base=base_ref)
 
 
 def _branch_tip(repo: str, ref: str, read: Read) -> str | None:
@@ -314,9 +316,15 @@ def _bots_for(trusted_logins: Mapping[str, frozenset[str]], login: str) -> froze
     return frozenset()
 
 
-def ready_head(expected: Expected, comment_id: str, read: Read) -> str | None:
+@dataclass(frozen=True)
+class ReadyAt:
+    head: str
+    base: str | None
+
+
+def ready_at(expected: Expected, comment_id: str, read: Read) -> ReadyAt | None:
     """The head a ready names (#503), as the PR's full sha when they still
-    agree; None when the handoff is not a ready."""
+    agree, and the PR's base; None when the handoff is not a ready."""
     if expected.kind != "ready":
         return None
     comment = read(f"repos/{expected.repo}/issues/comments/{comment_id}")
@@ -331,4 +339,6 @@ def ready_head(expected: Expected, comment_id: str, read: Read) -> str | None:
         return None
     pull = _pull(match.group(1), int(match.group(2)), read)
     named = str(fields.get("head") or "")
-    return pull.sha if pull is not None and _same_head(named, pull.sha) else named
+    if pull is None:
+        return ReadyAt(named, None)
+    return ReadyAt(pull.sha if _same_head(named, pull.sha) else named, pull.base)

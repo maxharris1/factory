@@ -354,6 +354,12 @@ class FactoryConfig:
         return self.hold is not None and self.ship in ("merge", "handoff")
 
 
+def no_ci_base(factory: FactoryConfig, pr_base: str | None) -> str | None:
+    if factory.ci_branches is None or pr_base is None or pr_base in factory.ci_branches:
+        return None
+    return pr_base
+
+
 def trust_front_matter_changed(base_text: str | None, head_text: str | None) -> bool:
     base = _trust_sections(base_text)
     head = _trust_sections(head_text)

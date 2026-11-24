@@ -42,7 +42,8 @@ from lib.job_state import (
     never_started,
     read_placements,
 )
-from lib.queue import PRE_READY_FAILED, PRE_READY_PASSED, JobRequest
+from lib.pre_ready import planned
+from lib.queue import CHECK_FAILED_EVENTS, CHECK_PASSED_EVENTS, LOCAL_GATE_FAILED, JobRequest
 from lib.update_check import UpdateClass, UpdateScope
 
 
@@ -504,19 +505,24 @@ class MergeQueueMixin:
                 events = connection.execute(
                     f"""
                     SELECT event, detail FROM {JOB_EVENTS_TABLE}
-                    WHERE job_id = ? AND event IN (?, ?) ORDER BY id
+                    WHERE job_id = ? AND event IN (?, ?, ?, ?) ORDER BY id
                     """,
-                    (job_id, PRE_READY_FAILED, PRE_READY_PASSED),
+                    (job_id, *CHECK_FAILED_EVENTS, *CHECK_PASSED_EVENTS),
                 ).fetchall()
-        failed = [str(detail) for event, detail in events if event == PRE_READY_FAILED]
+        failed = [(event, str(detail)) for event, detail in events if event in CHECK_FAILED_EVENTS]
         if failed:
-            return f"The update job pushed {head} but its pre_ready check failed: {failed[-1]}"
-        if ticket.factory.pre_ready is None or any(
-            event == PRE_READY_PASSED and str(detail).endswith(f": at {head}")
-            for event, detail in events
-        ):
-            return None
-        return f"The update job pushed {head} but its pre_ready check never passed at that head"
+            event, detail = failed[-1]
+            name = "local_gate" if event == LOCAL_GATE_FAILED else "pre_ready"
+            return f"The update job pushed {head} but its {name} check failed: {detail}"
+        for check in planned(ticket.factory, ticket.pr_base):
+            if not any(
+                event == check.passed_event and str(detail).endswith(f": at {head}")
+                for event, detail in events
+            ):
+                return (
+                    f"The update job pushed {head} but its {check.name} check never passed at that head"
+                )
+        return None
 
     def _settle_orphaned_update(self, ticket: TrackedTicket, row: sqlite3.Row, head: str) -> bool:
         """True once the ticket left the queue, so another may merge ahead of it (#660)."""
@@ -554,7 +560,7 @@ class MergeQueueMixin:
                 self._set_workflow_state(ticket, "fixing")
                 if self.log is not None:
                     self.log(
-                        f"update pre_ready unmet: {ticket.repo}#{ticket.ticket_id} at "
+                        f"update head checks unmet: {ticket.repo}#{ticket.ticket_id} at "
                         f"{head[:12]}, its update job gone: fix queued"
                     )
                 return True

@@ -24,7 +24,7 @@ import yaml
 
 from lib.cli import main as cli_main
 from lib.dispatcher import CIResult, TrackedTicket
-from lib.factory_md import CheckCommand, FactoryConfig
+from lib.factory_md import CheckCommand
 from lib.pre_ready import planned
 from lib.queue import (
     LOCAL_GATE_FAILED,
@@ -167,14 +167,17 @@ def box(tmp_path: Path, _fake_gh_store: Path, monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_planned_runs_the_gate_only_on_a_base_outside_ci_branches() -> None:
+    from tests.test_dispatcher import factory
+
     gate = CheckCommand("make gate", 60)
-    with_ci = FactoryConfig(ci_branches=("main",), ci_local_gate=gate)
+    plain = factory()
+    with_ci = replace(plain, ci_branches=("main",), ci_local_gate=gate)
 
     assert [check.name for check in planned(with_ci, FEATURE)] == ["local_gate"]
     assert planned(with_ci, FEATURE)[0].spec == gate
     assert planned(with_ci, "main") == ()
-    assert planned(FactoryConfig(), FEATURE) == ()
-    assert planned(FactoryConfig(ci_branches=("main",)), FEATURE) == ()
+    assert planned(plain, FEATURE) == ()
+    assert planned(replace(plain, ci_branches=("main",)), FEATURE) == ()
     both = replace(with_ci, pre_ready=CheckCommand("make check", 30))
     assert [check.name for check in planned(both, FEATURE)] == ["pre_ready", "local_gate"]
     assert [check.name for check in planned(both, "main")] == ["pre_ready"]
@@ -226,7 +229,7 @@ def test_a_gate_timeout_refuses(box: Box, capsys) -> None:
 
 def test_gate_failures_count_toward_the_invalid_handoff_cap(box: Box, capsys) -> None:
     box.ready(_factory_text("exit 1"))
-    serve_handoff(box.store, box.job, "1102", pr_head=box.head, pr_base=FEATURE, kind="nonsense")
+    serve_handoff(box.store, box.job, "1102", pr_head=box.head, pr_base=FEATURE, login="stranger")
 
     assert box.done("1102") == 1
     for _ in range(MAX_INVALID_HANDOFFS - 1):

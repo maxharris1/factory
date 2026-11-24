@@ -92,9 +92,10 @@ from lib.job_state import (
 from lib.machines_yml import Device, MachinesConfig, orch_host
 from lib.max_actions import may_hand_off
 from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES
+from lib.pre_ready import planned
 from lib.queue import (
-    PRE_READY_FAILED,
-    PRE_READY_PASSED,
+    CHECK_FAILED_EVENTS,
+    CHECK_PASSED_EVENTS,
     QA_RECIPIENT,
     RECIPIENTS,
     SLOTS_TABLE,
@@ -1478,7 +1479,7 @@ class JobsMixin:
                 or self._update_job_before(ticket, item) != job.id
             ):
                 continue
-            if kind == "ready" and self._pre_ready_unmet(ticket, item.id):
+            if kind == "ready" and self._head_checks_unmet(ticket, item.id):
                 continue
             unread = (
                 kind == "ready"
@@ -1490,9 +1491,9 @@ class JobsMixin:
             return HandoffCandidate(item, unread)
         return None
 
-    def _pre_ready_unmet(self, ticket: TrackedTicket, comment_id: str) -> bool:
-        """A ready settles no job (#503) once its pre_ready check failed, or
-        while factory.md sets review.pre_ready and the check never passed.
+    def _head_checks_unmet(self, ticket: TrackedTicket, comment_id: str) -> bool:
+        """A ready settles no job (#503, #1463) once any of its head checks
+        failed, or while a check factory.md plans for this PR never passed.
         Keyed on the comment, not the job, so a T6 retry cannot settle with it."""
         prefix = f"handoff {comment_id}:"
         with self._connect() as connection:
@@ -1501,18 +1502,20 @@ class JobsMixin:
                 for row in connection.execute(
                     """
                     SELECT DISTINCT event FROM job_events
-                    WHERE repo = ? AND ticket_id = ? AND event IN (?, ?)
+                    WHERE repo = ? AND ticket_id = ? AND event IN (?, ?, ?, ?)
                       AND substr(detail, 1, ?) = ?
                     """,
                     (
-                        ticket.repo.lower(), ticket.ticket_id, PRE_READY_FAILED,
-                        PRE_READY_PASSED, len(prefix), prefix,
+                        ticket.repo.lower(), ticket.ticket_id, *CHECK_FAILED_EVENTS,
+                        *CHECK_PASSED_EVENTS, len(prefix), prefix,
                     ),
                 )
             }
-        if PRE_READY_FAILED in events:
+        if events.intersection(CHECK_FAILED_EVENTS):
             return True
-        return ticket.factory.pre_ready is not None and PRE_READY_PASSED not in events
+        return any(
+            check.passed_event not in events for check in planned(ticket.factory, ticket.pr_base)
+        )
 
     def _done_from_handoff(self, job: Job, handoff: Comment) -> None:
         """Mark a failed job done with the handoff it already posted."""
