@@ -16,7 +16,7 @@ from tests.test_dispatcher import (
     ticket,
 )
 
-COMPARE_PREFIX = "repos/owner/repo/compare/main..."
+COMPARE = "repos/owner/repo/compare/"
 
 
 def git(repo: Path, *args: str) -> str:
@@ -58,8 +58,9 @@ def heads(tmp_path: Path) -> dict[str, str | Path]:
 
 class RepoGh:
 
-    def __init__(self, repo: Path, *, diff: str | None = None, fail: bool = False):
+    def __init__(self, repo: Path, *, diff: str | None = None, fail: bool = False, base: str = "main"):
         self.repo = repo
+        self.base = base
         self.diff = diff
         self.fail = fail
         self.calls: list[list[str]] = []
@@ -69,15 +70,16 @@ class RepoGh:
         self.calls.append(argv)
         endpoint = argv[-1]
         if endpoint == "repos/owner/repo/pulls/42":
-            return GhResult(0, json.dumps({"base": {"ref": "main"}}), "")
+            return GhResult(0, json.dumps({"base": {"ref": self.base}}), "")
         assert argv[-3:-1] == ["-H", "Accept: application/vnd.github.diff"], argv
-        assert endpoint.startswith(COMPARE_PREFIX), endpoint
+        prefix = f"{COMPARE}{self.base}..."
+        assert endpoint.startswith(prefix), endpoint
         if self.fail:
             return GhResult(1, "", "gh: Not Found (HTTP 404)\n")
         if self.diff is not None:
             return GhResult(0, self.diff, "")
-        head = endpoint.removeprefix(COMPARE_PREFIX)
-        base = git(self.repo, "merge-base", "main", head)
+        head = endpoint.removeprefix(prefix)
+        base = git(self.repo, "merge-base", self.base, head)
         return GhResult(0, git(self.repo, "diff", base, head) + "\n", "")
 
 
@@ -203,3 +205,25 @@ def test_a_changed_or_unreadable_patch_re_reviews(tmp_path: Path, heads, gh: dic
     assert review is not None
     assert review.request.action == "review"
     assert review.request.head == heads["different"]
+
+
+def test_a_stacked_child_compare_covers_only_its_own_files(tmp_path: Path) -> None:
+    repo = tmp_path / "stack"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.email", "t@example.com")
+    git(repo, "config", "user.name", "t")
+    commit(repo, "base.txt", "one\n", "base")
+    git(repo, "checkout", "-q", "-b", "factory/issue-1449")
+    commit(repo, "parent_only.py", "parent = 1\n", "parent")
+    git(repo, "checkout", "-q", "-b", "child")
+    head = commit(repo, "child.py", "child = 1\n", "child")
+    gh = RepoGh(repo, base="factory/issue-1449")
+
+    GitHubReviewActions(gh).stable_patch_id(pr(), head)
+
+    (compare,) = [call for call in gh.calls if "/compare/" in call[-1]]
+    assert compare[-1] == f"{COMPARE}factory/issue-1449...{head}"
+    diff = gh(compare, 10).stdout
+    assert "child.py" in diff
+    assert "parent_only.py" not in diff

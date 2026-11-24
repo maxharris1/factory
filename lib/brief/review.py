@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from lib.brief.common import _HEAD, _URL, Lead, evidence_part, fenced, local_checks, pr_ref
+from lib.brief.common import _HEAD, _URL, Lead, evidence_part, fenced, local_checks, pr_ref, stack_lines
 from lib.factory_md import padded_estimate
 from lib.followups import followup_start, followups_active
 
@@ -190,6 +190,8 @@ def lead(facts: dict) -> Lead:
     base = facts["base"] or "<base branch>"
     head = facts["head"] or "the PR head"
     later_round = (facts["round_number"] or 1) > 1
+    stacked = () if later_round else stack_lines(facts)
+    tip = facts["head"] or "<pr-head>"
     variant = followups_active(facts["followup_from"], facts["round_number"])
     user_impact = facts["block_on"] == "user-impact"
     mode, reason = review_mode(facts)
@@ -281,6 +283,10 @@ def lead(facts: dict) -> Lead:
         f"Review {pr_ref(facts)} at {head} against every acceptance criterion and post one verdict.",
         (
             f"Review against `{base}`. You are the one cross-family reviewer. Follow the router in Skills below.",
+            *(
+                f"{line} Read its files with `git diff --stat origin/{facts['stack']['branch']}...{tip}`."
+                for line in stacked
+            ),
             f"Mode: `{mode}`. {reason} {summary}",
             *(f"{number}. {step}" for number, step in enumerate(steps, 1)),
         ),

@@ -4,7 +4,18 @@ import re
 from typing import NamedTuple
 
 from lib.brief.build import base_step, builder_notes, proof_lines
-from lib.brief.common import GH, TEST_SCOPE, Lead, code_span, comment_url, detail_of, evidence_part, fenced, pr_ref
+from lib.brief.common import (
+    GH,
+    TEST_SCOPE,
+    Lead,
+    code_span,
+    comment_url,
+    detail_of,
+    evidence_part,
+    fenced,
+    pr_ref,
+    stack_lines,
+)
 from lib.queue import Job
 
 _REVIEW_ID = re.compile(r"#pullrequestreview-(\d+)$")
@@ -24,7 +35,7 @@ def lead(job: Job, facts: dict) -> Lead:
         goal, lines, proof = _review_fix(detail, facts, verdict)
     else:
         goal, lines, proof = _ci_fix(detail, facts)
-    return Lead(goal, (*lines, *builder_notes(job, facts)), (proof, *proof_lines(detail)))
+    return Lead(goal, (*stack_lines(facts), *lines, *builder_notes(job, facts)), (proof, *proof_lines(detail)))
 
 
 def quoted_findings(detail: dict[str, object], facts: dict) -> list[dict[str, object]]:

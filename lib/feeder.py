@@ -186,7 +186,7 @@ from lib.device_pool import free_slots, placement_blocked, slots_in_use
 from lib.device_sync import Blocked
 from lib.dispatch.bookkeeping import LockLedger, bookkeeping_write, must_write
 from lib.dispatch.constants import TERMINAL_STATES
-from lib.dispatch.types import BaseCheck, FailedCheck
+from lib.dispatch.types import BaseCheck, FailedCheck, StackParent
 from lib.dispatcher import Comment, TicketRef, TrackedTicket, safe_ship_error
 from lib.evidence.ci import CIEvidence, MainRed, ci_evidence, main_red
 from lib.evidence.criteria import numbered
@@ -769,13 +769,6 @@ class LinearIntake(Protocol):
     def linear_comments(self, issue_id: str) -> Sequence[Comment]: ...
 
     def post_linear_comment(self, issue_id: str, body: str) -> str: ...
-
-
-@dataclass(frozen=True)
-class StackParent:
-    pr: int
-    branch: str
-    head: str
 
 
 @dataclass(frozen=True)
@@ -2704,7 +2697,7 @@ class Feeder:
             candidate, branch=branch, base_branch=base,
             stack_parent_pr=parent and parent.pr,
             stack_parent_branch=parent and parent.branch,
-            stack_parent_head_at_feed=parent and parent.head,
+            stack_parent_head_at_feed=parent and parent.sha,
         )
         if number is None:
             if not branch_found:
@@ -3132,7 +3125,7 @@ def _brief(
     parent: StackParent | None = None,
 ) -> str:
     config = context.config
-    stacked = f" (stacked on #{parent.pr} at `{parent.head}`)" if parent is not None else ""
+    stacked = f" (stacked on #{parent.pr} at `{parent.sha}`)" if parent is not None else ""
     body = issue.body.strip() or "(the ticket has no body)"
     if len(body) > BODY_LIMIT:
         body = body[:BODY_LIMIT] + f"\n[cut at {BODY_LIMIT} characters]"

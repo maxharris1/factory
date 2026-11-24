@@ -49,6 +49,7 @@ from lib.dispatch.types import (
     LinearState,
     LinearStateRead,
     PullReview,
+    StackParent,
     ci_fresh,
     pr_ci,
 )
@@ -551,9 +552,20 @@ class FedPulls:
         ).fetchone()
         return None if row is None or row[0] is None else str(row[0])
 
+    def stack_parent(self, repo: str, ticket_id: str) -> tuple[int, str] | None:
+        if not {"stack_parent_pr", "stack_parent_branch"} <= self._columns():
+            return None
+        row = self._connection.execute(
+            f"SELECT stack_parent_pr, stack_parent_branch FROM {FEEDER_TABLE} WHERE repo = ? AND ticket_id = ?",
+            (repo.lower(), ticket_id),
+        ).fetchone()
+        return None if row is None or None in row else (int(row[0]), str(row[1]))
+
+    def _columns(self) -> set[str]:
+        return {row[1] for row in self._connection.execute(f"PRAGMA table_info({FEEDER_TABLE})")}
+
     def _read(self, column: str, repo: str, identifier: str) -> str | None:
-        columns = {row[1] for row in self._connection.execute(f"PRAGMA table_info({FEEDER_TABLE})")}
-        if column not in columns:
+        if column not in self._columns():
             return None
         row = self._connection.execute(
             f"SELECT {column} FROM {FEEDER_TABLE} WHERE repo = ? AND issue = ?",
@@ -2083,6 +2095,8 @@ class LivePollSource:
                 )
         brief = canonical_brief(comments, self._trusted)
         source_issue = github_source(pull, project.repo, number)
+        if (stack := self._stack(project.repo, number, pull)) is not None:
+            factory = replace(factory, base_branch=stack.branch)
         ticket = TrackedTicket(
             **hold_inputs,
             repo=project.repo,
@@ -2119,10 +2133,18 @@ class LivePollSource:
             intake_label=project.intake.label if project.intake else None,
             source_issue=source_issue,
             pr_title=_open_title(pull),
+            stack=stack,
             **_pull_facts(pull, fresh=fresh),
         )
         self._ticket_cache[cache_key] = ticket
         return ticket
+
+    def _stack(self, repo: str, ticket_id: str, pull: Mapping[str, Any]) -> StackParent | None:
+        recorded = self.fed_pulls.stack_parent(repo, ticket_id)
+        if recorded is None or _pr_base(pull) != recorded[1]:
+            return None
+        sha = _optional_string(pull["base"].get("sha"))
+        return None if sha is None else StackParent(*recorded, sha)
 
     def _reviews(self, repo: str, number: str, factory: FactoryConfig) -> tuple[PullReview, ...]:
         return self.github.list_reviews(repo, number) if factory.ship == "handoff" else ()
@@ -2406,8 +2428,11 @@ class LivePollSource:
         pull_facts: dict[str, Any] = {"merged": False}
         pull: Mapping[str, Any] = {}
         reviews: tuple[PullReview, ...] = ()
+        stack = None
         if pr_number is not None:
             pull = self._github_pull(project.repo, pr_number, fresh=fresh or uncached)
+            if (stack := self._stack(project.repo, identifier, pull)) is not None:
+                factory = replace(factory, base_branch=stack.branch)
             # #108: a cached discovery read still carries the merge.
             pull_facts = {**_pull_facts(pull, fresh=fresh), "merged": pull.get("merged") is True}
             if pull_facts["merged"] and tracked:
@@ -2475,6 +2500,7 @@ class LivePollSource:
             ready_starts_review=project.ready_starts_review,
             source_issue=identifier if pr_number is not None and SOURCE.fullmatch(identifier) else None,
             pr_title=pr_title,
+            stack=stack,
             **pull_facts,
         )
         self._ticket_cache[cache_key] = ticket
