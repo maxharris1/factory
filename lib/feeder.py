@@ -3003,7 +3003,12 @@ class Feeder:
         if row is None or row[0] is None:
             return None
         proof = json.loads(row[0])
-        return RetargetProof(proof["onto_from"], proof["head"], tuple(proof["parent_heads"]))
+        return RetargetProof(
+            proof["onto_from"],
+            proof["head"],
+            tuple(proof["parent_heads"]),
+            proof.get("parent_head"),
+        )
 
     def set_pending_retarget(
         self, connection: sqlite3.Connection, ticket: TrackedTicket, proof: RetargetProof | None

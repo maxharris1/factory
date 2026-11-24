@@ -156,6 +156,7 @@ from lib.update_check import (
     HeadDiff,
     MovedHead,
     RebaseScope,
+    RetargetDelta,
     UpdateClass,
     classify as classify_update,
     head_diff,
@@ -163,6 +164,7 @@ from lib.update_check import (
     merge_update,
     moved_head_probe,
     rebase_scope,
+    retarget_delta,
     stack_bounds,
 )
 from lib.wait import (
@@ -1447,6 +1449,7 @@ def _runtime(
         qa_diff=_qa_diff,
         moved_head=_moved_head_probe,
         stack_bounds=_stack_bounds_probe,
+        retarget_delta=_retarget_delta_probe,
     )
     source.error_sink = dispatcher.record_poll_error
     source.warning_sink = lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True)
@@ -1507,6 +1510,20 @@ def _stack_bounds_probe(repo: str, old_head: str, parent_heads: tuple[str, ...])
         worktrees.work_root(None), repo, (old_head, *parent_heads), worktrees.url_template(None)
     )
     return stack_bounds(clone, old_head, parent_heads)
+
+
+def _retarget_delta_probe(
+    repo: str, base: str, onto_from: str, from_head: str, parent_head: str, head: str
+) -> RetargetDelta:
+    clone = worktrees.fetched_clone(
+        worktrees.work_root(None),
+        repo,
+        (onto_from, from_head, parent_head, head),
+        worktrees.url_template(None),
+    )
+    return retarget_delta(
+        clone, onto_from, from_head, parent_head, head, f"refs/remotes/origin/{base}"
+    )
 
 
 def _feeder(

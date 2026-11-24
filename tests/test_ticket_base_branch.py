@@ -546,7 +546,7 @@ def fed_child(tmp_path: Path, *, target: str | None = PARENT, text: str | None =
 
 def merge_parent(github: FakeGitHub, *, into: str = "main") -> None:
     github.pulls[(STACK_REPO, PARENT_PR)].update(merged=True, state="closed", base=into)
-    github.landings[(STACK_REPO, PARENT_PR)] = ParentMerged(into=into, heads=(sha(2),))
+    github.landings[(STACK_REPO, PARENT_PR)] = ParentMerged(into=into, head=sha(2), heads=(sha(2),))
     del github.branches[(STACK_REPO, PARENT)]
 
 
@@ -678,10 +678,12 @@ def test_an_unreadable_parent_stays_base_mismatch_and_records_the_error(tmp_path
 
 def test_a_stacked_child_reads_its_merged_parents_heads_feed_head_first(tmp_path: Path) -> None:
     feeder, _, github, _ = fed_child(tmp_path)
-    github.landings[(STACK_REPO, PARENT_PR)] = ParentMerged(into="main", heads=(sha(4), sha(2), sha(5)))
+    github.landings[(STACK_REPO, PARENT_PR)] = ParentMerged(
+        into="main", head=sha(4), heads=(sha(4), sha(2), sha(5))
+    )
 
     assert feeder.stacked_parent_facts(polled_child(tmp_path, github)) == ParentMerged(
-        into="main", heads=(sha(2), sha(4), sha(5))
+        into="main", head=sha(4), heads=(sha(2), sha(4), sha(5))
     )
 
 
@@ -710,14 +712,16 @@ def test_a_linear_child_takes_its_parents_merge_target(tmp_path: Path) -> None:
         tmp_path, orch=LINEAR_ORCH, github=github, linear=linear, factory_text=LINEAR_FACTORY_MD
     )
     assert len(feeder.feed_once().fed) == 1
-    github.landings[(LINEAR_STACK_REPO, PARENT_PR)] = ParentMerged(into="dev", heads=(sha(4),))
+    github.landings[(LINEAR_STACK_REPO, PARENT_PR)] = ParentMerged(into="dev", head=sha(4), heads=(sha(4),))
     child = TrackedTicket(
         repo=LINEAR_STACK_REPO, ticket_id="AUT-7",
         factory=replace(factory(tickets="linear"), base_branch=PARENT),
         comments=(), current_head=sha(3), ci={}, risk="low", pr_number=str(CHILD_PR), pr_base="dev",
     )
 
-    assert feeder.stacked_parent_facts(child) == ParentMerged(into="dev", heads=(sha(2), sha(4)))
+    assert feeder.stacked_parent_facts(child) == ParentMerged(
+        into="dev", head=sha(4), heads=(sha(2), sha(4))
+    )
     with sqlite3.connect(tmp_path / "orch.db") as connection:
         proof = RetargetProof(sha(9), sha(3), (sha(2), sha(4)))
         assert feeder.move_stack_base(connection, child, "dev", proof)
