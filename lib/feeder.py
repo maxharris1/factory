@@ -1527,7 +1527,10 @@ class Feeder:
                     continue
                 if not assignee_allowed(project, issue):
                     continue
-                if issue.applied_by is None or issue.applied_by not in trusted:
+                if issue.applied_by is None:
+                    self.log(f"feeder: {issue.repo}#{issue.key} skipped: no applied_by")
+                    continue
+                if issue.applied_by not in trusted:
                     continue
                 found.append(
                     _Candidate(
