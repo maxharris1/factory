@@ -105,8 +105,9 @@ def builder_notes(job: Job, facts: dict) -> list[str]:
         command = f"{fence} {spec.command} {fence}" if len(fence) > 1 else f"`{spec.command}`"
         notes.append(
             f"Before `ready` counts, the factory runs {command} (timeout {spec.timeout_seconds}s) "
-            "in your worktree at the head you name. `ready` is not accepted until it passes at the "
-            "pushed head. Run it yourself before you post."
+            "in a fresh checkout of the head you name, without anything uncommitted or untracked "
+            "and without your installed dependencies or generated files. `ready` is not accepted "
+            "until it passes at the pushed head. Run it yourself before you post."
         )
     detail = detail_of(job)
     notes.extend(resume_lines(detail))

@@ -1,8 +1,9 @@
 """#1463: a ready on a PR into a base outside `ci.branches` counts only after
 the base factory.md's `ci.local_gate` passes at the ready's head.
 
-`orch job done --handoff` runs the gate in the job's worktree; the waiter
-runs it for a remote run in a throwaway worktree of its shared clone. A pass
+`orch job done --handoff` runs the gate in a throwaway worktree of the ready's
+head made from the job's worktree; the waiter runs it for a remote run in a
+throwaway worktree of its shared clone. A pass
 records `local-gate-passed` at the head. A failure records
 `local-gate-failed`, counts toward the invalid-handoff cap and refuses the
 ready. A PR into a `ci.branches` base, or a repo with no `ci`, runs no gate.
@@ -233,6 +234,14 @@ def test_the_gate_runs_in_a_checkout_it_leaves_no_trace_of(box: Box) -> None:
     assert not checkout.exists()
     assert not (box.work / "made-by-gate").exists()
     assert _git(box.work, "worktree", "list", "--porcelain").count("worktree ") == 1
+
+
+def test_the_spec_says_box_checks_run_in_a_throwaway_checkout_of_the_head() -> None:
+    spec = (Path(__file__).resolve().parents[1] / "docs/SPEC.md").read_text(encoding="utf-8")
+    (bullet,) = [line for line in spec.splitlines() if line.startswith("- `review.pre_ready` is")]
+    assert "runs in the job's worktree" not in bullet
+    assert "throwaway detached worktree of the ready's head, added from the job's worktree" in bullet
+    assert "installed dependencies" in bullet
 
 
 def test_exit_75_refuses_and_never_passes(box: Box, capsys) -> None:
