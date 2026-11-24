@@ -734,7 +734,9 @@ class DetailMixin:
             )
         if rebase is not None:
             context["rebase"] = {
-                name: value for name, value in asdict(rebase).items() if value is not None
+                name: value
+                for name, value in asdict(rebase).items()
+                if value is not None and value is not False
             }
         if rebase_step is not None:
             context.update(kind="rebase", rebase=rebase_step.block())

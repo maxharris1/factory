@@ -184,6 +184,11 @@ def _delta_line(rebase: dict | None, head: str) -> str:
 
 def review_mode(facts: dict) -> tuple[str, str]:
     round_number = facts["round_number"] or 1
+    if facts["rebased"] and (facts["rebase"] or {}).get("retarget"):
+        return "fix-check", (
+            "A retarget after the stack parent merged rebases this PR's own commits, and pstack's "
+            f'`autopilot-full.md` step 4 says: "{PSTACK_FIX_ROUND}".'
+        )
     if round_number == 1:
         return "full", "Round 1 reviews the whole PR."
     if facts["block_on"] == "user-impact":

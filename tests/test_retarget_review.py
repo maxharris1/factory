@@ -10,7 +10,8 @@ from lib.brief import render_brief
 from lib.queue import JobRequest
 from lib.update_check import RebaseScope, RetargetDelta
 from tests.merge_queue_support import sha
-from tests.regenerate_brief_snapshots import BOX_FACTORY_ROOT
+from lib.factory_md import parse_factory_context
+from tests.regenerate_brief_snapshots import BOX_FACTORY_ROOT, HEAD, _job
 from tests.test_lifecycle import HEADS, Flow
 from tests.test_rebase_review import capped_at_cap, newest_review, rebase_then_ready
 from tests.test_stack_retarget_transition import ONTO, land, ready_on, rebases, wired
@@ -85,6 +86,7 @@ def test_an_edited_child_gets_one_rebase_review_ranged_from_onto_from(tmp_path: 
         "reviewed_base": ONTO,
         "base": NEW_BASE,
         "overlap": [],
+        "retarget": True,
     }
     assert review_round(queue) == 1, "the retarget review spends no round"
     assert dispatcher.retarget_delta.calls == [
@@ -138,6 +140,40 @@ def test_the_retarget_review_brief_names_the_overlap_and_the_onto_from_range(
     assert f"`git range-diff {ONTO}..{FROM_HEAD} {NEW_BASE}..{NEW_HEAD}`" in text
     assert "`lib/b.py`" in text
     assert "`lib/a.py`" not in text
+    assert "Mode: `fix-check`" in text
+
+
+def _mode(round_text: str, rebase: dict | None, source: str | None) -> str:
+    context, _ = parse_factory_context(Path("factory.md").read_text())
+    extra: dict[str, object] = {"round": round_text}
+    if source is not None:
+        extra["source"] = source
+    if rebase is not None:
+        extra["rebase"] = rebase
+    text = render_brief(
+        _job("review", "codex", 1, HEAD, extra), bot="codex-bot", context=context,
+        factory_root=BOX_FACTORY_ROOT,
+    )
+    return next(line for line in text.splitlines() if line.startswith("Mode:"))
+
+
+SCOPE = {"last_reviewed_head": sha(1), "reviewed_base": sha(2), "base": sha(3)}
+
+
+@pytest.mark.parametrize("round_text", ["1/3", "2/3"])
+def test_a_retarget_review_is_a_fix_check_at_the_reused_round(round_text: str) -> None:
+    rebase = {**SCOPE, "overlap": ["shared.py"], "retarget": True}
+
+    assert _mode(round_text, rebase, "rebase").startswith("Mode: `fix-check`")
+
+
+@pytest.mark.parametrize(
+    ("rebase", "source"),
+    [(None, None), (SCOPE, "rebase")],
+    ids=["ordinary", "plain-rebase"],
+)
+def test_round_one_without_a_retarget_stays_a_full_review(rebase, source) -> None:
+    assert _mode("1/3", rebase, source).startswith("Mode: `full`")
 
 
 def test_an_unreadable_delta_still_reviews_from_onto_from_once(tmp_path: Path) -> None:
@@ -149,6 +185,7 @@ def test_an_unreadable_delta_still_reviews_from_onto_from_once(tmp_path: Path) -
         "last_reviewed_head": FROM_HEAD,
         "reviewed_base": ONTO,
         "base": NEW_BASE,
+        "retarget": True,
     }
     assert any("retarget-delta" in error for error in stack_poll_errors(tmp_path))
 

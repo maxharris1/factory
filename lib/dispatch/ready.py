@@ -1844,6 +1844,7 @@ class ReadyMixin:
             scope,
             reviewed_base=retarget.onto_from,
             overlap=self._parent_overlap(ticket, retarget, head),
+            retarget=True,
         )
 
     def _parent_overlap(

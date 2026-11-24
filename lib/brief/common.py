@@ -259,6 +259,8 @@ def _rebase_scope(detail: dict[str, object]) -> dict | None:
     overlap = rebase.get("overlap")
     if isinstance(overlap, list) and all(isinstance(path, str) for path in overlap):
         scope["overlap"] = overlap
+    if rebase.get("retarget") is True:
+        scope["retarget"] = True
     return scope
 
 
