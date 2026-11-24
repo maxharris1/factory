@@ -25,6 +25,7 @@ STEP_AFTER_CI = {
     "ci-rerun": "review",
     "ci-infra-wait": "review",
     "ci-base-red": "review",
+    "local-gate-waiting": "review",
 }
 LOCAL_POOL = "factory-linux"
 _REF = ("repo", "ticket_id", "source", "tracker", "pr", "head_short")

@@ -21,7 +21,10 @@ OK_UNREAD: Final = "unread"
 # so an ok-no-hold there needs no note.
 OK_COVERED_STATES = ("awaiting-ok", "merge-queue", "updating", "handed-off")
 OK_WITHOUT_APPROVE: Final = "ok-without-approve"
-CI_WAIT_REASONS = ("ci-pending", "approved-ci-pending", CI_RERUN, CI_INFRA_WAIT, CI_BASE_RED)
+LOCAL_GATE_WAITING: Final = "local-gate-waiting"
+CI_WAIT_REASONS = (
+    "ci-pending", "approved-ci-pending", CI_RERUN, CI_INFRA_WAIT, CI_BASE_RED, LOCAL_GATE_WAITING
+)
 CI_RERUN_SETTLE_SECONDS = 900.0
 CI_INFRA_WAIT_SECONDS = 1800.0
 CI_STALE_SECONDS = 7200.0
