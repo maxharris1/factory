@@ -96,6 +96,7 @@ from lib.pre_ready import planned
 from lib.queue import (
     CHECK_FAILED_EVENTS,
     CHECK_PASSED_EVENTS,
+    LOCAL_GATE_UNAVAILABLE,
     QA_RECIPIENT,
     RECIPIENTS,
     SLOTS_TABLE,
@@ -1494,7 +1495,9 @@ class JobsMixin:
     def _head_checks_unmet(self, ticket: TrackedTicket, comment_id: str) -> bool:
         """A ready settles no job (#503, #1463) once any of its head checks
         failed, or while a check factory.md plans for this PR never passed.
-        Keyed on the comment, not the job, so a T6 retry cannot settle with it."""
+        An unavailable local_gate counts as met here: T2 holds that ready as
+        local-gate-waiting (#1464). Keyed on the comment, not the job, so a
+        T6 retry cannot settle with it."""
         prefix = f"handoff {comment_id}:"
         with self._connect() as connection:
             events = {
@@ -1502,19 +1505,20 @@ class JobsMixin:
                 for row in connection.execute(
                     """
                     SELECT DISTINCT event FROM job_events
-                    WHERE repo = ? AND ticket_id = ? AND event IN (?, ?, ?, ?)
+                    WHERE repo = ? AND ticket_id = ? AND event IN (?, ?, ?, ?, ?)
                       AND substr(detail, 1, ?) = ?
                     """,
                     (
                         ticket.repo.lower(), ticket.ticket_id, *CHECK_FAILED_EVENTS,
-                        *CHECK_PASSED_EVENTS, len(prefix), prefix,
+                        *CHECK_PASSED_EVENTS, LOCAL_GATE_UNAVAILABLE, len(prefix), prefix,
                     ),
                 )
             }
         if events.intersection(CHECK_FAILED_EVENTS):
             return True
         return any(
-            check.passed_event not in events for check in planned(ticket.factory, ticket.pr_base)
+            check.passed_event not in events and check.unavailable_event not in events
+            for check in planned(ticket.factory, ticket.pr_base)
         )
 
     def _done_from_handoff(self, job: Job, handoff: Comment) -> None:

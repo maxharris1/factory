@@ -41,7 +41,7 @@ def _failed_build(
             event=PRE_READY_FAILED,
         )
     if passed is not None:
-        queue.record_check_passed(build.id, event=PRE_READY_PASSED, comment_id=passed, head=HEAD)
+        queue.record_head_check(build.id, event=PRE_READY_PASSED, comment_id=passed, head=HEAD)
     queue.finish(build.id, owner="claude", handoff_comment_id=None)
     return build
 
