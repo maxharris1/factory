@@ -522,7 +522,6 @@ def fenced(text: str, info: str = "") -> str:
 
 
 def command_code(command: str) -> str:
-    """command as inline code, its whitespace kept, fenced past any backtick run in it."""
     fence = "`" * (max((len(run) for run in re.findall("`+", command)), default=0) + 1)
     return f"{fence} {command} {fence}" if len(fence) > 1 else f"`{command}`"
 

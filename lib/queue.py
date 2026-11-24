@@ -94,8 +94,11 @@ _PASSED_DETAIL = re.compile(r"handoff [^:]+: at ([0-9a-f]{40})")
 MAX_INVALID_HANDOFFS = 3
 
 
+def passed_detail(comment_id: str, head: str) -> str:
+    return f"handoff {comment_id}: at {head}"
+
+
 def passed_head(detail: object) -> str | None:
-    """The head in a check-passed event's detail, as record_check_passed writes it."""
     match = _PASSED_DETAIL.fullmatch(detail) if isinstance(detail, str) else None
     return match.group(1) if match else None
 
@@ -579,7 +582,7 @@ class SQLiteJobQueue:
                 SELECT id, lower(repo), ticket_id, action, recipient, ?, ?, ?
                 FROM jobs WHERE id = ?
                 """,
-                (event, f"handoff {comment_id}: at {head}", self.now(), job_id),
+                (event, passed_detail(comment_id, head), self.now(), job_id),
             )
             connection.commit()
 

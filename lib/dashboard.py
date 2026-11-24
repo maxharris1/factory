@@ -1099,7 +1099,6 @@ def _no_ci_bases(connection: sqlite3.Connection, tables: set[str]) -> dict[tuple
         ):
             key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
             if key in bases and (head := passed_head(row["detail"])) is not None:
-                # A whole 40-hex head would be redacted, so the snapshot carries its first 12.
                 bases[key]["gate_head"] = head[:12]
     return bases
 
