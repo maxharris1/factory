@@ -80,9 +80,8 @@ local_checks (a list of short check labels, default none). A head with no
 check run and no commit status on a PR whose base is not in branches is
 CI not-run: the CI gates do not wait, and the build, fix and review
 briefs ask for the local_checks results instead, or name local_gate when
-it is set. Absent, every base is
-treated as a CI base. required_checks (issue #1278) is a list of job-name
-globs, default none. When set, it is the whole PR CI gate on a CI base
+it is set. Absent, every base is treated as a CI base. required_checks
+(issue #1278) is a list of job-name globs, default none. When set, it is the whole PR CI gate on a CI base
 (issue #1279). CI fails when a matching check run failed, clears when every
 glob matched a successful run and no matching run is still going, and is
 pending otherwise, a skipped or neutral match alone included. Other check
