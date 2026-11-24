@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
+from types import SimpleNamespace
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -16,9 +18,10 @@ from lib.dispatcher import CIResult, Comment, FailedCheck, TrackedTicket
 from lib.evidence.ci import ci_evidence
 from lib.evidence.scenarios import qa_scenarios
 from lib.github_actions import GhResult, GitHubReviewActions
-from lib.factory_md import parse_factory_context
+from lib.factory_md import CheckCommand, parse_factory_context
 from lib.brief.common import journey_lines
 from lib.journeys import Journey, QaCheck, QaPlan
+from lib.waiter import ContextResult, Waiter
 from tests.regenerate_brief_snapshots import FACTORY_MD, HEAD, QA_FACTORY_MD, _job, with_qa
 from tests.test_dispatcher import (
     ANSWERS,
@@ -702,6 +705,147 @@ def test_an_update_review_on_a_base_without_ci_requires_the_pasted_local_checks(
     ) in task
     assert "CI result on this head" not in task
     assert "CI may still be running" not in task
+
+
+GATE = "make gate"
+GATE_FACTORY_MD = FACTORY_MD.replace(
+    "ship: merge\n", f"ship: merge\nci:\n  branches: [dev]\n  local_gate:\n    command: {GATE}\n    timeout_seconds: 600\n", 1
+)
+GATE_RUN = (
+    f"CI does not run on `{NO_CI_BASE}`. Before `ready` counts, the factory runs `{GATE}` (timeout 600s), "
+    "factory.md `ci.local_gate`, in a fresh checkout of the head you name and records `local-gate-passed` at it. "
+    "Run it yourself before you post. You need not paste local results."
+)
+
+
+def _gated(variant: tuple, factory_md: str = GATE_FACTORY_MD, **detail: object) -> str:
+    action, attempt, head, extra = variant
+    context, findings = parse_factory_context(factory_md)
+    assert context is not None, findings
+    job = _job(action, "codex" if action == "review" else "claude", attempt, head, {**extra, **NO_CI, **detail})
+    return _task(render_brief(job, bot=f"{job.request.recipient}-bot", context=context, factory_root="/srv/orch/factory"))
+
+
+@pytest.mark.parametrize("variant", [BUILD, REVIEW_FIX, CI_FIX], ids=["build", "review-fix", "ci-fix"])
+def test_a_builder_under_a_local_gate_is_told_the_gate_not_the_paste_rule(variant: tuple):
+    task = _gated(variant)
+    assert GATE_RUN in task
+    assert "paste each command and its result" not in task
+    assert "CI runs the full suite and is the gate" not in task
+
+
+def test_a_builder_without_a_local_gate_keeps_the_paste_rule():
+    assert LOCAL_RUN in _gated(BUILD, factory_md=FACTORY_MD)
+    assert "local-gate-passed" not in _gated(BUILD, factory_md=FACTORY_MD)
+
+
+def test_a_review_reads_the_recorded_local_gate_pass_in_place_of_the_paste():
+    task = _gated(REVIEW, local_gate_head=HEAD)
+    assert (
+        f"Read the whole diff. CI does not run on `{NO_CI_BASE}`. The factory ran `{GATE}`, factory.md "
+        f"`ci.local_gate`, at this head and recorded `local-gate-passed` at `{HEAD}`. Read that pass as the "
+        "head's CI result. The ready need not paste local results."
+    ) in task
+    assert "The ready must paste" not in task
+
+
+@pytest.mark.parametrize("recorded", [None, "e" * 40], ids=["none", "other-head"])
+def test_a_review_with_no_gate_pass_at_its_head_blocks(recorded: str | None):
+    task = _gated(REVIEW, **({"local_gate_head": recorded} if recorded else {}))
+    assert (
+        f"CI does not run on `{NO_CI_BASE}`, and no `local-gate-passed` for factory.md `ci.local_gate` "
+        "is recorded at this head. That is a `[blocking]` finding, so REVISE."
+    ) in task
+    assert "The ready must paste" not in task
+
+
+def test_a_review_without_a_local_gate_keeps_the_paste_rule():
+    task = _gated(REVIEW, factory_md=FACTORY_MD, local_gate_head=HEAD)
+    assert "The ready must paste the commands and results of typecheck, Jest and pgTAP run at this head." in task
+    assert "local-gate-passed" not in task
+
+
+def test_an_update_review_under_a_local_gate_reads_the_recorded_pass():
+    task = _gated(
+        REVIEW, local_gate_head=HEAD, kind="update", last_reviewed_head="a" * 40, update_merge="b" * 40,
+        update_commits=[],
+    )
+    assert f"whether the base changes break this PR: read the `local-gate-passed` recorded at `{HEAD}`" in task
+    assert "pasted local results" not in task and "The ready must paste" not in task
+
+
+def test_the_job_detail_names_the_newest_local_gate_pass(tmp_path: Path):
+    dispatcher, _queue = setup(tmp_path)
+    config = replace(factory(), ci_branches=("main",), ci_local_gate=CheckCommand(GATE, 600))
+    gated = replace(ticket(factory_config=config), pr_base=NO_CI_BASE)
+    assert "local_gate_head" not in json.loads(dispatcher._job_detail(gated, action="review", head=HEAD))
+    with sqlite3.connect(tmp_path / "d.db") as connection:
+        for at, head in ((1.0, "e" * 40), (2.0, HEAD)):
+            connection.execute(
+                "INSERT INTO job_events (job_id, repo, ticket_id, action, recipient, event, detail, recorded_at) "
+                "VALUES ('j', ?, ?, 'build', 'claude', 'local-gate-passed', ?, ?)",
+                (gated.repo.lower(), gated.ticket_id, f"handoff 9: at {head}", at),
+            )
+    assert json.loads(dispatcher._job_detail(gated, action="review", head=HEAD))["local_gate_head"] == HEAD
+    for tracked in (replace(gated, pr_base="main"), replace(gated, factory=replace(config, ci_local_gate=None))):
+        assert "local_gate_head" not in json.loads(dispatcher._job_detail(tracked, action="review", head=HEAD))
+
+
+class _FailedLookup:
+    def load(self, repo: str) -> ContextResult:
+        raise RuntimeError("gh api exited 502")
+
+
+def _brief_after_failed_lookup(detail: str, action: str, head: str | None, **extra: object) -> str:
+    recipient = "codex" if action == "review" else "claude"
+    job = _job(action, recipient, 1, head, {**json.loads(detail), **extra})
+    waiter = SimpleNamespace(context=_FailedLookup(), bot=f"{recipient}-bot")
+    return _task(Waiter._brief(waiter, job, factory_root="/srv/orch/factory"))
+
+
+def test_a_failed_factory_md_lookup_keeps_the_gate_the_dispatcher_recorded(tmp_path: Path):
+    dispatcher, _queue = setup(tmp_path)
+    config = replace(factory(), ci_branches=("main",), ci_local_gate=CheckCommand(GATE, 600))
+    gated = replace(ticket(factory_config=config), pr_base=NO_CI_BASE)
+    with sqlite3.connect(tmp_path / "d.db") as connection:
+        connection.execute(
+            "INSERT INTO job_events (job_id, repo, ticket_id, action, recipient, event, detail, recorded_at) "
+            "VALUES ('j', ?, ?, 'build', 'claude', 'local-gate-passed', ?, 1.0)",
+            (gated.repo.lower(), gated.ticket_id, f"handoff 9: at {HEAD}"),
+        )
+
+    review = _brief_after_failed_lookup(dispatcher._job_detail(gated, action="review", head=HEAD), "review", HEAD)
+    assert f"recorded `local-gate-passed` at `{HEAD}`. Read that pass as the head's CI result." in review
+    assert "The ready must paste" not in review
+
+    for action in ("build", "fix"):
+        task = _brief_after_failed_lookup(dispatcher._job_detail(gated, action=action, head=HEAD), action, HEAD)
+        assert GATE_RUN in task
+        assert "paste each command and its result" not in task
+
+
+def test_the_job_detail_names_the_local_gate_only_off_ci_with_a_gate(tmp_path: Path):
+    dispatcher, _queue = setup(tmp_path)
+    config = replace(factory(), ci_branches=("main",), ci_local_gate=CheckCommand(GATE, 600))
+    gated = replace(ticket(factory_config=config), pr_base=NO_CI_BASE)
+    for action in ("build", "fix", "review"):
+        detail = json.loads(dispatcher._job_detail(gated, action=action, head=HEAD))
+        assert detail["local_gate"] == {"command": GATE, "timeout_seconds": 600}
+    for tracked in (replace(gated, pr_base="main"), replace(gated, factory=replace(config, ci_local_gate=None))):
+        assert "local_gate" not in json.loads(dispatcher._job_detail(tracked, action="review", head=HEAD))
+
+
+@pytest.mark.parametrize(
+    "recorded", [None, "make gate", {"command": "", "timeout_seconds": 600}, {"command": GATE, "timeout_seconds": True}],
+    ids=["absent", "string", "empty-command", "bool-timeout"],
+)
+def test_a_review_with_no_usable_gate_and_no_config_keeps_the_paste_rule(recorded: object):
+    job = _job("review", "codex", 1, HEAD, {
+        "round": "1/3", **NO_CI, "local_gate_head": HEAD, **({"local_gate": recorded} if recorded else {}),
+    })
+    task = _task(render_brief(job, bot="codex-bot", context=None, factory_root="/srv/orch/factory"))
+    assert "The ready must paste the commands and results of typecheck, Jest and pgTAP run at this head." in task
+    assert "local-gate-passed" not in task
 
 
 def _task_under(factory_md: str, action: str, extra: dict[str, object], created_at: float = 0.0) -> str:

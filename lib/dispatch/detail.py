@@ -32,7 +32,7 @@ from lib.dispatch.types import CIResult, Comment, TrackedTicket
 from lib.grok_delivery import GrokDeliveryError, wake_body
 from lib.handoff import HandoffError, parse_comment
 from lib.max_actions import wait_facts, wait_of
-from lib.queue import Job, JobRequest, job_from_row
+from lib.queue import LOCAL_GATE_PASSED, Job, JobRequest, job_from_row, passed_head
 from lib.queue import plan_round as _plan_round
 from lib.ticket_type import ticket_type_of
 from lib.update_check import RebaseScope, UpdateScope
@@ -746,11 +746,28 @@ class DetailMixin:
             context["stack"] = asdict(ticket.stack)
         if (no_ci_base := ticket.no_ci_base) is not None:
             context.update(no_ci_base=no_ci_base, local_checks=list(ticket.factory.ci_local_checks))
+            if (gate := ticket.factory.ci_local_gate) is not None:
+                context["local_gate"] = asdict(gate)
+                if (gate_head := self._local_gate_head(ticket, connection)) is not None:
+                    context["local_gate_head"] = gate_head
         if resume:
             # Claim order (lib/queue.py): a resumed paused step goes before
             # bug and ordinary work, after urgent (issue #85).
             context["resume"] = True
         return json.dumps(context, separators=(",", ":"), sort_keys=True)
+
+    def _local_gate_head(
+        self, ticket: TrackedTicket, connection: sqlite3.Connection | None = None
+    ) -> str | None:
+        if connection is None:
+            with self._connect() as connection:
+                return self._local_gate_head(ticket, connection)
+        rows = connection.execute(
+            "SELECT detail FROM job_events WHERE repo = ? AND ticket_id = ? AND event = ? "
+            "ORDER BY recorded_at DESC, id DESC",
+            (ticket.repo.lower(), ticket.ticket_id, LOCAL_GATE_PASSED),
+        )
+        return next((head for row in rows if (head := passed_head(row["detail"])) is not None), None)
 
     def _answers(self, ticket: TrackedTicket) -> list[dict[str, str | None]]:
         answers: list[dict[str, str | None]] = []

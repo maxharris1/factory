@@ -11,6 +11,7 @@ from typing import Literal
 from lib.brief.skills import PLAYBOOKS, skill_paths
 from lib.factory_md import (
     CHECK_LABEL,
+    CheckCommand,
     DEFAULT_PLAN_MAX_CRITERIA,
     DEFAULT_PLAN_MAX_LINES,
     FactoryContext,
@@ -149,6 +150,8 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
     plan_text = detail.get("plan_text") if job.request.action in ("build", "plan") else None
     unmapped = detail.get("unmapped") if job.request.action == "plan" else None
     no_ci_base = detail.get("no_ci_base")
+    no_ci_base = no_ci_base if isinstance(no_ci_base, str) and _BRANCH.fullmatch(no_ci_base) else None
+    gate_head = detail.get("local_gate_head")
     ticket_type = detail.get("ticket_type")
     ticket_text = ticket_texts(detail, _plain_repo(job.request.repo), pr)
     return {
@@ -172,8 +175,10 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
         "ticket": job.request.ticket_id if _TICKET.fullmatch(job.request.ticket_id) else None,
         "base": base if isinstance(base, str) and _BRANCH.fullmatch(base) else None,
         "branch": branch if isinstance(branch, str) and _BRANCH.fullmatch(branch) else None,
-        "no_ci_base": no_ci_base if isinstance(no_ci_base, str) and _BRANCH.fullmatch(no_ci_base) else None,
+        "no_ci_base": no_ci_base,
         "local_checks": _check_labels(detail.get("local_checks")),
+        "local_gate": _local_gate(detail.get("local_gate"), context) if no_ci_base is not None else None,
+        "local_gate_head": gate_head if isinstance(gate_head, str) and _HEAD.fullmatch(gate_head) else None,
         "verify": verify,
         "verify_unavailable": (
             context is not None
@@ -515,6 +520,19 @@ def fenced(text: str, info: str = "") -> str:
     longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
     fence = "`" * max(4, longest + 1)
     return f"{fence}{info}\n{text}\n{fence}"
+
+
+def _local_gate(recorded: object, context: FactoryContext | None) -> CheckCommand | None:
+    if isinstance(recorded, dict):
+        command, timeout = recorded.get("command"), recorded.get("timeout_seconds")
+        if isinstance(command, str) and command.strip() and type(timeout) is int and timeout > 0:
+            return CheckCommand(command, timeout)
+    return context.config.ci_local_gate if context is not None else None
+
+
+def command_code(command: str) -> str:
+    fence = "`" * (max((len(run) for run in re.findall("`+", command)), default=0) + 1)
+    return f"{fence} {command} {fence}" if len(fence) > 1 else f"`{command}`"
 
 
 def code_span(text: str) -> str:

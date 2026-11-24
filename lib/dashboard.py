@@ -233,7 +233,9 @@ from lib.orch_yml import POLL_SECONDS, POLL_SECONDS_ALLOWED, OrchConfig
 from lib.pr_title import SOURCE, read_sources
 from lib.project_rules import read_rows as read_project_rules
 from lib.qa_cloud import qa_id
-from lib.queue import ACTIONS, RECIPIENTS, STATES, PriorityMark, priority_marks
+from lib.queue import (
+    ACTIONS, LOCAL_GATE_PASSED, RECIPIENTS, STATES, PriorityMark, passed_head, priority_marks,
+)
 from lib.schema import TICKETS
 from lib import max_actions
 from lib.status import PAUSED_STATES, _hold_approvers
@@ -1081,11 +1083,24 @@ def _ci_attention(connection: sqlite3.Connection, tables: set[str]) -> dict[str,
     return {"base_red": int(base_red), "stale": int(stale)}
 
 
-def _no_ci_bases(connection: sqlite3.Connection) -> dict[tuple[str, str], dict]:
-    return {
+def _no_ci_bases(connection: sqlite3.Connection, tables: set[str]) -> dict[tuple[str, str], dict]:
+    bases = {
         (str(row["repo"]).casefold(), str(row["ticket_id"])): {"base": _clean(row["base"], 80)}
         for row in connection.execute("SELECT repo, ticket_id, base FROM no_ci_bases")
     }
+    if "job_events" in tables:
+        for row in connection.execute(
+            """
+            SELECT event.repo, event.ticket_id, event.detail FROM job_events AS event
+            JOIN no_ci_bases AS base ON base.repo = event.repo AND base.ticket_id = event.ticket_id
+            WHERE event.event = ? ORDER BY event.recorded_at, event.id
+            """,
+            (LOCAL_GATE_PASSED,),
+        ):
+            key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
+            if key in bases and (head := passed_head(row["detail"])) is not None:
+                bases[key]["gate_head"] = head[:12]
+    return bases
 
 
 CI_JOB_STATUSES = ("queued", "in_progress", "completed")
@@ -1878,7 +1893,7 @@ def _read_db(
         approvers = _hold_approvers(connection)
         wait_facts = max_actions.wait_facts(connection)
         ci_waits = _ci_waits(connection, now) if "ci_waits" in tables else {}
-        no_ci_bases = _no_ci_bases(connection) if "no_ci_bases" in tables else {}
+        no_ci_bases = _no_ci_bases(connection, tables) if "no_ci_bases" in tables else {}
         state_columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(ticket_state)")}
         stuck_at = ", ".join([
             *(["state.stuck_since"] if "stuck_since" in state_columns else []),
