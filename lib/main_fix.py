@@ -150,7 +150,7 @@ def issue_body(
             "",
             "## Acceptance criteria",
             "",
-            f"- The required checks ({patterns}) pass on `{base}`.",
+            f"- The required checks ({patterns}) pass at this PR's head.",
         ],
         evidence,
     )
