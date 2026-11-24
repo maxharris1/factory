@@ -165,6 +165,19 @@ def test_open_draft_pull_sends_draft_true() -> None:
     ) == 501
 
 
+def test_pull_body_reads_a_null_body_as_empty() -> None:
+    gh = RecordedGh()
+    gh.route((f"{REPO}/pulls/77",), ok({"number": 77, "body": None}))
+    assert GitHubIntakeClient(gh).pull_body("owner/app", 77) == ""
+
+
+def test_set_pull_body_patches_the_body() -> None:
+    gh = RecordedGh()
+    key = ("-X", "PATCH", f"{REPO}/pulls/77", "-f", "body=Fixes #1\n\nStacked on #9.")
+    gh.route(key, ok({"number": 77}))
+    GitHubIntakeClient(gh).set_pull_body("owner/app", 77, "Fixes #1\n\nStacked on #9.")
+
+
 class FakeLinearSource:
     def __init__(self, data: dict):
         self.data = data

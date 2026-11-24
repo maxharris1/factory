@@ -236,6 +236,12 @@ class FakeGitHub:
         self.calls.append(f"pull:{repo}:{self._next_pr}")
         return self._next_pr
 
+    def pull_body(self, repo: str, number: int) -> str:
+        return self.pulls[(repo, number)].get("body", "")
+
+    def set_pull_body(self, repo: str, number: int, body: str) -> None:
+        self.pulls[(repo, number)]["body"] = body
+
     def add_labels(self, repo: str, number: int, labels) -> None:
         self._maybe_fail("labels")
         self.labels.setdefault((repo, number), [])
