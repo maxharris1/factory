@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from lib.brief.build import builder_notes, proof_lines
-from lib.brief.common import TEST_SCOPE, Lead, detail_of, pr_ref
+from lib.brief.common import TEST_SCOPE, Lead, detail_of, pr_ref, stack_lines
 from lib.queue import Job
 
 
@@ -14,6 +14,7 @@ def lead(job: Job, facts: dict) -> Lead:
     return Lead(
         f"Rebase {pr_ref(facts)} onto `origin/{base}`, nothing else.",
         (
+            *stack_lines(facts),
             f"1. Check out `{branch}` at {head} and run `git fetch origin {base}`.",
             f"2. `git rebase origin/{base}`, without `--rebase-merges`. Never run `git merge`.",
             "3. Resolve each conflict without changing behavior, then `git rebase --continue`.",
