@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from lib.brief.common import _HEAD, _URL, Lead, evidence_part, fenced, local_checks, pr_ref, stack_lines
+from lib.brief.common import (
+    _HEAD, _URL, Lead, command_code, evidence_part, fenced, local_checks, pr_ref, stack_lines,
+)
 from lib.factory_md import padded_estimate
 from lib.followups import followup_start, followups_active
 
@@ -134,7 +136,13 @@ def _update_steps(facts: dict, base: str, head: str, unchanged_tag: str) -> list
     last = update["last_reviewed_head"]
     merge = update["merge"]
     commits = update["commits"]
-    evidence = "read the ready's pasted local results" if facts["no_ci_base"] else "read the CI result on this head"
+    if not facts["no_ci_base"]:
+        evidence = "read the CI result on this head"
+    elif facts["local_gate"]:
+        passed = _gate_pass(facts)
+        evidence = "read the `local-gate-passed` recorded at " + (f"`{passed}`" if passed else "this head")
+    else:
+        evidence = "read the ready's pasted local results"
     steps = [
         f"The code at `{last}` was already reviewed and approved. This head brings `{base}` in by merge commit "
         f"`{merge}`. Review only how that merge resolved conflicts (`git show --remerge-diff {merge}`) and "
@@ -303,10 +311,27 @@ def _size_flag_step(facts: dict) -> str:
     )
 
 
+def _gate_pass(facts: dict) -> str | None:
+    head = facts["local_gate_head"]
+    return head if facts["local_gate"] and head is not None and head == facts["head"] else None
+
+
 def _local_checks_required(facts: dict) -> str:
+    base = facts["no_ci_base"]
+    if (gate := facts["local_gate"]) is None:
+        return (
+            f"CI does not run on `{base}`. The ready must paste the commands and results of "
+            f"{local_checks(facts)} run at this head. A ready without that paste is a `[blocking]` finding, so REVISE."
+        )
+    if (passed := _gate_pass(facts)) is not None:
+        return (
+            f"CI does not run on `{base}`. The factory ran {command_code(gate.command)}, factory.md `ci.local_gate`, "
+            f"at this head and recorded `local-gate-passed` at `{passed}`. Read that pass as the head's CI result. "
+            "The ready need not paste local results."
+        )
     return (
-        f"CI does not run on `{facts['no_ci_base']}`. The ready must paste the commands and results of "
-        f"{local_checks(facts)} run at this head. A ready without that paste is a `[blocking]` finding, so REVISE."
+        f"CI does not run on `{base}`, and no `local-gate-passed` for factory.md `ci.local_gate` is recorded at "
+        "this head. That is a `[blocking]` finding, so REVISE."
     )
 
 

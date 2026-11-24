@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from lib.dispatch.types import StackedOn
 from tests.merge_queue_support import Board, sha
 from tests.test_merge_queue_gate import after_board, post_ok
 
@@ -27,7 +28,7 @@ def stacked_on(board: Board, base: list[str], children: tuple[str, ...] | None =
             ticket,
             factory=replace(ticket.factory, base_branch=base[0]),
             pr_base=base[0],
-            stack_parent_branch=PARENT_BRANCH,
+            stacked_on=StackedOn(10, PARENT_BRANCH, "main"),
         )
 
     board.snapshot = based

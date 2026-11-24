@@ -11,6 +11,7 @@ from lib.dispatch.helpers import (
     _matching_head,
     _round_number,
     _scope,
+    _stack_wait,
 )
 from lib.dispatch.qa import EnsureQa, FixFromQa, MaintainSkill, ParkQa, RetryQa, Wait
 from lib.dispatch.types import (
@@ -198,6 +199,8 @@ class T4Mixin:
         covered = self._approval_covers(ticket, approved_head, current_head)
         if not covered:
             return self._queue_patch_review(ticket, comment, current_head)
+        if ship == "handoff" and _stack_wait(ticket, current_head) is not None:
+            return False, "stacked-handoff-waits"
         gated = self._approve_qa(ticket, comment, current_head, reported_round)
         if gated is not None:
             return gated

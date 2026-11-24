@@ -306,6 +306,9 @@ SCRIPT_TICKETS = r"""
     var line = add(parent, el('div', 'tk-ci'));
     add(line, chip('no CI on this base', 'muted'));
     add(line, el('span', 'tk-out', noCi.base));
+    if (!noCi.gate_head) return;
+    add(line, chip('local gate passed', 'ok'));
+    add(line, el('span', 'tk-dev', noCi.gate_head));
   }
 
   function tkInState(parent, t) {
@@ -954,10 +957,15 @@ def _card(card: dict) -> str:
                     f'<div class="tk-ci">{_chip("waiting on CI", "warn")}{_span("tk-out", checks_named(ci))}'
                     f'{checks_link(ticket)}{_span("tk-t", "waiting " + duration(ci["waiting_seconds"]))}</div>'
                 )
-            if ticket.get("no_ci"):
+            if no_ci := ticket.get("no_ci"):
+                gate = (
+                    f'{_chip("local gate passed", "ok")}{_span("tk-dev", no_ci["gate_head"])}'
+                    if no_ci.get("gate_head")
+                    else ""
+                )
                 lines += (
                     f'<div class="tk-ci">{_chip("no CI on this base", "muted")}'
-                    f'{_span("tk-out", ticket["no_ci"]["base"])}</div>'
+                    f'{_span("tk-out", no_ci["base"])}{gate}</div>'
                 )
             verdict = card["verdict"]
             if verdict and not (wait_line and verdict["kind"] == "waiting"):

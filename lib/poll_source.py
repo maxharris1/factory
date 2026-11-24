@@ -49,6 +49,7 @@ from lib.dispatch.types import (
     LinearState,
     LinearStateRead,
     PullReview,
+    StackedOn,
     StackParent,
     ci_fresh,
     pr_ci,
@@ -560,10 +561,6 @@ class FedPulls:
             (repo.lower(), ticket_id),
         ).fetchone()
         return None if row is None or None in row else (int(row[0]), str(row[1]))
-
-    def stack_parent_branch(self, repo: str, ticket_id: str) -> str | None:
-        recorded = self.stack_parent(repo, ticket_id)
-        return None if recorded is None else recorded[1]
 
     def _columns(self) -> set[str]:
         return {row[1] for row in self._connection.execute(f"PRAGMA table_info({FEEDER_TABLE})")}
@@ -2048,6 +2045,7 @@ class LivePollSource:
         probed: str | None = None,
         uncached: bool = False,
     ) -> TrackedTicket:
+        default_branch = factory.base_branch
         recorded = self.fed_pulls.ticket_base(project.repo, number)
         if recorded is not None:
             factory = replace(factory, base_branch=recorded)
@@ -2099,6 +2097,7 @@ class LivePollSource:
                 )
         brief = canonical_brief(comments, self._trusted)
         source_issue = github_source(pull, project.repo, number)
+        stacked_on = self._stacked_on(project.repo, number, default_branch)
         if (stack := self._stack(project.repo, number, pull)) is not None:
             factory = replace(factory, base_branch=stack.branch)
         ticket = TrackedTicket(
@@ -2138,11 +2137,15 @@ class LivePollSource:
             source_issue=source_issue,
             pr_title=_open_title(pull),
             stack=stack,
-            stack_parent_branch=self.fed_pulls.stack_parent_branch(project.repo, number),
+            stacked_on=stacked_on,
             **_pull_facts(pull, fresh=fresh),
         )
         self._ticket_cache[cache_key] = ticket
         return ticket
+
+    def _stacked_on(self, repo: str, ticket_id: str, default_branch: str) -> StackedOn | None:
+        recorded = self.fed_pulls.stack_parent(repo, ticket_id)
+        return None if recorded is None else StackedOn(*recorded, default_branch)
 
     def _stack(self, repo: str, ticket_id: str, pull: Mapping[str, Any]) -> StackParent | None:
         recorded = self.fed_pulls.stack_parent(repo, ticket_id)
@@ -2415,10 +2418,14 @@ class LivePollSource:
         head = _latest_head(linear_comments)
         factory = self._factory(project)
         linear_project = issue.get("project")
+        project_base = project.base_for(
+            linear_project.get("id") if isinstance(linear_project, dict) else None
+        )
+        stacked_on = self._stacked_on(
+            project.repo, identifier, project_base or factory.base_branch
+        )
         factory = replace(
-            factory,
-            base_branch=self.fed_pulls.base(project.repo, identifier)
-            or project.base_for(linear_project.get("id") if isinstance(linear_project, dict) else None),
+            factory, base_branch=self.fed_pulls.base(project.repo, identifier) or project_base
         )
         ci: dict[str, CIResult] = {}
         pr_title: str | None = None
@@ -2506,7 +2513,7 @@ class LivePollSource:
             source_issue=identifier if pr_number is not None and SOURCE.fullmatch(identifier) else None,
             pr_title=pr_title,
             stack=stack,
-            stack_parent_branch=self.fed_pulls.stack_parent_branch(project.repo, identifier),
+            stacked_on=stacked_on,
             **pull_facts,
         )
         self._ticket_cache[cache_key] = ticket

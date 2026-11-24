@@ -20,6 +20,7 @@ from lib.dispatch.helpers import (
     _merge_only,
     _queue_state,
     _scope,
+    _stack_wait,
 )
 from lib.dispatch.retry import _harness_job_active
 from lib.dispatch.transitions import write_workflow_state
@@ -1158,21 +1159,6 @@ def _failed_update_may_settle(row: sqlite3.Row, polled: TrackedTicket) -> bool:
         return False
     ci = polled.ci.get(head)
     return ci is not None and ci.status != "pending"
-
-
-def _stack_wait(ticket: TrackedTicket, head: str | None) -> str | None:
-    parent = ticket.stack_parent_branch
-    if parent is None:
-        return None
-    base = ticket.pr_base or ticket.factory.base_branch
-    if base == parent:
-        return f"stacked on {parent}: waits for its retarget"
-    if ticket.no_ci_base is not None:
-        return f"stacked child: GitHub CI does not run on {base}, waits for a retarget to a CI base"
-    ci =ticket.ci.get(head) if head is not None else None
-    if ci is not None and ci.status == "not-run":
-        return f"stacked child: CI not-run on {base}, waits for GitHub CI"
-    return None
 
 
 def _waits_on_update_or_ci(ticket: TrackedTicket) -> bool:

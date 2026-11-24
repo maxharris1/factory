@@ -1073,7 +1073,7 @@ def test_no_line_or_default_is_no_target(extra) -> None:
 
 
 @pytest.mark.parametrize(
-    "value", ["a..b", "-x", "two words", "", "`dev`", "feature/x~1", "x" * 201],
+    "value", ["a..b", "-x", "two words", "", "feature/x~1", "x" * 201],
 )
 def test_a_bad_target_branch_value_is_a_defect(value: str) -> None:
     template = parse_intake(body(extra=f"Target branch: {value}"), ())
@@ -1122,6 +1122,66 @@ def test_a_target_branch_markdown_cannot_hide_a_bad_character(value: str) -> Non
     template = parse_intake(body(extra=f"Target branch: {value}"), ())
     assert [defect.code for defect in template.defects] == ["bad-target-branch"]
     assert template.target_branch is None
+
+
+_AUT_2281 = "max/aut-2281-new-determination-letters-record-their"
+
+
+@pytest.mark.parametrize(
+    ("line", "branch"),
+    [(f"Target branch: `{_AUT_2281}`", _AUT_2281), (f"Target branch: ``{_AUT_2281}``", _AUT_2281),
+     (f"Target branch: `` {_AUT_2281} ``", _AUT_2281), (f"**Target branch:** `{_AUT_2281}`", _AUT_2281),
+     ("Target branch: `dev`", "dev"),
+     ("Target branch: max/[AUT-2281](https://linear.app/aut0/issue/AUT-2281/new-determination-letters-record-"
+      "their-servicing-provider-and-source)-new-determination-letters-record-their", _AUT_2281),
+     ('Target branch: max/<issue id="…" label="AUT-2281" href="…" />-new-determination-letters-record-their',
+      _AUT_2281),
+     ('Target branch: max/<issue href="https://linear.app/aut0/issue/AUT-2281" label="AUT-2281" />-new-determination-'
+      "letters-record-their", _AUT_2281),
+     ("Target branch: *max/[AUT-2281](https://linear.app/aut0/issue/AUT-2281)-new-determination-letters-record-their*",
+      _AUT_2281)],
+)
+def test_a_target_branch_survives_linear_rendering(line: str, branch: str) -> None:
+    template = parse_intake(body(extra=line), ())
+    assert (template.target_branch, template.defects) == (branch, ())
+
+
+@pytest.mark.parametrize(
+    ("ticket", "branch"),
+    [("AUT-2288", _AUT_2281), ("AUT-2289", _AUT_2281),
+     ("AUT-2478", "max/aut-817-unassigned-email-queue-offers-no-case"),
+     ("AUT-2449", "max/aut-2448-qa-lane-scripts-boot-aut0-with-no-docker"),
+     ("AUT-2450", "max/aut-2448-qa-lane-scripts-boot-aut0-with-no-docker"),
+     ("AUT-2451", "max/aut-2448-qa-lane-scripts-boot-aut0-with-no-docker"),
+     ("AUT-2287", "max/aut-2280-the-llm-service-can-write-an-offer-brief-with")],
+)
+def test_the_aut0_stacked_tickets_target_lines_parse(ticket: str, branch: str) -> None:
+    template = parse_intake(body(extra=f"Target branch: `{branch}`"), ())
+    assert (template.target_branch, template.defects) == (branch, ()), ticket
+
+
+def test_a_backticked_default_is_the_project_base() -> None:
+    template = parse_intake(body(extra="Target branch: `default`"), ())
+    assert (template.target_branch, template.defects) == (None, ())
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["`a..b`", "`two words`", "`release*`", "``x`", "```x```", "`*release*`",
+     "max/[AUT-1](https://github.com/x/y)-z", "max/[AUT-1](https://linear.app/a/issue/AUT-2)-z",
+     "max/[AUT-1](http://linear.app/a/issue/AUT-1)-z", "max/[AUT-1](https://linear.app.evil/a/issue/AUT-1)-z",
+     "max/[AUT-1](https://linear.app/a/issue/AUT-1)/", "max/[AUT-1](https://linear.app/a/issue/AUT-1)..z"],
+)
+def test_a_target_branch_still_bad_after_unwrap_is_a_defect(value: str) -> None:
+    template = parse_intake(body(extra=f"Target branch: {value}"), ())
+    assert [defect.code for defect in template.defects] == ["bad-target-branch"]
+    assert template.target_branch is None
+
+
+def test_a_refused_mention_is_quoted_as_written() -> None:
+    value = "max/[AUT-1](https://github.com/x/y)-z"
+    template = parse_intake(body(extra=f"Target branch: {value}"), ())
+    assert value in template.defects[0].reason
 
 
 @pytest.mark.parametrize(

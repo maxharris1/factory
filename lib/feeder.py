@@ -382,6 +382,12 @@ _TARGET_LINE = re.compile(
 _TARGET_BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9_./-]{0,199}")
 _TARGET_REFUSED = re.compile(r"\.\.|//|/\.|\.lock(?:/|$)|[./]$")
 _EMPHASIZED = re.compile(r"^(\*\*|__|\*|_)(?P<inner>.+)\1$")
+_CODE_SPAN = re.compile(r"^(?P<ticks>`{1,2}) ?(?P<inner>[^` ]+) ?(?P=ticks)$")
+_LINEAR_MENTION = re.compile(
+    r"\[(?P<link>[A-Z][A-Z0-9]*-\d+)\]\(https://linear\.app/[^/\s()]+/issue/(?P=link)(?:/[^\s()]*)?\)"
+    r"|<issue\b[^>]*?\blabel=\"(?P<tag>[A-Z][A-Z0-9]*-\d+)\"[^>]*/>",
+    re.IGNORECASE,
+)
 _PLAN_LINE = re.compile(_FIELD.format(name=r"plan\s+first(?:\s*\(yes\s*/\s*no\))?"), re.IGNORECASE)
 _DEPENDS_LINE = re.compile(_FIELD.format(name=r"depends\s+on"), re.IGNORECASE)
 _TYPE_LINE = re.compile(_FIELD.format(name=r"type"), re.IGNORECASE)
@@ -463,11 +469,13 @@ def _target_value(match: re.Match[str]) -> str:
             value = value[len(mark):].strip()
         elif value.endswith(mark):
             value = value[: -len(mark)].strip()
-    if _is_target_branch(value):
-        return value
-    wrapped = _EMPHASIZED.match(value)
-    if wrapped and _is_target_branch(wrapped["inner"]):
-        return wrapped["inner"]
+    restored = _LINEAR_MENTION.sub(lambda m: (m["link"] or m["tag"]).lower(), value)
+    for candidate in (value, restored):
+        if _is_target_branch(candidate):
+            return candidate
+        wrapped = _EMPHASIZED.match(candidate) or _CODE_SPAN.match(candidate)
+        if wrapped and _is_target_branch(wrapped["inner"]):
+            return wrapped["inner"]
     return value
 
 
