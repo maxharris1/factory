@@ -13,16 +13,17 @@ new one each time.
 * Data calls carry `-o ControlMaster=no -o ControlPath=<socket>`. ssh uses a
   live master, and falls back to its own plain login when the socket is
   missing, stale or refuses the session, so a bad socket never fails a call.
-* Before each call, under an flock on `<socket>.lock`, `ssh -O check` asks
-  the master whether it is alive, then a no-op session (`PROBE_COMMAND`)
-  through it, bounded by `PROBE_TIMEOUT_SECONDS`, proves its connection to
-  the device still carries sessions: `-O check` only reaches the local
-  master process, which outlives a TCP path lost across a box VM pause.
-  When either fails (a pause, a reboot, a killed master, a deleted socket),
-  the master is told to exit, a stale socket owned by this user is removed
-  and one master is started with `-N -f` and `ControlPersist`. That rebuild
-  happens inside the transport, before the command is sent: callers see one
-  ordinary call, and the command itself runs at most once.
+* Before each call, a lock-free `ssh -O check` asks the local master whether
+  its socket is alive (no per-call remote probe round-trip and no hot-path
+  flock serialization). Masters are started with tight SSH keepalives
+  (`ServerAliveInterval=5`, `ServerAliveCountMax=2`) so a TCP path lost
+  across a VM pause or offline device tears itself down within ~10s.
+  When the socket is absent or `-O check` fails (a pause, a reboot, a killed
+  master, a deleted socket), under an flock on `<socket>.lock` it re-checks
+  once, removes a stale socket owned by this user, and starts one master with
+  `-N -f` and `ControlPersist`. That rebuild happens inside the transport,
+  before the command is sent: callers see one ordinary call, and the command
+  itself runs at most once.
 * When the master cannot be started (the device is down), the call runs
   once as a plain login, exactly as it did before multiplexing, so a real
   drop still ends 255. When a call through a master ends 255 or times out,
@@ -48,6 +49,8 @@ CONTROL_TIMEOUT_SECONDS = 10.0
 MASTER_TIMEOUT_SECONDS = 30.0
 PROBE_TIMEOUT_SECONDS = 10.0
 RETIRE_WAIT_SECONDS = 2.0
+SERVER_ALIVE_INTERVAL = 5
+SERVER_ALIVE_COUNT_MAX = 2
 PROBE_COMMAND = "exit 0 # orch-ssh-mux-probe"
 UNREACHABLE = 255
 
@@ -94,9 +97,19 @@ class Multiplexer:
             return Prepared(argv)
         alias, user = login
         socket = socket_path(directory, alias, user)
+        if os.path.lexists(socket) and self._control(socket, "check", alias, user) == 0:
+            return Prepared(
+                [argv[0], "-o", "ControlMaster=no", "-o", f"ControlPath={socket}", *argv[1:]],
+                socket,
+                alias,
+                user,
+            )
         try:
             with self._locked(socket):
-                if not self._live(socket, alias, user) and not self._rebuild(socket, alias, user):
+                if (
+                    self._control(socket, "check", alias, user) != 0
+                    and not self._rebuild(socket, alias, user)
+                ):
                     return Prepared(argv)
         except OSError:
             return Prepared(argv)
@@ -177,8 +190,13 @@ class Multiplexer:
             if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
                 return False
             os.unlink(socket)
+        keepalive = [
+            "-o", f"ServerAliveInterval={SERVER_ALIVE_INTERVAL}",
+            "-o", f"ServerAliveCountMax={SERVER_ALIVE_COUNT_MAX}",
+        ]
         argv = [
             self.binary,
+            *keepalive,
             *self.options,
             "-o", "ControlMaster=yes",
             "-o", f"ControlPersist={CONTROL_PERSIST_SECONDS}",

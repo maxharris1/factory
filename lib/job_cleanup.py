@@ -285,15 +285,26 @@ def _parent(process: Path) -> Path | None:
     return process.with_name(stat.rsplit(")", 1)[1].split()[1])
 
 
+NON_JOB_AGENTS = frozenset({"ssh-agent", "gpg-agent", "dbus-daemon", "dbus-broker"})
+
+
+def _setgid(status: list[str]) -> bool:
+    gids = next((line.split()[1:] for line in status if line.startswith("Gid:")), [])
+    return len(gids) >= 3 and len(set(gids[:3])) > 1
+
+
 def _hides_from_scan(process: Path) -> bool:
     """Root starts sshd's session process, `systemd --user` and `(sd-pam)` and
     then drops them to this user, which leaves them non-dumpable, so their
-    cwd cannot be read."""
+    cwd cannot be read. Setgid agents (such as ssh-agent) are likewise
+    non-dumpable and never hold job checkouts."""
     status = _status(process) if _mine(process) else None
     if status is None:
         return False
     name = next((line.removeprefix("Name:").strip() for line in status
                  if line.startswith("Name:")), None)
+    if name in NON_JOB_AGENTS or _setgid(status):
+        return False
     return name not in SSH_SESSION or not _started_by_another_user(process)
 
 
@@ -610,6 +621,8 @@ def _hold(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None]) -> Re
                     held.append(job_id)
         except OSError as exc:
             kept[job_id] = f"error: could not set aside {folder}: {exc}".splitlines()[0]
+    if not plan.dry_run:
+        job_leftovers.prune_kept(root, now=time.time())
     return Report(removed, kept, plan.dry_run, tuple(sorted(held)))
 
 

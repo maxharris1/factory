@@ -165,6 +165,7 @@ class T3Mixin:
                     instruction=qa.link if from_approve and qa is not None else _comment_link(comment),
                     ci_failure=ci_failure,
                     qa_findings=qa,
+                    connection=connection,
                 )
                 request = JobRequest(
                     repo=ticket.repo,

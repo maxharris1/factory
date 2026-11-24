@@ -561,18 +561,22 @@ class QuestionsMixin:
             return item
         return None
 
-    def _first_queued_at(self, job: Job) -> float:
+    def _first_queued_at(
+        self, job: Job, *, connection: sqlite3.Connection | None = None
+    ) -> float:
+        if connection is None:
+            with self._connect() as conn:
+                return self._first_queued_at(job, connection=conn)
         queued_at = job.created_at
         retry_of = _retry_of(job.request.detail)
-        with self._connect() as connection:
-            while retry_of is not None:
-                row = connection.execute(
-                    "SELECT created_at, detail FROM jobs WHERE id = ?", (retry_of,)
-                ).fetchone()
-                if row is None:
-                    break
-                queued_at = min(queued_at, float(row["created_at"]))
-                retry_of = _retry_of(row["detail"])
+        while retry_of is not None:
+            row = connection.execute(
+                "SELECT created_at, detail FROM jobs WHERE id = ?", (retry_of,)
+            ).fetchone()
+            if row is None:
+                break
+            queued_at = min(queued_at, float(row["created_at"]))
+            retry_of = _retry_of(row["detail"])
         return queued_at
 
     def _cancel_answered_jobs(self, ticket: TrackedTicket) -> None:
@@ -596,9 +600,9 @@ class QuestionsMixin:
                 """,
                 (ticket.repo.lower(), ticket.ticket_id, *_ANSWERS),
             ).fetchall()
+            jobs = [_job(row, connection) for row in rows]
         answered: list[tuple[Job, Comment]] = []
-        for row in rows:
-            job = _job(row, connection)
+        for job in jobs:
             source = sources.get(job.request.source_comment_id)
             if source is None:
                 continue
@@ -660,8 +664,9 @@ class QuestionsMixin:
                 """,
                 (ticket.repo.lower(), ticket.ticket_id, *_ANSWERS),
             ).fetchall()
+            candidates = [(row, _job(row, connection)) for row in rows]
         unanswered: list[tuple[Job, str]] = []
-        for row in rows:
+        for row, job in candidates:
             reason = row["cancel_reason"] or ""
             source = sources.get(row["source_comment_id"])
             if reason == RESTORED:
@@ -676,7 +681,6 @@ class QuestionsMixin:
                 requeue_reason = f"answer-rejected:{answer_id}"
             else:
                 continue
-            job = _job(row, connection)
             if job.request.action == "review" and self._open_fix_for_head(job):
                 continue
             if self._resumed_by_answers(job) or self._waiting_max(job):
@@ -729,10 +733,10 @@ class QuestionsMixin:
                 """,
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchall()
+            jobs = [_job(row, connection) for row in rows]
         retry_prefix = f"review-refused:{_scope(ticket.repo, ticket.ticket_id)}:"
         owed: tuple[Job, Comment] | None = None
-        for row in rows:
-            job = _job(row, connection)
+        for job in jobs:
             if job.state in ("queued", "running"):
                 return
             if (

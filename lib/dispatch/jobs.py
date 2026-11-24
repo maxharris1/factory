@@ -612,14 +612,14 @@ class JobsMixin:
                 rows = connection.execute(
                     "SELECT * FROM jobs WHERE state = 'running' ORDER BY created_at, id"
                 ).fetchall()
+                jobs = [_job(row, connection) for row in rows]
                 placements = read_placements(connection)
                 connection.commit()
         except Exception as exc:
             self.record_poll_error("job-states", "-", exc)
             return
         check = getattr(self.devices, "liveness", None)
-        for row in rows:
-            job = _job(row, connection)
+        for job in jobs:
             try:
                 placement = placements.get(job.id)
                 facts = (

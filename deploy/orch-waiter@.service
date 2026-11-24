@@ -18,6 +18,7 @@ Type=simple
 WorkingDirectory=%h/factory
 EnvironmentFile=-%h/.config/factory/waiter.env
 Environment=PYTHONUNBUFFERED=1
+Environment=ORCH_WAITER_DRAIN=%h/.local/state/factory/waiter-%i.drain
 ExecStart=%h/.local/bin/orch wait %i --autostart
 Restart=always
 RestartSec=5

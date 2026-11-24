@@ -530,6 +530,9 @@ class IntakeRisks:
         )
         self._connection.execute(INTAKE_RISK_SCHEMA)
 
+    def close(self) -> None:
+        self._connection.close()
+
     def get(self, repo: str, ticket_id: str) -> str | None:
         return stored_risk(self._connection, repo, ticket_id)
 
@@ -550,6 +553,9 @@ class FedPulls:
         self._connection = sqlite3.connect(
             ":memory:" if path is None else str(path), timeout=30, isolation_level=None
         )
+
+    def close(self) -> None:
+        self._connection.close()
 
     def get(self, repo: str, identifier: str) -> str | None:
         return self._read("pr_number", repo, identifier)
@@ -608,6 +614,9 @@ class GhCacheExpiries:
             "CREATE TABLE IF NOT EXISTS gh_cache_expiry (key TEXT PRIMARY KEY, expiry REAL NOT NULL)"
         )
 
+    def close(self) -> None:
+        self._connection.close()
+
     def replays(self, key: tuple[str, ...], now: float) -> bool:
         row = self._connection.execute(
             "SELECT expiry FROM gh_cache_expiry WHERE key = ?", (json.dumps(key),)
@@ -648,6 +657,9 @@ class RequiredGlobs:
             "CREATE TABLE IF NOT EXISTS ci_required_globs "
             "(repo TEXT, base TEXT, glob TEXT, added_at REAL, PRIMARY KEY (repo, base, glob))"
         )
+
+    def close(self) -> None:
+        self._connection.close()
 
     def observe(
         self, repo: str, base: str, globs: Sequence[str], now: float
@@ -847,6 +859,18 @@ class LivePollSource:
                 self._read_prefix = reads_prefix(self.gh[:-1], bot, environ)
             except BrokerError as exc:
                 raise PollSourceError(f"poller_reads_app {bot}: {exc}") from None
+
+    def close(self) -> None:
+        for store in (self.risks, self.fed_pulls, self.gh_cache, self.required_globs):
+            close = getattr(store, "close", None)
+            if callable(close):
+                close()
+
+    def __enter__(self) -> LivePollSource:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
 
     def review_actions_by_repo(self) -> dict[str, ReviewActions]:
         cleared = self.config.secret_env_names

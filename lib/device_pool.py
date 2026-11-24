@@ -657,9 +657,10 @@ class DevicePool:
                 "SELECT * FROM jobs WHERE id = ?",
                 (row["id"],),
             ).fetchone()
+            assert updated is not None
+            job = _job(updated, connection)
             connection.commit()
-        assert updated is not None
-        return _job(updated, connection), Placement(
+        return job, Placement(
             job_id=str(row["id"]),
             device=device.name,
             harness=harness,

@@ -4,6 +4,7 @@ Description=Factory dispatcher poll loop
 [Service]
 Type=simple
 WorkingDirectory=%h/factory
+Environment=PYTHONUNBUFFERED=1
 # run-poller.sh sources webhook.env and orch-poll.env itself and refuses to
 # start without them: the one launcher, as poller-service.sh uses (#107).
 ExecStart=%h/factory/deploy/run-poller.sh
@@ -12,6 +13,7 @@ TimeoutStopSec=300
 Restart=on-failure
 RestartSec=60
 RestartPreventExitStatus=79
+KillMode=process
 
 [Install]
 WantedBy=default.target

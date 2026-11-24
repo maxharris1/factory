@@ -51,9 +51,10 @@ from lib.settings_apply import (
     resolve_pair,
     untrusted,
 )
-from lib.signin_relay import Relay, relay_for
+from lib.signin_relay import LocalRelay, Relay, relay_for
 
 POLL_SECONDS = 2.0
+IDLE_POLL_SECONDS = 30.0
 MAX_CONCURRENT = 2
 
 
@@ -92,6 +93,7 @@ class Broker:
     _attempts: dict[tuple[str, str], Attempt] = field(default_factory=dict, init=False, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _running: int = field(default=0, init=False, repr=False)
+    _activity_seq: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._idle = threading.Condition(self._lock)
@@ -121,13 +123,29 @@ class Broker:
         return self._close(self._entry(attempt.request, result, attempt.previous, error, new), attempt)
 
     def serve(self, stop: threading.Event) -> None:
+        wait = POLL_SECONDS
+        remote = not isinstance(self.relay, LocalRelay)
         while not stop.is_set():
+            had_work = False
             try:
-                self.tick()
+                with self._lock:
+                    before_seq = self._activity_seq
+                entries = self.tick()
+                with self._lock:
+                    active = (
+                        bool(self._attempts)
+                        or self._running > 0
+                        or self._activity_seq != before_seq
+                    )
+                had_work = bool(entries) or active
             except (SpoolError, OSError, sqlite3.Error) as exc:
                 detail = str(exc) if isinstance(exc, SpoolError) else type(exc).__name__
                 print(f"signin broker: {detail}", file=sys.stderr)
-            stop.wait(POLL_SECONDS)
+            if not remote or had_work:
+                wait = POLL_SECONDS
+            else:
+                wait = min(wait * 2, IDLE_POLL_SECONDS)
+            stop.wait(wait)
 
     def drain(self) -> None:
         while True:
@@ -157,6 +175,7 @@ class Broker:
             return self._close(self._entry(request, REFUSED, previous, refusal.error))
         with self._lock:
             self._running += 1
+            self._activity_seq += 1
         self.spawn(lambda: self._run(attempt))
         return None
 
@@ -166,6 +185,7 @@ class Broker:
         finally:
             with self._idle:
                 self._running -= 1
+                self._activity_seq += 1
                 self._idle.notify_all()
 
     def _attempt(self, attempt: Attempt) -> None:

@@ -133,11 +133,46 @@ def _fsync_directory(path: Path) -> None:
 
 
 def backup(db: Path, dest: Path) -> None:
-    """Copy the live database db to dest, replacing it atomically."""
+    """Copy the live database db and its job-detail/ files to dest, replacing atomically."""
     _check_apart(db, dest)
     if not db.exists():
         raise BackupError(f"database {db} does not exist")
+    _sync_job_detail(db, dest)
     _copy(db, dest)
+    _sync_job_detail(db, dest)
+
+
+def _sync_job_detail(source_db: Path, target_db: Path) -> None:
+    src_dir = source_db.parent / job_detail.DIRECTORY
+    if not src_dir.is_dir():
+        return
+    dst_dir = target_db.parent / job_detail.DIRECTORY
+    try:
+        dst_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise BackupError(f"cannot create job-detail directory {dst_dir}: {exc}") from exc
+    for src in sorted(src_dir.glob("*.json")):
+        if src.is_symlink() or not src.is_file():
+            continue
+        try:
+            data = src.read_bytes()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise BackupError(f"cannot read job-detail {src}: {exc}") from exc
+        dst = dst_dir / src.name
+        try:
+            if dst.is_file() and dst.read_bytes() == data:
+                continue
+            tmp = dst.with_name(f".{dst.name}.{os.getpid()}.tmp")
+            try:
+                tmp.write_bytes(data)
+                os.replace(tmp, dst)
+            except OSError:
+                tmp.unlink(missing_ok=True)
+                raise
+        except OSError as exc:
+            raise BackupError(f"cannot write job-detail {dst}: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -402,6 +437,11 @@ def restore(backup_path: Path, db: Path) -> datetime:
     if check is None or check[0] != "ok":
         raise BackupError(f"backup {backup_path} failed integrity_check")
     _copy(backup_path, db, _hold_steps)
+    try:
+        _sync_job_detail(backup_path, db)
+    except BackupError:
+        db.unlink(missing_ok=True)
+        raise
     return datetime.fromtimestamp(backup_path.stat().st_mtime, UTC)
 
 
@@ -512,3 +552,35 @@ class CycleBackup:
                 prune_labelled(self.labelled, now)
             except Exception as exc:
                 self.record_error("backup", "-", f"labelled-prune:{type(exc).__name__}")
+
+
+def db_mtime_ns(path: Path) -> int | None:
+    try:
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return None
+
+
+def advance_wal_close_mtime(path: Path, prev_mtime_ns: int | None) -> None:
+    """Advance db mtime when closing the last WAL connection unlinks -wal.
+
+    Linux's coarse filesystem clock (~4ms) can otherwise leave st_mtime_ns
+    identical across rapid back-to-back checkpointed commits, causing
+    stat-based watchers (db_fingerprint) to miss a write.
+    """
+    wal = Path(f"{path}-wal")
+    try:
+        wal_active = wal.exists() and wal.stat().st_size > 0
+    except OSError:
+        wal_active = False
+    if wal_active:
+        return
+    try:
+        st = os.stat(path)
+        floor = max(
+            st.st_mtime_ns + 1,
+            (prev_mtime_ns + 1) if prev_mtime_ns is not None else 0,
+        )
+        os.utime(path, ns=(st.st_atime_ns, max(time.time_ns(), floor)))
+    except OSError:
+        pass

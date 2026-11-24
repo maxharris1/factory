@@ -40,7 +40,12 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from lib import attention, exposure, job_detail, job_token, lane_limit
-from lib.state_backup import RESTORED, RESTORED_CLAIM
+from lib.state_backup import (
+    RESTORED,
+    RESTORED_CLAIM,
+    advance_wal_close_mtime,
+    db_mtime_ns,
+)
 
 ACTIONS = (
     "plan",
@@ -188,6 +193,23 @@ class DispatcherQueue(JobQueue, Protocol):
     def unhandled_failures(self) -> tuple[Job, ...]: ...
 
     def mark_failure_handled(self, job_id: str) -> None: ...
+
+
+class _ClosingConnection(sqlite3.Connection):
+    """sqlite3.Connection whose context manager commits/rolls back AND closes."""
+
+    _db_path: Path | None = None
+
+    def __exit__(self, exc_type, exc_val, exc_tb):  # type: ignore[override]
+        wrote = exc_type is None and self.total_changes > 0
+        path = self._db_path
+        prev_mtime_ns = db_mtime_ns(path) if wrote and path is not None else None
+        try:
+            return super().__exit__(exc_type, exc_val, exc_tb)
+        finally:
+            self.close()
+            if wrote and path is not None:
+                advance_wal_close_mtime(path, prev_mtime_ns)
 
 
 class SQLiteJobQueue:
@@ -369,9 +391,10 @@ class SQLiteJobQueue:
                 "SELECT * FROM jobs WHERE id = ?",
                 (row["id"],),
             ).fetchone()
+            assert updated is not None
+            job = _job(updated, connection)
             connection.commit()
-        assert updated is not None
-        return _job(updated, connection)
+        return job
 
     def release(self, job_id: str, *, owner: str) -> Job:
         """Undo a claim whose work never started: running -> queued.
@@ -416,8 +439,9 @@ class SQLiteJobQueue:
                         f"job {job_id} belongs to {updated['recipient']}, not {owner}"
                     )
                 raise QueueError("release requires a running job")
+            job = _job(updated, connection)
             connection.commit()
-        return _job(updated, connection)
+        return job
 
     def heartbeat(self, job_id: str, *, owner: str, proof: Proof | None = None) -> Job:
         if owner not in RECIPIENTS:
@@ -449,9 +473,10 @@ class SQLiteJobQueue:
                 "SELECT * FROM jobs WHERE id = ?",
                 (job_id,),
             ).fetchone()
+            assert row is not None
+            job = _job(row, connection)
             connection.commit()
-        assert row is not None
-        return _job(row, connection)
+        return job
 
     def finish(
         self,
@@ -494,11 +519,13 @@ class SQLiteJobQueue:
                     updated["state"] == target
                     and updated["handoff_comment_id"] == handoff_comment_id
                 ):
+                    job = _job(updated, connection)
                     connection.commit()
-                    return _job(updated, connection)
+                    return job
                 raise QueueError("finish requires a running job")
+            job = _job(updated, connection)
             connection.commit()
-        return _job(updated, connection)
+        return job
 
     def record_invalid_handoff(
         self,
@@ -568,8 +595,9 @@ class SQLiteJobQueue:
                     (now, now, job_id),
                 )
             updated = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            job = _job(updated, connection)
             connection.commit()
-        return count, _job(updated, connection)
+        return count, job
 
     def record_head_check(
         self,
@@ -719,7 +747,7 @@ class SQLiteJobQueue:
                 ORDER BY created_at, id
                 """
             ).fetchall()
-        return tuple(_job(row, connection) for row in rows)
+            return tuple(_job(row, connection) for row in rows)
 
     def mark_timed_out(self, job: Job) -> bool:
         """Fail a job the timeout sweep read, unless it changed or may run.
@@ -770,7 +798,7 @@ class SQLiteJobQueue:
                 ORDER BY finished_at, id
                 """
             ).fetchall()
-        return tuple(_job(row, connection) for row in rows)
+            return tuple(_job(row, connection) for row in rows)
 
     def mark_failure_handled(self, job_id: str) -> None:
         with self._connect() as connection:
@@ -785,7 +813,10 @@ class SQLiteJobQueue:
             raise QueueError("failure is missing or already handled")
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=BUSY_TIMEOUT_SECONDS)
+        connection = sqlite3.connect(
+            self.path, timeout=BUSY_TIMEOUT_SECONDS, factory=_ClosingConnection
+        )
+        connection._db_path = self.path
         connection.row_factory = sqlite3.Row
         return connection
 

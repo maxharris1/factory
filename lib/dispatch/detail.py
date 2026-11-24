@@ -485,7 +485,7 @@ class DetailMixin:
             comment,
             request.action,
             request.recipient,
-            queued_at=self._first_queued_at(job),
+            queued_at=self._first_queued_at(job, connection=connection),
             head=request.head,
             round_number=_detail_round_number(request.detail),
             plan_round=_plan_round(request.detail),
