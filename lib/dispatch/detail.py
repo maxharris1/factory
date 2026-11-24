@@ -746,10 +746,10 @@ class DetailMixin:
             context["stack"] = asdict(ticket.stack)
         if (no_ci_base := ticket.no_ci_base) is not None:
             context.update(no_ci_base=no_ci_base, local_checks=list(ticket.factory.ci_local_checks))
-            if ticket.factory.ci_local_gate is not None and (
-                gate_head := self._local_gate_head(ticket, connection)
-            ) is not None:
-                context["local_gate_head"] = gate_head
+            if (gate := ticket.factory.ci_local_gate) is not None:
+                context["local_gate"] = asdict(gate)
+                if (gate_head := self._local_gate_head(ticket, connection)) is not None:
+                    context["local_gate_head"] = gate_head
         if resume:
             # Claim order (lib/queue.py): a resumed paused step goes before
             # bug and ordinary work, after urgent (issue #85).

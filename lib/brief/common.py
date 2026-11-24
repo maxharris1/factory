@@ -11,6 +11,7 @@ from typing import Literal
 from lib.brief.skills import PLAYBOOKS, skill_paths
 from lib.factory_md import (
     CHECK_LABEL,
+    CheckCommand,
     DEFAULT_PLAN_MAX_CRITERIA,
     DEFAULT_PLAN_MAX_LINES,
     FactoryContext,
@@ -176,7 +177,7 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
         "branch": branch if isinstance(branch, str) and _BRANCH.fullmatch(branch) else None,
         "no_ci_base": no_ci_base,
         "local_checks": _check_labels(detail.get("local_checks")),
-        "local_gate": context.config.ci_local_gate if context is not None and no_ci_base is not None else None,
+        "local_gate": _local_gate(detail.get("local_gate"), context) if no_ci_base is not None else None,
         "local_gate_head": gate_head if isinstance(gate_head, str) and _HEAD.fullmatch(gate_head) else None,
         "verify": verify,
         "verify_unavailable": (
@@ -519,6 +520,14 @@ def fenced(text: str, info: str = "") -> str:
     longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
     fence = "`" * max(4, longest + 1)
     return f"{fence}{info}\n{text}\n{fence}"
+
+
+def _local_gate(recorded: object, context: FactoryContext | None) -> CheckCommand | None:
+    if isinstance(recorded, dict):
+        command, timeout = recorded.get("command"), recorded.get("timeout_seconds")
+        if isinstance(command, str) and command.strip() and type(timeout) is int and timeout > 0:
+            return CheckCommand(command, timeout)
+    return context.config.ci_local_gate if context is not None else None
 
 
 def command_code(command: str) -> str:
