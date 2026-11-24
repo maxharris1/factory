@@ -904,6 +904,7 @@ def test_eval_report_imports_and_does_not_touch_network(
         "lib.job_detail",
         "lib.load",
         "lib.orch_yml",
+        "lib.pricing",
         "lib.schema",
     }
 

@@ -53,7 +53,15 @@ import re
 import sqlite3
 from collections.abc import Iterable
 
-from lib.telemetry import LABEL_LIMIT, LIVE_RUN_COLUMNS, PLAN_ITEMS, SUBAGENTS, TABLE, TASK_TEXT_LIMIT
+from lib.telemetry import (
+    LABEL_LIMIT,
+    LIVE_RUN_COLUMNS,
+    PLAN_ITEMS,
+    SUBAGENTS,
+    TABLE,
+    TASK_TEXT_LIMIT,
+    effective_cost_usd,
+)
 
 WINDOW_DAYS = 7
 RECENT_JOBS = 12
@@ -261,6 +269,7 @@ def _empty_rollup(state: str) -> dict:
         "state": state,
         "window_days": WINDOW_DAYS,
         "totals": _bucket(None),
+        "spend": {"productive_usd": 0.0, "wasted_usd": 0.0, "estimated_total_usd": 0.0},
         "by_harness": [],
         "by_repo": [],
         "recent": [],
@@ -299,45 +308,92 @@ def read_telemetry(connection: sqlite3.Connection, now: float) -> dict:
     ).fetchone()
     if present is None:
         return {"rows": {}, "rollup": _empty_rollup("none")}
+    has_jobs = (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'jobs'"
+        ).fetchone()
+        is not None
+    )
+    cutoff = now - WINDOW_DAYS * 86400
     try:
-        present = {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}
+        cols = {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}
         live = [
-            name if name in present else f"NULL AS {name}"
+            f"t.{name}" if name in cols else f"NULL AS {name}"
             for name in (*LIVE_RUN_COLUMNS, "tokens_unknown")
         ]
-        rows = connection.execute(
-            f"SELECT {', '.join([*_COLUMNS, *live])} FROM {TABLE} WHERE updated_at >= ? "
-            "ORDER BY updated_at DESC LIMIT ?",
-            (now - WINDOW_DAYS * 86400, ROW_LIMIT),
+        # Full 7-day rollup without silent ROW_LIMIT truncation: stream lightweight
+        # rollup columns over the entire window, and load detailed summaries only
+        # for recent/active jobs.
+        job_state_col = "j.state AS job_state" if has_jobs else "NULL AS job_state"
+        job_join = f"LEFT JOIN jobs j ON j.id = t.job_id" if has_jobs else ""
+        rollup_cursor = connection.execute(
+            f"SELECT t.job_id, t.harness, t.repo, t.tokens_in, t.tokens_cached, t.tokens_out, "
+            f"{'t.tokens_unknown' if 'tokens_unknown' in cols else 'NULL AS tokens_unknown'}, "
+            f"t.cost_usd, t.exit_code, {job_state_col} "
+            f"FROM {TABLE} t {job_join} WHERE t.updated_at >= ? ORDER BY t.updated_at DESC",
+            (cutoff,),
+        )
+        totals = _bucket(None)
+        harness: dict[str, dict] = {}
+        repo: dict[str, dict] = {}
+        productive_usd = 0.0
+        wasted_usd = 0.0
+        estimated_total_usd = 0.0
+        total_rows = 0
+        for row in rollup_cursor:
+            total_rows += 1
+            _add(totals, row)
+            name = _harness(row["harness"])
+            _add(harness.setdefault(name, _bucket(name)), row)
+            place = _text(row["repo"], 100)
+            _add(repo.setdefault(place, _bucket(place)), row)
+            eff = effective_cost_usd(
+                str(row["harness"] or ""),
+                _money(row["cost_usd"]),
+                tokens_in=_count(row["tokens_in"]),
+                tokens_cached=_count(row["tokens_cached"]),
+                tokens_out=_count(row["tokens_out"]),
+            )
+            if eff is not None:
+                estimated_total_usd += eff
+                jstate = row["job_state"]
+                if jstate in ("failed", "cancelled") or (
+                    jstate is None and isinstance(row["exit_code"], int) and row["exit_code"] != 0
+                ):
+                    wasted_usd += eff
+                else:
+                    productive_usd += eff
+        col_list = ", ".join([*(f"t.{c}" for c in _COLUMNS), *live])
+        detail_rows = connection.execute(
+            f"SELECT {col_list} FROM {TABLE} t WHERE t.updated_at >= ? "
+            "ORDER BY t.updated_at DESC LIMIT ?",
+            (cutoff, ROW_LIMIT),
+        ).fetchall()
+        finished = connection.execute(
+            f"SELECT {col_list} FROM {TABLE} t WHERE t.updated_at >= ? AND t.finished_at IS NOT NULL "
+            "ORDER BY t.finished_at DESC LIMIT ?",
+            (cutoff, RECENT_JOBS),
         ).fetchall()
     except sqlite3.OperationalError:
         return {"rows": {}, "rollup": _empty_rollup("unreadable")}
-    totals = _bucket(None)
-    harness: dict[str, dict] = {}
-    repo: dict[str, dict] = {}
     by_prefix: dict[str, sqlite3.Row] = {}
-    for row in rows:
+    for row in detail_rows:
         by_prefix.setdefault(str(row["job_id"])[:8], row)
-        _add(totals, row)
-        name = _harness(row["harness"])
-        _add(harness.setdefault(name, _bucket(name)), row)
-        place = _text(row["repo"], 100)
-        _add(repo.setdefault(place, _bucket(place)), row)
-    finished = sorted(
-        (row for row in rows if _number(row["finished_at"]) is not None),
-        key=lambda row: _number(row["finished_at"]),
-        reverse=True,
-    )
     order = lambda item: (-item["tokens_in"] - item["tokens_out"], item["name"])  # noqa: E731
     return {
         "rows": by_prefix,
         "rollup": {
-            "state": "ok" if rows else "empty",
+            "state": "ok" if total_rows else "empty",
             "window_days": WINDOW_DAYS,
             "totals": totals,
+            "spend": {
+                "productive_usd": round(productive_usd, 4),
+                "wasted_usd": round(wasted_usd, 4),
+                "estimated_total_usd": round(estimated_total_usd, 4),
+            },
             "by_harness": sorted(harness.values(), key=order),
             "by_repo": sorted(repo.values(), key=order),
-            "recent": [summary(row, now) for row in finished[:RECENT_JOBS]],
+            "recent": [summary(row, now) for row in finished],
         },
     }
 

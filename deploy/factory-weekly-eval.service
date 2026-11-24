@@ -1,0 +1,8 @@
+[Unit]
+Description=Factory weekly eval report (text + JSON)
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/factory/deploy/weekly-eval.sh

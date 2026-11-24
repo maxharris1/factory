@@ -62,6 +62,7 @@ from lib.eval_report import (
     render,
     render_json,
     render_metrics,
+    render_metrics_json,
     render_qa,
 )
 from lib import qa_runners
@@ -792,25 +793,32 @@ def _eval_report(argv: list[str]) -> int:
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--since")
     parser.add_argument("--until")
+    parser.add_argument("--baseline-since")
+    parser.add_argument("--baseline-until")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     if args.db is not None:
-        if args.baseline is None:
-            parser.error("--db needs --baseline")
-        if args.json:
-            parser.error("--json reads --input only")
+        if (args.baseline_since is not None or args.baseline_until is not None) and args.baseline is None:
+            parser.error("--baseline-since/--baseline-until need --baseline")
         try:
-            current, baseline = (
-                build_metrics(path, since=args.since, until=args.until)
-                for path in (args.db, args.baseline)
-            )
+            current = build_metrics(args.db, since=args.since, until=args.until)
+            baseline = None
+            if args.baseline is not None:
+                if args.baseline_since is not None or args.baseline_until is not None:
+                    b_since, b_until = args.baseline_since, args.baseline_until
+                else:
+                    b_since, b_until = args.since, args.until
+                baseline = build_metrics(args.baseline, since=b_since, until=b_until)
         except EvalError as exc:
             print(str(exc), file=sys.stderr)
             return 1
-        print(render_metrics(current, baseline), end="")
-        print(render_qa(current), end="")
+        if args.json:
+            print(render_metrics_json(current, baseline), end="")
+        else:
+            print(render_metrics(current, baseline), end="")
+            print(render_qa(current), end="")
         return 0
-    if args.baseline is not None:
+    if args.baseline is not None or args.baseline_since is not None or args.baseline_until is not None:
         parser.error("--baseline needs --db")
     try:
         built = build_report(args.input, since=args.since, until=args.until)
