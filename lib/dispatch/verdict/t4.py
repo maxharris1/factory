@@ -255,9 +255,6 @@ class T4Mixin:
                 return self._enter_merge_queue(ticket, comment, current_head)
             self._complete_ship_intent(ticket, comment.id, "handed-off")
             self._write_state_label(ticket, "handed-off")
-            if (stacked := ticket.stacked_on) is not None:
-                parent = f"Stacked on #{stacked.pr}. Merge #{stacked.pr} first."
-                note = f"{parent} {note}" if note else parent
             self._wake_done(ticket, comment, "handed-off", note=note)
             return True, "handed-off"
         approver = ship.removeprefix("after:")

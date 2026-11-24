@@ -831,6 +831,9 @@ class DetailMixin:
             "pr_number": ticket.pr_number,
             "post_to": ticket.ticket_url,
         }
+        if outcome == "handed-off" and (stacked := ticket.stacked_on) is not None:
+            parent = f"Stacked on #{stacked.pr}. Merge #{stacked.pr} first."
+            note = f"{parent} {note}" if note else parent
         if note is not None:
             detail["note"] = note
         self._hold_done_wake(ticket, comment, detail)
