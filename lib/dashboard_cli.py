@@ -9,7 +9,7 @@ when configured, pushes it out. Paths:
   --orch else the checkout's orch.yml (only its dashboard, job_states and
          poll_seconds are used)
   --machines else the checkout's machines.yml, when present
-  --evals-dir else $ORCH_STATE_DIR/evals, else evals/ next to the database
+  --evals-dir else $ORCH_STATE_DIR/evals, else ~/.local/state/factory/evals
 
 `snapshot` writes status.json, the five pages (index.html, job.html,
 activity.html, efficiency.html, health.html), tickets.json (a record per
@@ -268,7 +268,7 @@ def _out(args: argparse.Namespace) -> Path:
 def _evals_dir(args: argparse.Namespace) -> Path:
     if args.evals_dir is not None:
         return args.evals_dir
-    return (_env_path("ORCH_STATE_DIR") or _db(args).parent) / "evals"
+    return (_env_path("ORCH_STATE_DIR") or Path.home() / ".local/state/factory") / "evals"
 
 
 def _env_path(name: str) -> Path | None:

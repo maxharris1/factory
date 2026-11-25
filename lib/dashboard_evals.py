@@ -54,10 +54,18 @@ METRIC_KEYS = (
 
 def collect_weekly(evals_dir: Path) -> dict:
     try:
-        with os.scandir(evals_dir) as entries:
-            names = [entry.name for entry in entries]
+        dir_fd = os.open(evals_dir, os.O_RDONLY | os.O_DIRECTORY)
     except OSError:
         return _bundle("no dir", [], 0)
+    try:
+        return _collect(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def _collect(dir_fd: int) -> dict:
+    with os.scandir(dir_fd) as entries:
+        names = [entry.name for entry in entries]
     skipped = 0
     dated: list[str] = []
     for name in names:
@@ -67,12 +75,11 @@ def collect_weekly(evals_dir: Path) -> dict:
             skipped += 1
         else:
             dated.append(name)
-    root = os.path.realpath(evals_dir)
     weeks: list[dict] = []
     for name in sorted(dated, reverse=True):
         if len(weeks) == KEEP:
             break
-        week = _read(evals_dir, name, root)
+        week = _read(dir_fd, name)
         if week is None:
             skipped += 1
         else:
@@ -109,17 +116,14 @@ def _week(name: str) -> str | None:
     return match.group(1)
 
 
-def _read(evals_dir: Path, name: str, root: str) -> dict | None:
-    path = evals_dir / name
+def _read(dir_fd: int, name: str) -> dict | None:
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
     except OSError:
         return None
     with os.fdopen(fd, "rb") as handle:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-            return None
-        if os.path.dirname(os.path.realpath(path)) != root:
             return None
         if info.st_size > MAX_SNAPSHOT_BYTES:
             return None

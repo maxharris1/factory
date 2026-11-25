@@ -43,16 +43,6 @@ def weeks(bundle: dict) -> list[str]:
     return [week["week"] for week in bundle["weeks"]]
 
 
-def _escape(directory: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    write_week(directory, BAD)
-    real = os.path.realpath
-    monkeypatch.setattr(
-        dashboard_evals.os.path,
-        "realpath",
-        lambda path: "/elsewhere/" + BAD if str(path).endswith(BAD) else real(path),
-    )
-
-
 def _oversize(directory: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(dashboard_evals, "MAX_SNAPSHOT_BYTES", 1024)
     write_week(directory, BAD, dict(report(), followups=["x" * 2000]))
@@ -67,7 +57,6 @@ SKIPS: dict[str, Seed] = {
     "fifo": lambda d, _: os.mkfifo(d / BAD),
     "hard link": lambda d, _: os.link(write_week(d.parent, "outside.json"), d / BAD),
     "oversize": _oversize,
-    "escaped parent": _escape,
     "not json": lambda d, _: write_week(d, BAD, "{"),
     "not utf-8": lambda d, _: write_week(d, BAD, b'{"metrics": {}, "x": "\xff"}'),
     "nan": lambda d, _: write_week(d, BAD, '{"metrics": {"poll-errors": NaN}}'),
@@ -185,10 +174,16 @@ def test_evals_json_is_written_without_a_bundle(tmp_path: Path) -> None:
     }
 
 
-@pytest.mark.parametrize("where", ["flag", "state", "db"])
+@pytest.mark.parametrize("where", ["flag", "state", "home"])
 def test_cli_snapshot_reads_the_evals_dir(tmp_path: Path, where: str) -> None:
     db, log = seeded(tmp_path)
-    dirs = {"flag": tmp_path / "flag", "state": tmp_path / "state" / "evals", "db": tmp_path / "evals"}
+    home = tmp_path / "home"
+    dirs = {
+        "flag": tmp_path / "flag",
+        "state": tmp_path / "state" / "evals",
+        "home": home / ".local" / "state" / "factory" / "evals",
+        "next to db": tmp_path / "evals",
+    }
     for directory in dirs.values():
         directory.mkdir(parents=True)
         write_week(directory, GOOD)
@@ -197,9 +192,37 @@ def test_cli_snapshot_reads_the_evals_dir(tmp_path: Path, where: str) -> None:
     result = run_orch(
         "dashboard", "snapshot", "--db", str(db), "--log", str(log), "--out", str(out),
         *(["--evals-dir", str(dirs["flag"])] if where == "flag" else []),
-        env={} if where == "db" else {"ORCH_STATE_DIR": str(tmp_path / "state")},
+        env={"HOME": str(home)} | (
+            {} if where == "home" else {"ORCH_STATE_DIR": str(tmp_path / "state")}
+        ),
     )
     assert result.returncode == 0, result.stderr
     assert weeks(json.loads((out / "evals.json").read_text(encoding="utf-8"))) == [
         "2026-11-23", "2026-11-16",
     ]
+
+
+def test_a_parent_swapped_for_a_symlink_mid_read_cannot_redirect_a_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    evals, outside, saved = (tmp_path / name for name in ("evals", "outside", "saved"))
+    evals.mkdir()
+    outside.mkdir()
+    write_week(evals, GOOD, report({"tickets-succeeded": 1}))
+    write_week(outside, GOOD, report({"tickets-succeeded": 999}))
+    real_open = os.open
+
+    def swapped_open(path, flags, *args, **kwargs):
+        if not str(path).endswith(GOOD):
+            return real_open(path, flags, *args, **kwargs)
+        evals.rename(saved)
+        evals.symlink_to(outside, target_is_directory=True)
+        try:
+            return real_open(path, flags, *args, **kwargs)
+        finally:
+            evals.unlink()
+            saved.rename(evals)
+
+    monkeypatch.setattr(dashboard_evals.os, "open", swapped_open)
+    bundle = collect_weekly(evals)
+    assert [week["metrics"] for week in bundle["weeks"]] in ([{"tickets-succeeded": 1}], [])
