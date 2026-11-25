@@ -1,0 +1,9 @@
+#routing{grid-column:1/-1}
+.rt-scroll{overflow-x:auto}
+.rt-table{min-width:560px;margin:0}
+.rt-table tbody th{color:var(--text);white-space:nowrap}
+.rt-table td{font:12px/1.5 var(--mono);color:var(--text-2)}
+.rt-pool{margin:0;padding-left:20px}
+.rt-e.clamped{color:var(--warn)}
+.rt-errors{margin:4px 0;padding-left:20px;font:12px/1.5 var(--mono);color:var(--bad);overflow-wrap:anywhere}
+.rt-note{margin:12px 0 0;max-width:720px;font-size:12px;color:var(--muted)}

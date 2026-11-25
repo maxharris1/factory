@@ -295,6 +295,45 @@ def _slot_lookup(
     return None
 
 
+def _central_entry(
+    routing: RoutingConfig,
+    role: str,
+    budget: str,
+) -> tuple[SlotEntry | None, Literal["budget_overrides", "roles"]]:
+    tier_entry = _slot_lookup(routing.budget_overrides.get(budget, {}), role)
+    if tier_entry is not None:
+        return tier_entry, "budget_overrides"
+    return _slot_lookup(routing.roles, role), "roles"
+
+
+def role_matrix(path: Path = ROOT / ROUTING_PATH) -> dict:
+    if not path.is_file():
+        return {"state": "missing", "roles": []}
+    config, findings = parse_routing_yml(path.read_text(encoding="utf-8"))
+    if config is None:
+        errors = [f.message for f in findings if f.severity == "error"]
+        return {"state": "invalid", "errors": errors, "roles": []}
+    budget = config.budget
+    rows = []
+    for role in ROLE_SLOTS:
+        entry, source = _central_entry(config, role, budget)
+        if entry is None or entry == "inherit":
+            rows.append({"role": role, "source": "unset" if entry is None else "inherit", "candidates": []})
+            continue
+        rows.append({"role": role, "source": source, "candidates": [
+            {
+                "rank": rank,
+                "harness": cand.harness,
+                "model": cand.model,
+                "family": family_for(cand.harness, cand.model)[0],
+                "effort": _clamp_effort(cand.effort, budget) if source == "roles" else cand.effort,
+                "configured": cand.effort,
+            }
+            for rank, cand in enumerate(entry, 1)
+        ]})
+    return {"state": "ok", "budget": budget, "ceiling": EFFORT_CEILING_BY_BUDGET[budget], "roles": rows}
+
+
 def _factory_override_entry(factory: FactoryConfig | None, role: str) -> SlotEntry | None:
     if factory is None or factory.routing is None:
         return None
@@ -369,15 +408,10 @@ def resolve_slot(
         source = "factory-override"
         clamp_budget = False
     else:
-        central: SlotEntry | None = None
-        if routing is not None:
-            tier_map = routing.budget_overrides.get(effective_budget)
-            if tier_map is not None:
-                central = _slot_lookup(tier_map, role)
-                if central is not None and central != "inherit":
-                    clamp_budget = False
-            if central is None:
-                central = _slot_lookup(routing.roles, role)
+        central, central_source = (
+            _central_entry(routing, role, effective_budget) if routing is not None else (None, "roles")
+        )
+        clamp_budget = central_source == "roles"
         if central is not None and central != "inherit":
             pool = central
             source = "routing.yml"
