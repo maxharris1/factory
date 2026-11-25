@@ -15,7 +15,6 @@ from lib import (
     factory_md,
     harness_env,
     harnesses,
-    lane_limit,
     orch_yml,
     pstack_models,
     pstack_pin,
@@ -27,9 +26,9 @@ from lib import (
     waiter,
 )
 from lib.brief import render_brief
-from lib.harnesses import AccountIsolation, HarnessDriver, StreamFlags
+from lib.harnesses import HarnessDriver, StreamFlags
 from lib.harnesses.gemini import AUTH_OVERRIDES, GeminiDriver
-from lib.machines_yml import load_machines_yml
+from lib.machines_yml import DEVICE_LOGIN_ONLY, load_machines_yml
 from tests.test_brief import job
 
 NOW = 1_800_000_000.0
@@ -52,37 +51,30 @@ def test_gemini_is_first_class_in_schema_wait_queue_and_registry() -> None:
     assert driver.family_for_model("gemini-3.1-pro") == "google"
     assert driver.family_for_model(None) == "google"
     assert harnesses.driver_for_bot("gemini-bot") is driver
-    assert driver.account_isolation() == AccountIsolation("GEMINI_CLI_HOME", AUTH_OVERRIDES)
+    assert driver.account_isolation() is None
+    assert "gemini" in DEVICE_LOGIN_ONLY
     assert driver.probe_usage({}, NOW) == []
     assert usage_readings.NOT_TRACKED["gemini"]
 
 
-UPSTREAM_AUTH_OVERRIDES = (
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
-    "GOOGLE_CLOUD_ACCESS_TOKEN",
-    "GOOGLE_APPLICATION_CREDENTIALS",
-    "GOOGLE_GENAI_USE_GCA",
-    "GOOGLE_GENAI_USE_VERTEXAI",
-    "GEMINI_CLI_USE_COMPUTE_ADC",
-    "CLOUD_SHELL",
-)
-
-
-def test_an_account_job_drops_every_gemini_auth_override_and_signs_in_from_its_folder() -> None:
-    home = "/home/gemini-bot/.factory-accounts/gemini-pro"
-    secrets = {name: f"SYNTHETIC-{index}-{name}" for index, name in enumerate(AUTH_OVERRIDES)}
-    scrubbed = harness_env.account_environ({"PATH": "/usr/bin", "KEEP": "ok", **secrets}, "gemini", home)
-
-    assert set(UPSTREAM_AUTH_OVERRIDES) <= set(AUTH_OVERRIDES)
-    assert scrubbed == {"PATH": "/usr/bin", "KEEP": "ok", "GEMINI_CLI_HOME": home}
-    assert not [value for value in secrets.values() if value in repr(scrubbed)]
+def test_a_gemini_account_cannot_run_from_a_folder_of_its_own() -> None:
+    assert "gemini" not in harness_env.ACCOUNT_ISOLATION
+    with pytest.raises(ValueError, match="cannot run from an account folder"):
+        harness_env.account_environ({"PATH": "/usr/bin"}, "gemini", "/home/gemini-bot/.factory-accounts/gemini-ultra")
 
 
 @pytest.mark.parametrize("path", ["README.md", "docs/SPEC.md", "bots/gemini-bot/SKILL.md"])
 def test_the_docs_name_every_gemini_auth_override_the_job_drops(path: str) -> None:
     text = (pstack_pin.ROOT / path).read_text(encoding="utf-8")
     assert [name for name in AUTH_OVERRIDES if f"`{name}`" not in text] == []
+
+
+@pytest.mark.parametrize("path", ["README.md", "docs/SPEC.md"])
+def test_the_docs_name_a_gemini_account_as_the_devices_gemini_bot_login(path: str) -> None:
+    text = " ".join((pstack_pin.ROOT / path).read_text(encoding="utf-8").split())
+    assert "each device's `gemini-bot` login" in text
+    assert "`agy models`" in text
+    assert not re.search(r"`GEMINI_CLI_HOME` \(Gemini\) set to `<home>/\.factory-accounts", text)
 
 
 def _gemini_session(tmp_path: Path) -> tuple[telemetry.Session, io.BytesIO]:
@@ -418,36 +410,45 @@ def test_the_dashboard_and_doctor_give_the_interactive_agy_sign_in_command(tmp_p
     assert commands["gemini-ultra"] == [command]
 
 
-def test_a_gemini_account_folder_is_prepared(tmp_path: Path) -> None:
-    err = {"type": "error", "message": "quota exhausted"}
-    assert lane_limit.error_text("gemini", err) == err["message"]
-
-    bot_home = tmp_path / "gemini-home"
-    bot_home.mkdir()
-    machines = tmp_path / "machines.yml"
-    machines.write_text(
-        f"""\
+GEMINI_MACHINES = """\
 orch_host: pc
 accounts:
-  - {{id: gemini-pro, harness: gemini, signed_in_on: [pc]}}
+  - {{id: gemini-ultra, harness: gemini, plan: ultra{signed_in_on}}}
 devices:
   - name: pc
     tailscale_name: pc.example.ts.net
     slot_max: 2
-    harnesses: {{gemini: gemini-bot}}
+    harnesses: {{gemini: {harness}}}
     workdir_root: /home/{{bot}}/factory-work
     ssh_alias: pc-{{bot}}
     factory_root: /home/{{bot}}/factory
-    home: {bot_home.as_posix()}
-""",
-        encoding="utf-8",
-    )
+    home: {home}
+"""
+
+
+def test_a_gemini_account_is_each_devices_gemini_bot_login_with_no_folder(tmp_path: Path) -> None:
+    bot_home = tmp_path / "gemini-home"
+    bot_home.mkdir()
+    machines = tmp_path / "machines.yml"
+    machines.write_text(GEMINI_MACHINES.format(
+        signed_in_on="", harness="{bot: gemini-bot, account: gemini-ultra}", home=bot_home.as_posix(),
+    ), encoding="utf-8")
     config, findings = load_machines_yml(machines, overlay=False)
-    assert config is not None
-    assert not [f for f in findings if f.severity == "error"]
-    assert config.accounts_on("pc", "gemini") == ("gemini-default", "gemini-pro")
-    changes = account_home.prepare(config, "pc", "gemini-bot", bot_home)
-    assert any(c.action == "made" and c.path.endswith("gemini-pro") for c in changes)
+    assert config is not None and findings == []
+    assert config.accounts_on("pc", "gemini") == ("gemini-ultra",)
+    assert config.account_home("pc", "gemini", "gemini-ultra") is None
+    assert account_home.prepare(config, "pc", "gemini-bot", bot_home) == []
+    assert not (bot_home / ".factory-accounts").exists()
+
+
+def test_a_gemini_account_signed_in_from_a_folder_is_refused(tmp_path: Path) -> None:
+    machines = tmp_path / "machines.yml"
+    machines.write_text(GEMINI_MACHINES.format(
+        signed_in_on=", signed_in_on: [pc]", harness="gemini-bot", home="/home/gemini-bot",
+    ), encoding="utf-8")
+    config, findings = load_machines_yml(machines, overlay=False)
+    assert config is None
+    assert any("signed_in_on is not supported for a gemini account" in item.message for item in findings)
 
 
 @pytest.mark.parametrize("path", ["docs/ACCOUNTS.md", "docs/RUNBOOK-HARDENING.md", "bots/gemini-bot/SKILL.md"])

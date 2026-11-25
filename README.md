@@ -1950,19 +1950,26 @@ no longer lists it in `refused_harnesses`
 Account homes (issues #1183 and #1184). One bot user on one device can run
 several accounts of its harness, each from its own folder. A job placed on
 an account that is not the device's own login runs with `CLAUDE_CONFIG_DIR`
-(Claude), `CODEX_HOME` (Codex) or `GEMINI_CLI_HOME` (Gemini) set to
-`<home>/.factory-accounts/<id>`.
+(Claude) or `CODEX_HOME` (Codex) set to `<home>/.factory-accounts/<id>`.
 Its token variables are dropped by name after the login profile runs:
 `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`
-for Claude, `OPENAI_API_KEY` and `CODEX_API_KEY` for Codex, and
-`GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_ACCESS_TOKEN`, `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_GENAI_USE_GCA`, `GOOGLE_GENAI_USE_VERTEXAI`, `GEMINI_CLI_USE_COMPUTE_ADC`, `CLOUD_SHELL`, `GOOGLE_GEMINI_BASE_URL` and `GEMINI_CLI_CUSTOM_HEADERS`
-for Gemini. The harness then
-signs in from the folder, never from a variable, and the values never reach
-the run log, the telemetry or the job detail. The job's usage probe and
+for Claude, and `OPENAI_API_KEY` and `CODEX_API_KEY` for Codex. The harness
+then signs in from the folder, never from a variable, and the values never
+reach the run log, the telemetry or the job detail. The job's usage probe and
 `skill-probe run --account <id>` run the same way, and the skill probe reads
 the run's transcript from that folder. A job on the device's own login runs
 unchanged. `lib/harness_env.py` `ACCOUNT_ISOLATION` is the one table that
 names these variables.
+A Gemini account has no folder (issue #1641). Only a different `HOME` moves
+the Antigravity `agy` login, so a Gemini account is each device's
+`gemini-bot` login, named inline as a Cursor account is
+(`gemini: {bot: gemini-bot, account: <id>}`). `orch accounts doctor` checks
+it with `agy models`, and the sign-in is interactive `agy`. Both run with
+`GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_ACCESS_TOKEN`,
+`GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_GENAI_USE_GCA`,
+`GOOGLE_GENAI_USE_VERTEXAI`, `GEMINI_CLI_USE_COMPUTE_ADC`, `CLOUD_SHELL`,
+`GOOGLE_GEMINI_BASE_URL`, `GEMINI_CLI_CUSTOM_HEADERS` and `GEMINI_CLI_HOME`
+unset, so no key in the login profile can stand in for the login.
 To sign an account in on each device, follow [docs/ACCOUNTS.md](docs/ACCOUNTS.md).
 
 The Accounts panel on the Settings page (issue #1066) adds and removes
