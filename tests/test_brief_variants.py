@@ -316,13 +316,10 @@ def test_no_ci_fix_says_the_log_is_in_job_data(logs: dict[str, str | None]):
 
 
 @pytest.mark.parametrize("name", sorted(VARIANTS))
-def test_each_builder_variant_brings_the_base_in_before_ready(name: str):
+def test_each_builder_variant_leaves_the_base_step_to_the_router(name: str):
     task = _task(_render(*VARIANTS[name]))
-    assert "git fetch origin dev" in task
-    assert "git rebase origin/dev" in task
-    assert "--force-with-lease" in task
-    assert "git merge origin/dev" in task
-    assert task.index("git fetch origin dev") < task.index("post the ready handoff")
+    assert "git rebase origin/" not in task
+    assert "router's \"Before ready\" steps" in task
 
 
 @pytest.mark.parametrize("name", sorted(VARIANTS))

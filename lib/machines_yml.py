@@ -869,7 +869,7 @@ def _device(
             if resolved is None:
                 continue
             harnesses[harness], device_accounts[harness] = resolved
-            if isinstance(user, dict) and "account" in user:
+            if isinstance(user, dict) and "account" in user and harness != "cursor":
                 findings.append(
                     Finding(
                         "warning",

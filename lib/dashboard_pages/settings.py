@@ -11,6 +11,7 @@ import json
 import math
 import time
 
+from lib.account_requests import ADD_REFUSED
 from lib.dashboard_pages.common import _chip, _e, _panel, _span
 from lib.dashboard_static import read_asset
 
@@ -81,14 +82,23 @@ def running_line(account: dict) -> str:
     ) or "none"
 
 
-def account_facts(account: dict) -> list[tuple[str, str, str]]:
+def usage_facts(account: dict) -> list[tuple[str, str, str]]:
+    if account.get("not_tracked"):
+        return [("usage", f"not tracked: {account['not_tracked']}", "muted")]
     return [
-        ("harness", account["harness"], ""),
-        ("max_jobs", "—" if account.get("max_jobs") is None else str(account["max_jobs"]), ""),
-        ("paused", "yes" if account.get("paused") else "no", "warn" if account.get("paused") else ""),
         ("5h used", percent(account.get("five_hour_used")), ""),
         ("7d used", percent(account.get("seven_day_used")), ""),
         ("headroom", *headroom_fact(account)),
+    ]
+
+
+def account_facts(account: dict) -> list[tuple[str, str, str]]:
+    return [
+        ("harness", account["harness"], ""),
+        *([("plan", account["plan"], "")] if account.get("plan") else []),
+        ("max_jobs", "—" if account.get("max_jobs") is None else str(account["max_jobs"]), ""),
+        ("paused", "yes" if account.get("paused") else "no", "warn" if account.get("paused") else ""),
+        *usage_facts(account),
         ("running", running_line(account), ""),
     ]
 
@@ -212,5 +222,6 @@ SCRIPT = _SCRIPT.replace("__ST__", json.dumps(
     {"tone": RESULT_TONE, "perCard": RESULTS_PER_CARD, "queued": QUEUED, "readOnly": READ_ONLY,
      "waiting": WAITING, "noChanges": NO_CHANGES, "signIn": SIGN_IN_TONE, "unchecked": UNCHECKED,
      "accountReadOnly": ACCOUNT_READ_ONLY, "notSignedIn": NOT_SIGNED_IN, "noAccounts": NO_ACCOUNTS,
-     "harnesses": ADD_HARNESSES, "signinHarnesses": SIGNIN_HARNESSES, "remind": SIGNIN_REMIND}
+     "harnesses": ADD_HARNESSES, "signinHarnesses": SIGNIN_HARNESSES, "remind": SIGNIN_REMIND,
+     "addRefused": dict(ADD_REFUSED)}
 ))

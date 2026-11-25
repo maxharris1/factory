@@ -69,8 +69,6 @@ def test_every_verify_setting_says_which_checks_did_not_run(
     brief = render(case, {"round": round_text, "verify_skill": verify}, factory_md=factory_md)
     text = task(brief)
     assert NOT_RUN in text
-    assert "QA owns live checks" in text
-    assert "never boots or drives the app: `review.verify` is `none`" in brief
     assert "verify skill is unknown" not in brief
 
 

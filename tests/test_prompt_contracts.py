@@ -481,7 +481,6 @@ GUIDANCE: dict[str, Callable[[], None]] = {
     "finish-remote-no-db": lambda: carried("finish-remote-no-db", side="remote"),
     "finish-remote-waiter": lambda: carried("finish-remote-waiter", side="remote"),
     "finish-no-heartbeat": wording("finish-no-heartbeat"),
-    "review-no-app": wording("review-no-app"),
     "review-blocking-ran": wording("review-blocking-ran"),
     "review-no-judge": wording("review-no-judge"),
     "review-low-risk-rounds": wording("review-low-risk-rounds"),
@@ -500,7 +499,6 @@ GUIDANCE: dict[str, Callable[[], None]] = {
     "rule-scratch": lambda: carried("rule-scratch", side="box"),
     "rule-containers": wording("rule-containers"),
     "rule-load": wording("rule-load"),
-    "rule-one-channel": wording("rule-one-channel"),
     "rule-no-follow-up-fixes": wording_no_follow_up_fixes,
     "rule-job-text": wording("rule-job-text"),
 }

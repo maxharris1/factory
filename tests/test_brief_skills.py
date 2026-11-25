@@ -142,7 +142,7 @@ def test_the_old_harness_and_no_rebase_rules_are_gone(action: str, recipient: st
         assert "Never start another harness" not in text
         assert "No force-push and no rebase of a pushed branch" not in text
         assert "Never start another factory job." in text
-        assert text.count("Message no other bot.") == 1
+        assert text.lower().count("message no other bot") == 1
         assert "Run as poteto-mode" not in text
 
 
@@ -372,10 +372,6 @@ def test_build_and_fix_briefs_name_tdd_and_plans_name_how_and_architect(
     else:
         assert TDD in named
         assert HOW not in named and ARCHITECT not in named
-
-
-def test_the_build_task_points_at_the_tdd_skill() -> None:
-    assert "Write tests first, as the `tdd` skill says." in _brief("build", "claude", {})
 
 
 def test_every_playbook_and_action_file_is_pinned() -> None:

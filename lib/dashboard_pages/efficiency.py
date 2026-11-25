@@ -182,6 +182,30 @@ def _who(entry: dict) -> str:
     )
 
 
+def _untracked_who(entry: dict) -> str:
+    harness, plan = entry["harness"], entry["plan"]
+    return (
+        f'<div class="ef-who">{_span("bot " + harness, harness)}{_span("ef-name", entry["account"])}</div>'
+        + ("" if plan is None else f'<div class="ef-dev">{_e(plan)}</div>')
+    )
+
+
+def _untracked_row(entry: dict) -> str:
+    return (
+        f'<tr class="ef-un"><td>{_untracked_who(entry)}</td>'
+        f'<td class="ef-v muted" colspan="4">{_e("not tracked: " + entry["not_tracked"])}</td>'
+        + _cell(_jobs(entry), "muted") + _cell(_devices(entry), "muted") + "</tr>"
+    )
+
+
+def _untracked_block(entry: dict) -> str:
+    return (
+        f'<div class="ef-un">{_untracked_who(entry)}'
+        + _cell("not tracked: " + entry["not_tracked"], "muted", "div")
+        + f'<div class="ef-dev">{_e(_jobs(entry) + " · " + _devices(entry))}</div></div>'
+    )
+
+
 def _number(view: dict, *, phone: bool) -> str:
     if view["limit"]:
         return _span("ef-lim bad", view["limit"])
@@ -225,18 +249,11 @@ def _account_block(view: dict) -> str:
 def _headroom(snapshot: dict) -> str:
     accounts = snapshot["usage"]["accounts"]
     views = [_view(e, snapshot["generated_at_epoch"]) for e in accounts if e["state"] != "not tracked"]
-    untracked = list(dict.fromkeys(e["harness"] for e in accounts if e["state"] == "not tracked"))
+    untracked = [e for e in accounts if e["state"] == "not tracked"]
     head = "".join(f"<th>{name}</th>" for name in
                    ("account", "5-hour window", "7-day window", "resets", "headroom", "jobs", "devices"))
-    rows = "".join(_account_row(view) for view in views) + "".join(
-        f'<tr class="ef-un"><td>{_span("bot " + h, h)}</td>'
-        '<td class="ef-v muted" colspan="6">not tracked</td></tr>'
-        for h in untracked
-    )
-    blocks = "".join(_account_block(view) for view in views) + "".join(
-        f'<div class="ef-un">{_span("bot " + h, h)}{_span("ef-v muted", "not tracked")}</div>'
-        for h in untracked
-    )
+    rows = "".join(_account_row(view) for view in views) + "".join(_untracked_row(e) for e in untracked)
+    blocks = "".join(_account_block(view) for view in views) + "".join(_untracked_block(e) for e in untracked)
     inner = (
         f'<div class="ef-scroll"><table class="ef-usage"><thead><tr>{head}</tr></thead>'
         f"<tbody>{rows}</tbody></table></div>"
