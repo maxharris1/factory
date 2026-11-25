@@ -30,13 +30,15 @@ def _snapshot(tmp_path: Path) -> dict:
 
 
 def _css(html: str) -> str:
-    (css,) = re.findall(r"<style>(.*?)</style>", html, flags=re.S)
-    return css
+    assert '<link rel="stylesheet" href="/app.css">' in html
+    assert "<style>" not in html
+    return page.app_css()
 
 
 def _script(html: str) -> str:
-    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
-    return script
+    assert '<script src="/app.js" defer></script>' in html
+    assert "<script>" not in html
+    return page.page_script(None)
 
 
 def _faces(script: str) -> list[dict]:

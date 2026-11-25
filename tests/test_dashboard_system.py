@@ -18,7 +18,7 @@ import pytest
 from lib import health as component_health
 from lib.dashboard import collect_snapshot, rules_and_limits
 from lib.dashboard_flow import load_chart
-from lib.dashboard_page import CSS, render_pages, version_drift
+from lib.dashboard_page import CSS, render_pages, render_static_assets, version_drift
 from lib.factory_md import load_factory_md
 from tests.test_dashboard import NOW, seeded
 from tests import test_dashboard_tickets_board as board
@@ -273,8 +273,11 @@ DETAILS_HARNESS = board.HARNESS.replace(
 
 
 def _details_steps(tmp_path: Path, actions: list) -> list[dict]:
+    from lib.dashboard_page import page_script
     snapshot = _snapshot(tmp_path)
-    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(snapshot)["health.html"], flags=re.S)
+    html = render_pages(snapshot)["health.html"]
+    assert '<script src="/app.js" defer></script>' in html
+    script = page_script(snapshot.get("statechart"))
     out = run_harness(tmp_path, DETAILS_HARNESS, script, snapshot, "health", BAR + ["hud", "components"], actions)
     return [step for step in out["steps"] if "open" in step]
 
@@ -405,9 +408,12 @@ def test_broken_now_is_first_and_lists_each_item(tmp_path: Path) -> None:
 
 @needs_node
 def test_script_broken_now_is_first_and_lists_each_item(tmp_path: Path) -> None:
+    from lib.dashboard_page import page_script
+
     snapshot = _down(tmp_path)
     out = _run_page(tmp_path, snapshot, "health", BAR + ["hud", *PANELS])
-    assert "health: [renderBroken, renderComponents," in render_pages(snapshot)["health.html"]
+    assert '<script src="/app.js" defer></script>' in render_pages(snapshot)["health.html"]
+    assert "health: [renderBroken, renderComponents," in page_script(snapshot.get("statechart"))
     assert not out["hidden"]["broken"]
     broken = out["html"]["broken"]
     assert '<span class="count bad">2 components down · 1 component stale</span>' in broken
@@ -740,12 +746,15 @@ def test_script_poller_log_shows_the_newest_line_first(tmp_path: Path) -> None:
 
 
 def test_moved_panels_left_their_old_pages(tmp_path: Path) -> None:
-    pages = render_pages(_snapshot(tmp_path))
+    from lib.dashboard_page import page_script
+    snap = _snapshot(tmp_path)
+    pages = render_pages(snap)
+    script = page_script(snap.get("statechart"))
     assert 'id="health"' not in pages["efficiency.html"]
     assert 'id="log"' not in pages["activity.html"]
-    assert "renderHealth, renderLog" in pages["health.html"]
+    assert "renderHealth, renderLog" in script
     assert re.search(r"efficiency: \[renderHeadroom, renderTokens, renderRounds, renderSavings, renderJobsLifetime\]",
-                     pages["health.html"])
+                     script)
 
 
 
@@ -820,6 +829,13 @@ CHROME = next(filter(None, map(shutil.which, ("google-chrome", "chromium", "chro
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         pass
+
+
+def publish_assets(root: Path, *snapshots: dict) -> None:
+    assets, *others = (render_static_assets(snapshot) for snapshot in snapshots)
+    assert all(other == assets for other in others), "sites that share one root app.js need one statechart"
+    for name, text in assets.items():
+        (root / name).write_text(text, encoding="utf-8")
 
 
 class TargetNavigated(Exception):
@@ -920,6 +936,7 @@ def _browse(tmp_path: Path, snapshot: dict, *, phone: bool = False, script: bool
     for name, html in render_pages(snapshot).items():
         (site / name).write_text(html, encoding="utf-8")
     (site / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    publish_assets(site, snapshot)
     handler = functools.partial(QuietHandler, directory=str(site))
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()

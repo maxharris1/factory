@@ -502,12 +502,15 @@ def _tokens(snapshot: dict) -> str:
 
 
 def test_tokens_tables_each_scroll_on_their_own(tmp_path: Path) -> None:
+    from lib.dashboard_page import app_css
+
     snapshot = _rollup(tmp_path, {"harness": "claude", "cost_usd": 1.5})
     page = render_pages(snapshot)["efficiency.html"]
     panel = _tokens(snapshot)
     assert panel.count("<table>") == 2
     assert len(re.findall(r'<div class="ef-scroll"><table>.*?</table></div>', panel)) == 2
-    assert ".ef-scroll{overflow-x:auto}" in page
+    assert '<link rel="stylesheet" href="/app.css">' in page
+    assert ".ef-scroll{overflow-x:auto}" in app_css()
 
 
 COSTS = [1057.64, 0.4213, 0.005, 12345.675]

@@ -1072,7 +1072,10 @@ def _place_harness() -> str:
 
 
 def _place(tmp_path: Path, snapshot: dict, page_name: str, ids: list[str], actions: list, hash_: str = "") -> list[dict]:
-    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(snapshot)[page_name], flags=re.S)
+    from lib.dashboard_page import page_script
+    html = render_pages(snapshot)[page_name]
+    assert '<script src="/app.js" defer></script>' in html
+    script = page_script(snapshot.get("statechart"))
     out = layout.run_harness(tmp_path, _place_harness(), script, snapshot, SCRIPT_PAGE[page_name], ids, actions, hash_)
     return [step for step in out["steps"] if "where" in step]
 
@@ -1284,7 +1287,10 @@ def _link_run(tmp_path: Path, snapshot: dict, actions: list, name: str = "index.
               ids: list[str] | None = None, harness: str | None = None) -> dict:
     harness = harness or _link_harness()
     assert "kind === 'hide'" in harness and "if (failing)" in harness
-    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(snapshot)[name], flags=re.S)
+    from lib.dashboard_page import page_script
+    html = render_pages(snapshot)[name]
+    assert '<script src="/app.js" defer></script>' in html
+    script = page_script(snapshot.get("statechart"))
     return layout.run_harness(tmp_path, harness, script, snapshot, SCRIPT_PAGE[name], ids or BAR, actions)
 
 
@@ -1790,6 +1796,7 @@ def test_the_bar_is_announced_again_only_on_a_new_entry(tmp_path: Path, base: di
 
 
 def _fresh_page(snapshot: dict, name: str = "index.html") -> str:
+    from lib.dashboard_page import app_css, page_script
     shim = (
         "<script>(function () { var real = Date.now.bind(Date); window.__skew = 0; window.__fail = false;"
         " Date.now = function () { return real() + window.__skew; };"
@@ -1797,7 +1804,11 @@ def _fresh_page(snapshot: dict, name: str = "index.html") -> str:
         " return Promise.resolve({ok: true, status: 200, json: function () { return Promise.resolve("
         + json.dumps(snapshot) + "); }}); }; })();</script>"
     )
-    return render_pages(snapshot)[name].replace("<script>", shim + "<script>", 1)
+    return (
+        render_pages(snapshot)[name]
+        .replace('<link rel="stylesheet" href="/app.css">', f"<style>{app_css()}</style>", 1)
+        .replace('<script src="/app.js" defer></script>', shim + f"<script>{page_script(snapshot.get('statechart'))}</script>", 1)
+    )
 
 
 _OPENED = [0]
@@ -1939,7 +1950,7 @@ def test_every_shown_segment_is_reachable_and_whole_in_a_browser(
     snapshot = _f1(base) if case == "phone-fit-poll-error" else copy.deepcopy(base)
     snapshot["health"]["publish_seconds"] = 15
     snapshot = _now(snapshot, STALE_AGE if fresh == "stale" else 0)
-    html = _fresh_page(snapshot) if fresh else _no_script(render_pages(snapshot)["index.html"])
+    html = _fresh_page(snapshot) if fresh else _no_script(_fresh_page(snapshot))
     browser = Browser()
     try:
         _open(browser, html, width, fresh)

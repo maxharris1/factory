@@ -1408,7 +1408,7 @@ def test_write_snapshot_is_atomic_and_leaves_no_temp_files(
 
     monkeypatch.setattr(dashboard.os, "replace", spy)
     paths = dashboard.write_snapshot_pages(out, snapshot)
-    names = ["status.json", "index.html", "job.html", "activity.html", "efficiency.html",
+    names = ["status.json", *dashboard.STATIC_ASSETS, "index.html", "job.html", "activity.html", "efficiency.html",
              "health.html", "settings.html", "ticket.html", "tickets.json"]
     assert [target for _, target in replaced] == names
     assert all(source.startswith(".") for source, _ in replaced)
@@ -1486,15 +1486,20 @@ def test_failed_first_snapshot_write_leaves_no_half_pair(tmp_path: Path, monkeyp
 
 
 def test_html_is_self_contained(tmp_path: Path) -> None:
-    html = render_html(snapshot_for(tmp_path))
+    snapshot = snapshot_for(tmp_path)
+    html = render_html(snapshot)
+    script = dashboard.render_static_assets(snapshot)["app.js"]
     assert html.startswith("<!doctype html>")
-    for needle in ("<link", "src=", "http://"):
-        assert needle not in html
+    assert '<link rel="stylesheet" href="/app.css">' in html
+    assert '<script src="/app.js" defer></script>' in html
+    assert "<script>" not in html and "<style>" not in html
+    assert "http://" not in html and "http://" not in script
     # #563: the only https:// text is a link to github.com, never an asset.
     assert set(re.findall(r"https://[^/'\"]*/", html)) <= {"https://github.com/"}
-    assert re.findall(r"fetch\(([^,)]+)", html) == ["path", "'/api/session'", "'tickets.json'", "STATUS_URL"]
-    assert all(path.startswith("/api/") for path in re.findall(r"ghPost\('([^']*)'", html))
-    assert "var STATUS_URL = 'status.json';" in html
+    assert set(re.findall(r"https://[^/'\"]*/", script)) <= {"https://github.com/"}
+    assert re.findall(r"fetch\(([^,)]+)", script) == ["path", "'/api/session'", "'tickets.json'", "STATUS_URL"]
+    assert all(path.startswith("/api/") for path in re.findall(r"ghPost\('([^']*)'", script))
+    assert "var STATUS_URL = 'status.json';" in script
 
 
 # --- CLI --------------------------------------------------------------------
@@ -1521,7 +1526,7 @@ def test_cli_snapshot_writes_both_files(tmp_path: Path) -> None:
         "dashboard", "snapshot", "--db", str(db), "--log", str(log), "--out", str(out)
     )
     assert result.returncode == 0, result.stderr
-    names = ["status.json", "index.html", "job.html", "activity.html", "efficiency.html",
+    names = ["status.json", *dashboard.STATIC_ASSETS, "index.html", "job.html", "activity.html", "efficiency.html",
              "health.html", "settings.html", "ticket.html", "tickets.json"]
     assert sorted(path.name for path in out.iterdir()) == sorted(names)
     status = json.loads((out / "status.json").read_text(encoding="utf-8"))

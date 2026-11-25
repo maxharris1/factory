@@ -22,7 +22,7 @@ from lib.dashboard_page import render_pages
 from tests import test_dashboard_activity as activity
 from tests import test_dashboard_layout as layout
 from tests.test_dashboard import NOW, seeded
-from tests.test_dashboard_system import CHROME, QuietHandler, _Chrome
+from tests.test_dashboard_system import CHROME, QuietHandler, _Chrome, publish_assets
 
 REPO = "maxharris1/factory"
 LABEL = {"ok": "Merge OK", "approve-plan": "Approve plan as-is", "split": "Split", "another-round": "Another round",
@@ -132,6 +132,7 @@ def _browse(tmp_path: Path, snapshot: dict, session: dict | None, replies: dict 
     site = tmp_path / "site"
     site.mkdir()
     (site / "activity.html").write_text(render_pages(snapshot)["activity.html"], encoding="utf-8")
+    publish_assets(site, snapshot)
     polls = itertools.count()
 
     class Publishing(QuietHandler):
