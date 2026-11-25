@@ -122,12 +122,12 @@ tickets while a matching check is red on the base branch (issue #1025).
 
 qa is optional (issue #759): what the project's QA lane runs. The block
 needs enabled, a boolean. Enabled, it also needs runners (one or two of
-claude-cloud and cursor-cloud, the first primary, each with a claude_cloud
-or cursor_cloud block holding an environment and an optional model), a
-profile, lane.boot and lane.base_url. The other keys are optional.
-enabled: false still checks the values it holds. check-config refuses a bad
-block; with strict=False its problems are warnings and qa is off. Off is
-always FactoryConfig.qa None.
+claude-cloud, cursor-cloud and local-docker, the first primary, each with a
+claude_cloud, cursor_cloud or local_docker block holding an environment and
+an optional model), a profile, lane.boot and lane.base_url. The other keys
+are optional. enabled: false still checks the values it holds. check-config
+refuses a bad block; with strict=False its problems are warnings and qa is
+off. Off is always FactoryConfig.qa None.
 
 Unknown fields are errors by default, as check-config reads them. The
 poller, feeder and waiter read factory.md with strict=False (issue #288):

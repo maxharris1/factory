@@ -26,18 +26,6 @@ projects:
       evidence_root: /srv/factory/qa-evidence
 """
 
-QA = """\
-qa:
-  enabled: true
-  runners: [claude-cloud]
-  profile: none
-  claude_cloud:
-    environment: qa-env
-  lane:
-    boot: bash boot.sh
-    base_url: http://127.0.0.1:8080
-"""
-
 
 @pytest.fixture(autouse=True)
 def overlay_on(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -46,7 +34,8 @@ def overlay_on(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def qa_factory_md(tmp_path: Path) -> Path:
     text = (ROOT / "examples/cleffy/factory.md").read_text(encoding="utf-8")
-    text = text.replace("skills: []\n", "skills: []\n" + QA, 1)
+    assert "qa:\n  enabled: false\n" in text
+    text = text.replace("qa:\n  enabled: false\n", "qa:\n  enabled: true\n", 1)
     path = tmp_path / "factory.md"
     path.write_text(text, encoding="utf-8")
     return path

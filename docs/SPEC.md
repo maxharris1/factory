@@ -641,10 +641,10 @@ Optional:
   | `qa.enabled` | boolean | required | False keeps QA off. The other keys are still checked. |
   | `qa.gate` | `report` \| `block` | `report` | `report` posts the result and never gates a ship. `block` gates the ship. |
   | `qa.visual_hold` | boolean | true | When true on `ship: merge` or `ship: handoff`, a passing primary QA run with stored screenshot or video evidence (`.png`, `.jpg`, `.jpeg`, `.webp`, `.webm`, `.mp4`) automatically holds the PR in `awaiting-ok` (`reason: visual-qa-review`) until an approver posts `/ok <sha>` or `kind=ok`. The hold belongs to the ticket, not the head: once any primary PASS stored visuals (`qa_runs.visual`), every later head stays held under either `qa.gate`, even after recycling deletes the files. An ok at an older head covers a newer one only for the same stable patch id or a clean merge from base with no hand-merged file. |
-  | `qa.runners` | list of `claude-cloud`, `cursor-cloud` | required when enabled | One or two runners, no repeat. The first is the primary. |
-  | `qa.claude_cloud`, `qa.cursor_cloud` | mapping | none | One block for each listed runner, and none for an unlisted one. `environment` is a required token. `model` is an optional model hint, checked like `builder.model`. |
+  | `qa.runners` | list of `claude-cloud`, `cursor-cloud`, `local-docker` | required when enabled | One or two runners, no repeat. The first is the primary. |
+  | `qa.claude_cloud`, `qa.cursor_cloud`, `qa.local_docker` | mapping | none | One block for each listed runner, and none for an unlisted one. `environment` is a required token. `model` is an optional model hint, checked like `builder.model`. |
   | `qa.shootout` | boolean | false | True sends every run to every listed runner, for comparison. It needs two runners and `gate: report`. |
-  | `qa.profile` | `full-stack` \| `supabase` \| `none` | required when enabled | What the lane loads: every service, only the database, or no backend. |
+  | `qa.profile` | `full-stack` \| `supabase` \| `none` | required when enabled | The `env=` label on the QA result comment. The factory starts no service for any profile: `qa.lane.boot` starts whatever the app needs. |
   | `qa.lanes` | integer, 1 to 3 | 1 | The number of QA lanes. |
   | `qa.paths` | list of repo-relative globs | none | Matched like `hold.paths`. |
   | `qa.full_rerun_lines` | positive integer | 400 | The changed-line size at which a run covers the whole app. |
