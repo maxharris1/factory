@@ -18,6 +18,7 @@ from lib.dashboard_pages.activity import _ATTENTION, _attention, _attention_key,
 from lib.dashboard_pages.cockpit import _needs_max
 from lib.dashboard_pages.common import _chip, duration, _e, _span, _ticket, ticket_page_href
 from lib.dashboard_pages.efficiency import _jobs_lifetime, middle_row, routing_row, top_row
+from lib.dashboard_pages.evals import _evals
 from lib.dashboard_pages.lanes import _just_happened_and_intake, lane_devices, _lanes
 from lib.dashboard_pages.settings import _accounts, _settings
 from lib.dashboard_pages.system import (
@@ -62,7 +63,9 @@ def px_script() -> str:
 # refresh_seconds) and the script only has to replace their contents.
 
 # In nav order (#78).
-NAV_PAGES = ("index.html", "job.html", "activity.html", "efficiency.html", "health.html", "settings.html")
+NAV_PAGES = (
+    "index.html", "job.html", "activity.html", "efficiency.html", "evals.html", "health.html", "settings.html",
+)
 
 
 PAGES = (*NAV_PAGES, "ticket.html")
@@ -76,6 +79,7 @@ _PAGE_NAMES = {
     "job.html": ("job", "Tickets"),
     "activity.html": ("activity", "Activity"),
     "efficiency.html": ("efficiency", "Efficiency"),
+    "evals.html": ("evals", "Evals"),
     "health.html": ("health", "System"),
     "settings.html": ("settings", "Settings"),
     "ticket.html": ("ticket", "Ticket"),
@@ -553,6 +557,7 @@ _PANELS = {
     "index.html": (_lanes, _just_happened_and_intake, _needs_max),
     "activity.html": (_attention, _relay),
     "efficiency.html": (top_row, middle_row, routing_row, _jobs_lifetime),
+    "evals.html": (_evals,),
     "health.html": (_broken, _components, _versions, _log_row, _rules, _no_waiter),
     "job.html": (_board, _tickets),
     "settings.html": (_settings, _accounts),

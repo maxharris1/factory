@@ -14,8 +14,8 @@ from pathlib import Path
 
 from lib.dashboard_flow import flowmap_layout
 from lib.dashboard_pages import (
-    activity, ci, cockpit, common, efficiency, lanes, routing, settings, shell, system, ticket_detail,
-    tickets,
+    activity, ci, cockpit, common, efficiency, evals, lanes, routing, settings, shell, system,
+    ticket_detail, tickets,
 )
 from lib.dashboard_pages.activity import (  # noqa: F401
     _ATTENTION, _HEALTH_LINK, _VERDICT, _attention, _health_link, _relay, relay_threads,
@@ -62,8 +62,8 @@ FONTS = (
 
 CSS = "".join((
     common.CSS_BASE, shell.CSS, common.CSS_PANEL, lanes.CSS, common.CSS_PARTS, shell.CSS_NAV,
-    system.CSS, ticket_detail.CSS, tickets.CSS, common.CSS_MISC, efficiency.CSS, routing.CSS, activity.CSS, ci.CSS,
-    cockpit.CSS, settings.CSS, shell.CSS_PX,
+    system.CSS, ticket_detail.CSS, tickets.CSS, common.CSS_MISC, efficiency.CSS, evals.CSS, routing.CSS,
+    activity.CSS, ci.CSS, cockpit.CSS, settings.CSS, shell.CSS_PX,
     common.CSS_TAIL,
 ))
 SCRIPT = "".join((

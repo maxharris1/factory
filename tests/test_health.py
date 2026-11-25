@@ -571,12 +571,12 @@ def snapshot(tmp_path: Path, db: Path, now: float = NOW, *, machines: str = MACH
                             orch=config)
 
 
-def test_health_is_the_tab_after_efficiency(tmp_path: Path) -> None:
-    assert NAV_PAGES[-3:-1] == ("efficiency.html", "health.html")
+def test_health_follows_efficiency_and_evals(tmp_path: Path) -> None:
+    assert NAV_PAGES[-4:-1] == ("efficiency.html", "evals.html", "health.html")
     db, _ = make_db(tmp_path)
     html = render_pages(snapshot(tmp_path, db))["index.html"]
     nav = html[html.index('id="nav"'):html.index("</nav>")]
-    assert nav.index("efficiency.html") < nav.index('href="health.html"')
+    assert nav.index("efficiency.html") < nav.index("evals.html") < nav.index('href="health.html"')
     assert ">System</a>" in nav  # #139
 
 

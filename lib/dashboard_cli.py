@@ -11,8 +11,9 @@ when configured, pushes it out. Paths:
   --machines else the checkout's machines.yml, when present
   --evals-dir else $ORCH_STATE_DIR/evals, else ~/.local/state/factory/evals
 
-`snapshot` writes status.json, the five pages (index.html, job.html,
-activity.html, efficiency.html, health.html), tickets.json (a record per
+`snapshot` writes status.json, the pages (index.html, job.html,
+activity.html, efficiency.html, evals.html, health.html, settings.html,
+ticket.html), tickets.json (a record per
 tracked ticket) and evals.json (the newest weekly eval reports in the evals
 dir, lib/dashboard_evals.py); `push` sends them all and, over ssh, each
 settled QA run's evidence folder (lib/qa_evidence_push.py).

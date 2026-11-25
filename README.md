@@ -2076,6 +2076,9 @@ already listed as stuck, each once).
   comments by outcome), every tracked ticket and the redacted log tail.
 - **Efficiency** (`efficiency.html`): poll health and Linear-budget health,
   and handoff savings with a one-line definition of scripted share.
+- **Evals** (`evals.html`): the weekly eval reports as one table, a column
+  per week, newest first, each value with its change from the previous
+  available report, so a delta after a missing week spans two weeks.
 - **Health** (`health.html`, issue #92): every component heartbeat as up,
   stale or down, with last seen in ET, its age, pid, device, version and
   start time, and each harness whose queued jobs have no live waiter (see
@@ -2093,7 +2096,10 @@ panels in place, with no reload; ages tick every second between fetches,
 rows that appear since the last snapshot flash briefly, and the job page
 redraws each job's path (SVG nodes made with `createElementNS`, in the
 namespace of the server-drawn chart) and copies the server-drawn full chart
-with the highlight moved. If `status.json`
+with the highlight moved. The Evals table is the exception. `status.json`
+carries no eval bundle and the page has no script twin for the table, so
+with script the table changes only when the page is reloaded, which picks
+up the latest published `evals.html`. If `status.json`
 cannot be fetched at all, the server-rendered page stays and reloads as
 without script. Everything is inline: no external asset, font or CDN, so it
 works offline on the tailnet. The look follows Omarchy (omarchy.org): the
@@ -2338,8 +2344,9 @@ the working directory when `--directory` is empty.
 `Conflicts=factory-dashboard.service` keeps the two from running at once.
 The HTTP server answers GET and HEAD (and, with GitHub actions on, POST
 under `/api`, below) only. It answers only for `/`, `/status.json`, the
-seven pages (`/index.html`, `/job.html`, `/activity.html`,
-`/efficiency.html`, `/health.html`, `/ticket.html`, `/settings.html`),
+eight pages (`/index.html`, `/job.html`, `/activity.html`,
+`/efficiency.html`, `/evals.html`, `/health.html`, `/ticket.html`,
+`/settings.html`),
 `/tickets.json` and a QA run's evidence under `/qa/runs/<run_id>`. Every
 other path, dot-file, `..` or encoded slash is a 404, and no directory is
 ever listed. Each file is opened, with `O_NOFOLLOW`, relative to a

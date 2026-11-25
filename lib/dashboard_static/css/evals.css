@@ -1,0 +1,15 @@
+#evals{grid-column:1/-1}
+.ev-scroll{overflow-x:auto}
+.ev-table{min-width:520px;margin:0}
+.ev-table th:first-child{position:sticky;left:0;z-index:1;padding-right:16px;background:var(--panel)}
+.ev-table tbody th{color:var(--text);font:13px/1.5 var(--sans);white-space:nowrap}
+.ev-table thead th[scope=col]{text-align:right;font:500 11px/1.5 var(--mono);letter-spacing:.08em;color:var(--muted);white-space:nowrap}
+.ev-table td{padding-left:16px;text-align:right;white-space:nowrap}
+.ev-table th:last-child,.ev-table td:last-child{padding-right:0}
+.ev-v{font:12px/1.5 var(--mono);font-variant-numeric:tabular-nums;color:var(--text)}
+.ev-table .chip{font-variant-numeric:tabular-nums}
+.ev-skipped{margin:12px 0 0;font-size:12px;color:var(--muted)}
+@media (max-width:699.98px){
+body[data-page="evals"] main{padding:12px 12px 24px;gap:12px}
+#evals{padding:12px}
+}

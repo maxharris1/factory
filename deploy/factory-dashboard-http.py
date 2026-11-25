@@ -16,7 +16,7 @@ empty. This server:
   and neither / nor $HOME nor any directory that contains $HOME (it is
   resolved through symlinks before those checks);
 - answers GET and HEAD for the snapshot, and only for /, /status.json, the
-  pages (/index.html, /activity.html, /efficiency.html, /job.html,
+  pages (/index.html, /activity.html, /efficiency.html, /evals.html, /job.html,
   /health.html, /ticket.html, /settings.html) and /tickets.json (the ticket
   records), the files `orch dashboard push` writes. Every other path, including
   dot-files such as the push's temp files and anything with `..` or an
@@ -123,7 +123,7 @@ TAILNET = ipaddress.ip_network("100.64.0.0/10")
 DEFAULT_PORT = 8787
 MAX_BYTES = 8 * 1024 * 1024
 PAGES = (
-    "index.html", "activity.html", "efficiency.html", "job.html", "health.html", "ticket.html",
+    "index.html", "activity.html", "efficiency.html", "evals.html", "job.html", "health.html", "ticket.html",
     "settings.html",
 )
 STATIC_ASSETS = ("app.css", "app.js", "auth.js")

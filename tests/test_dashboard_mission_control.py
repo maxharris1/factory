@@ -317,6 +317,7 @@ def test_pages_have_every_mission_control_panel(tmp_path: Path) -> None:
         "index.html": ("lanes", "queue", "just-happened", "intake"),
         "activity.html": ("attention", "relay"),
         "efficiency.html": ("savings",),
+        "evals.html": ("evals",),
         "health.html": ("components", "drift", "health", "log", "rules", "no-waiter"),
         "job.html": ("ticket-filter", "pipeline", "shipped", "tickets"),
     }

@@ -77,8 +77,8 @@ def test_serves_index_at_root_and_by_name(get) -> None:
         assert headers["content-type"] == "text/html; charset=utf-8"
 
 
-@pytest.mark.parametrize("name", ["activity.html", "efficiency.html", "job.html", "health.html", "ticket.html",
-                                  "settings.html"])
+@pytest.mark.parametrize("name", ["activity.html", "efficiency.html", "evals.html", "job.html", "health.html",
+                                  "ticket.html", "settings.html"])
 def test_serves_the_other_pages(site: Path, get, name: str) -> None:
     status, _, _ = get(f"/{name}")
     assert status == 404  # not written yet

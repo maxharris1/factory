@@ -35,12 +35,14 @@ from tests.test_dashboard_layout import BAR, JOB, _no_script, _run_page, _sectio
 from tests.test_dashboard_pixelstrip import _node
 from tests.test_dashboard_lanes import FOLD, Browser, _page_with_status_stub, needs_chrome
 
-PAGES = ("index.html", "job.html", "activity.html", "efficiency.html", "health.html", "settings.html", "ticket.html")
+PAGES = ("index.html", "job.html", "activity.html", "efficiency.html", "evals.html", "health.html", "settings.html",
+         "ticket.html")
 SCRIPT_PAGE = {"index.html": "main", "job.html": "job", "activity.html": "activity",
-               "efficiency.html": "efficiency", "health.html": "health", "settings.html": "settings",
-               "ticket.html": "ticket"}
+               "efficiency.html": "efficiency", "evals.html": "evals", "health.html": "health",
+               "settings.html": "settings", "ticket.html": "ticket"}
 NAV = [("index.html", "Lanes"), ("job.html", "Tickets"), ("activity.html", "Activity"),
-       ("efficiency.html", "Efficiency"), ("health.html", "System"), ("settings.html", "Settings")]
+       ("efficiency.html", "Efficiency"), ("evals.html", "Evals"), ("health.html", "System"),
+       ("settings.html", "Settings")]
 SHELL = ["caret", "band", "attention-strip", "statusline"]
 # The harness clock starts 3 s after the snapshot; this puts it back, so
 # every ticking age reads as the server wrote it.
@@ -1396,10 +1398,10 @@ def test_the_skip_link_moves_focus_to_main_without_a_hash(tmp_path: Path, base: 
 
 
 @pytest.mark.parametrize(("name", "label"), [
-    ("index.html", "Lanes"), ("activity.html", "Activity"), ("efficiency.html", "Efficiency"), ("health.html", "System"),
-    ("job.html", "Tickets"),
+    ("index.html", "Lanes"), ("activity.html", "Activity"), ("efficiency.html", "Efficiency"), ("evals.html", "Evals"),
+    ("health.html", "System"), ("job.html", "Tickets"),
 ])
-def test_five_pages_have_one_hidden_h1_with_the_nav_label(base: dict, name: str, label: str) -> None:
+def test_six_pages_have_one_hidden_h1_with_the_nav_label(base: dict, name: str, label: str) -> None:
     html = render_pages(base)[name]
     assert re.findall(r"<h1\b[^>]*>.*?</h1>", html) == [f'<h1 class="vh">{label}</h1>']
     assert f'<a href="{name}" aria-current="page">{label}</a>' in html

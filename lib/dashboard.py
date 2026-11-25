@@ -3,11 +3,12 @@
 `orch dashboard snapshot` opens the dispatcher database with a SQLite
 `mode=ro` URI and reads the tail of poller.log. It never writes either.
 It writes status.json, the self-contained pages (PAGES: index.html,
-job.html, activity.html, efficiency.html, health.html, settings.html, ticket.html; see
+job.html, activity.html, efficiency.html, evals.html, health.html, settings.html, ticket.html; see
 lib/dashboard_page.py) and tickets.json to an output directory, each
 atomically (temp file in the same directory, fsync, then rename), as one
 set: a failed rename puts back every file already renamed. Each page's inline script fetches status.json every 1 to 2
-seconds and updates in place. Without script (or when status.json cannot
+seconds and updates in place. The Evals table is not in status.json, so
+only a page reload refreshes it. Without script (or when status.json cannot
 be fetched) the server-rendered page reloads every refresh_seconds (15 to
 30). The job page's diagram is model/chart.mmd (lib/dashboard_flow.py).
 
@@ -2823,8 +2824,9 @@ def write_snapshot_pages(out_dir: Path, snapshot: dict) -> tuple[Path, ...]:
 
     The ticket records (RECORDS) go to tickets.json only and the weekly eval
     bundle (EVALS, lib/dashboard_evals.py) to evals.json only, a "no dir"
-    bundle when the snapshot has none; status.json, the
-    static assets and the pages are written from the rest of the snapshot. Each
+    bundle when the snapshot has none; status.json and the static assets are
+    written from the rest of the snapshot, and the pages from the rest plus the
+    eval bundle, so evals.html draws the weekly table. Each
     file is written to a temp file in the same directory and fsynced, then
     renamed into place, status.json first. If a later rename fails, every file
     already renamed is put back as it was (or removed if there was none), so the
@@ -2833,10 +2835,11 @@ def write_snapshot_pages(out_dir: Path, snapshot: dict) -> tuple[Path, ...]:
     order, then tickets.json and evals.json.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    status = {key: value for key, value in snapshot.items() if key not in (RECORDS, EVALS)}
+    paged = {key: value for key, value in snapshot.items() if key != RECORDS}
+    status = {key: value for key, value in paged.items() if key != EVALS}
     texts = {"status.json": json.dumps(status, indent=2, sort_keys=True, allow_nan=False) + "\n"}
     texts.update(render_static_assets(status))
-    texts.update(render_pages(status))
+    texts.update(render_pages(paged))
     texts["tickets.json"] = tickets_json(snapshot)
     texts["evals.json"] = evals_json(snapshot.get(EVALS))
     targets = [out_dir / name for name in texts]

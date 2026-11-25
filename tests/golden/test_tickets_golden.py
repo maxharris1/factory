@@ -19,11 +19,11 @@ GOLDEN = {
     "hostile/__FLOWMAP__": "242c85c9a6bfbfca11bad8b93bcf0966842c8d743e216534233cefe3e04d630b",
     "empty/__FLOWMAP__": "242c85c9a6bfbfca11bad8b93bcf0966842c8d743e216534233cefe3e04d630b",
     "seeded/main": "7f2c6b4708768fb3208c39c0dd3cf8389f8e36c38e92fb6f3abfcbab8a158efc",
-    "seeded/chrome": "5540d49aab3881177ef965a00099da65d1df7d7f889f39736f85a5b6105bc8d4",
+    "seeded/chrome": "fe5f7ca3a20724d4a1aaa5f965f062a0f6169e212f7f6b85ba6c4ca918de8044",
     "hostile/main": "7f2c6b4708768fb3208c39c0dd3cf8389f8e36c38e92fb6f3abfcbab8a158efc",
-    "hostile/chrome": "898ca5a0248e5b548bbcf63a5becfe28c6ea3535794d76c9b57a585490da8a0d",
+    "hostile/chrome": "9a63ad2f08297092c5458a44e64d9ab8e4d8b947efef14ac26150da6edefabb8",
     "empty/main": "e36d217e80efb19b357b57a0949ab9f065931c323ae9ab40c99774ec7aa34f38",
-    "empty/chrome": "1d877b5957de58609d7ca40a5dcd5bc882637fcd4a903bbae00bbd2300679b92",
+    "empty/chrome": "358a7d40398d22514b7b83186fe2e5fa65b22f748604b59727a5d34c80461aa7",
 }
 
 

@@ -11,11 +11,11 @@ GOLDEN = {
     "settings.CSS": "6d28070b6f594121087183618668c453fadcae7644fa256dd493bce321f334c9",
     "settings.SCRIPT": "db9696e85b0cec45e6a8ae6fb39125daeba4798acc49a3805fbc2895631e56da",
     "seeded/main": "5fcd6365b9b111a4793a9885a6a5590189bbd2bc081bcfb209426850758f87d3",
-    "seeded/chrome": "a30c252f2d59b9d99badc42e4a9a21c5a3aa87ca9e387b5be3c87fafff01f717",
+    "seeded/chrome": "2eaa09bc5a0e8dca86e8fca5becc26fb962999496985824555fdeb173236b050",
     "hostile/main": "5fcd6365b9b111a4793a9885a6a5590189bbd2bc081bcfb209426850758f87d3",
-    "hostile/chrome": "455bc3a734f48962441ae3733123c71c964c78849810774df87c2b4017f14da8",
+    "hostile/chrome": "5e76145cfa5575068199a74c288299e13a4618403bbcaf59258d74dc3cd51cb9",
     "empty/main": "5fcd6365b9b111a4793a9885a6a5590189bbd2bc081bcfb209426850758f87d3",
-    "empty/chrome": "43b071bcb67a41de3a078efbeabcd9b7e0cee6fd0b7b87e1ca09cef007ab6012",
+    "empty/chrome": "f8e2b2ab3db9a261f6abf827dfb52aa17afa9754c2db88748cde22b26c5adac5",
 }
 
 

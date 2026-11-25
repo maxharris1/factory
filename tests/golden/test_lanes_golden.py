@@ -16,11 +16,11 @@ GOLDEN = {
     "cockpit.SCRIPT": "c2110e91918538773e559ae2846b4dc96844d9ded357a2374b8f46028f898e67",
     "__LANES__": "0a070c5626c19ae07dc2fd8adfb927643b397d9899d61f93f67b20ee6f76e617",
     "seeded/main": "bb842118ba687d913788c3f03d6a959aee29cdff79d661695f1db635dbf79736",
-    "seeded/chrome": "9522b88ea36b14ce7c9ce4c9643e3ea92aeffbf26a7a6923d5aef01d95a1b69d",
+    "seeded/chrome": "7754112969551732eac6190685750455b4bc996c39b7b9ed98b489cad8a0ab0f",
     "hostile/main": "bb842118ba687d913788c3f03d6a959aee29cdff79d661695f1db635dbf79736",
-    "hostile/chrome": "a356e44f87e1f0c9da99cd3328d7dd7747c1196b0922f3bb930dd7d3309a3341",
+    "hostile/chrome": "3ec9de0566a75e9dde2cf666830a6ffda9d2bfd679b41bfdbf48632300f6ae88",
     "empty/main": "0430eee7a74cc525784e083c329b0a6dbfd65540dab0d05e13bbdc9862876745",
-    "empty/chrome": "cf6c770af8638b93bb7d0a6c626e8d80263d8d3a51bf8f095b1f6f4154186a20",
+    "empty/chrome": "267ca8331580ee53274eb32b22ba72e6e1db254e0e6e9a52efaf76fb9efbb9d2",
 }
 
 
