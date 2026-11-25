@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from typing import Literal
 
 from lib.dashboard_pages.common import _chip, _e, _panel, _span
+from lib.dashboard_static import read_asset
+
+CSS = read_asset("css/evals.css")
 
 TITLE = "Weekly evals"
 NO_DIR = '<p class="empty">No evals dir on this host.</p>'

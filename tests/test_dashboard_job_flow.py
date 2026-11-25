@@ -42,6 +42,7 @@ NAV = [
     ("job.html", "Tickets"),  # #139
     ("activity.html", "Activity"),
     ("efficiency.html", "Efficiency"),
+    ("evals.html", "Evals"),
     ("health.html", "System"),  # #92, #139
     ("settings.html", "Settings"),
 ]

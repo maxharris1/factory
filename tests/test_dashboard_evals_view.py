@@ -13,6 +13,7 @@ import pytest
 from lib import dashboard_evals
 from lib.dashboard import EVALS, write_snapshot_pages
 from lib.dashboard_evals import KEEP, METRIC_KEYS, collect_weekly, evals_json
+from lib.dashboard_page import render_pages
 from lib.dashboard_pages.evals import EVAL_ROWS, _evals
 from tests.test_dashboard import run_orch, seeded, snapshot_for
 
@@ -371,3 +372,58 @@ def test_hostile_text_is_escaped() -> None:
     rows = table(html)
     assert rows["Poll errors"][0] == ("n/a", "n/a", "muted")
     assert rows["Stuck jobs"][0] == ("n/a", "n/a", "muted")
+
+
+NAV = re.compile(r'<nav class="nav" id="nav" aria-label="Pages">(.*?)</nav>')
+MAIN = re.compile(r'<main id="hud" tabindex="-1">(.*)</main>', re.S)
+
+
+def evals_page(tmp_path: Path, evals_dir: Path | None) -> str:
+    (tmp_path / "db").mkdir()
+    snapshot = snapshot_for(tmp_path / "db")
+    if evals_dir is not None:
+        snapshot[EVALS] = collect_weekly(evals_dir)
+    html = render_pages(snapshot)["evals.html"]
+    nav = NAV.search(html).group(1)
+    assert re.findall(r'href="([^"]+)" aria-current="page"', nav) == ["evals.html"]
+    assert '<a href="evals.html" aria-current="page">Evals</a>' in nav
+    assert '<body data-page="evals" ' in html
+    main = MAIN.search(html).group(1)
+    assert main.startswith('<h1 class="vh">Evals</h1>')
+    return main
+
+
+@pytest.mark.parametrize(
+    ("where", "words"),
+    [
+        (None, "No evals dir on this host."),
+        ("missing", "No evals dir on this host."),
+        ("empty", "No weekly evals yet."),
+    ],
+    ids=["no key", "missing dir", "empty dir"],
+)
+def test_the_page_with_no_weeks_shows_the_state(tmp_path: Path, where: str | None, words: str) -> None:
+    evals = None if where is None else tmp_path / "evals"
+    if where == "empty":
+        evals.mkdir()
+    main = evals_page(tmp_path, evals)
+    assert words in main
+    assert "<table" not in main
+
+
+def test_the_page_with_one_week_has_one_column_and_no_deltas(tmp_path: Path) -> None:
+    (tmp_path / "evals").mkdir()
+    write_week(tmp_path / "evals", GOOD, report(NEWEST))
+    main = evals_page(tmp_path, tmp_path / "evals")
+    assert headers(main) == ["2026-11-23"]
+    assert {delta for cells in table(main).values() for _, delta, _ in cells} == {"n/a"}
+
+
+def test_the_page_with_several_weeks_shows_every_row_newest_first(tmp_path: Path) -> None:
+    (tmp_path / "evals").mkdir()
+    for name, metrics in (("weekly-2026-11-09.json", OLDEST), ("weekly-2026-11-16.json", MIDDLE),
+                          (GOOD, NEWEST)):
+        write_week(tmp_path / "evals", name, report(metrics))
+    main = evals_page(tmp_path, tmp_path / "evals")
+    assert headers(main) == ["2026-11-23", "2026-11-16", "2026-11-09"]
+    assert list(table(main)) == [row.label for row in EVAL_ROWS]

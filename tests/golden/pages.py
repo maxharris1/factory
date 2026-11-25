@@ -13,7 +13,8 @@ from unittest import mock
 
 import lib.dashboard_page as page
 import lib.health
-from lib.dashboard import collect_snapshot
+from lib.dashboard import EVALS, collect_snapshot
+from lib.dashboard_evals import collect_weekly
 from lib.dashboard_pages import lanes, tickets
 from tests.test_dashboard import NOW, make_db, seeded
 
@@ -22,12 +23,26 @@ PAGE_FILES = {
     "job.html": "test_tickets_golden",
     "activity.html": "test_activity_golden",
     "efficiency.html": "test_efficiency_golden",
+    "evals.html": "test_evals_golden",
     "health.html": "test_system_golden",
     "settings.html": "test_settings_golden",
     "ticket.html": "test_ticket_golden",
 }
 
 MARKERS = {"main": "\0main\0"}
+
+WEEKS = {
+    "2026-11-09": {"tickets-succeeded": 5, "first-pass-approve-rate": 0.9, "poll-errors": 3},
+    "2026-11-16": {"tickets-succeeded": 7, "first-pass-approve-rate": 0.8, "poll-errors": 3,
+                   "cycle-time-p50-hours": 7.7, "wasted-cost-usd": 5},
+    "2026-11-23": {"tickets-succeeded": 10, "first-pass-approve-rate": 0.85, "poll-errors": 5,
+                   "cycle-time-p50-hours": 6.5, "wasted-cost-usd": 3.1},
+}
+HOSTILE_EVALS = {"schema": 1, "state": "ok", "skipped": 2, "weeks": [
+    {"week": "</script><script>x()</script>", "since": None, "until": None,
+     "metrics": {"poll-errors": "<img src=x onerror=y>", "stuck-jobs": "unrecorded", "failed-jobs": None}},
+    {"week": "2026-11-16", "since": None, "until": None, "metrics": {"poll-errors": 1, "stuck-jobs": 2}},
+]}
 
 _PAGE = re.compile(
     r'(.*?<link rel="stylesheet" href="/app\.css"></head>.*?<main id="hud" tabindex="-1">)(.*?)'
@@ -58,7 +73,12 @@ def _snapshots(root: Path) -> dict[str, dict]:
     db, log = seeded(root / "seeded")
     os.utime(log, (NOW - 30, NOW - 30))
     seeded_snapshot = collect_snapshot(db, log, now=NOW)
+    (root / "evals").mkdir()
+    for day, metrics in WEEKS.items():
+        (root / "evals" / f"weekly-{day}.json").write_text(json.dumps({"metrics": metrics}), encoding="utf-8")
+    seeded_snapshot[EVALS] = collect_weekly(root / "evals")
     hostile = copy.deepcopy(seeded_snapshot)
+    hostile[EVALS] = HOSTILE_EVALS
     hostile["attention"] = {"count": 2, "items": [
         {"kind": "down", "repo": "", "ticket_id": "", "component": "<b>x</b>",
          "link": "javascript:alert(1)", "detail": "down \"now\""},

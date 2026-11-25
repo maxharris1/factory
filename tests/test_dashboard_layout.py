@@ -12,6 +12,7 @@ efficiency pages.
   in that state.
 - Efficiency page (efficiency.html): poll and Linear budget, handoff savings
   and a one-line definition of scripted share.
+- Evals page (evals.html): the weekly eval table, newest week first.
 - #63 FU-1: a lane counts max(held, running) slots.
 Every page renders its content server-side, so it reads without script.
 """
@@ -43,7 +44,9 @@ from tests.test_dashboard import (
 ROOT = Path(__file__).resolve().parents[1]
 CHART = ROOT / "model" / "chart.mmd"
 MINI = ROOT / "tests" / "fixtures" / "statechart" / "mini.mmd"
-NAV = ("index.html", "job.html", "activity.html", "efficiency.html", "health.html", "settings.html")  # nav order (#78, #92, #777)
+NAV = (  # nav order (#78, #92, #777)
+    "index.html", "job.html", "activity.html", "efficiency.html", "evals.html", "health.html", "settings.html",
+)
 PAGES = (*NAV, "ticket.html")
 
 

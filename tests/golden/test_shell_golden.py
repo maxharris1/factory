@@ -9,8 +9,8 @@ import pytest
 import lib.dashboard_page as page
 from lib.dashboard_flow import load_chart
 from lib.dashboard_pages import (
-    activity, ci, cockpit, common, efficiency, lanes, routing, settings, shell, system, ticket_detail,
-    tickets,
+    activity, ci, cockpit, common, efficiency, evals, lanes, routing, settings, shell, system,
+    ticket_detail, tickets,
 )
 from tests.golden.pages import (
     PAGE_FILES, record, render, sha, snapshots, split, substitutions,
@@ -21,8 +21,9 @@ FACADE = Path(__file__).resolve().parents[2] / "lib" / "dashboard_page.py"
 CSS_ORDER = (
     (common, "CSS_BASE"), (shell, "CSS"), (common, "CSS_PANEL"), (lanes, "CSS"),
     (common, "CSS_PARTS"), (shell, "CSS_NAV"), (system, "CSS"), (ticket_detail, "CSS"),
-    (tickets, "CSS"), (common, "CSS_MISC"), (efficiency, "CSS"), (routing, "CSS"), (activity, "CSS"),
-    (ci, "CSS"), (cockpit, "CSS"), (settings, "CSS"), (shell, "CSS_PX"), (common, "CSS_TAIL"),
+    (tickets, "CSS"), (common, "CSS_MISC"), (efficiency, "CSS"), (evals, "CSS"), (routing, "CSS"),
+    (activity, "CSS"), (ci, "CSS"), (cockpit, "CSS"), (settings, "CSS"), (shell, "CSS_PX"),
+    (common, "CSS_TAIL"),
 )
 SCRIPT_ORDER = (
     (common, "SCRIPT_HEAD"), (shell, "SCRIPT"), (lanes, "SCRIPT"), (ci, "SCRIPT"), (activity, "SCRIPT"),
