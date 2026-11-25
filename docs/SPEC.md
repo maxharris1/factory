@@ -644,7 +644,7 @@ Optional:
   | `qa.runners` | list of `claude-cloud`, `cursor-cloud`, `local-docker` | required when enabled | One or two runners, no repeat. The first is the primary. |
   | `qa.claude_cloud`, `qa.cursor_cloud`, `qa.local_docker` | mapping | none | One block for each listed runner, and none for an unlisted one. `environment` is a required token. `model` is an optional model hint, checked like `builder.model`. |
   | `qa.shootout` | boolean | false | True sends every run to every listed runner, for comparison. It needs two runners and `gate: report`. |
-  | `qa.profile` | `full-stack` \| `supabase` \| `none` | required when enabled | What the lane loads: every service, only the database, or no backend. |
+  | `qa.profile` | `full-stack` \| `supabase` \| `none` | required when enabled | The `env=` label on the QA result comment. The factory starts no service for any profile: `qa.lane.boot` starts whatever the app needs. |
   | `qa.lanes` | integer, 1 to 3 | 1 | The number of QA lanes. |
   | `qa.paths` | list of repo-relative globs | none | Matched like `hold.paths`. |
   | `qa.full_rerun_lines` | positive integer | 400 | The changed-line size at which a run covers the whole app. |

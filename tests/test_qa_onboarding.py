@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -47,3 +48,27 @@ def test_example_qa_stanza_is_local_docker_with_visual_hold(relative: str) -> No
     assert config is not None and config.qa is not None
     assert config.qa.runners == (QaRunner("local-docker", qa["local_docker"]["environment"], None),)
     assert config.qa.visual_hold is True
+
+
+QA_DOCS = (*QA_EXAMPLES, "docs/AUT0-CLEANUP.md")
+
+
+def _qa_section(relative: str) -> str:
+    text = (ROOT / relative).read_text(encoding="utf-8")
+    return text.split("\n## QA\n", 1)[1].split("\n## ", 1)[0]
+
+
+@pytest.mark.parametrize("relative", QA_DOCS)
+def test_qa_section_says_the_profile_provisions_nothing(relative: str) -> None:
+    section = _qa_section(relative)
+    assert re.search(r"profile[^.]*\bloads\b", section) is None
+    assert "only labels the result comment's `env=` field" in section
+    assert "starts no service for any profile" in section
+    assert re.search(r"`lane\.boot` and `lane\.base_url` are placeholders", section)
+
+
+def test_spec_profile_row_claims_no_provisioning() -> None:
+    spec = (ROOT / "docs/SPEC.md").read_text(encoding="utf-8")
+    row = next(line for line in spec.splitlines() if line.startswith("  | `qa.profile` |"))
+    assert "loads" not in row
+    assert "starts no service" in row
