@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Callable
 from datetime import date, timedelta
+from html import escape as html_escape
 from pathlib import Path
 
 import pytest
 
 from lib import dashboard_evals
 from lib.dashboard import EVALS, write_snapshot_pages
-from lib.dashboard_evals import KEEP, collect_weekly, evals_json
+from lib.dashboard_evals import KEEP, METRIC_KEYS, collect_weekly, evals_json
+from lib.dashboard_pages.evals import EVAL_ROWS, _evals
 from tests.test_dashboard import run_orch, seeded, snapshot_for
 
 GOOD = "weekly-2026-11-23.json"
@@ -226,3 +229,145 @@ def test_a_parent_swapped_for_a_symlink_mid_read_cannot_redirect_a_snapshot(
     monkeypatch.setattr(dashboard_evals.os, "open", swapped_open)
     bundle = collect_weekly(evals)
     assert [week["metrics"] for week in bundle["weeks"]] in ([{"tickets-succeeded": 1}], [])
+
+
+CELL = re.compile(r'<td><span class="ev-v">([^<]*)</span> <span class="chip (\w+)">([^<]*)</span></td>')
+
+
+def panel(bundle: dict | None) -> str:
+    return _evals({} if bundle is None else {EVALS: bundle})
+
+
+def table(html: str) -> dict[str, list[tuple[str, str, str]]]:
+    rows = re.findall(r'<tr><th scope="row">([^<]*)</th>(.*?)</tr>', html)
+    return {label: [(value, delta, tone) for value, tone, delta in CELL.findall(cells)]
+            for label, cells in rows}
+
+
+def headers(html: str) -> list[str]:
+    return re.findall(r'<th scope="col">([^<]*)</th>', html)
+
+
+def test_every_metric_key_is_read_by_exactly_one_row() -> None:
+    labels = [row.label for row in EVAL_ROWS]
+    assert len(set(labels)) == len(labels)
+    for key in METRIC_KEYS:
+        bundle = {"state": "ok", "skipped": 0, "weeks": [
+            {"week": "2026-11-23", "metrics": {key: 2}},
+            {"week": "2026-11-16", "metrics": {key: 1}},
+        ]}
+        read = [label for label, cells in table(panel(bundle)).items() if cells[0][0] != "n/a"]
+        assert len(read) == 1, (key, read)
+
+
+@pytest.mark.parametrize(
+    ("bundle", "words"),
+    [
+        (None, "No evals dir on this host."),
+        ({"schema": 1, "state": "no dir", "weeks": [], "skipped": 0}, "No evals dir on this host."),
+        ({"schema": 1, "state": "no snapshots", "weeks": [], "skipped": 0},
+         "No weekly evals yet. The Monday report writes the first."),
+    ],
+    ids=["no key", "no dir", "no snapshots"],
+)
+def test_no_weeks_draws_the_state_and_no_table(bundle: dict | None, words: str) -> None:
+    html = panel(bundle)
+    assert words in html
+    assert "<table" not in html
+    assert "skipped" not in html
+
+
+def test_the_collected_states_render(tmp_path: Path) -> None:
+    assert "No evals dir on this host." in panel(collect_weekly(tmp_path / "missing"))
+    write_week(tmp_path, GOOD, "[]")
+    html = panel(collect_weekly(tmp_path))
+    assert "No weekly evals yet." in html
+    assert "1 report skipped" in html
+
+
+def test_one_week_has_one_column_and_no_deltas(tmp_path: Path) -> None:
+    write_week(tmp_path, GOOD, report({"tickets-succeeded": 3, "poll-errors": 4}))
+    html = panel(collect_weekly(tmp_path))
+    assert headers(html) == ["2026-11-23"]
+    rows = table(html)
+    assert [row.label for row in EVAL_ROWS] == list(rows)
+    assert rows["Throughput (tickets shipped)"] == [("n/a", "n/a", "muted")]
+    assert rows["Poll errors"] == [("4", "n/a", "muted")]
+    assert all(cell[1:] == ("n/a", "muted") for cells in rows.values() for cell in cells)
+    assert "1 week" in html
+
+
+NEWEST = {
+    "tickets-succeeded": 10, "first-pass-approve-rate": 0.85, "cap-rate": 0.1, "poll-errors": 5,
+    "stuck-jobs": 1, "failed-jobs": 0, "cycle-time-p50-hours": 6.5, "cycle-time-p90-hours": 20,
+    "max-interventions": 2, "wasted-wakes": "x", "productive-cost-usd": 41.2, "wasted-cost-usd": 3.1,
+}
+MIDDLE = {
+    "tickets-succeeded": 7, "first-pass-approve-rate": 0.8, "cap-rate": 0.1, "poll-errors": 3,
+    "stuck-jobs": 1, "failed-jobs": 1, "cycle-time-p50-hours": 7.7, "cycle-time-p90-hours": None,
+    "wasted-wakes": 4, "productive-cost-usd": 38.1, "wasted-cost-usd": 5,
+}
+OLDEST = {"tickets-succeeded": 5, "first-pass-approve-rate": 0.9, "poll-errors": 3}
+
+
+def test_several_weeks_show_values_and_toned_deltas_newest_first(tmp_path: Path) -> None:
+    write_week(tmp_path, "weekly-2026-11-09.json", report(OLDEST))
+    write_week(tmp_path, "weekly-2026-11-16.json", report(MIDDLE))
+    write_week(tmp_path, GOOD, report(NEWEST))
+    html = panel(collect_weekly(tmp_path))
+    assert headers(html) == ["2026-11-23", "2026-11-16", "2026-11-09"]
+    rows = table(html)
+    assert rows == {
+        "Throughput (tickets shipped)": [("3", "+1", "ok"), ("2", "n/a", "muted"), ("n/a", "n/a", "muted")],
+        "First-pass approve rate (lifetime)": [
+            ("85%", "+5 pts", "ok"), ("80%", "-10 pts", "bad"), ("90%", "n/a", "muted"),
+        ],
+        "Cap rate (lifetime)": [("10%", "0 pts", "muted"), ("10%", "n/a", "muted"), ("n/a", "n/a", "muted")],
+        "Poll errors": [("5", "+2", "bad"), ("3", "0", "muted"), ("3", "n/a", "muted")],
+        "Stuck jobs": [("1", "0", "muted"), ("1", "n/a", "muted"), ("n/a", "n/a", "muted")],
+        "Failed jobs": [("0", "-1", "ok"), ("1", "n/a", "muted"), ("n/a", "n/a", "muted")],
+        "Cycle time p50": [("6.5 h", "-1.2 h", "ok"), ("7.7 h", "n/a", "muted"), ("n/a", "n/a", "muted")],
+        "Cycle time p90": [("20.0 h", "n/a", "muted"), ("n/a", "n/a", "muted"), ("n/a", "n/a", "muted")],
+        "Max interventions": [("2", "n/a", "muted"), ("n/a", "n/a", "muted"), ("n/a", "n/a", "muted")],
+        "Wasted wakes": [("n/a", "n/a", "muted"), ("4", "n/a", "muted"), ("n/a", "n/a", "muted")],
+        "Productive spend": [
+            ("$41.20", "+$3.10", "ok"), ("$38.10", "n/a", "muted"), ("n/a", "n/a", "muted"),
+        ],
+        "Wasted spend": [("$3.10", "-$1.90", "ok"), ("$5.00", "n/a", "muted"), ("n/a", "n/a", "muted")],
+    }
+    assert "3 weeks" in html
+    assert "skipped" not in html
+
+
+def test_a_rise_in_a_down_is_better_cost_reads_bad() -> None:
+    bundle = {"state": "ok", "skipped": 0, "weeks": [
+        {"week": "2026-11-23", "metrics": {"wasted-cost-usd": 7.5, "cycle-time-p90-hours": 30}},
+        {"week": "2026-11-16", "metrics": {"wasted-cost-usd": 5, "cycle-time-p90-hours": 24.25}},
+    ]}
+    rows = table(panel(bundle))
+    assert rows["Wasted spend"][0] == ("$7.50", "+$2.50", "bad")
+    assert rows["Cycle time p90"][0] == ("30.0 h", "+5.8 h", "bad")
+
+
+@pytest.mark.parametrize(("bad_files", "words"), [(1, "1 report skipped"), (2, "2 reports skipped")])
+def test_the_skipped_count_is_shown_under_the_table(tmp_path: Path, bad_files: int, words: str) -> None:
+    write_week(tmp_path, GOOD)
+    for n in range(bad_files):
+        write_week(tmp_path, f"weekly-2026-11-0{n + 1}.json", "{")
+    html = panel(collect_weekly(tmp_path))
+    assert words in html
+    assert html.index("</table>") < html.index(words)
+
+
+def test_hostile_text_is_escaped() -> None:
+    hostile = '<img src=x onerror="y">'
+    bundle = {"state": "ok", "skipped": 0, "weeks": [
+        {"week": hostile, "metrics": {"poll-errors": hostile, "stuck-jobs": True}},
+        {"week": "2026-11-16", "metrics": {"poll-errors": 1, "stuck-jobs": 1}},
+    ]}
+    html = panel(bundle)
+    assert "<img" not in html
+    assert headers(html) == [html_escape(hostile), "2026-11-16"]
+    rows = table(html)
+    assert rows["Poll errors"][0] == ("n/a", "n/a", "muted")
+    assert rows["Stuck jobs"][0] == ("n/a", "n/a", "muted")
