@@ -90,7 +90,7 @@ def _evidence_write(target: _Target) -> str:
     run = lane.parent
     if run.exists():
         raise ValueError(f"{run} already exists")
-    created = [path for path in (root / ".staging", *reversed(run.parents[:3])) if not path.exists()]
+    ticket_created = not run.parent.exists()
     upload, payload = _upload(repo, run_id)
     try:
         try:
@@ -102,9 +102,9 @@ def _evidence_write(target: _Target) -> str:
     finally:
         if run.exists():
             shutil.rmtree(run)
-        for path in reversed(created):
+        if ticket_created:
             with contextlib.suppress(OSError):
-                path.rmdir()
+                run.parent.rmdir()
     return str(lane / RESULT_NAME)
 
 

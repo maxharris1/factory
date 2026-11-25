@@ -6,6 +6,8 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
+import threading
 import urllib.request
 from pathlib import Path
 
@@ -116,13 +118,13 @@ def _tree(root: Path) -> list[tuple[str, int]]:
     return sorted((str(p.relative_to(root)), p.stat().st_mode) for p in root.rglob("*"))
 
 
-def test_qa_smoke_passes_with_a_fake_runner_and_leaves_the_evidence_root_unchanged(
+def test_qa_smoke_passes_with_a_fake_runner_and_leaves_only_the_folders_intake_shares(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     root = tmp_path / "evidence"
     root.mkdir()
     (root / "kept.txt").write_text("operator file\n")
-    before = (_tree(root), root.stat().st_mode)
+    mode = root.stat().st_mode
 
     status = smoke(smoke_orch(tmp_path, root))
 
@@ -132,7 +134,8 @@ def test_qa_smoke_passes_with_a_fake_runner_and_leaves_the_evidence_root_unchang
         "ok project", "ok runner", "ok evidence root", "ok evidence write",
     ]
     assert out[1] == "ok runner: fake fake-1.0"
-    assert (_tree(root), root.stat().st_mode) == before
+    assert [path for path, _mode in _tree(root)] == [".staging", "kept.txt", "owner", "owner/repo"]
+    assert root.stat().st_mode == mode
     assert (root / "kept.txt").read_text() == "operator file\n"
 
 
@@ -159,7 +162,7 @@ def test_qa_smoke_writes_where_the_dashboard_reads_and_touches_no_github(
         rf"ok evidence write: {re.escape(str(root))}/owner/repo/smoke/smoke-\d{{14}}-\d+/lane-1/result\.json",
         out[3],
     )
-    assert list(root.iterdir()) == []
+    assert [path for path, _mode in _tree(root)] == [".staging", "owner", "owner/repo"]
     tree = ast.parse(Path(lib.qa_smoke.__file__).read_text(encoding="utf-8"))
     imported = [
         f"{getattr(node, 'module', '')}.{alias.name}"
@@ -192,6 +195,60 @@ def test_qa_smoke_keeps_evidence_that_intake_stores_while_it_runs(
     assert status == 0, capsys.readouterr().out
     assert (ordinary / qa_storage.RESULT_NAME).read_bytes() == result
     assert not (root / "owner" / "repo" / "smoke").exists()
+
+
+@pytest.mark.parametrize("pause", ["staging allocation", "lane parent creation"])
+def test_qa_smoke_on_a_fresh_root_does_not_break_intake_paused_mid_allocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], pause: str
+) -> None:
+    root = tmp_path / "evidence"
+    root.mkdir()
+    result = json.dumps({"run_id": "r-1", "lane": 1, "artifacts": []}).encode()
+    prefix = qa_storage.lane_prefix("owner/repo", "r-1", 1)
+    upload = FakeStorage({prefix + qa_storage.RESULT_NAME: result, prefix + qa_storage.BUNDLE_NAME: bundle()})
+    paused, smoke_done = threading.Event(), threading.Event()
+    outcome: list[object] = []
+    real_mkdtemp, real_mkdir = tempfile.mkdtemp, os.mkdir
+
+    def ordinary() -> None:
+        try:
+            outcome.append(qa_evidence.collect("r-1", 1, storage=upload, repo="owner/repo", ticket="7", root=root))
+        except Exception as exc:
+            outcome.append(exc)
+        finally:
+            paused.set()
+
+    intake = threading.Thread(target=ordinary)
+
+    def hold_intake() -> None:
+        paused.set()
+        smoke_done.wait(10)
+
+    def mkdtemp(*args: object, **kwargs: object) -> str:
+        if threading.current_thread() is intake:
+            if pause == "staging allocation":
+                hold_intake()
+        elif not intake.is_alive() and not outcome:
+            intake.start()
+            paused.wait(10)
+        return real_mkdtemp(*args, **kwargs)
+
+    def mkdir(path: object, *args: object, **kwargs: object) -> None:
+        real_mkdir(path, *args, **kwargs)
+        shared = Path(path) == root / "owner" / "repo"
+        if shared and pause == "lane parent creation" and threading.current_thread() is intake:
+            hold_intake()
+
+    monkeypatch.setattr(tempfile, "mkdtemp", mkdtemp)
+    monkeypatch.setattr(os, "mkdir", mkdir)
+
+    status = smoke(smoke_orch(tmp_path, root))
+    smoke_done.set()
+    intake.join(10)
+
+    assert status == 0, capsys.readouterr().out
+    assert len(outcome) == 1 and isinstance(outcome[0], dict), outcome
+    assert (qa_evidence.lane_dir(root, "owner/repo", "7", "r-1", 1) / qa_storage.RESULT_NAME).read_bytes() == result
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
