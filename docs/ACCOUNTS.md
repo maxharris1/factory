@@ -371,10 +371,24 @@ CODEX_HOME=~/.factory-accounts/<id> codex login --device-auth
 Then press Run doctor on the card, or run `orch accounts doctor` on the
 orch host.
 
-A Cursor card row shows no command and no Sign in, because the doctor and
-the sign-in broker cover only Claude and Codex. A Cursor account is the
-device's cursor login itself, so sign it in by hand on the device as that
-login with `cursor-agent login`.
+A Cursor card row shows the doctor's status and the command, but no Sign
+in, because the sign-in broker covers only Claude and Codex. A Cursor
+account is the device's cursor login itself, so sign it in by hand on the
+device as that login:
+
+```sh
+env -u CURSOR_API_KEY -u CURSOR_AUTH_TOKEN -u CURSOR_CONFIG_DIR cursor-agent login
+```
+
+On macOS the Cursor CLI keeps that login in the Keychain, so no variable
+moves it to a folder and a Cursor account has no `signed_in_on`.
+
+### Cursor is checked, not run
+
+The doctor checks each device's cursor login, but the factory runs no build
+or review job on Cursor. `orch.yml` keeps `refused_harnesses: [cursor]`, and
+that holds until Max says otherwise. A cursor row in `account_signins` never
+changes where a job runs.
 
 ## 1. Declare the account
 
@@ -447,7 +461,10 @@ orch accounts doctor
 ```
 
 It reads the database from `--db` or `$ORCH_DB`. It asks every device over
-ssh, as each harness's login there, with the token variables unset. It prints one line per
+ssh, as each harness's login there, with the token variables unset. For
+Cursor it runs `cursor-agent status --format json` with `CURSOR_API_KEY` and
+`CURSOR_AUTH_TOKEN` unset, and reads only the reply, never a credential
+file. It keeps a hash of the Cursor user id, never the email. It prints one line per
 pair, `<account>@<device> <status> <auth method or -> <detail>`. Confirm
 the new account's row on each listed device reads `ok`. The poller runs the
 same check on its first poll, every 30 minutes, and after it adopts a
@@ -485,16 +502,17 @@ The Mac's row appears once the Mac lists `claude` in `machines.yml`.
 
 | Status | Detail | Cause | Fix |
 | --- | --- | --- | --- |
-| `ok` | (empty) | Claude reports a `claude.ai` sign-in with an org and email. Codex reports `Logged in using ChatGPT`. | None. |
+| `ok` | (empty) | Claude reports a `claude.ai` sign-in with an org and email. Codex reports `Logged in using ChatGPT`. Cursor reports `authenticated`. | None. |
 | `signed-out` | `not logged in` | The status command reports no sign-in. | Run step 2. |
-| `signed-out` | `status reply not understood` | Claude's reply has no `loggedIn`, or Codex's first line is unknown. | Run the status command as the bot and read its reply. |
-| `signed-out` | `status command exited nonzero` | The reply says signed in, but the command failed. | Run the status command as the bot and read its error. |
+| `signed-out` | `status reply not understood` | Claude's reply has no `loggedIn`, Codex's first line is unknown, or Cursor's `status` is unknown. | Run the status command as the bot and read its reply. |
+| `signed-out` | `status command exited nonzero` | The reply says signed in, but the command failed, or Cursor's reply is `error`. | Run the status command as the bot and read its error. |
+| `signed-out` | `partly signed in` | Cursor reports `partially-authenticated`. | Run the Cursor login again. |
 | `signed-out` | `sign-in names no org and email` | Claude's `claude.ai` sign-in names no org and email. | Run the Claude login again. |
 | `signed-out` | `auth from a token variable, not the account folder` | Claude's auth method is `oauth_token`, `api_key`, `auth_token` or `apiKeyHelper`. | Follow [Move the Mac's profile token off the default account](#move-the-macs-profile-token-off-the-default-account). |
 | `signed-out` | `api key, not a ChatGPT sign-in` | Codex signed in with an API key. | Run the Codex login and sign in with ChatGPT. |
 | `signed-out` | `auth method not understood` | Claude names no auth method, or one the doctor does not know. | Run the Claude login again. |
-| `mismatch` | `same sign-in as account <ids>` | Another account's folder has the same Claude org and email. | Sign this account in to its own subscription. |
-| `mismatch` | `another sign-in on device <devices>` | This account has a different org and email on the named devices. | Sign the account in again on the device that has the wrong subscription. |
+| `mismatch` | `same sign-in as account <ids>` | Another account has the same Claude org and email, or the same Cursor user. | Sign this account in to its own subscription. |
+| `mismatch` | `another sign-in on device <devices>` | This account has a different org and email, or a different Cursor user, on the named devices. | Sign the account in again on the device that has the wrong subscription. |
 | `mismatch` | `signing in changed account <ids>` | A dashboard sign-in of this account changed the named accounts' sign-in on the same device. | Sign this account in with the CLI command, then check the named accounts. |
 | `unreachable` | `device has install placeholders` | A device field still holds a `REPLACE_WITH_` value. | Fill in the device in `machines.yml`. |
 | `unreachable` | `no ssh_alias for <harness> on <device>` | The device has no ssh alias for that harness. | Set `ssh_alias` on the device. |
@@ -518,8 +536,9 @@ its reason is `account-signin`. Its detail is `<status>; run: <step>;
 
 `<sign-in command>` is the step 2 command for the account's folder, with
 `<folder>` in place of `~/.factory-accounts/<id>`. For the device's own
-login it is `env -u CLAUDE_CODE_OAUTH_TOKEN -u CLAUDE_CONFIG_DIR claude auth login`
-or `env -u CODEX_HOME codex login --device-auth`.
+login it is `env -u CLAUDE_CODE_OAUTH_TOKEN -u CLAUDE_CONFIG_DIR claude auth login`,
+`env -u CODEX_HOME codex login --device-auth` or
+`env -u CURSOR_API_KEY -u CURSOR_AUTH_TOKEN -u CURSOR_CONFIG_DIR cursor-agent login`.
 
 The next pass that finds the row `ok` clears the flag. So does the pass
 after the account leaves the device's `signed_in_on`. A flag still raised

@@ -183,6 +183,42 @@ def test_the_operator_step_and_the_dashboard_share_one_login_command(tmp_path: P
     assert account_doctor.login_command("codex", None) == "env -u CODEX_HOME codex login --device-auth"
 
 
+CURSOR_MACHINES = """\
+devices:
+  - name: box
+    local: true
+    slot_max: 1
+    harnesses: {cursor: cursor-bot}
+  - name: pc
+    tailscale_name: pc.example.ts.net
+    slot_max: 2
+    harnesses: {cursor: cursor-bot}
+    workdir_root: /home/{bot}/work
+    ssh_alias: pc-{bot}
+    factory_root: /srv/factory
+"""
+
+
+def test_a_cursor_account_shows_its_doctor_status_and_the_cursor_login_command(tmp_path: Path) -> None:
+    machines = tmp_path / "machines.yml"
+    machines.write_text(CURSOR_MACHINES, encoding="utf-8")
+    config = config_of(machines)
+    with contextlib.closing(sqlite3.connect(tmp_path / "orch.db")) as connection:
+        with connection:
+            account_doctor.write(connection, (
+                sign_in("cursor-default", "box", "signed-out", "partly signed in", method=None, subscription=None),
+                sign_in("cursor-default", "pc", "ok", method="login", subscription=None, fingerprint="bbbbbbbbbbbb"),
+            ), config, None, NOW - 300)
+        accounts = by_id(read_accounts(connection, NOW, config))
+    assert accounts["cursor-default"]["signed_in_on"] == [
+        {"device": "box", "status": "signed-out", "auth_method": None, "subscription_type": None,
+         "checked_at": NOW - 300, "same_login_as": [], "login": "cursor-bot",
+         "command": "env -u CURSOR_API_KEY -u CURSOR_AUTH_TOKEN -u CURSOR_CONFIG_DIR cursor-agent login"},
+        {"device": "pc", "status": "ok", "auth_method": "login", "subscription_type": None,
+         "checked_at": NOW - 300, "same_login_as": [], "login": "cursor-bot", "command": None},
+    ]
+
+
 def config_of_machines(tmp_path: Path):
     machines = tmp_path / "machines.yml"
     machines.write_text(MACHINES, encoding="utf-8")
