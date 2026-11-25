@@ -596,11 +596,11 @@ def _signin_fence(db: Path | None, machines: Path | None, now: float) -> Iterato
     if db is None or not db.is_file():
         yield True
         return
-    config = health.load_machines(machines)
-    pairs = () if config is None else [(a.id, d) for a in config.accounts for d in a.signed_in_on]
     try:
         with closing(sqlite3.connect(db, timeout=30, isolation_level=None)) as connection:
             connection.execute("BEGIN IMMEDIATE")
+            config = health.load_machines(machines)
+            pairs = () if config is None else account_doctor.declared_pairs(config)
             fenced = account_doctor.fence_signins(connection, pairs, now)
             connection.execute("COMMIT")
     except sqlite3.Error:

@@ -260,6 +260,57 @@ def test_a_broker_that_knows_no_fence_admits_nothing_while_heal_restarts_it(inta
         assert account_doctor.signing_out(connection, NOW) == frozenset()
 
 
+def test_new_pair_added_by_settings_apply_cannot_sign_in_during_stale_broker_restart(
+    intake: Intake,
+) -> None:
+    from lib import account_settings
+
+    box = intake.box
+    add = account_settings.AccountRequest(
+        "add-seat-abcdefghij", "maxharris1", "2026-11-23T00:00:00Z", "add", "claude-new",
+        "add", None, {"harness": "claude", "max_jobs": 1, "signed_in_on": ["pc"]},
+    )
+    old_broker_rowcount: list[int] = []
+
+    def restart(argv, env, log):
+        result = box.applier.apply(add)
+        assert result.result == "applied", result
+        intake.made("claude-new")
+        with closing(sqlite3.connect(box.world.db, isolation_level=None)) as connection:
+            assert ("claude-new", "pc") in account_doctor.signing_out(connection, NOW)
+            # Simulate an un-upgraded main broker that checks only signout_locks.
+            taken = connection.execute(
+                f"INSERT INTO {account_doctor.SIGNOUTS} (account, device, since, owner) "
+                "VALUES (?1, ?2, ?3, ?4) ON CONFLICT(account, device) DO UPDATE SET "
+                "since = excluded.since, owner = excluded.owner "
+                "WHERE owner = excluded.owner OR since <= ?5",
+                ("claude-new", "pc", NOW, "old-broker", NOW - account_doctor.SIGNOUT_LEASE_SECONDS),
+            )
+            old_broker_rowcount.append(taken.rowcount)
+        rid = box.request("signin", account="claude-new")
+        intake.tick()
+        assert intake.launched == []
+        assert any(line["id"] == rid and line["error"] == "signing-out" for line in intake.lines())
+        return 0
+
+    actions = heal.heal(
+        report(component("signin-broker", bot="", device="pc", version="old")),
+        facts=heal.Facts("pc", owned=frozenset({"signin-broker"}), db=box.world.db,
+                         machines=box.machines),
+        state_dir=box.state, deploy=Path("/deploy"), webhook=heal.Webhook(),
+        environ={}, now=NOW, run=restart, clock=lambda: 0.0,
+    )
+
+    assert [action.kind for action in actions] == [heal.RESTART]
+    assert old_broker_rowcount == [0]
+    assert intake.launched == []
+    with closing(sqlite3.connect(box.world.db, isolation_level=None)) as connection:
+        assert account_doctor.signing_out(connection, NOW) == frozenset()
+    after_rid = box.request("signin", account="claude-new")
+    intake.tick()
+    assert [attempt.request.id for attempt in intake.launched] == [after_rid]
+
+
 def test_the_refusal_records_the_pairs_doctor_status_before(intake: Intake) -> None:
     assert intake.box.world.doctor() == 0
     rid = intake.box.request("signin", actor="someone-else")

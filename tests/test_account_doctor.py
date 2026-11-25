@@ -1217,3 +1217,15 @@ def test_a_signin_fence_expires_after_the_lease(tmp_path: Path) -> None:
         assert account_doctor.fence_signins(connection, [("claude-c", "pc")], NOW + lease) is True
         assert account_doctor.signing_out(connection, NOW + 2 * lease - 1) == {("claude-c", "pc")}
         assert account_doctor.reserve_pair(connection, "claude-c", "pc", "signin-2", NOW + 2 * lease)
+
+
+def test_extend_signin_fence_covers_pairs_added_during_active_fence(tmp_path: Path) -> None:
+    with contextlib.closing(sqlite3.connect(tmp_path / "orch.db", isolation_level=None)) as connection:
+        assert account_doctor.fence_signins(connection, (), NOW) is True
+        assert account_doctor.fence_signins(connection, (), NOW + 1) is False
+        assert not account_doctor.reserve_pair(connection, "claude-new", "pc", "signin-1", NOW + 1)
+        account_doctor.extend_signin_fence(connection, [("claude-new", "pc")])
+        assert account_doctor.signing_out(connection, NOW + 1) == {("claude-new", "pc")}
+        account_doctor.unfence_signins(connection)
+        assert account_doctor.signing_out(connection, NOW + 1) == frozenset()
+        assert account_doctor.reserve_pair(connection, "claude-new", "pc", "signin-1", NOW + 2)
