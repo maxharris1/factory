@@ -113,6 +113,9 @@ _SIGNED_OUT = {
         r"not logged in|not authenticated|run cursor-agent login|401 Unauthorized|invalid api key",
         re.IGNORECASE,
     ),
+    "gemini": re.compile(
+        r"Please sign in|not signed in|Launch the CLI without arguments to sign in", re.IGNORECASE
+    ),
 }
 
 SUBSCRIPTION = re.compile(r"[a-z][a-z0-9_]{0,23}")
@@ -513,7 +516,7 @@ _LOGIN: dict[Harness, tuple[tuple[str, ...], str]] = {
     "claude": (("CLAUDE_CODE_OAUTH_TOKEN",), "claude auth login"),
     "codex": ((), "codex login --device-auth"),
     "cursor": (("CURSOR_API_KEY", "CURSOR_AUTH_TOKEN"), "cursor-agent login"),
-    "gemini": (GEMINI_AUTH_OVERRIDES, "NO_BROWSER=true gemini"),
+    "gemini": (GEMINI_AUTH_OVERRIDES, "agy"),
 }
 _THEN = ", then orch accounts doctor"
 _STEP: dict[Status, str] = {

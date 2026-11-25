@@ -402,25 +402,20 @@ def test_the_doctor_probes_the_gemini_bot_login_with_agy_models_and_every_overri
     assert [names & set(PLANTED_LOGIN) for names, _ in calls] == [set(), set()]
 
 
-def test_the_dashboard_and_doctor_give_the_gemini_sign_in_command(tmp_path: Path) -> None:
+def test_the_dashboard_and_doctor_give_the_interactive_agy_sign_in_command(tmp_path: Path) -> None:
     from lib import dashboard_accounts
     from lib.machines_yml import Account, Device, MachinesConfig
 
-    folder = "/home/gemini-bot/.factory-accounts/gemini-pro"
-    command = account_doctor.login_command("gemini", folder)
-    assert command == (
-        "env " + " ".join(f"-u {name}" for name in AUTH_OVERRIDES)
-        + f" GEMINI_CLI_HOME={folder} NO_BROWSER=true gemini"
-    )
-    assert account_doctor.login_command("gemini", None).split(" NO_BROWSER")[0].endswith("-u GEMINI_CLI_HOME")
+    command = account_doctor.login_command("gemini", None)
+    assert command == "env " + " ".join(f"-u {name}" for name in AUTH_OVERRIDES) + " -u GEMINI_CLI_HOME agy"
     config = MachinesConfig(
-        (Device("pc", 1, {"gemini": "gemini-bot"}, home="/home/gemini-bot"),),
-        accounts=(Account("gemini-pro", "gemini", signed_in_on=frozenset({"pc"})),),
+        (Device("pc", 1, {"gemini": "gemini-bot"}, accounts={"gemini": "gemini-ultra"}, home="/home/gemini-bot"),),
+        accounts=(Account("gemini-ultra", "gemini", plan="ultra"),),
     )
     with sqlite3.connect(":memory:") as db:
         rows = dashboard_accounts.read_accounts(db, NOW, config)
     commands = {account["id"]: [row["command"] for row in account["signed_in_on"]] for account in rows}
-    assert commands["gemini-pro"] == [command]
+    assert commands["gemini-ultra"] == [command]
 
 
 def test_a_gemini_account_folder_is_prepared(tmp_path: Path) -> None:
