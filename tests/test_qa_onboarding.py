@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import threading
 import urllib.request
+from itertools import takewhile
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ import lib.qa_runners.fake
 import lib.qa_smoke
 from lib import cli, github_actions, qa_evidence, qa_runners, qa_storage
 from lib.factory_md import EXAMPLE_PATHS, QaRunner, parse_factory_md
+from lib.journeys import map_ids
 from lib.load import split_front_matter
 from tests.qa_support import FakeStorage, bundle
 
@@ -338,3 +340,101 @@ def test_qa_smoke_argument_errors_exit_2(tmp_path: Path, capsys: pytest.CaptureF
     assert cli.main(["qa", "smoke", "--repo", "owner/repo", "--runner", "fake",
                      "--orch", str(tmp_path / "absent.yml")]) == 1
     assert "orch qa smoke: " in capsys.readouterr().err
+
+
+ONBOARDING = ROOT / "docs/qa-onboarding.md"
+WEB_PROJECTS = ("cleffy", "aut0", "tracy")
+
+
+def _per_project(web: str, cli_or_service: str) -> list[tuple[str, str]]:
+    return [(web, project) for project in WEB_PROJECTS] + [(cli_or_service, "coo")]
+
+
+def _template(heading: str) -> str:
+    lines = iter(ONBOARDING.read_text(encoding="utf-8").splitlines())
+    next(line for line in lines if line == f"### {heading}")
+    for line in lines:
+        assert not line.startswith("#"), f"no fenced block under ### {heading}"
+        if line.startswith("```"):
+            fence = line[: len(line) - len(line.lstrip("`"))]
+            return "\n".join(takewhile(lambda inner: inner != fence, lines)) + "\n"
+    raise AssertionError(f"no fenced block under ### {heading}")
+
+
+def _headings(text: str, level: int) -> list[str]:
+    marker, inside, found = "#" * level + " ", False, []
+    for line in text.splitlines():
+        if line.startswith("```"):
+            inside = not inside
+        elif not inside and line.startswith(marker):
+            found.append(line[len(marker):].strip())
+    return found
+
+
+@pytest.mark.parametrize(("heading", "project"), _per_project("Web stanza", "CLI or service stanza"))
+def test_onboarding_stanza_parses_strictly_once_enabled(heading: str, project: str) -> None:
+    stanza = yaml.safe_load(_template(heading).replace("<project>", project))
+    assert list(stanza) == ["qa"]
+    qa = stanza["qa"]
+    assert qa["enabled"] is False
+
+    raw, body = split_front_matter((ROOT / "examples/aut0/factory.md").read_text(encoding="utf-8"))
+    front = yaml.safe_load(raw)
+    front["review"]["verify"] = f"verify-{project}"
+    front["qa"] = {**qa, "enabled": True}
+    config, findings = parse_factory_md(f"---\n{yaml.safe_dump(front, sort_keys=False)}---\n{body}", strict=True)
+
+    assert findings == []
+    assert config is not None and config.qa is not None
+    assert config.qa.verify == f"verify-{project}"
+    assert config.qa.runners == (QaRunner("local-docker", qa["local_docker"]["environment"], None),)
+    assert config.qa.visual_hold is True
+    assert config.qa.lane.doctor
+
+
+@pytest.mark.parametrize(("heading", "project"), _per_project("Web verify skill", "CLI or service verify skill"))
+def test_onboarding_verify_skill_has_front_matter_and_sections(heading: str, project: str) -> None:
+    raw, body = split_front_matter(_template(heading).replace("<project>", project))
+    front = yaml.safe_load(raw)
+    assert front["name"] == f"verify-{project}"
+    assert isinstance(front["description"], str) and front["description"].strip()
+    assert _headings(body, 2) == ["Launch", "Doctor", "Drive", "Evidence", "Cleanup"]
+
+
+@pytest.mark.parametrize(("heading", "project"), _per_project("Web journey", "CLI or service journey"))
+def test_onboarding_journey_has_the_four_sections(heading: str, project: str) -> None:
+    text = _template(heading).replace("<project>", project).replace("<journey>", "sign-in")
+    assert len(_headings(text, 1)) == 1
+    assert _headings(text, 2) == [
+        "Sub-features", "How to get to it (user POV)", f"Driving it with verify-{project}", "Gotchas",
+    ]
+
+
+def test_onboarding_feature_map_links_a_journey_the_map_accepts() -> None:
+    readme = _template("Feature map README").replace("<journey>", "sign-in")
+    links = re.findall(r"\]\(\./([^)]+)\)", readme)
+    assert links == ["sign-in.md"]
+    assert map_ids({"README.md", *links}) == {"sign-in"}
+
+
+def test_onboarding_check_config_command_passes_once_qa_is_turned_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("ORCH_NO_LOCAL_OVERLAY", raising=False)
+    monkeypatch.chdir(tmp_path)
+    smoke_orch(tmp_path, None)
+    (tmp_path / "orch.local.yml").write_text(
+        "projects:\n  - repo: owner/repo\n" + SMOKE_STORAGE.format(root=tmp_path), encoding="utf-8"
+    )
+    raw, body = split_front_matter((ROOT / "examples/aut0/factory.md").read_text(encoding="utf-8"))
+    front = yaml.safe_load(raw)
+    front["qa"] = {**yaml.safe_load(_template("Web stanza").replace("<project>", "aut0"))["qa"], "enabled": True}
+    (tmp_path / "factory.md").write_text(f"---\n{yaml.safe_dump(front, sort_keys=False)}---\n{body}", encoding="utf-8")
+
+    commands = re.findall(r"`orch check-config ([^`]*)`", ONBOARDING.read_text(encoding="utf-8"))
+    assert commands
+    for command in commands:
+        argv = command.replace("<owner>/<repo>", "owner/repo").split()
+        status = cli._check_config([*argv, "--orch", str(tmp_path / "orch.yml")])
+        output = capsys.readouterr()
+        assert status == 0, output.err
