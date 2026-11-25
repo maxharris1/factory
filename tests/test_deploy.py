@@ -405,7 +405,9 @@ def test_readme_dashboard_describes_live_http_server() -> None:
         assert key in section, key
     assert "Any secret or OAuth value is Max's to create and set" in section
     assert "sign-in broker" in section
-    assert "#1398" in section
+    assert "orch accounts signin-broker" in section
+    assert "deploy/signin-broker-service.sh install-autostart" in section
+    assert "dashboard.settings.relay" in section
     for stale in (
         "not deployed",
         "~/.config/factory-dashboard/http.env",

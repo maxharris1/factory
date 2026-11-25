@@ -409,6 +409,49 @@ def test_lane_past_timeout_is_stopped_and_blocked(tmp_path: Path) -> None:
     assert lab.header()["result"] == "BLOCKED"
 
 
+class ReleaseRecorder(FakeRunner):
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+        self.stop_calls: list[str] = []
+
+    def stop(self, agent_id: str) -> None:
+        self.stop_calls.append(agent_id)
+        super().stop(agent_id)
+
+
+def test_reported_and_ended_lanes_release_their_agent(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=2)
+    fake = lab.fakes["claude-cloud"] = ReleaseRecorder("claude-cloud")
+    lab.worker = lab.new_worker()
+    lab.enqueue(ids=2)
+    lab.silent.add((1, 1))
+    lab.tick(2)
+    fake.end("claude-cloud-2")
+    lab.tick(2)
+
+    assert [row[3:5] for row in lab.lanes()] == [("reported", None), ("gap", "ended-without-result")]
+    assert sorted(set(fake.stop_calls)) == ["claude-cloud-1", "claude-cloud-2"]
+
+
+def test_a_failed_release_is_logged_and_the_lane_still_reports(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    lab.fakes["claude-cloud"].stop_errors.append(RunnerOutage("docker daemon unavailable"))
+    lab.enqueue(ids=2)
+    lab.tick(2)
+
+    assert [row[3:5] for row in lab.lanes()] == [("reported", None)]
+    assert [line for line in lab.logs if "stop failed: RunnerOutage" in line]
+    assert lab.header()["result"] == "PASS"
+
+
+def test_lane_carries_the_commits_it_tests(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    lab.enqueue(ids=2)
+    lab.tick()
+
+    assert [lane.commits for lane in lab.launched()] == [(HEAD_A, BASE)]
+
+
 def test_failed_scenario_starts_exactly_one_base_check_lane(tmp_path: Path) -> None:
     lab = Lab(tmp_path, lanes=2)
     lab.enqueue(ids=3)
@@ -1480,7 +1523,7 @@ def test_refused_evidence_drops_and_relaunches_once(tmp_path: Path) -> None:
         (0, "head", 1, "dropped", "evidence-refused", "claude-cloud"),
         (0, "head", 2, "reported", None, "claude-cloud"),
     ]
-    assert lab.fakes["claude-cloud"].stopped == ["claude-cloud-1"]
+    assert lab.fakes["claude-cloud"].stopped == ["claude-cloud-1", "claude-cloud-2"]
     assert "qa lane 1 of run-784-claude-cloud: evidence refused: bundle.tar.gz is missing" in lab.logs
     assert lab.header()["result"] == "PASS"
     assert_no_signed_link(lab)

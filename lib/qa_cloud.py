@@ -695,6 +695,7 @@ class QaWorker:
             base_ref=plan.factory.base_branch,
             environment_name=config.environment,
             model=config.model,
+            commits=tuple(dict.fromkeys(sha for sha in (facts.commit, facts.base_commit) if sha)),
         ), links
 
     def _watch(self, plan: RunPlan, row: LaneRow) -> None:
@@ -704,6 +705,7 @@ class QaWorker:
             if result is None and runner.status(row.agent_id) == "ended":
                 result = self._intake(plan, row)
                 if result is None:
+                    self._release(row)
                     self._close(row, "gap", "ended-without-result")
                     return
         except StorageError as exc:
@@ -722,10 +724,17 @@ class QaWorker:
             record_evidence_dir(connection, row.run_id, run_dir(plan.evidence_root, plan.repo, plan.ticket, row.run_id))
         reason = rejection(row, result, plan.qa.verify)
         if reason is None:
+            self._release(row)
             with self.queue.connect() as connection:
                 _set_state(connection, row.lane_id, "reported", None, self.queue.now(), result=result)
             return
         self._drop(row, reason)
+
+    def _release(self, row: LaneRow) -> None:
+        try:
+            self.runners[row.runner].stop(row.agent_id)
+        except Exception as exc:
+            self.log(f"qa lane {row.lane_no} of {row.run_id}: stop failed: {type(exc).__name__}")
 
     def _intake(self, plan: RunPlan, row: LaneRow) -> dict | None:
         folder = lane_dir(plan.evidence_root, plan.repo, plan.ticket, row.run_id, row.lane_no)
