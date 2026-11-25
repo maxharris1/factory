@@ -139,11 +139,6 @@ def test_merge_conflict_is_not_a_finding() -> None:
     assert "A merge conflict with the base is `mergeable: no` in the verdict, not a finding." in review_brief("1/3")
 
 
-NO_APP = (
-    "That reviewer checks code and logic and never boots or drives the app: `review.verify` is `none`, "
-    "whatever verify skill factory.md or Job data names."
-)
-QA_OWNS = "QA owns live checks, so judge a `qa` criterion from its code, never `unverified` for lack of a live run."
 VERIFY_NONE_MD = snapshots.FACTORY_MD.replace("  verify: verify-cleffy\n", "  verify: none\n")
 USER_IMPACT = "review:\n  block_on: user-impact\n"
 
@@ -201,40 +196,20 @@ REVIEW_TASKS = {
 @pytest.mark.parametrize("case", list(REVIEW_TASKS))
 def test_the_reviewer_never_boots_the_app_and_runs_no_verify_skill(case: str) -> None:
     text = REVIEW_TASKS[case]()
-    assert QA_OWNS in text
     for gone in ("Run the verify skill", "verify result", "UI and database checks", "`verify-cleffy`"):
         assert gone not in text
 
 
-def test_the_review_rules_say_the_reviewer_never_boots_the_app() -> None:
+def test_the_review_rules_name_no_verify_skill() -> None:
     review_rules = review_brief("1/3").split("## Review rules", 1)[1].split("\n## ", 1)[0]
-    assert NO_APP in review_rules
     assert "runs the project's verify skill" not in review_rules
 
 
 @pytest.mark.parametrize("round_text", ["1/3", "3/3"])
-def test_each_criterion_has_exactly_one_owner_and_only_review_criteria_get_an_independent_check(
-    round_text: str,
-) -> None:
+def test_each_criterion_gets_one_owner_and_the_router_defines_the_owners(round_text: str) -> None:
     listed = steps(review_brief(round_text))
-    assert (
-        "tag each `ac-<n>` in the Ticket section below with one owner, `review` (code, tests or logic show "
-        "it) or `qa` (only the running app can)" in listed[0]
-    )
-    independent = [step for step in listed if "write your own check" in step]
-    assert len(independent) == 1
-    assert (
-        "For each `review` criterion, write your own check (test, script or trace) before reading the builder's "
-        "proof, then compare. A `qa` criterion gets none."
-    ) in independent[0]
-    assert QA_OWNS in independent[0]
-
-
-@pytest.mark.parametrize("round_text", ["1/3", "3/3"])
-def test_each_helper_gets_a_distinct_question(round_text: str) -> None:
-    helpers = [step for step in steps(review_brief(round_text)) if "helper" in step]
-    assert len(helpers) == 1
-    assert helpers[0].endswith("Give each helper a distinct question: one criterion group or one risk.")
+    assert "tag each `ac-<n>` in the Ticket section below with one owner, `review` or `qa`, and mark it" in listed[0]
+    assert not any("helper" in step for step in listed)
 
 
 SIZE_LINE = (
@@ -343,6 +318,7 @@ def test_the_reviewer_skill_says_no_app_one_owner_and_distinct_helpers() -> None
     assert "Do not boot or drive the app. `review.verify` is `none` for the reviewer" in text
     assert "Tag each criterion `review` or `qa`" in text
     assert "before you read the builder's proof" in text
+    assert "never `unverified` for lack of a live run" in text
     assert "Give each helper a distinct question: one criterion group or one risk." in text
     assert "Run the verify skill" not in text
 
@@ -402,15 +378,10 @@ def test_a_review_and_a_build_brief_require_labelled_containers(kind: str) -> No
         assert "`factory.job=$ORCH_JOB_ID`" in brief and "EXIT trap" in brief
 
 
-def test_the_review_rules_point_the_throwaway_copy_at_the_container_rule() -> None:
-    brief = review_brief("1/3")
-    review_rules = brief.split("## Review rules", 1)[1]
-    throwaway = [line for line in review_rules.splitlines() if "throwaway copy" in line]
-    assert len(throwaway) == 1 and "its containers labelled as the Rules say" in throwaway[0]
-
-
 def test_the_review_task_still_forbids_merging_and_pushing() -> None:
-    assert "Do not merge. Do not push to the PR." in review_brief("1/3")
+    brief = review_brief("1/3")
+    assert "Do not push to the PR." in task(brief)
+    assert "A reviewer never merges." in brief.split("## Review rules", 1)[1]
 
 
 MODE_CASES = {
@@ -445,9 +416,8 @@ def test_no_review_brief_says_verify_fix(round_text: str) -> None:
 
 
 @pytest.mark.parametrize("case", ["user-impact-fix-round", "user-impact-merge-update"])
-def test_a_fix_check_closes_each_finding_reruns_the_gates_and_never_boots_the_app(case: str) -> None:
+def test_a_fix_check_skips_interrogate_and_blast_radius(case: str) -> None:
     text = MODE_CASES[case][1]()
-    assert "A `fix-check` closes each earlier `f-<n>`, reruns the gates and does not boot the app." in text
     assert "Do not run interrogate or blast-radius: the dispatcher picked `fix-check`." in text
     assert "blast-radius only when" not in text
 
@@ -459,14 +429,13 @@ def test_a_fix_check_round_closes_findings_by_id_and_reruns_the_gates() -> None:
         "say whether this head closes it."
     ) in text
     assert "Rerun the gates on this head" in text
-    assert "Do not boot or drive the app." in text
 
 
 def test_the_review_rules_leave_the_mode_to_the_dispatcher() -> None:
     md = snapshots.FACTORY_MD.replace("review:\n", USER_IMPACT)
     rules = brief_from(md, "2/3").split("## Review rules", 1)[1].split("\n## ", 1)[0]
     assert "only for new behavior" not in rules
-    assert "interrogate and blast-radius in a `full` review, not in a `fix-check`" in rules
+    assert "interrogate" not in rules
 
 
 def test_the_reviewer_skill_runs_interrogate_by_mode_not_on_every_review() -> None:

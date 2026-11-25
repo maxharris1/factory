@@ -49,19 +49,19 @@ CEILINGS: dict[str, int] = {
     "rebase": 12143,
     "resume": 11260,
     "retry": 11598,
-    "review": 17174,
-    "review-before-ci": 19066,
-    "review-evidence": 17178,
-    "review-followups": 19416,
-    "review-qa-block": 17640,
-    "review-qa-report": 17421,
-    "review-rebased": 19462,
-    "review-round-2-evidence": 19124,
-    "review-round-3": 18924,
-    "review-update": 18112,
-    "review-update-commits": 18636,
-    "review-user-impact": 18110,
-    "review-user-impact-round-2": 20582,
+    "review": 15554,
+    "review-before-ci": 17446,
+    "review-evidence": 15558,
+    "review-followups": 17795,
+    "review-qa-block": 16020,
+    "review-qa-report": 15801,
+    "review-rebased": 17842,
+    "review-round-2-evidence": 17504,
+    "review-round-3": 17304,
+    "review-update": 16492,
+    "review-update-commits": 17016,
+    "review-user-impact": 16490,
+    "review-user-impact-round-2": 18895,
 }
 
 DEVICES = ("box", "remote (mac)")
@@ -83,9 +83,25 @@ DROPPED_SKILLS_PHRASES = (
     "They do research only; you write the verdict.",
     "start a general helper",
 )
+MOVED_TO_ROUTER = (
+    ("write your own check", REVIEWER_ROUTER, "write your own independent check before you read the builder's proof"),
+    ("QA owns live checks", REVIEWER_ROUTER, "never `unverified` for lack of a live run"),
+    ("`review` (code, tests or logic show it)", REVIEWER_ROUTER, "A `review` criterion is one that code, tests or logic"),
+    ("Give each helper a distinct question", REVIEWER_ROUTER, "Give each helper a distinct question"),
+    ("never boots or drives the app", REVIEWER_ROUTER, "Do not boot or drive the app."),
+    ("Do not boot or drive the app.", REVIEWER_ROUTER, "Do not boot or drive the app."),
+    ("A `full` review runs interrogate and blast-radius.", REVIEWER_ROUTER, "In a `full` review, run"),
+    ("reruns the gates and does not boot the app", REVIEWER_ROUTER, "reruns the gates and never boots the app"),
+)
+KEPT_IN_REVIEW_RULES = (
+    ("You are the one cross-family reviewer", "One reviewer, from a different model family"),
+    ("Do not merge.", "A reviewer never merges."),
+)
+REPO = Path(__file__).resolve().parents[1]
+REVIEW_KINDS = tuple(sorted(kind for kind in CASES if kind.startswith("review")))
 NO_ROUTER = frozenset({"merge-only", "rebase"})
 ROOT = Path(__file__).resolve().parent.parent
-MOVED_TO_ROUTER = (
+BUILDER_MOVED_TO_ROUTER = (
     ("Write tests first, as the `tdd` skill says", BUILDER_ROUTER, "writes each test first with"),
     ("Never poll, watch or wait on GitHub Actions", BUILDER_ROUTER, "Never babysit, merge or wait on CI"),
     ("Start with an architect scaffold", BUILDER_ROUTER, "A plan job also runs"),
@@ -319,25 +335,54 @@ def router_of(kind: str) -> str | None:
 
 
 def check_moved_prose(kind: str, brief: str) -> None:
-    for phrase, router, _anchor in MOVED_TO_ROUTER:
+    for phrase, router, _anchor in BUILDER_MOVED_TO_ROUTER:
         if router_of(kind) == router:
             assert phrase not in brief, (kind, phrase)
 
 
-@pytest.mark.parametrize("phrase,router,anchor", MOVED_TO_ROUTER, ids=[row[0] for row in MOVED_TO_ROUTER])
+@pytest.mark.parametrize("phrase,router,anchor", BUILDER_MOVED_TO_ROUTER, ids=[row[0] for row in BUILDER_MOVED_TO_ROUTER])
 def test_each_moved_rule_still_lives_in_its_router(phrase: str, router: str, anchor: str) -> None:
     assert anchor in (ROOT / router).read_text(encoding="utf-8"), (router, anchor)
 
 
 @pytest.mark.parametrize("kind", sorted(CASES))
-def test_moved_prose_lives_in_the_router_not_the_brief(kind: str) -> None:
+def test_builder_moved_prose_lives_in_the_router_not_the_brief(kind: str) -> None:
     for brief in render_devices(kind).values():
         check_moved_prose(kind, brief)
 
 
 def test_a_moved_phrase_put_back_fails_the_moved_prose_check() -> None:
     brief = render_devices("build")["box"]
-    regrown = brief.replace("## Proof\n", f"{MOVED_TO_ROUTER[0][0]}.\n\n## Proof\n", 1)
+    regrown = brief.replace("## Proof\n", f"{BUILDER_MOVED_TO_ROUTER[0][0]}.\n\n## Proof\n", 1)
     assert regrown != brief
     with pytest.raises(AssertionError):
         check_moved_prose("build", regrown)
+
+
+def check_moved_out(brief: str) -> None:
+    static = boilerplate(brief)
+    for phrase, _, _ in MOVED_TO_ROUTER:
+        assert phrase not in static, phrase
+    rules = static.split("## Review rules", 1)[1].split("\n## ", 1)[0]
+    for phrase, kept in KEPT_IN_REVIEW_RULES:
+        assert phrase not in static, phrase
+        assert static.count(kept) == 1 and kept in rules, kept
+
+
+@pytest.mark.parametrize("kind", REVIEW_KINDS)
+def test_moved_prose_lives_in_the_router_not_the_brief(kind: str) -> None:
+    for brief in render_devices(kind).values():
+        check_moved_out(brief)
+
+
+@pytest.mark.parametrize(("phrase", "router", "rule"), MOVED_TO_ROUTER)
+def test_each_moved_rule_is_in_its_router(phrase: str, router: str, rule: str) -> None:
+    assert rule in " ".join((REPO / router).read_text(encoding="utf-8").split()), (phrase, rule)
+
+
+@pytest.mark.parametrize("phrase", [row[0] for row in MOVED_TO_ROUTER + KEPT_IN_REVIEW_RULES])
+def test_a_restored_phrase_fails_the_moved_check(phrase: str) -> None:
+    brief = render_devices("review")["box"]
+    restored = brief.replace("## Review rules", f"{phrase}\n\n## Review rules", 1)
+    with pytest.raises(AssertionError):
+        check_moved_out(restored)
