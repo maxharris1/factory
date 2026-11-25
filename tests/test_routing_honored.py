@@ -552,3 +552,145 @@ def test_answer_after_a_late_retry_resumes_the_current_step(tmp_path: Path) -> N
     detail = json.loads(row["detail"])
     assert detail["reviewer_harness"] == "claude"
     assert detail["routing"] == {"builder": "codex", "reviewer": "claude"}
+
+
+def _override_config():
+    from lib.factory_md import FactoryRouting
+
+    return replace(
+        factory(),
+        routing=FactoryRouting(
+            slots={
+                "build": (("codex", "gpt-5.4", "high"),),
+                "review": (("claude", "claude-opus-4-6", "high"),),
+            }
+        ),
+    )
+
+
+def test_factory_routing_override_picks_the_recipient_and_its_model(
+    tmp_path: Path,
+) -> None:
+    from lib.role_router import routing_argv_for_detail
+
+    config = _override_config()
+    dispatcher, queue = setup(tmp_path)
+    go = comment("go-1", _go(""), author="grok-login")
+    dispatcher.process(ticket(go, factory_config=config))
+
+    assert queue.claim("claude") is None
+    build = queue.claim("codex")
+    assert build is not None and build.request.action == "build"
+    picks = {
+        "builder": "codex",
+        "builder_model": "gpt-5.4",
+        "builder_effort": "high",
+        "reviewer": "claude",
+        "reviewer_model": "claude-opus-4-6",
+        "reviewer_effort": "high",
+    }
+    assert json.loads(build.request.detail)["routing"] == picks
+    assert routing_argv_for_detail(
+        ["codex", "exec", "-"], harness=build.request.recipient, detail=build.request.detail
+    ) == ["codex", "exec", "--model", "gpt-5.4", "-c", "model_reasoning_effort=high", "-"]
+    queue.finish(build.id, owner="codex", handoff_comment_id="ready-1")
+
+    ready = comment("ready-1", _ready("codex"), author="codex-login", created_at=2)
+    dispatcher.process(
+        ticket(go, ready, head=HEAD, ci={HEAD: CIResult("success")}, factory_config=config)
+    )
+    review = queue.claim("claude")
+    assert review is not None and review.request.action == "review"
+    assert json.loads(review.request.detail)["routing"] == picks
+    assert routing_argv_for_detail(
+        ["claude", "-p", "-"], harness=review.request.recipient, detail=review.request.detail
+    ) == ["claude", "-p", "--model", "claude-opus-4-6", "--effort", "high", "-"]
+    queue.finish(review.id, owner="claude", handoff_comment_id="verdict-1")
+
+    verdict = comment(
+        "verdict-1",
+        "<!-- orch:v1 kind=verdict from=claude-bot role=reviewer "
+        f"round=1/3 head={HEAD} verdict=REVISE risk=high -->\nRevise.\n",
+        author="claude-login",
+        created_at=3,
+    )
+    dispatcher.process(
+        ticket(
+            go, ready, verdict, head=HEAD, ci={HEAD: CIResult("success")}, factory_config=config
+        )
+    )
+    assert queue.claim("claude") is None
+    fix = queue.claim("codex")
+    assert fix is not None and fix.request.action == "fix"
+    assert json.loads(fix.request.detail)["routing"] == picks
+
+
+def test_go_pair_with_a_routing_override_queues_what_its_detail_names(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    go = comment("go-1", _go("builder=claude reviewer=codex "), author="grok-login")
+    dispatcher.process(ticket(go, factory_config=_override_config()))
+
+    assert queue.claim("codex") is None
+    build = queue.claim("claude")
+    assert build is not None
+    routing = json.loads(build.request.detail)["routing"]
+    assert (routing["builder"], routing["reviewer"]) == (build.request.recipient, "codex")
+
+
+def test_routing_budget_alone_routes_through_the_shipped_table(tmp_path: Path) -> None:
+    from lib.factory_md import FactoryRouting
+    from lib.orchestrate import RouteRequest, choose_route
+    from lib.role_router import central_routing, resolve_pair
+
+    config = replace(factory(), routing=FactoryRouting(budget="small"))
+    shipped_builder, shipped_reviewer = resolve_pair(routing=central_routing(), factory=config)
+    assert shipped_builder.model is not None and shipped_reviewer.model is not None
+
+    decision = choose_route(RouteRequest(config, "high", False, "feature", ("x.py",)))
+    assert (decision.builder_harness, decision.builder_model) == (
+        shipped_builder.harness,
+        shipped_builder.model,
+    )
+    assert (decision.reviewer_harness, decision.reviewer_model) == (
+        shipped_reviewer.harness,
+        shipped_reviewer.model,
+    )
+
+    dispatcher, queue = setup(tmp_path)
+    go = comment("go-1", _go(""), author="grok-login")
+    dispatcher.process(ticket(go, factory_config=config))
+    build = queue.claim(shipped_builder.harness)
+    assert build is not None
+    routing = json.loads(build.request.detail)["routing"]
+    assert routing["builder_model"] == shipped_builder.model
+    assert routing["reviewer"] == shipped_reviewer.harness
+    assert routing["reviewer_model"] == shipped_reviewer.model
+
+
+def test_brief_ticket_types_pick_their_build_role() -> None:
+    from lib.role_router import build_role_for_ticket_type
+    from lib.ticket_type import TICKET_TYPES
+
+    assert [build_role_for_ticket_type(kind) for kind in TICKET_TYPES] == [
+        "build:feature",
+        "build:bug",
+        "build:refactor",
+        "build:perf",
+    ]
+
+
+def test_routing_pool_with_no_queueable_harness_rejects_the_go(tmp_path: Path) -> None:
+    from lib.factory_md import FactoryRouting
+
+    config = replace(
+        factory(),
+        routing=FactoryRouting(slots={"build": (("gemini", "gemini-2.5-pro", None),)}),
+    )
+    dispatcher, queue = setup(tmp_path)
+    go = comment("go-1", _go(""), author="grok-login")
+    dispatcher.process(ticket(go, factory_config=config))
+
+    assert _outcome(queue, "go-1") == "rejected-go-routing"
+    assert queue.claim("claude") is None and queue.claim("codex") is None

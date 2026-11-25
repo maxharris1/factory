@@ -345,3 +345,87 @@ def test_parse_routing_yml_rejects_bad_configs_and_check_config_validates(tmp_pa
     bad_file.write_text("budget: bogus\nroles: {}\n", encoding="utf-8")
     assert cli.main(["check-config", "--allow-placeholders", "--routing", str(ROOT / ROUTING_PATH)]) == 0
     assert cli.main(["check-config", "--allow-placeholders", "--routing", str(bad_file)]) == 1
+
+
+def _build_detail(harness: str, model: str, effort: str | None = None) -> str:
+    routing = {"builder": harness, "builder_model": model}
+    if effort is not None:
+        routing["builder_effort"] = effort
+    return json.dumps({"action": "build", "routing": routing})
+
+
+@pytest.mark.parametrize(
+    ("harness", "command", "model", "expected"),
+    [
+        (
+            "cursor",
+            ["cursor-agent", "-p", "-"],
+            "gpt-5.4",
+            ["cursor-agent", "-p", "--model", "gpt-5.4", "-"],
+        ),
+        (
+            "gemini",
+            ["/usr/local/bin/gemini", "-p", "-"],
+            "gemini-2.5-pro",
+            ["/usr/local/bin/gemini", "--model", "gemini-2.5-pro", "-p", "-"],
+        ),
+    ],
+)
+def test_routed_model_reaches_cursor_and_gemini_argv_without_an_effort_flag(
+    harness: str, command: list[str], model: str, expected: list[str]
+) -> None:
+    detail = _build_detail(harness, model, effort="high")
+    assert routing_argv_for_detail(command, harness=harness, detail=detail) == expected
+
+
+def test_codex_prompt_mentioning_reasoning_effort_still_gets_routed_effort() -> None:
+    detail = _build_detail("codex", "gpt-5.4", effort="high")
+    assert routing_argv_for_detail(
+        ["codex", "exec", "explain model_reasoning_effort"], harness="codex", detail=detail
+    ) == [
+        "codex",
+        "exec",
+        "explain model_reasoning_effort",
+        "--model",
+        "gpt-5.4",
+        "-c",
+        "model_reasoning_effort=high",
+    ]
+
+
+def test_model_after_the_option_terminator_is_prompt_text_not_configuration() -> None:
+    detail = _build_detail("codex", "gpt-5.4")
+    assert routing_argv_for_detail(["codex", "exec", "--", "--model"], harness="codex", detail=detail) == [
+        "codex",
+        "exec",
+        "--model",
+        "gpt-5.4",
+        "--",
+        "--model",
+    ]
+
+
+@pytest.mark.parametrize(
+    "config",
+    [["-c", "model_reasoning_effort=low"], ["--config", "model_reasoning_effort=low"], ["--config=model_reasoning_effort=low"]],
+)
+def test_existing_codex_reasoning_effort_config_is_respected(config: list[str]) -> None:
+    detail = _build_detail("codex", "gpt-5.4", effort="high")
+    assert routing_argv_for_detail(
+        ["codex", "exec", *config, "--", "go"], harness="codex", detail=detail
+    ) == ["codex", "exec", *config, "--model", "gpt-5.4", "--", "go"]
+
+
+def test_existing_claude_effort_before_terminator_is_respected_and_after_is_not() -> None:
+    detail = _build_detail("claude", "claude-opus-4-6", effort="high")
+    assert routing_argv_for_detail(
+        ["claude", "-p", "--effort=low"], harness="claude", detail=detail
+    ) == ["claude", "-p", "--effort=low", "--model", "claude-opus-4-6"]
+    assert routing_argv_for_detail(
+        ["claude", "-p", "--", "--effort"], harness="claude", detail=detail
+    ) == ["claude", "-p", "--model", "claude-opus-4-6", "--effort", "high", "--", "--effort"]
+
+
+def test_non_harness_command_is_left_unchanged() -> None:
+    detail = _build_detail("claude", "claude-opus-4-6", effort="high")
+    assert routing_argv_for_detail(["bash", "run.sh"], harness="claude", detail=detail) == ["bash", "run.sh"]

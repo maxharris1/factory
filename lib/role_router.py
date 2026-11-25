@@ -264,6 +264,17 @@ def load_routing_yml(path: Path = ROOT / ROUTING_PATH) -> tuple[RoutingConfig | 
     return parse_routing_yml(path.read_text(encoding="utf-8"))
 
 
+def central_routing(path: Path = ROOT / ROUTING_PATH) -> RoutingConfig | None:
+    """The shipped routing table, None when absent. Raises RoutingError when invalid."""
+    if not path.is_file():
+        return None
+    config, findings = parse_routing_yml(path.read_text(encoding="utf-8"))
+    if config is None:
+        errors = "; ".join(f.message for f in findings if f.severity == "error")
+        raise RoutingError(f"{path}: {errors}")
+    return config
+
+
 def _clamp_effort(effort: str | None, budget: str) -> str | None:
     if effort is None:
         return None
@@ -405,10 +416,19 @@ def resolve_slot(
     raise RoutingError(f"no eligible candidate for role {role!r}{detail}")
 
 
+_BUILD_ROLE_BY_TICKET_TYPE: dict[str, str] = {
+    "feature": "build:feature",
+    "bug": "build:bug",
+    "bug-fix": "build:bug",
+    "refactor": "build:refactor",
+    "refactoring": "build:refactor",
+    "perf": "build:perf",
+    "perf-issue": "build:perf",
+}
+
+
 def build_role_for_ticket_type(ticket_type: str | None) -> str:
-    if ticket_type in ("feature", "bug", "refactor", "perf"):
-        return f"build:{ticket_type}"
-    return "build"
+    return _BUILD_ROLE_BY_TICKET_TYPE.get(ticket_type or "", "build")
 
 
 def resolve_pair(
@@ -457,19 +477,60 @@ def resolve_pair(
     return builder, reviewer
 
 
+HARNESS_BINARIES: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        "claude": frozenset({"claude"}),
+        "codex": frozenset({"codex"}),
+        "cursor": frozenset({"cursor-agent"}),
+        "gemini": frozenset({"gemini"}),
+    }
+)
+
+_CODEX_EFFORT_KEY = "model_reasoning_effort"
+
+
+def _options(argv: Sequence[str]) -> Sequence[str]:
+    end = argv.index("--") if "--" in argv else len(argv)
+    return argv[1:end]
+
+
 def _has_flag(argv: Sequence[str], names: Collection[str]) -> bool:
-    for arg in argv:
+    return any(
+        arg in names or any(arg.startswith(f"{name}=") for name in names)
+        for arg in _options(argv)
+    )
+
+
+def _option_values(argv: Sequence[str], names: Collection[str]) -> list[str]:
+    options = _options(argv)
+    values: list[str] = []
+    for idx, arg in enumerate(options):
         if arg in names:
-            return True
-        if any(arg.startswith(f"{name}=") for name in names):
-            return True
-    return False
+            if idx + 1 < len(options):
+                values.append(options[idx + 1])
+            continue
+        values.extend(arg[len(name) + 1 :] for name in names if arg.startswith(f"{name}="))
+    return values
 
 
-def _insert_index(argv: Sequence[str]) -> int:
+def _has_codex_effort(argv: Sequence[str]) -> bool:
+    return any(
+        value.startswith(f"{_CODEX_EFFORT_KEY}=")
+        for value in _option_values(argv, ("-c", "--config"))
+    )
+
+
+_PROMPT_OPTIONS: Mapping[str, frozenset[str]] = MappingProxyType(
+    {"gemini": frozenset({"-p", "--prompt"})}
+)
+
+
+def _insert_index(argv: Sequence[str], harness: str) -> int:
     if "--" in argv:
         return argv.index("--")
     if len(argv) >= 2 and argv[-1] == "-":
+        if len(argv) >= 3 and argv[-2] in _PROMPT_OPTIONS.get(harness, frozenset()):
+            return len(argv) - 2
         return len(argv) - 1
     return len(argv)
 
@@ -501,13 +562,11 @@ def apply_argv_flags(
             raise RoutingError(f"invalid effort level {effort!r}")
         if harness == "claude" and not _has_flag(argv, ("--effort",)):
             extra.extend(["--effort", effort])
-        elif harness == "codex" and not any(
-            "model_reasoning_effort" in item for item in argv
-        ):
-            extra.extend(["-c", f"model_reasoning_effort={effort}"])
+        elif harness == "codex" and not _has_codex_effort(argv):
+            extra.extend(["-c", f"{_CODEX_EFFORT_KEY}={effort}"])
     if not extra:
         return argv
-    idx = _insert_index(argv)
+    idx = _insert_index(argv, harness)
     return [*argv[:idx], *extra, *argv[idx:]]
 
 
@@ -524,10 +583,7 @@ def routing_argv_for_detail(
     """
     if not detail or not command:
         return list(command)
-    from lib import telemetry
-
-    detected = telemetry.stream_flags(command, harness).harness
-    if detected != harness:
+    if Path(command[0]).name not in HARNESS_BINARIES.get(harness, frozenset()):
         return list(command)
     try:
         parsed = json.loads(detail)

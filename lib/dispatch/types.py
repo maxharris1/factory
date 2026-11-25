@@ -12,6 +12,7 @@ from lib.factory_md import FactoryConfig, no_ci_base
 from lib.hold import LabelEvent, MergeUpdate
 from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES
 from lib.queue import Job
+from lib.role_router import Candidate
 from lib.update_check import HeadDiff, MovedHead, RebaseScope, RetargetDelta, UpdateClass
 
 if TYPE_CHECKING:
@@ -472,6 +473,9 @@ class TrackedTicket:
     # Issue #206: factory.md's config when a go routed this ticket to other
     # harnesses; factory then holds the routed pair.
     factory_md: FactoryConfig | None = None
+    # E2-4: the (builder, reviewer) picks config/routing.yml made for factory,
+    # carried into job detail as their model and effort.
+    routing: tuple[Candidate, Candidate] | None = None
     # Issue #115: the source issue (`#115`, or a Linear key) and the open
     # PR's title, so the poller can prefix a title that lacks it.
     source_issue: str | None = None

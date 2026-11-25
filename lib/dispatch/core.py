@@ -24,9 +24,12 @@ from lib.dispatch.helpers import (
     _matching_head,
     _normalize_trusted_logins,
     _route,
+    _route_picks,
+    _router_picks,
     trusted_bots,
 )
 from lib.dispatch.transitions import write_workflow_state
+from lib.role_router import RoutingError
 from lib.dispatch.types import (
     BaseCheck,
     BaseMismatch,
@@ -422,13 +425,22 @@ class DispatcherBase:
             ).fetchone()
         routing = _detail_routing(None if row is None else row["detail"])
         if routing is None:
-            return ticket
-        routed = _route(ticket, *routing)
+            try:
+                picks = _router_picks(ticket, self.refused_harnesses)
+            except RoutingError:
+                return ticket
+            return ticket if picks is None else _route_picks(ticket, picks)
+        builder, reviewer, picks = routing
+        routed = (
+            _route(ticket, builder, reviewer)
+            if picks is None
+            else _route_picks(ticket, picks)
+        )
         errors = _family_errors(routed.factory)
         if errors:
             raise RouteError(
                 f"{ticket.repo}#{ticket.ticket_id} routing "
-                f"{routing[0]} / {routing[1]}: {'; '.join(errors)}",
+                f"{builder} / {reviewer}: {'; '.join(errors)}",
                 str(row["source_comment_id"]),
             )
         return routed

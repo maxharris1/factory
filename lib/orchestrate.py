@@ -31,6 +31,7 @@ from lib.factory_md import (
 )
 from lib.handoff import Handoff, format_comment
 from lib.load import Finding, split_front_matter
+from lib.role_router import RoutingConfig, RoutingError, central_routing, resolve_pair
 from lib.schema import HARNESSES
 
 FROM = "grok-bot"
@@ -366,7 +367,8 @@ def choose_route(
     check-config would refuse is refused here rather than routed around.
     When `routing` (a `RoutingConfig`) or `request.config.routing` is set,
     delegates to `lib.role_router.resolve_pair` with mechanical cross-family
-    filtering. Otherwise keeps legacy `factory.md` pair resolution.
+    filtering, reading the shipped `config/routing.yml` when `routing` is
+    None. Otherwise keeps legacy `factory.md` pair resolution.
     """
     del usage  # dead cross-harness reserve removed; kept as optional kwarg for caller compatibility
     _check_request(request)
@@ -378,11 +380,11 @@ def choose_route(
         config.reviewer_model,
     )
     if routing is not None or config.routing is not None:
-        from lib.role_router import RoutingConfig, RoutingError, resolve_pair
-
         if routing is not None and not isinstance(routing, RoutingConfig):
             raise RouteError("routing must be a RoutingConfig")
         try:
+            if routing is None:
+                routing = central_routing()
             builder_slot, reviewer_slot = resolve_pair(
                 routing=routing,
                 factory=config,

@@ -141,6 +141,7 @@ from lib.queue import (
     require_proof,
 )
 from lib.remote import SshTransport
+from lib.role_router import RoutingError, load_routing_yml, routing_argv_for_detail
 from lib.state_backup import (
     BackupError,
     CycleBackup,
@@ -743,8 +744,6 @@ def _check_config(argv: list[str]) -> int:
     if routing_path is None and (ROOT / "config" / "routing.yml").is_file():
         routing_path = ROOT / "config" / "routing.yml"
     if routing_path is not None:
-        from lib.role_router import load_routing_yml
-
         _routing_cfg, routing_findings = load_routing_yml(routing_path)
         failed = _report(routing_path, routing_findings) or failed
     for repo, path in factory_paths:
@@ -2454,11 +2453,8 @@ def _job_run_command(argv: list[str]) -> int:
         # Not sent to a remote device: it would be on the ssh command line.
         environment[job_token.PROOF_ENV] = proof
     factory_root = skill_preflight.checkout_root(placed.device, owner, ROOT)
-    # Apply validated role-router model/effort flags from the job detail (E2-4)
-    # before telemetry/exposure so both record the effective harness invocation.
+    # Before telemetry and exposure, so both record the argv the harness runs.
     try:
-        from lib.role_router import RoutingError, routing_argv_for_detail
-
         command = routing_argv_for_detail(command, harness=owner, detail=detail)
     except RoutingError as exc:
         log(f"role router refused job detail flags: {exc}")
