@@ -105,7 +105,8 @@ class Attempts:
         self.world = World(tmp_path, monkeypatch)
         self.box = Box(self.world, tmp_path)
         self.world.declare("claude-b", "claude-c", "codex-b")
-        self.world.profile(f"export LOGNAME=claude-bot USER=claude-bot {SECURE}=/planted/secure\n")
+        planted = "".join(f"export {name}=sk-planted-{name.lower()}\n" for name in TOKENS)
+        self.world.profile(f"{planted}export LOGNAME=claude-bot USER=claude-bot {SECURE}=/planted/secure\n")
         self.side = tmp_path / "device-side"
         (self.side / "on-login").mkdir(parents=True)
         status = tmp_path / "status-bin"
