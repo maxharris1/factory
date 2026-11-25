@@ -2,15 +2,17 @@ import ast
 import json
 import os
 import shlex
+import signal
+import sys
 import time
 from pathlib import Path
 
 import pytest
 
-from lib import cli
+from lib import cli, skill_probe
 from lib.doctor_live import last_reply, live_canary
 from lib.harnesses import all_drivers
-from lib.machines_yml import load_machines_yml
+from lib.machines_yml import Device, MachinesConfig, load_machines_yml
 from lib.orch_yml import load_orch_yml
 from lib.pstack_models import rules_text
 from lib.pstack_pin import (
@@ -27,6 +29,7 @@ from lib.pstack_pin import (
 from lib.skill_probe import launch_argv, plan_canary
 from lib.waiter import WaiterError
 from tests.test_pstack_install import snapshot
+from tests.test_remote_start import Ssh, use_fake_ssh
 
 PSTACK = ROOT / "skills" / "pstack"
 
@@ -324,6 +327,14 @@ def stream_json_reply(bot: str, token: str) -> str:
     return "".join(json.dumps(event) + "\n" for event in events)
 
 
+def gemini_delta_reply(bot: str, token: str) -> str:
+    chunks = [f"started-by: {bot}\nskill: factory-builder\ntoken: ", token[:20], token[20:], "\n"]
+    events = [{"type": "init", "model": "gemini-3.1-pro"}]
+    events += [{"type": "message", "role": "assistant", "content": chunk, "delta": True} for chunk in chunks]
+    events += [{"type": "result", "status": "success", "stats": {}}]
+    return "".join(json.dumps(event) + "\n" for event in events)
+
+
 TIMEOUT = object()
 
 
@@ -345,6 +356,7 @@ class FakeSpawn:
             reply = {
                 "claude": stream_json_reply,
                 "codex": lambda b, t: echoed_prompt_then_reply(stdin.decode(), b, t),
+                "gemini": gemini_delta_reply,
             }.get(harness, plain_reply)(bot, self.token)
         log.write_text(reply, encoding="utf-8")
         return 0
@@ -429,9 +441,100 @@ def test_last_reply_reads_plain_and_json_event_stdout() -> None:
     for stdout in (
         plain_reply("claude-bot", token),
         stream_json_reply("claude-bot", token),
+        gemini_delta_reply("claude-bot", token),
         echoed_prompt_then_reply("started-by: claude-bot\ntoken: <that passage>", "claude-bot", token),
     ):
         assert score_reply("claude", "claude-bot", last_reply(stdout), token) is None
+
+
+def replying(bot: str) -> list[str]:
+    reply = plain_reply(bot, pinned_token(ROOT))
+    return [sys.executable, "-c", f"import sys; sys.stdin.read(); sys.stdout.write({reply!r})"]
+
+
+def local_box(*harnesses: str) -> MachinesConfig:
+    bots = {d.name: d.bot_user for d in all_drivers()}
+    return MachinesConfig((Device("box", 2, {h: bots[h] for h in harnesses}, local=True),))
+
+
+def test_a_harness_that_cannot_start_is_named_and_the_rest_still_run(tmp_path: Path) -> None:
+    missing = tmp_path / "not-installed" / "claude"
+    lines: list[str] = []
+    errors = live_canary(
+        local_box("claude", "codex"), (), pinned_token(ROOT), harnesses=None, timeout=10,
+        work=tmp_path / "work", run_id="doctor-0000",
+        load=lambda bot: [str(missing)] if bot == "claude-bot" else replying(bot),
+        out=lines.append,
+    )
+    [error] = errors
+    assert error.startswith("claude@box: did not load the pinned version (could not start: ")
+    assert str(missing) in error
+    assert lines == ["codex@box: ok"]
+
+
+def gone(pid: int, within: float) -> bool:
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_a_harness_that_ignores_sigterm_is_killed_after_its_timeout(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(skill_probe, "STOP_GRACE", 0.5)
+    marker = tmp_path / "pid"
+    stubborn = (
+        "import os, signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"open({str(marker)!r}, 'w').write(str(os.getpid())); sys.stdin.read(); time.sleep(60)"
+    )
+    lines: list[str] = []
+    started = time.monotonic()
+    errors = live_canary(
+        local_box("claude", "codex"), (), pinned_token(ROOT), harnesses=None, timeout=1,
+        work=tmp_path / "work", run_id="doctor-0000",
+        load=lambda bot: [sys.executable, "-c", stubborn] if bot == "claude-bot" else replying(bot),
+        out=lines.append,
+    )
+    assert time.monotonic() - started < 10
+    assert errors == ["claude@box: did not load the pinned version (timed out after 1s)"]
+    assert lines == ["codex@box: ok"]
+    assert gone(int(marker.read_text()), 1)
+
+
+def test_a_remote_harness_past_its_timeout_is_stopped_on_the_device(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(skill_probe, "REMOTE_STOP_PAUSE", 0.2)
+    ssh = Ssh(tmp_path)
+    use_fake_ssh(monkeypatch, ssh)
+    marker = tmp_path / "pid"
+    stubborn = (
+        "import os, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"open({str(marker)!r}, 'w').write(str(os.getpid())); time.sleep(60)"
+    )
+    machines = MachinesConfig((Device(
+        "remote", 1, {"claude": "claude-bot"}, workdir_root=str(tmp_path / "remote"),
+        ssh_alias="fakepc-{bot}",
+    ),))
+    errors = live_canary(
+        machines, (), pinned_token(ROOT), harnesses=("claude",), timeout=2,
+        work=tmp_path / "work", run_id="doctor-0000",
+        load=lambda bot: [sys.executable, "-c", stubborn], out=lambda line: None,
+    )
+    assert errors == ["claude@remote: did not load the pinned version (timed out after 2s)"]
+    pid = int(marker.read_text())
+    try:
+        assert gone(pid, 1), "the remote harness still runs after the doctor returned"
+    finally:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 LOCAL_CLAUDE = """\

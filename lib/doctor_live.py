@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Sequence
 from pathlib import Path
 
 from lib.harnesses import all_drivers
 from lib.machines_yml import MachinesConfig
 from lib.pstack_pin import canary_prompt_for, score_reply
-from lib.skill_probe import Spawn, _text, plan_canary, spawn, start_launch
+from lib.remote import RemoteError
+from lib.skill_probe import Spawn, plan_canary, spawn, start_launch
+from lib.telemetry import final_message
 from lib.waiter import WaiterError, default_harness_config, load_harness_command
 
 
@@ -16,13 +18,24 @@ def waiter_command(bot: str) -> Sequence[str]:
 
 
 def last_reply(stdout: str) -> str:
-    lines: list[str] = []
+    """The reply from the last `started-by:` line on, from plain or JSON-event stdout."""
+    parts: list[str] = []
+    streaming = False
     for line in stdout.splitlines():
         try:
             event = json.loads(line)
         except ValueError:
             event = None
-        lines += _text(event).splitlines() if isinstance(event, Mapping) else [line]
+        if not isinstance(event, dict):
+            parts.append(line + "\n")
+            streaming = False
+            continue
+        message = final_message(event)
+        delta = message is not None and event.get("delta") is True
+        if message is not None:
+            parts.append(message if delta and streaming else "\n" + message)
+        streaming = delta
+    lines = "".join(parts).splitlines()
     starts = [i for i, line in enumerate(lines) if line.strip().startswith("started-by:")]
     return "\n".join(lines[starts[-1]:] if starts else lines)
 
@@ -66,8 +79,15 @@ def live_canary(
             out(f"{target}: skipped ({row.skip})")
             continue
         log = work / f"{run_id}-{row.launch.name}.log"
-        code = start_launch(row.launch, canary_prompt_for(drivers[row.harness]),
-                            timeout=timeout, log_path=log, run=run)
+        try:
+            code = start_launch(row.launch, canary_prompt_for(drivers[row.harness]),
+                                timeout=timeout, log_path=log, run=run)
+        except OSError as exc:
+            errors.append(f"{target}: did not load the pinned version (could not start: {exc})")
+            continue
+        except RemoteError as exc:
+            errors.append(f"{target}: did not load the pinned version ({exc})")
+            continue
         if code is None:
             error = f"{target}: did not load the pinned version (timed out after {timeout:g}s)"
         else:
