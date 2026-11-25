@@ -1010,7 +1010,8 @@ class QaMixin:
                 """
                 SELECT run_id, visual, evidence_dir FROM qa_runs
                 WHERE repo = ? AND ticket_id = ? AND arm = 'primary'
-                  AND state = 'reported' AND result = 'PASS' AND evidence_dir IS NOT NULL
+                  AND (state = 'reported' OR (state = 'cancelled' AND reason = 'rerun-qa'))
+                  AND result = 'PASS' AND evidence_dir IS NOT NULL
                 """,
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchall()
