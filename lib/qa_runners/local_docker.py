@@ -61,6 +61,7 @@ _SAFE_AGENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SAFE_REF = re.compile(r"^[A-Za-z0-9._/-]{1,128}$")
 _SAFE_REPO = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 _SHA = re.compile(r"^[0-9a-f]{40}$")
+_REMOTE_URL = re.compile(r"^(?!file:)(?:[A-Za-z][A-Za-z0-9+.-]*://|[^/]+:)")
 
 
 RunCommand = Callable[..., subprocess.CompletedProcess[str]]
@@ -98,7 +99,8 @@ def _is_not_found(stderr: str) -> bool:
     return any(marker in low for marker in _NOT_FOUND_MARKERS)
 
 
-def _refuse_protected(path: Path, *, home: Path) -> Path:
+def _assert_safe_host_path(path: Path, *, home: Path) -> Path:
+    path = path.resolve()
     home = home.resolve()
     protected = (
         *((home / sub).resolve() for sub in _FORBIDDEN_HOST_SUBPATHS),
@@ -110,8 +112,10 @@ def _refuse_protected(path: Path, *, home: Path) -> Path:
     return path
 
 
-def _assert_safe_host_path(path: Path, *, home: Path) -> Path:
-    return _refuse_protected(path.resolve(), home=home)
+def _assert_safe_source(url: str, *, home: Path) -> str:
+    if not _REMOTE_URL.match(url):
+        _assert_safe_host_path(Path(url.removeprefix("file://")), home=home)
+    return url
 
 
 def _remove(path: Path) -> None:
@@ -338,14 +342,16 @@ class LocalDockerRunner:
             if not _SHA.fullmatch(sha):
                 raise LaunchFailed(f"unsafe commit: {sha!r}")
         owner, name = lane.repo.split("/", 1)
+        _assert_safe_source(self.config.repo_url_template.format(repo=lane.repo), home=self._home)
         cache_root = _assert_safe_host_path(self.config.repo_cache_root, home=self._home)
-        return _refuse_protected(cache_root / f"{owner}__{name}.git", home=self._home)
+        return _assert_safe_host_path(cache_root / f"{owner}__{name}.git", home=self._home)
 
     def _lane_paths(self, agent_id: str) -> _LanePaths:
         if not _SAFE_AGENT_ID.fullmatch(agent_id) or ".." in agent_id:
             raise LaunchFailed(f"unsafe agent_id: {agent_id!r}")
         work_root = _assert_safe_host_path(self.config.work_root, home=self._home)
-        lane_dir = _refuse_protected(work_root / agent_id, home=self._home)
+        lane_dir = work_root / agent_id
+        _assert_safe_host_path(lane_dir, home=self._home)
         return _LanePaths(
             lane_dir=lane_dir,
             brief=lane_dir / "brief.md",
@@ -359,7 +365,7 @@ class LocalDockerRunner:
         worktree = lane_dir / "worktree"
         if not repo_cache.exists():
             repo_cache.parent.mkdir(parents=True, exist_ok=True)
-            url = self.config.repo_url_template.format(repo=lane.repo)
+            url = _assert_safe_source(self.config.repo_url_template.format(repo=lane.repo), home=self._home)
             self._git_ok("clone", "--bare", "--", url, str(repo_cache), timeout=180)
         lane_refs = f"refs/factory-qa/{container_name_for(lane.lane_id)}"
         refs = [f"{lane_refs}/base", *(f"{lane_refs}/c{index}" for index in range(len(lane.commits)))]

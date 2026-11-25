@@ -298,6 +298,79 @@ def test_launch_never_writes_through_a_planted_brief_symlink(tmp_path: Path) -> 
     assert target.read_text() == "ORIGINAL DUMMY CONTENT\n"
 
 
+def test_launch_refuses_a_repo_cache_entry_symlinked_into_protected_state(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    protected = home / ".config" / "factory" / "protected.git"
+    source, _ = source_repo(tmp_path)
+    git("clone", "--bare", "--", source, protected)
+    before = sorted(str(p.relative_to(protected)) for p in protected.rglob("*"))
+    (tmp_path / "repos").mkdir()
+    (tmp_path / "repos" / "maxharris1__cleffy.git").symlink_to(protected, target_is_directory=True)
+    stub = FakeDocker()
+
+    with pytest.raises(LaunchFailed, match="protected directory"):
+        _runner(tmp_path, stub, home=home).launch(_lane("planted-cache"))
+    assert stub.runs() == []
+    assert sorted(str(p.relative_to(protected)) for p in protected.rglob("*")) == before
+
+
+@pytest.mark.parametrize("scheme", ["", "file://"])
+def test_launch_refuses_a_local_repo_source_inside_protected_state(tmp_path: Path, scheme: str) -> None:
+    home = tmp_path / "home"
+    protected = home / ".config" / "factory" / "source.git"
+    source, _ = source_repo(tmp_path)
+    git("clone", "--bare", "--", source, protected)
+    runner = LocalDockerRunner(
+        LocalDockerConfig(
+            work_root=tmp_path / "lanes",
+            repo_cache_root=tmp_path / "repos",
+            repo_url_template=f"{scheme}{protected}",
+        ),
+        run=FakeDocker(),
+        home=home,
+        environ=CREDENTIAL,
+    )
+
+    with pytest.raises(LaunchFailed, match="protected directory"):
+        runner.launch(_lane("protected-source"))
+    assert not (tmp_path / "repos").exists()
+
+
+def test_launch_and_stop_refuse_a_lane_dir_symlinked_into_protected_state(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    protected = home / ".config" / "factory" / "lane"
+    protected.mkdir(parents=True)
+    lane = _lane("planted-lane-dir")
+    agent_id = container_name_for(lane.lane_id)
+    marker = {"lane_id": lane.lane_id, "agent_id": agent_id, "url": f"docker://local/{agent_id}", "state": "running"}
+    (protected / "launched.json").write_text(json.dumps(marker))
+    (tmp_path / "lanes").mkdir()
+    (tmp_path / "lanes" / agent_id).symlink_to(protected, target_is_directory=True)
+    runner = _runner(tmp_path, FakeDocker(), home=home)
+
+    with pytest.raises(LaunchFailed, match="protected directory"):
+        runner.launch(lane)
+    with pytest.raises(LaunchFailed, match="protected directory"):
+        runner.stop(agent_id)
+    assert (protected / "launched.json").exists()
+
+
+def test_launch_and_stop_unlink_a_lane_dir_symlink_without_deleting_its_target(tmp_path: Path) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "keep.txt").write_text("keep\n")
+    lane = _lane("symlinked-lane-dir")
+    agent_id = container_name_for(lane.lane_id)
+    (tmp_path / "lanes").mkdir()
+    (tmp_path / "lanes" / agent_id).symlink_to(elsewhere, target_is_directory=True)
+    runner = _runner(tmp_path, FakeDocker())
+
+    runner.launch(lane)
+    assert not (tmp_path / "lanes" / agent_id).is_symlink()
+    runner.stop(agent_id)
+    assert (elsewhere / "keep.txt").read_text() == "keep\n"
+
+
 def test_launch_never_mounts_a_directory_holding_protected_state(tmp_path: Path) -> None:
     home = tmp_path / "home"
     (home / ".config" / "factory").mkdir(parents=True)
