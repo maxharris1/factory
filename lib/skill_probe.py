@@ -483,7 +483,6 @@ def device_launch(
     skill_md: str,
     home: str | None = None,
 ) -> Launch | None:
-    """command run as job_id on device; None when a remote device names no SSH target."""
     env = harness_env(harness, home)
     if device.local:
         return Launch(device.name, harness, style, tuple(command), env,
@@ -514,10 +513,6 @@ def plan_canary(
     local_root: str,
     drivers: Sequence[HarnessDriver] | None = None,
 ) -> list[CanaryTarget]:
-    """One row per device x harness it is eligible for, with its launch or why it has none.
-
-    commands maps a harness to its waiter argv.
-    """
     rows = []
     for device in machines.devices:
         for driver in all_drivers() if drivers is None else drivers:
