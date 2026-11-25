@@ -1368,14 +1368,13 @@ def _chunk_qa_path(encoded_rel: str) -> list[str] | None:
 def _held_qa_run(
     connection: sqlite3.Connection, key: tuple[str, str], head: str
 ) -> sqlite3.Row | None:
-    columns = "run_id, scope, result, reason, evidence_dir"
+    select = """
+        SELECT run_id, scope, result, reason, evidence_dir FROM qa_runs
+        WHERE (state = 'reported' OR (state = 'cancelled' AND reason = 'rerun-qa')) AND
+    """
     row = connection.execute(
-        f"""
-        SELECT {columns} FROM qa_runs
-        WHERE lower(repo) = ? AND ticket_id = ? AND head = ? AND arm = 'primary'
-          AND (state = 'reported' OR (state = 'cancelled' AND reason = 'rerun-qa'))
-        ORDER BY rowid DESC LIMIT 1
-        """,
+        select + "lower(repo) = ? AND ticket_id = ? AND head = ? AND arm = 'primary' "
+        "ORDER BY rowid DESC LIMIT 1",
         (*key, head),
     ).fetchone()
     seen: set[str] = set()
@@ -1384,10 +1383,7 @@ def _held_qa_run(
         if source == (row["reason"] or "") or source in seen:
             return None
         seen.add(source)
-        row = connection.execute(
-            f"SELECT {columns} FROM qa_runs WHERE run_id = ? AND state IN ('reported', 'cancelled')",
-            (source,),
-        ).fetchone()
+        row = connection.execute(select + "run_id = ?", (source,)).fetchone()
     return row if row is not None and row["evidence_dir"] is not None else None
 
 
