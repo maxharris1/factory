@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import secrets
 import shlex
@@ -68,7 +69,6 @@ Shell = Callable[[str, Sequence[str]], str | None]
 
 
 def ensure_table(connection: sqlite3.Connection) -> None:
-    """Two openers can migrate one database at once: the loser's `duplicate column name` means the column is there."""
     connection.execute(DDL)
     present = {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}
     for name, kind in ADDED_COLUMNS.items():
@@ -91,16 +91,19 @@ def write(connection: sqlite3.Connection, job_id: str, exposure: Exposure, at: f
     )
 
 
-_COLUMNS = "model, cli_version, brief_sha256, skill_paths, host, factory_revision, effort, harness"
+_COLUMNS = ("model", "cli_version", "brief_sha256", "skill_paths", "host", "factory_revision", "effort", "harness")
+
+
+def _unmigrated_columns_as_unknown(present: set[str]) -> str:
+    return ", ".join(f"'{UNKNOWN}'" if name in ADDED_COLUMNS and name not in present else name for name in _COLUMNS)
 
 
 def _rows(connection: sqlite3.Connection, where: str = "", args: tuple = ()) -> list:
-    try:
-        return connection.execute(f"SELECT job_id, {_COLUMNS} FROM {TABLE}{where}", args).fetchall()
-    except sqlite3.OperationalError as exc:
-        if "no such table" in str(exc):
-            return []
-        raise
+    present = {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}
+    if not present:
+        return []
+    columns = _unmigrated_columns_as_unknown(present)
+    return connection.execute(f"SELECT job_id, {columns} FROM {TABLE}{where}", args).fetchall()
 
 
 def _parsed(row: Sequence[str]) -> Exposure:
@@ -186,6 +189,59 @@ def _toml_string(value: str) -> str:
 
 
 @dataclass(frozen=True)
+class Chosen:
+    model: str
+    effort: str
+
+
+@dataclass(frozen=True)
+class _Command:
+    args: tuple[str, ...]
+    config_readable: bool
+
+
+_ENV_FLAGS = {"-0", "--null", "-v", "--debug"}
+_ENV_CLEARS = {"-i", "-", "--ignore-environment"}
+_ENV_VALUED = {"-u": "--unset", "--unset": "--unset", "-C": "--chdir", "--chdir": "--chdir"}
+_CODEX_CONFIG_ENV = {"CODEX_HOME", "HOME"}
+
+
+def _harness_command_if_followable(argv: Sequence[str]) -> _Command | None:
+    if not argv or os.path.basename(argv[0]) != "env":
+        return _Command(tuple(argv[1:]), True)
+    readable = True
+    options = True
+    words = iter(enumerate(argv[1:], 1))
+    for index, word in words:
+        if options and word == "--":
+            options = False
+        elif options and word in _ENV_FLAGS:
+            pass
+        elif options and word in _ENV_CLEARS:
+            readable = False
+        elif options and word.startswith("-"):
+            if word.startswith("--") and "=" in word:
+                name, _, value = word.partition("=")
+            elif word[:2] in _ENV_VALUED and len(word) > 2:
+                name, value = word[:2], word[2:]
+            else:
+                name, value = word, None
+            if name not in _ENV_VALUED:
+                return None
+            if value is None:
+                _, value = next(words, (None, None))
+                if value is None:
+                    return None
+            readable = readable and _ENV_VALUED[name] == "--unset" and value not in _CODEX_CONFIG_ENV
+        elif "=" in word:
+            options = False
+            readable = readable and word.partition("=")[0] not in _CODEX_CONFIG_ENV
+        else:
+            return _Command(tuple(argv[index + 1:]), readable)
+    return None
+
+
+@dataclass(frozen=True)
 class _Selected:
     model: str | None = None
     effort: str | None = None
@@ -194,15 +250,15 @@ class _Selected:
     profile_overridden: bool = False
 
 
-def _selected(argv: Sequence[str], harness: str | None) -> _Selected:
-    options = list(argv[1:])
+def _selected(args: Sequence[str], harness: str | None) -> _Selected:
+    options = list(args)
     if "--" in options:
         options = options[: options.index("--")]
     codex = harness == "codex"
     short = {"-m": "--model"} | ({"-c": "--config", "-p": "--profile", "-C": "--cd"} if codex else {})
     names = {"--model"} | ({"--config", "--profile", "--cd"} if codex else set())
-    names |= {"--effort"} if harness == "claude" else set()
-    flag = config = effort = config_effort = profile = cd = None
+    names |= {"--effort", "--settings"} if harness == "claude" else set()
+    flag = config = effort = config_effort = profile = cd = settings = None
     overridden = False
     words = iter(options)
     for word in words:
@@ -220,6 +276,8 @@ def _selected(argv: Sequence[str], harness: str | None) -> _Selected:
             flag = value or flag
         elif name == "--effort":
             effort = value or effort
+        elif name == "--settings":
+            settings = value
         elif name == "--profile":
             profile = value
         elif name == "--cd":
@@ -233,12 +291,24 @@ def _selected(argv: Sequence[str], harness: str | None) -> _Selected:
                 config_effort = _toml_string(setting) or config_effort
             # `profile` and `[profiles.<name>]` select a model only in some codex versions.
             overridden = overridden or key == "profile" or key.startswith("profiles.")
-    return _Selected(flag or config, effort or config_effort, profile, cd, overridden)
+    inline = _inline_settings(settings)
+    model, chosen_effort = inline.get("model"), inline.get("effortLevel")
+    return _Selected(
+        flag or config or (model if isinstance(model, str) else None),
+        effort or config_effort or (chosen_effort if isinstance(chosen_effort, str) else None),
+        profile,
+        cd,
+        overridden,
+    )
 
 
-def effort(argv: Sequence[str], harness: str | None) -> str:
-    found = _selected(argv, harness).effort
-    return found if found is not None and _MODEL.fullmatch(found) else UNKNOWN
+def _inline_settings(value: str | None) -> dict:
+    """Claude's `--settings` takes inline JSON or a file path; a file is not read."""
+    try:
+        parsed = json.loads(value) if value is not None else None
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 _PROFILE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*")
@@ -278,38 +348,53 @@ def _codex_configs(text: str | None, marker: str) -> list[tuple[str, dict]] | No
         return None
 
 
-def model(argv: Sequence[str], harness: str | None, shell: Shell, launch_dir: str | None = None) -> str:
-    chosen = _selected(argv, harness)
-    if chosen.model:
-        return chosen.model
-    if harness != "codex" or chosen.profile_overridden:
-        return UNKNOWN
-    if chosen.profile is not None and not _PROFILE.fullmatch(chosen.profile):
-        return UNKNOWN
+_CODEX_KEYS = {"model": "model", "effort": "model_reasoning_effort"}
+
+
+def _settled_by_codex_config(selected: _Selected, shell: Shell, launch_dir: str | None) -> dict[str, object]:
+    if selected.profile_overridden:
+        return {}
+    if selected.profile is not None and not _PROFILE.fullmatch(selected.profile):
+        return {}
     marker = f"{SHELL_NAME}-{secrets.token_hex(16)}"
     configs = _codex_configs(
-        shell(_CODEX_CONFIGS, (marker, launch_dir or "", chosen.cd or "", chosen.profile or "")), marker
+        shell(_CODEX_CONFIGS, (marker, launch_dir or "", selected.cd or "", selected.profile or "")), marker
     )
     if configs is None:
-        return UNKNOWN
-    # Codex reads a project's config only in a trusted project, which is not knowable here.
-    if any({"model", "profile", "profiles"} & parsed.keys() for kind, parsed in configs if kind == "project"):
-        return UNKNOWN
+        return {}
     files = dict(configs)
     base = files.get("base", {})
-    found = base.get("model")
-    if chosen.profile is None:
-        if "profile" in base:
-            return UNKNOWN
-    else:
-        if "profile" not in files:
-            return UNKNOWN
-        found = files["profile"].get("model", found)
-        tables = base.get("profiles")
-        legacy = tables.get(chosen.profile) if isinstance(tables, dict) else None
-        if isinstance(legacy, dict) and legacy.get("model", found) != found:
-            return UNKNOWN
-    return found if isinstance(found, str) and found else UNKNOWN
+    if selected.profile is None and "profile" in base:
+        return {}
+    if selected.profile is not None and "profile" not in files:
+        return {}
+    # Codex reads a project's config only in a trusted project, which is not knowable here.
+    projects = [parsed for kind, parsed in configs if kind == "project"]
+    if any({"profile", "profiles"} & parsed.keys() for parsed in projects):
+        return {}
+    tables = base.get("profiles")
+    legacy = tables.get(selected.profile) if isinstance(tables, dict) and selected.profile is not None else None
+    found: dict[str, object] = {}
+    for field, key in _CODEX_KEYS.items():
+        value = files.get("profile", {}).get(key, base.get(key))
+        if any(key in parsed for parsed in projects):
+            continue
+        if isinstance(legacy, dict) and legacy.get(key, value) != value:
+            continue
+        found[field] = value
+    return found
+
+
+def chosen(argv: Sequence[str], harness: str | None, shell: Shell, launch_dir: str | None = None) -> Chosen:
+    command = _harness_command_if_followable(argv)
+    if command is None:
+        return Chosen(UNKNOWN, UNKNOWN)
+    selected = _selected(command.args, harness)
+    found: dict[str, object] = {"model": selected.model, "effort": selected.effort}
+    if harness == "codex" and command.config_readable and not all(found.values()):
+        given = {field: value for field, value in found.items() if value}
+        found = _settled_by_codex_config(selected, shell, launch_dir) | given
+    return Chosen(reported_model(found.get("model")) or UNKNOWN, reported_model(found.get("effort")) or UNKNOWN)
 
 
 _RESOLVE_AS_IN_AN_EMPTY_LAUNCH_DIR = """\
@@ -372,14 +457,15 @@ def gather(
     # lib.brief imports lib.queue, which imports this module.
     from lib.brief.skills import pinned_paths
 
+    found = chosen(argv, harness, shell, launch_dir)
     return Exposure(
-        model=model(argv, harness, shell, launch_dir),
+        model=found.model,
         cli_version=cli_version(binary, shell, launch_dir),
         brief_sha256=brief_sha256(brief),
         skill_paths=None if brief is None else pinned_paths(brief.decode("utf-8", "replace")),
         host=host or UNKNOWN,
         factory_revision=factory_revision(factory_root, shell),
-        effort=effort(argv, harness),
+        effort=found.effort,
         harness=harness or UNKNOWN,
     )
 

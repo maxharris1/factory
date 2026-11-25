@@ -154,7 +154,7 @@ def test_pinned_paths_stops_at_the_next_section() -> None:
 )
 def test_the_model_comes_from_the_command_line(argv: list[str], harness: str, expected: str) -> None:
     shell = _shell({"config.toml": 'model = "from-config"\n'})
-    assert exposure.model(argv, harness, shell) == expected
+    assert exposure.chosen(argv, harness, shell).model == expected
 
 
 @pytest.mark.parametrize(
@@ -171,12 +171,12 @@ def test_the_model_comes_from_the_command_line(argv: list[str], harness: str, ex
     ],
 )
 def test_the_effort_comes_from_the_command_line(argv: list[str], harness: str, expected: str) -> None:
-    assert exposure.effort(argv, harness) == expected
+    assert exposure.chosen(argv, harness, _shell({})).effort == expected
 
 
 def test_options_after_a_double_dash_are_not_the_harnesses() -> None:
     shell = _shell({})
-    assert exposure.model(["claude", "-p", "--", "--model", "x"], "claude", shell) == exposure.UNKNOWN
+    assert exposure.chosen(["claude", "-p", "--", "--model", "x"], "claude", shell).model == exposure.UNKNOWN
 
 
 def test_a_codex_job_without_a_model_flag_reads_its_config_toml(tmp_path: Path) -> None:
@@ -184,15 +184,15 @@ def test_a_codex_job_without_a_model_flag_reads_its_config_toml(tmp_path: Path) 
     home.mkdir()
     (home / "config.toml").write_text('model = "gpt-5.5-codex"\n[profiles.x]\nmodel = "other"\n', encoding="utf-8")
     shell = exposure.local_shell({"PATH": "/usr/bin:/bin", "CODEX_HOME": str(home)})
-    assert exposure.model(["codex", "exec", "--json"], "codex", shell, str(tmp_path)) == "gpt-5.5-codex"
+    assert exposure.chosen(["codex", "exec", "--json"], "codex", shell, str(tmp_path)).model == "gpt-5.5-codex"
 
 
 def test_no_model_anywhere_is_unknown(tmp_path: Path) -> None:
     shell = exposure.local_shell({"PATH": "/usr/bin:/bin", "CODEX_HOME": str(tmp_path / "none")})
-    assert exposure.model(["codex", "exec"], "codex", shell) == exposure.UNKNOWN
-    assert exposure.model(["claude", "-p"], "claude", _shell({"config.toml": 'model = "x"'})) == exposure.UNKNOWN
-    assert exposure.model(["codex", "exec"], "codex", _shell({"config.toml": "model = 3"})) == exposure.UNKNOWN
-    assert exposure.model(["codex", "exec"], "codex", _shell({"config.toml": "not toml ["})) == exposure.UNKNOWN
+    assert exposure.chosen(["codex", "exec"], "codex", shell).model == exposure.UNKNOWN
+    assert exposure.chosen(["claude", "-p"], "claude", _shell({"config.toml": 'model = "x"'})).model == exposure.UNKNOWN
+    assert exposure.chosen(["codex", "exec"], "codex", _shell({"config.toml": "model = 3"})).model == exposure.UNKNOWN
+    assert exposure.chosen(["codex", "exec"], "codex", _shell({"config.toml": "not toml ["})).model == exposure.UNKNOWN
 
 
 BASE = 'model = "default-model"\n'
@@ -238,7 +238,7 @@ def test_a_codex_profile_selects_its_own_model_or_unknown(
     home = _codex_home(tmp_path, files)
     monkeypatch.chdir(tmp_path)
     shell = exposure.local_shell({"PATH": "/usr/bin:/bin", "CODEX_HOME": str(home)})
-    assert exposure.model(argv, argv[0], shell) == expected
+    assert exposure.chosen(argv, argv[0], shell).model == expected
 
 
 def test_a_profile_file_that_cannot_be_read_is_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -246,7 +246,7 @@ def test_a_profile_file_that_cannot_be_read_is_unknown(tmp_path: Path, monkeypat
     (home / "review.config.toml").mkdir()
     monkeypatch.chdir(tmp_path)
     shell = exposure.local_shell({"PATH": "/usr/bin:/bin", "CODEX_HOME": str(home)})
-    assert exposure.model(["codex", "-p", "review", "exec"], "codex", shell) == exposure.UNKNOWN
+    assert exposure.chosen(["codex", "-p", "review", "exec"], "codex", shell).model == exposure.UNKNOWN
 
 
 def test_a_project_codex_config_above_the_launch_directory_that_sets_the_model_is_unknown(
@@ -260,19 +260,19 @@ def test_a_project_codex_config_above_the_launch_directory_that_sets_the_model_i
     monkeypatch.chdir(project / "sub")
 
     (project / ".codex" / "config.toml").write_text("approval_policy = 'never'\n", encoding="utf-8")
-    assert exposure.model(["codex", "exec"], "codex", shell) == "default-model"
+    assert exposure.chosen(["codex", "exec"], "codex", shell).model == "default-model"
     (project / ".codex" / "config.toml").write_text('model = "project-model"\n', encoding="utf-8")
-    assert exposure.model(["codex", "exec"], "codex", shell) == exposure.UNKNOWN
-    assert exposure.model(["codex", "-p", "review", "exec"], "codex", shell) == exposure.UNKNOWN
-    assert exposure.model(["codex", "-m", "flag", "exec"], "codex", shell) == "flag"
+    assert exposure.chosen(["codex", "exec"], "codex", shell).model == exposure.UNKNOWN
+    assert exposure.chosen(["codex", "-p", "review", "exec"], "codex", shell).model == exposure.UNKNOWN
+    assert exposure.chosen(["codex", "-m", "flag", "exec"], "codex", shell).model == "flag"
 
     (project / ".codex" / "config.toml").write_text("model = [", encoding="utf-8")
-    assert exposure.model(["codex", "exec"], "codex", shell) == exposure.UNKNOWN
+    assert exposure.chosen(["codex", "exec"], "codex", shell).model == exposure.UNKNOWN
     (project / ".codex" / "config.toml").unlink()
     (project / "sub" / ".codex" / "config.toml").write_text('model = "nested"\n', encoding="utf-8")
     monkeypatch.chdir(project)
-    assert exposure.model(["codex", "exec"], "codex", shell) == "default-model"
-    assert exposure.model(["codex", "-C", "sub", "exec"], "codex", shell) == exposure.UNKNOWN
+    assert exposure.chosen(["codex", "exec"], "codex", shell).model == "default-model"
+    assert exposure.chosen(["codex", "-C", "sub", "exec"], "codex", shell).model == exposure.UNKNOWN
 
 
 def test_the_user_config_is_not_read_as_a_project_config_from_under_home(
@@ -283,7 +283,142 @@ def test_the_user_config_is_not_read_as_a_project_config_from_under_home(
     (tmp_path / "work").mkdir()
     monkeypatch.chdir(tmp_path / "work")
     shell = exposure.local_shell({"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)})
-    assert exposure.model(["codex", "exec"], "codex", shell) == "default-model"
+    assert exposure.chosen(["codex", "exec"], "codex", shell).model == "default-model"
+
+
+EFFORT = 'model_reasoning_effort = "high"\n'
+
+
+@pytest.mark.parametrize(
+    ("argv", "files", "expected"),
+    [
+        (["codex", "--profile", "review", "exec"], {"review.config.toml": 'model = "profile-model"\n' + EFFORT},
+         ("profile-model", "high")),
+        (["codex", "exec"], {"config.toml": BASE + EFFORT}, ("default-model", "high")),
+        (["codex", "-p", "review", "exec"],
+         {"config.toml": BASE + 'model_reasoning_effort = "low"\n', "review.config.toml": REVIEW},
+         ("review-model", "low")),
+        (["codex", "-p", "review", "exec"],
+         {"config.toml": BASE + 'model_reasoning_effort = "low"\n', "review.config.toml": REVIEW + EFFORT},
+         ("review-model", "high")),
+        (["codex", "exec", "-m", "flag"], {"config.toml": BASE + EFFORT}, ("flag", "high")),
+        (["codex", "exec", "-c", "model_reasoning_effort=xhigh"], {"config.toml": BASE + EFFORT},
+         ("default-model", "xhigh")),
+        (["codex", "exec"], {"config.toml": 'profile = "review"\n' + BASE + EFFORT, "review.config.toml": REVIEW},
+         (exposure.UNKNOWN, exposure.UNKNOWN)),
+        (["codex", "exec", "-c", "profile=review"], {"config.toml": BASE + EFFORT}, (exposure.UNKNOWN, exposure.UNKNOWN)),
+        (["codex", "-p", "review", "exec"],
+         {"config.toml": BASE + '[profiles.review]\nmodel_reasoning_effort = "low"\n',
+          "review.config.toml": REVIEW + EFFORT},
+         ("review-model", exposure.UNKNOWN)),
+        (["codex", "exec"], {"config.toml": BASE + 'model_reasoning_effort = "$(rm -rf /)"\n'},
+         ("default-model", exposure.UNKNOWN)),
+        (["codex", "exec"], {"config.toml": BASE + "model_reasoning_effort = 3\n"}, ("default-model", exposure.UNKNOWN)),
+    ],
+)
+def test_a_codex_profile_or_default_config_supplies_the_effort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, argv: list[str], files: dict[str, str], expected: tuple
+) -> None:
+    home = _codex_home(tmp_path, files)
+    monkeypatch.chdir(tmp_path)
+    shell = exposure.local_shell({"PATH": "/usr/bin:/bin", "CODEX_HOME": str(home)})
+    found = exposure.chosen(argv, "codex", shell)
+    assert (found.model, found.effort) == expected
+
+
+def test_a_project_codex_config_that_sets_the_effort_makes_it_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _codex_home(tmp_path, {"config.toml": BASE + EFFORT})
+    (tmp_path / "project" / ".codex").mkdir(parents=True)
+    (tmp_path / "project" / ".codex" / "config.toml").write_text('model_reasoning_effort = "low"\n', encoding="utf-8")
+    monkeypatch.chdir(tmp_path / "project")
+    shell = exposure.local_shell({"PATH": "/usr/bin:/bin", "CODEX_HOME": str(home)})
+    found = exposure.chosen(["codex", "exec"], "codex", shell)
+    assert (found.model, found.effort) == ("default-model", exposure.UNKNOWN)
+
+
+def test_a_recorded_codex_profile_job_stores_the_profiles_model_and_effort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _codex_home(tmp_path, {"review.config.toml": 'model = "profile-model"\n' + EFFORT})
+    monkeypatch.chdir(tmp_path)
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=time.time)
+    argv = ["codex", "--profile", "review", "exec"]
+    exposure.record(queue.connect, "job-1", lambda: exposure.gather(
+        argv=argv, binary="codex", harness="codex", brief=None, host="pc", factory_root=None,
+        shell=exposure.local_shell({"PATH": "/usr/bin:/bin", "CODEX_HOME": str(home)}), launch_dir=None,
+    ), lambda line: None)
+    with closing(queue.connect()) as connection:
+        row = connection.execute("SELECT model, effort FROM job_exposure WHERE job_id = 'job-1'").fetchone()
+    assert tuple(row) == ("profile-model", "high")
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["claude", "-p", "--settings", '{"model":"opus","effortLevel":"high"}'], ("opus", "high")),
+        (["claude", "-p", '--settings={"effortLevel": "max"}'], (exposure.UNKNOWN, "max")),
+        (["claude", "-p", "--settings", '{"model":"opus","effortLevel":"high"}', "--effort", "low", "--model", "x"],
+         ("x", "low")),
+        (["claude", "-p", "--effort", "low", "--settings", '{"effortLevel":"high"}'], (exposure.UNKNOWN, "low")),
+        (["claude", "-p", "--settings", "/etc/claude/settings.json"], (exposure.UNKNOWN, exposure.UNKNOWN)),
+        (["claude", "-p", "--settings", '{"effortLevel":'], (exposure.UNKNOWN, exposure.UNKNOWN)),
+        (["claude", "-p", "--settings", '["high"]'], (exposure.UNKNOWN, exposure.UNKNOWN)),
+        (["claude", "-p", "--settings", '{"effortLevel":"$(rm -rf /)","model":3}'], (exposure.UNKNOWN, exposure.UNKNOWN)),
+        (["claude", "-p", "--", "--settings", '{"effortLevel":"high"}'], (exposure.UNKNOWN, exposure.UNKNOWN)),
+    ],
+)
+def test_claudes_inline_settings_supply_the_model_and_effort(argv: list[str], expected: tuple) -> None:
+    found = exposure.chosen(argv, "claude", _shell({}))
+    assert (found.model, found.effort) == expected
+
+
+@pytest.mark.parametrize(
+    ("argv", "harness", "expected"),
+    [
+        (["/usr/bin/env", "--", "codex", "exec", "-m", "flag-model", "-c", "model_reasoning_effort=xhigh"], "codex",
+         ("flag-model", "xhigh")),
+        (["env", "-u", "OPENAI_API_KEY", "--unset=X", "-i", "FOO=1", "codex", "exec", "-m", "m", "-c",
+          "model_reasoning_effort=low"], "codex", ("m", "low")),
+        (["env", "--", "FOO=1", "claude", "-p", "--model", "opus", "--effort", "high"], "claude", ("opus", "high")),
+        (["env", "-0", "--ignore-environment", "claude", "-p", "--effort=max", "--", "--model", "x"], "claude",
+         (exposure.UNKNOWN, "max")),
+        (["env", "-S", "codex exec -m m", "codex"], "codex", (exposure.UNKNOWN, exposure.UNKNOWN)),
+        (["env", "FOO=1"], "codex", (exposure.UNKNOWN, exposure.UNKNOWN)),
+    ],
+)
+def test_an_env_wrapper_passes_the_harness_its_own_arguments(
+    tmp_path: Path, argv: list[str], harness: str, expected: tuple
+) -> None:
+    shell = exposure.local_shell({"PATH": "/usr/bin:/bin", "CODEX_HOME": str(tmp_path / "none")})
+    found = exposure.chosen(argv, harness, shell)
+    assert (found.model, found.effort) == expected
+
+
+@pytest.mark.parametrize(
+    "wrapper",
+    [
+        ["env", "CODEX_HOME=/elsewhere"],
+        ["env", "-u", "CODEX_HOME"],
+        ["env", "--unset=CODEX_HOME"],
+        ["env", "HOME=/elsewhere"],
+        ["env", "-i"],
+        ["env", "-C", "/elsewhere"],
+        ["env", "--chdir=/elsewhere"],
+    ],
+)
+def test_an_env_wrapper_that_moves_the_codex_config_makes_the_config_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wrapper: list[str]
+) -> None:
+    home = _codex_home(tmp_path, {"config.toml": BASE + EFFORT})
+    monkeypatch.chdir(tmp_path)
+    shell = exposure.local_shell({"PATH": "/usr/bin:/bin", "CODEX_HOME": str(home), "HOME": str(tmp_path)})
+    plain = exposure.chosen(["codex", "exec"], "codex", shell)
+    wrapped = exposure.chosen([*wrapper, "codex", "exec"], "codex", shell)
+    assert ((plain.model, plain.effort), (wrapped.model, wrapped.effort)) == (
+        ("default-model", "high"), (exposure.UNKNOWN, exposure.UNKNOWN)
+    )
 
 
 # --- the CLI version -------------------------------------------------------------
@@ -702,6 +837,25 @@ def test_opening_an_orch_db_with_an_older_job_exposure_adds_effort_and_harness_a
         )
 
 
+def test_a_read_only_open_of_an_unmigrated_orch_db_reads_its_rows_with_unknown_effort_and_harness(
+    tmp_path: Path,
+) -> None:
+    from lib.dashboard import open_readonly
+
+    path = tmp_path / "orch.db"
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute(
+            "CREATE TABLE job_exposure (job_id TEXT PRIMARY KEY, model TEXT NOT NULL, cli_version TEXT NOT NULL, "
+            "brief_sha256 TEXT NOT NULL, skill_paths TEXT NOT NULL, host TEXT NOT NULL, "
+            "factory_revision TEXT NOT NULL, recorded_at REAL NOT NULL)"
+        )
+        connection.execute("INSERT INTO job_exposure VALUES ('old', 'opus', 'claude 2.0', 'b', 'unknown', 'pc', 'r', 1.0)")
+    old = exposure.Exposure("opus", "claude 2.0", "b", None, "pc", "r", exposure.UNKNOWN, exposure.UNKNOWN)
+
+    with closing(open_readonly(path)) as connection:
+        assert (exposure.read(connection, "old"), exposure.read_all(connection)) == (old, {"old": old})
+
+
 def test_two_openers_migrating_at_once_both_succeed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "orch.db"
     _old_database(path, monkeypatch)
@@ -744,7 +898,7 @@ def test_the_config_walk_ends_on_a_device_without_dirname(tmp_path: Path) -> Non
     (tools / "cat").symlink_to(shutil.which("cat"))
     shell = exposure.local_shell({"PATH": str(tools), "CODEX_HOME": str(home)})
     started = time.monotonic()
-    found = exposure.model(["codex", "exec"], "codex", shell, str(tmp_path / "job" / "not-made"))
+    found = exposure.chosen(["codex", "exec"], "codex", shell, str(tmp_path / "job" / "not-made")).model
     assert (found, time.monotonic() - started < exposure.TIMEOUT_SECONDS / 2) == ("base-model", True)
 
 
