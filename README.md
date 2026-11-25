@@ -1921,10 +1921,13 @@ integer, caps the account's running jobs across every device. Placement
 its running jobs finish. A pause or a lower `max_jobs` reaches placement at
 once, and a resume or a higher `max_jobs` once the poller adopts the file.
 
-Cursor accounts (issue #1411). Cursor has no folder setting for its login. `CURSOR_CONFIG_DIR` moves only `cli-config.json`; the login stays in `~/.config/cursor/auth.json` on Linux and in the `cursor-user`, `cursor-access-token` and `cursor-refresh-token` keychain items on macOS. So a Cursor account
-never runs from a folder: each device's `cursor-bot` login is the account,
-named inline on every device that runs it, as in
-`cursor: {bot: cursor-bot, account: cursor-ultra-1}`. That inline form is not
+Cursor accounts (issue #1411). Cursor has no folder setting for its login.
+`CURSOR_CONFIG_DIR` moves only `cli-config.json`; the login stays in
+`~/.config/cursor/auth.json` on Linux and in the `cursor-user`,
+`cursor-access-token` and `cursor-refresh-token` keychain items on macOS. So
+a Cursor account never runs from a folder: each device's `cursor-bot` login
+is the account, named inline on every device that runs it, as in `cursor:
+{bot: cursor-bot, account: cursor-ultra-1}`. That inline form is not
 deprecated for Cursor. `machines.yml` refuses `signed_in_on` on a Cursor
 account and a declared Cursor account that no device names as its login.
 `orch accounts doctor` runs `cursor-agent status` as `cursor-bot` on each of
