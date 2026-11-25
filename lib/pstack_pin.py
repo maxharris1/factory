@@ -10,9 +10,7 @@ copies them into the project for a cloud run. A local install also links
 pstack's agents/ and docs/ into ~/.claude and, given the rules text, writes
 ~/.claude/rules/pstack-models.md (docs/decisions/178-plugin-dir-and-deslop.md).
 doctor prints a canary that asks Claude and Codex
-to load factory-builder and quote a token from the pinned poteto-mode. The
-owning bot starts the harness and writes the reply, or doctor --live starts
-each harness through lib/doctor_live.py. This module does not start a harness.
+to load factory-builder and quote a token from the pinned poteto-mode.
 """
 
 from __future__ import annotations

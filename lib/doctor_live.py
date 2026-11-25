@@ -1,5 +1,3 @@
-"""orch doctor --live: start each planned harness with the pinned canary and score its reply."""
-
 from __future__ import annotations
 
 import json
@@ -17,9 +15,7 @@ def waiter_command(bot: str) -> Sequence[str]:
     return load_harness_command(default_harness_config(bot), bot).command
 
 
-def reply_text(stdout: str) -> str:
-    """A harness can echo the prompt, which has its own `started-by:` line, and print
-    its reply twice, so only the lines from the last `started-by:` on are scored."""
+def last_reply(stdout: str) -> str:
     lines: list[str] = []
     for line in stdout.splitlines():
         try:
@@ -75,7 +71,7 @@ def live_canary(
         if code is None:
             error = f"{target}: did not load the pinned version (timed out after {timeout:g}s)"
         else:
-            reply = reply_text(log.read_text(encoding="utf-8", errors="replace"))
+            reply = last_reply(log.read_text(encoding="utf-8", errors="replace"))
             error = score_reply(target, row.bot, reply, token)
         if error is None:
             out(f"{target}: ok")

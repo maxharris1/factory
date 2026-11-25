@@ -679,7 +679,6 @@ def call(argv: Sequence[str], *, timeout: float = FETCH_TIMEOUT) -> subprocess.C
 def start_launch(
     launch: Launch, prompt: str, *, timeout: float, log_path: Path, run: Spawn = spawn
 ) -> int | None:
-    """Run the launch with prompt on stdin, its output in log_path. None on timeout."""
     if launch.remote is None:
         Path(launch.run_dir).mkdir(parents=True, exist_ok=False)
     return run(

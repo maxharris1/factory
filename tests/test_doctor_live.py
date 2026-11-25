@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from lib import cli
-from lib.doctor_live import live_canary, reply_text
+from lib.doctor_live import last_reply, live_canary
 from lib.harnesses import all_drivers
 from lib.machines_yml import load_machines_yml
 from lib.orch_yml import load_orch_yml
@@ -424,14 +424,14 @@ def test_an_unreadable_waiter_config_names_the_per_bot_command(tmp_path: Path) -
     assert not any(target.startswith("codex@") for _argv, target in spawn.calls)
 
 
-def test_reply_text_reads_plain_and_json_event_stdout() -> None:
+def test_last_reply_reads_plain_and_json_event_stdout() -> None:
     token = pinned_token(ROOT)
     for stdout in (
         plain_reply("claude-bot", token),
         stream_json_reply("claude-bot", token),
         echoed_prompt_then_reply("started-by: claude-bot\ntoken: <that passage>", "claude-bot", token),
     ):
-        assert score_reply("claude", "claude-bot", reply_text(stdout), token) is None
+        assert score_reply("claude", "claude-bot", last_reply(stdout), token) is None
 
 
 LOCAL_CLAUDE = """\

@@ -72,10 +72,10 @@ from lib.eval_report import (
 from lib import qa_runners, qa_smoke
 from lib.factory_md import EXAMPLE_PATHS, QA_RUNNERS, FactoryConfig, load_factory_md
 from lib.github_actions import GitHubAdapterError, _status as gh_status
-from lib.harnesses import all_drivers
 from lib.grok_delivery import GrokDeliveryError, wake_delivery
 from lib.handoff import format_header
 from lib.harness_env import CPU_CAP, account_environ, harness_env
+from lib.harnesses import all_drivers
 from lib.hold import MergeUpdate
 from lib.hook_t7 import T7Hook
 from lib.hook_t8 import T8Hook
