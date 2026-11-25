@@ -8,8 +8,8 @@ orch_host: pc
 # harness is claude, codex, cursor, or external (a plan no factory process
 # runs; `orch usage record` writes its readings). A bare bot value under a
 # device's harnesses means the account <harness>-default, which needs no
-# entry. signed_in_on lists the devices a claude or codex account is signed
-# in on; each such device names home, the bot's home folder, and the
+# entry. signed_in_on lists the devices a claude, codex or cursor account is
+# signed in on; each such device names home, the bot's home folder, and the
 # account's folder there is <home>/.factory-accounts/<id>.
 accounts:
   - {id: codex-pro-1, harness: codex, plan: pro, label: "Codex Pro", signed_in_on: [pc]}

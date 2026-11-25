@@ -70,6 +70,9 @@ TABLE = "usage_readings"
 WINDOWS = ("five_hour", "seven_day")
 SOURCES = {"claude": "get_usage", "codex": "rollout", "external": "external"}
 NOT_TRACKED = frozenset({"cursor"})
+NOT_TRACKED_REASONS: dict[str, str] = {
+    "cursor": "Cursor CLI has no non-interactive usage command",
+}
 CODEX_WINDOW_MINUTES = {300: "five_hour", 10080: "seven_day"}
 GET_USAGE_ID = "orch-usage"
 RESET_HORIZON_SECONDS = 30 * 24 * 3600

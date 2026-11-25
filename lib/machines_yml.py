@@ -442,14 +442,6 @@ def _accounts(
                     "an external account is not signed in on a device",
                 )
             )
-        elif signed_in_on and harness == "cursor":
-            findings.append(
-                Finding(
-                    "error",
-                    f"{prefix}.signed_in_on is not supported for a cursor account: "
-                    "Cursor has no setting that keeps a second login in its own folder",
-                )
-            )
         max_jobs = item.get("max_jobs")
         if "max_jobs" in item and not (is_strict_int(max_jobs) and max_jobs >= 1):
             findings.append(
@@ -530,11 +522,7 @@ def _check_sign_ins(
                 Finding(
                     "error",
                     f"account {account.id!r} is not signed in on any device; "
-                    + (
-                        "name it as a device's cursor login"
-                        if account.harness == "cursor"
-                        else "list it in signed_in_on"
-                    ),
+                    "list it in signed_in_on",
                 )
             )
 

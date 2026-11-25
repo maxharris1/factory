@@ -1912,7 +1912,7 @@ be a listed device that lists the account's harness, and must name a
 `{bot}` is the bot user (refused with `ssh_user`, since every bot then logs
 in as that one user). The account's folder on that device is
 `<home>/.factory-accounts/<id>`. `machines.yml` refuses a declared Claude or
-Codex account no device lists, `signed_in_on` on an `external` or Cursor
+Codex or Cursor account no device lists, `signed_in_on` on an `external`
 account, and a device named twice for one account (twice in `signed_in_on`,
 or there and as the device's own login). `max_jobs`, a positive
 integer, caps the account's running jobs across every device. Placement
@@ -1924,10 +1924,12 @@ once, and a resume or a higher `max_jobs` once the poller adopts the file.
 Account homes (issues #1183 and #1184). One bot user on one device can run
 several accounts of its harness, each from its own folder. A job placed on
 an account that is not the device's own login runs with `CLAUDE_CONFIG_DIR`
-(Claude) or `CODEX_HOME` (Codex) set to `<home>/.factory-accounts/<id>`.
+(Claude), `CODEX_HOME` (Codex) or `CURSOR_CONFIG_DIR` (Cursor) set to
+`<home>/.factory-accounts/<id>`.
 Its token variables are dropped by name after the login profile runs:
 `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`
-for Claude, `OPENAI_API_KEY` and `CODEX_API_KEY` for Codex. The harness then
+for Claude, `OPENAI_API_KEY` and `CODEX_API_KEY` for Codex, and
+`CURSOR_API_KEY` and `CURSOR_AUTH_TOKEN` for Cursor. The harness then
 signs in from the folder, never from a variable, and the values never reach
 the run log, the telemetry or the job detail. The job's usage probe and
 `skill-probe run --account <id>` run the same way, and the skill probe reads

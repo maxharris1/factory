@@ -1,13 +1,14 @@
 # Sign in an extra harness account
 
-This guide signs one extra Claude or Codex account in on each device, so the
+This guide signs one extra Claude, Codex or Cursor account in on each device, so the
 factory can run that account's jobs from its own folder. Max does step 1.
 Step 2 runs as each bot on each listed device. Step 3 runs on the orch host.
 
 The factory never runs a login and never reads a credential file.
 `orch accounts prepare` makes folders and links. `orch accounts doctor` runs
-`claude auth status` or `codex login status` and keeps only the status, the
-auth method, the plan name and a 12-character hash of the org and email.
+`claude auth status`, `codex login status` or `cursor-agent status` and keeps
+only the status, the auth method, the plan name and a 12-character hash of the
+account identity.
 
 ## Manage accounts from Settings
 
@@ -50,7 +51,7 @@ and writes the request to the settings spool. The card then shows
 | `remove` | `expect` | Remove | Deletes the account's block and keeps its comments. `expect` is the account as the card showed it, with `harness`, `max_jobs`, `paused` and `signed_in_on`. |
 | `prepare` | `device` | Prepare | Makes the account's folder on `device`, then runs the doctor. It edits nothing. |
 | `doctor` | `device` | Run doctor | Makes the account's folder on `device`, as Prepare does, then runs the doctor. It edits nothing. |
-| `signout` | `device` | Sign out | Runs `claude auth logout` or `codex logout` as the bot in the account's folder on `device`, with the five token variables and `CLAUDE_SECURESTORAGE_CONFIG_DIR` unset, then runs the doctor. It records `signed-out`, `failed`, or `refused` with `running-job` while the pair runs a job, or `signing-in` while the sign-in broker holds the pair. From the running-job check until its own doctor pass ends, a row in `signout_locks` keeps placement off the pair. The row names the request that took it, and only that request renews or deletes it. A sign-in attempt takes the same row, so a sign-out and a sign-in never hold one pair at once. A doctor pass never clears that row, and placement ignores one older than ten minutes. |
+| `signout` | `device` | Sign out | Runs `claude auth logout`, `codex logout` or `cursor-agent logout` as the bot in the account's folder on `device`, with the token variables and `CLAUDE_SECURESTORAGE_CONFIG_DIR` unset, then runs the doctor. It records `signed-out`, `failed`, or `refused` with `running-job` while the pair runs a job, or `signing-in` while the sign-in broker holds the pair. From the running-job check until its own doctor pass ends, a row in `signout_locks` keeps placement off the pair. The row names the request that took it, and only that request renews or deletes it. A sign-in attempt takes the same row, so a sign-out and a sign-in never hold one pair at once. A doctor pass never clears that row, and placement ignores one older than ten minutes. |
 
 ### Refusals by the server
 
@@ -102,7 +103,7 @@ shows `refused` with the reason on the card.
 | `<account> holds a running job on <device>` | A `signed_in_on` change that drops a device where the account runs a job. |
 | `cannot read running jobs` | The running-job check could not read `orch.db`. |
 | `cannot edit the account's block` | The line edit cannot find or change the account's block. |
-| `invalid after the edit: <reason>` | The edited file does not load. A Claude or Codex account needs at least one device in `signed_in_on`. A Cursor account must be a device's cursor login, which the panel cannot set, so an `add` with harness `cursor` ends here. |
+| `invalid after the edit: <reason>` | The edited file does not load. Every Claude, Codex or Cursor account needs at least one device in `signed_in_on` (or to be named as a device's login account). |
 | `the edit changed more than that field`, `the edit changed more than that account` | The edit changed something besides the request. |
 | `the edit changed a comment` | The edit changed a comment line. |
 
@@ -218,6 +219,16 @@ CODEX_HOME=~/.factory-accounts/<id> codex login --device-auth
 ```
 
 Sign in with ChatGPT. The doctor counts an API-key login as `signed-out`.
+
+For a Cursor account, run:
+
+```sh
+env -u CURSOR_API_KEY -u CURSOR_AUTH_TOKEN CURSOR_CONFIG_DIR=~/.factory-accounts/<id> cursor-agent login
+```
+
+Sign in with your Cursor account. The doctor counts a `CURSOR_API_KEY` login as
+`signed-out`, and Cursor quota stays `not tracked` because Cursor CLI has no
+non-interactive usage command that avoids reading credential files.
 
 ## 3. Check every sign-in
 
