@@ -18,12 +18,14 @@ from lib.dispatch.constants import (
 from lib.dispatch.helpers import (
     _REGISTERING_ACTIONS,
     _base_mismatch,
+    _comment_order,
     _detail_round,
     _detail_routing,
     _family_errors,
     _matching_head,
     _normalize_trusted_logins,
     _route,
+    _route_go,
     _route_picks,
     _router_picks,
     trusted_bots,
@@ -409,8 +411,7 @@ class DispatcherBase:
         """The ticket with the builder and reviewer its latest plan, build or
         fix step was routed to (issue #206), or as read when that step names
         no routing. A T6 retry is not a step: it repeats an older one. Raises RouteError when the restored pair, with today's
-        factory.md model hints, fails the cross-family rule, or when factory.md's
-        routing cannot pick a pair."""
+        factory.md model hints, fails the cross-family rule."""
         if ticket.factory_md is not None:
             return ticket
         with self._connect() as connection:
@@ -429,6 +430,9 @@ class DispatcherBase:
             try:
                 picks = _router_picks(ticket, self.refused_harnesses)
             except RoutingError as error:
+                named = self._routed_by_pending_go(ticket)
+                if named is not None:
+                    return named
                 raise RouteError(
                     f"{ticket.repo}#{ticket.ticket_id} routing: {error}",
                     ticket.comments[-1].id if ticket.comments else "",
@@ -448,6 +452,34 @@ class DispatcherBase:
                 str(row["source_comment_id"]),
             )
         return routed
+
+    def _routed_by_pending_go(self, ticket: TrackedTicket) -> TrackedTicket | None:
+        for comment in sorted(ticket.comments, key=_comment_order, reverse=True):
+            if comment.edited_at is not None or self._is_handled(ticket, comment.id):
+                continue
+            try:
+                fields = parse_comment(comment.body).as_dict()
+            except HandoffError:
+                continue
+            if (
+                fields["kind"] != "go"
+                or fields.get("state") not in ("planning", "building")
+                or not {"builder", "reviewer"} & fields.keys()
+                or not self._trusted(
+                    ticket, comment, fields, ORCHESTRATOR, role="orchestrator"
+                )
+            ):
+                continue
+            try:
+                routed = _route_go(ticket, fields, self.refused_harnesses)
+            except RoutingError:
+                continue
+            if routed is not None and not {
+                routed.factory.builder_harness,
+                routed.factory.reviewer_harness,
+            } & self.refused_harnesses:
+                return routed
+        return None
 
     def _job_builder_harness(self, ticket: TrackedTicket) -> str | None:
         with self._connect() as connection:

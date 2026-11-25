@@ -696,10 +696,10 @@ def test_routing_pool_with_no_queueable_harness_holds_the_go(tmp_path: Path) -> 
     assert queue.claim("claude") is None and queue.claim("codex") is None
 
 
-def test_ready_cannot_bypass_an_exhausted_routing_pool(tmp_path: Path) -> None:
+def _claude_only_pools():
     from lib.factory_md import FactoryRouting
 
-    config = replace(
+    return replace(
         factory(),
         routing=FactoryRouting(
             slots={
@@ -708,6 +708,60 @@ def test_ready_cannot_bypass_an_exhausted_routing_pool(tmp_path: Path) -> None:
             }
         ),
     )
+
+
+def _queued(queue: SQLiteJobQueue) -> list[tuple[str, str]]:
+    with queue.connect() as connection:
+        rows = connection.execute(
+            "SELECT action, recipient FROM jobs WHERE recipient != 'grok'"
+        ).fetchall()
+    return [tuple(row) for row in rows]
+
+
+def test_explicit_go_pair_routes_past_an_exhausted_default_pool(tmp_path: Path) -> None:
+    config = _claude_only_pools()
+    dispatcher, queue = setup(tmp_path)
+    go = comment("go-1", _go("builder=codex reviewer=claude "), author="grok-login")
+    dispatcher.process(ticket(go, factory_config=config))
+
+    assert _outcome(queue, "go-1") == "queued-build"
+    assert _queued(queue) == [("build", "codex")]
+    build = queue.claim("codex")
+    assert build is not None
+    queue.finish(build.id, owner="codex", handoff_comment_id="ready-1")
+
+    ready = comment("ready-1", _ready("codex"), author="codex-login", created_at=2)
+    dispatcher.process(
+        ticket(go, ready, head=HEAD, ci={HEAD: CIResult("success")}, factory_config=config)
+    )
+
+    assert _outcome(queue, "ready-1").startswith("queued-review")
+    assert _queued(queue) == [("build", "codex"), ("review", "claude")]
+    assert not _is_stuck(queue)
+
+
+@pytest.mark.parametrize(
+    ("extra", "author"),
+    [
+        ("builder=codex reviewer=claude ", "stranger"),
+        ("builder=claude reviewer=claude ", "grok-login"),
+        ("", "grok-login"),
+    ],
+    ids=["untrusted", "same-family", "unnamed"],
+)
+def test_go_that_cannot_name_a_cross_family_pair_stays_held(
+    tmp_path: Path, extra: str, author: str
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    go = comment("go-1", _go(extra), author=author)
+    dispatcher.process(ticket(go, factory_config=_claude_only_pools()))
+
+    assert _queued(queue) == []
+    assert _is_stuck(queue)
+
+
+def test_ready_cannot_bypass_an_exhausted_routing_pool(tmp_path: Path) -> None:
+    config = _claude_only_pools()
     dispatcher, queue = setup(tmp_path)
     ready = comment("ready-1", _ready("claude"), author="claude-login")
     snapshot = replace(
@@ -716,9 +770,5 @@ def test_ready_cannot_bypass_an_exhausted_routing_pool(tmp_path: Path) -> None:
     )
     dispatcher.process(snapshot)
 
-    with queue.connect() as connection:
-        queued = connection.execute(
-            "SELECT action, recipient FROM jobs WHERE recipient != 'grok'"
-        ).fetchall()
-    assert [tuple(row) for row in queued] == []
+    assert _queued(queue) == []
     assert _is_stuck(queue)
