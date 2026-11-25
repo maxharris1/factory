@@ -101,6 +101,54 @@ def world(tmp_path: Path, sign_ins: tuple[SignIn, ...] = SIGN_INS) -> tuple[Path
     return db, machines
 
 
+CURSOR_MACHINES = """\
+accounts:
+  - {id: cursor-ultra-1, harness: cursor, plan: ultra, label: "Cursor Ultra"}
+devices:
+  - name: box
+    local: true
+    slot_max: 2
+    harnesses: {claude: claude-bot, cursor: {bot: cursor-bot, account: cursor-ultra-1}}
+  - name: mac
+    tailscale_name: mac.example.ts.net
+    slot_max: 1
+    harnesses: {cursor: {bot: cursor-bot, account: cursor-ultra-1}}
+    workdir_root: /Users/{bot}/work
+    ssh_alias: mac-{bot}
+    factory_root: /srv/factory
+  - name: pc
+    tailscale_name: pc.example.ts.net
+    slot_max: 2
+    harnesses: {cursor: {bot: cursor-bot, account: cursor-ultra-1}}
+    workdir_root: /home/{bot}/work
+    ssh_alias: pc-{bot}
+    factory_root: /srv/factory
+"""
+CURSOR_REASON = "Cursor CLI has no non-interactive usage command"
+CURSOR_SIGN_INS = (
+    sign_in("cursor-ultra-1", "box", "ok", method=None, subscription=None),
+    sign_in("cursor-ultra-1", "mac", "signed-out", account_doctor.NOT_LOGGED_IN, method=None, subscription=None),
+    sign_in("cursor-ultra-1", "pc", "unreachable", account_doctor.SSH_DOWN, method=None, subscription=None),
+)
+
+
+def cursor_world(tmp_path: Path, *, usage_tables: bool) -> tuple[Path, Path]:
+    db = tmp_path / "orch.db"
+    make_db(db)
+    machines = tmp_path / "machines.yml"
+    machines.write_text(CURSOR_MACHINES, encoding="utf-8")
+    with contextlib.closing(sqlite3.connect(db)) as connection, connection:
+        account_doctor.write(connection, CURSOR_SIGN_INS, config_of(machines), None, NOW - 300)
+        if usage_tables:
+            usage_readings.ensure_table(connection)
+    return db, machines
+
+
+def cursor_snapshot(tmp_path: Path, *, usage_tables: bool = False) -> dict:
+    db, machines = cursor_world(tmp_path, usage_tables=usage_tables)
+    return collect_snapshot(db, tmp_path / "poll.log", now=NOW, machines_path=machines)
+
+
 def snapshot_accounts(tmp_path: Path, **kwargs: object) -> list[dict]:
     db, machines = world(tmp_path, **kwargs)
     return collect_snapshot(db, tmp_path / "poll.log", now=NOW, machines_path=machines)["accounts"]
@@ -172,6 +220,20 @@ def test_each_account_carries_its_usage_floor_and_running_jobs(tmp_path: Path) -
     assert accounts["claude-b"]["running"] == [{"ticket": "41", "kind": "build", "device": "pc"}]
     assert accounts["codex-default"]["running"] == [{"ticket": "43", "kind": "review", "device": "pc"}]
     assert accounts["ext-grok"]["running"] == []
+
+
+@pytest.mark.parametrize("usage_tables", [False, True], ids=["no-usage-tables", "usage-tables"])
+def test_a_cursor_account_carries_its_plan_each_device_doctor_status_and_why_usage_is_not_tracked(
+    tmp_path: Path, usage_tables: bool
+) -> None:
+    accounts = by_id(cursor_snapshot(tmp_path, usage_tables=usage_tables)["accounts"])
+    cursor = accounts["cursor-ultra-1"]
+    assert (cursor["harness"], cursor["plan"], cursor["usage_state"], cursor["usage_reason"]) == (
+        "cursor", "ultra", "not tracked", CURSOR_REASON)
+    assert [(d["device"], d["status"]) for d in cursor["signed_in_on"]] == [
+        ("box", "ok"), ("mac", "signed-out"), ("pc", "unreachable")]
+    claude = accounts["claude-default"]
+    assert (claude["plan"], claude["usage_state"], claude["usage_reason"]) == (None, "tracked", None)
 
 
 def test_the_operator_step_and_the_dashboard_share_one_login_command(tmp_path: Path) -> None:

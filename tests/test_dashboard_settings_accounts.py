@@ -9,7 +9,7 @@ import pytest
 from lib.dashboard import collect_snapshot, render_pages
 from tests import test_dashboard_layout as layout
 from tests import test_dashboard_settings as test_settings
-from tests.test_dashboard_accounts import NOW, world
+from tests.test_dashboard_accounts import CURSOR_REASON, NOW, cursor_snapshot, world
 from tests.test_dashboard_layout import BAR, HARNESS, _no_script, _section, _text, needs_node
 
 CHECKED = "2027-01-15T07:55:00Z"
@@ -123,6 +123,23 @@ def test_used_and_headroom_show_with_the_floor_marked(tmp_path: Path) -> None:
     default, claude_b = _facts(_card(panel, "claude-default")), _facts(_card(panel, "claude-b"))
     assert (default["5h used"], default["7d used"], default["headroom"]) == ("25%", "60%", "40% · floor 5%")
     assert (claude_b["5h used"], claude_b["7d used"], claude_b["headroom"]) == ("—", "—", "— · floor 5%")
+
+
+def test_a_cursor_card_shows_its_plan_each_device_doctor_status_and_why_usage_is_not_tracked(
+    tmp_path: Path,
+) -> None:
+    panel = _panel(cursor_snapshot(tmp_path))
+    card = _card(panel, "cursor-ultra-1")
+    facts = _facts(card)
+    assert (facts["harness"], facts["plan"], facts["usage"]) == ("cursor", "ultra", f"not tracked: {CURSOR_REASON}")
+    assert not {"5h used", "7d used", "headroom"} & set(facts)
+    assert re.findall(r'<li class="ac-dev" data-device="([^"]+)">', card) == ["box", "mac", "pc"]
+    assert '<span class="chip ok">ok</span>' in _device(card, "box")
+    assert '<span class="chip bad">signed-out</span>' in _device(card, "mac")
+    assert '<span class="chip warn">unreachable</span>' in _device(card, "pc")
+    claude = _facts(_card(panel, "claude-default"))
+    assert (claude["plan"], claude["5h used"]) == ("—", "—")
+    assert "usage" not in claude
 
 
 def test_headroom_under_the_floor_reads_below_floor(tmp_path: Path) -> None:
@@ -239,6 +256,15 @@ def test_script_draws_the_accounts_like_the_server(tmp_path: Path) -> None:
     assert out["html"]["accounts"] == server[server.index(">") + 1:server.rindex("<")]
     for flag in NOT_DOCUMENTED:
         assert flag not in out["html"]["accounts"]
+
+
+@needs_node
+def test_script_draws_a_cursor_card_like_the_server(tmp_path: Path) -> None:
+    snapshot = cursor_snapshot(tmp_path)
+    out = _run(tmp_path / "run", snapshot)
+    server = _panel(snapshot)
+    assert out["html"]["accounts"] == server[server.index(">") + 1:server.rindex("<")]
+    assert f"not tracked: {CURSOR_REASON}" in _text(out["html"]["accounts"])
 
 
 @needs_node

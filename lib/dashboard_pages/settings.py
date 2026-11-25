@@ -80,14 +80,24 @@ def running_line(account: dict) -> str:
     ) or "none"
 
 
-def account_facts(account: dict) -> list[tuple[str, str, str]]:
+def usage_facts(account: dict) -> list[tuple[str, str, str]]:
+    if account.get("usage_state") == "not tracked":
+        reason = account.get("usage_reason")
+        return [("usage", f"not tracked: {reason}" if reason else "not tracked", "")]
     return [
-        ("harness", account["harness"], ""),
-        ("max_jobs", "—" if account.get("max_jobs") is None else str(account["max_jobs"]), ""),
-        ("paused", "yes" if account.get("paused") else "no", "warn" if account.get("paused") else ""),
         ("5h used", percent(account.get("five_hour_used")), ""),
         ("7d used", percent(account.get("seven_day_used")), ""),
         ("headroom", *headroom_fact(account)),
+    ]
+
+
+def account_facts(account: dict) -> list[tuple[str, str, str]]:
+    return [
+        ("harness", account["harness"], ""),
+        ("plan", account.get("plan") or "—", ""),
+        ("max_jobs", "—" if account.get("max_jobs") is None else str(account["max_jobs"]), ""),
+        ("paused", "yes" if account.get("paused") else "no", "warn" if account.get("paused") else ""),
+        *usage_facts(account),
         ("running", running_line(account), ""),
     ]
 
@@ -400,11 +410,17 @@ _SCRIPT = r"""
       return (j.ticket ? j.ticket + ' ' : '') + j.kind + ' on ' + j.device;
     }).join(', ') || 'none';
   }
+  function acUsage(a) {
+    if (a.usage_state === 'not tracked') {
+      return [['usage', a.usage_reason ? 'not tracked: ' + a.usage_reason : 'not tracked', '']];
+    }
+    return [['5h used', acPct(a.five_hour_used), ''], ['7d used', acPct(a.seven_day_used), ''],
+            ['headroom'].concat(acHeadroom(a))];
+  }
   function acFacts(a) {
-    return [['harness', a.harness, ''], ['max_jobs', stValue(a.max_jobs), ''],
-            ['paused', a.paused ? 'yes' : 'no', a.paused ? 'warn' : ''],
-            ['5h used', acPct(a.five_hour_used), ''], ['7d used', acPct(a.seven_day_used), ''],
-            ['headroom'].concat(acHeadroom(a)), ['running', acRunning(a), '']];
+    return [['harness', a.harness, ''], ['plan', a.plan || '—', ''], ['max_jobs', stValue(a.max_jobs), ''],
+            ['paused', a.paused ? 'yes' : 'no', a.paused ? 'warn' : '']]
+      .concat(acUsage(a), [['running', acRunning(a), '']]);
   }
   function acSignIn(ul, x) {
     var li = add(ul, el('li', 'ac-dev'));
