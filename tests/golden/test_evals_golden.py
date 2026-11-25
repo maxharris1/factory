@@ -9,6 +9,7 @@ NAME = page_name(__file__)
 
 GOLDEN = {
     "evals.CSS": "8bb068c15598b0bd5e27dad2a3607b0aee89384c7a88efb31335bbfec89125d2",
+    "evals.SCRIPT": "049cef2fc5c44c7e5eb7441eddf3b671db727ce7944d5ea9179c9d3f26d15ff4",
     "seeded/main": "1c206fd1484ae4fb1072cedb13e3ada68a3cdbe6c9294b38074472c0d6b9d7b8",
     "seeded/chrome": "f88caeb074d48f715baeab3d03532bebdbfb2b8b0c61b891dbd374fea5752cb6",
     "hostile/main": "8fa23e066ac211b3f178bf6f5fdaebd2243ab8bc1ced90f2144aef04925c7adc",
@@ -19,7 +20,7 @@ GOLDEN = {
 
 
 def digests(root: Path) -> dict[str, str]:
-    return page_digests(NAME, {"evals.CSS": evals.CSS}, root)
+    return page_digests(NAME, {"evals.CSS": evals.CSS, "evals.SCRIPT": evals.SCRIPT}, root)
 
 
 def test_the_page_and_its_parts_are_byte_identical(tmp_path: Path) -> None:

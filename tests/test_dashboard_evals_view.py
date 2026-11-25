@@ -1,23 +1,29 @@
 from __future__ import annotations
 
+import http.client
+import importlib.util
 import json
 import os
 import re
+import threading
 from collections.abc import Callable
 from datetime import date, timedelta
 from html import escape as html_escape
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from lib import dashboard, dashboard_evals
 from lib.dashboard import EVALS, write_snapshot_pages
 from lib.dashboard_evals import KEEP, METRIC_KEYS, collect_weekly, evals_json
-from lib.dashboard_page import render_pages
+from lib.dashboard_page import render_pages, render_static_assets
 from lib.dashboard_pages.evals import EVAL_ROWS, _evals
 from lib.dashboard_pages.shell import _PAGE_NAMES
 from lib.dashboard_static import read_asset
+from tests import test_dashboard_layout as layout
 from tests.test_dashboard import run_orch, seeded, snapshot_for
+from tests.test_dashboard_layout import BAR, _run_page, needs_node
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -459,13 +465,234 @@ def test_the_guides_name_the_report_a_delta_compares() -> None:
         assert "week before" not in text
 
 
-def test_the_guides_say_the_evals_table_refreshes_on_reload() -> None:
+def test_the_guides_say_the_evals_table_redraws_from_evals_json() -> None:
     block = re.search(r"var PAGES = \{(.*?)\n  \};", read_asset("js/common_tail.js"), re.S).group(1)
     scripted = set(re.findall(r"^\s*(\w+):", block, re.M))
-    assert {name for name, _ in _PAGE_NAMES.values()} - scripted == {"evals"}
+    assert {name for name, _ in _PAGE_NAMES.values()} <= scripted
     guide = (ROOT / "README.md").read_text(encoding="utf-8")
     paragraph = flat(re.search(r"Each page is rendered in full on the box.*?(?=\n\n)", guide, re.S).group(0))
-    assert "Evals table" in paragraph and "reload" in paragraph
-    assert "Evals" in dashboard.__doc__ and "reload" in dashboard.__doc__.split("Evals", 1)[1]
+    assert "Evals table" in paragraph and "evals.json" in paragraph
+    assert "evals.json" in dashboard.__doc__.split("Evals", 1)[1]
     intro = (ROOT / "lib/dashboard_pages/README.md").read_text(encoding="utf-8").split("## Page to module")[0]
-    assert "Evals table" in intro
+    assert "Evals table" in flat(intro) and "evals.json" in intro
+    for text in (paragraph, dashboard.__doc__, intro):
+        assert "reload refreshes" not in text and "no script twin" not in text
+
+
+spec = importlib.util.spec_from_file_location(
+    "factory_dashboard_http_evals", ROOT / "deploy" / "factory-dashboard-http.py"
+)
+assert spec is not None and spec.loader is not None
+server_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(server_module)
+
+BUNDLE_TEXT = '{"schema":1,"skipped":0,"state":"no dir","weeks":[]}\n'
+
+
+@pytest.fixture
+def site(tmp_path: Path) -> Path:
+    root = tmp_path / "site"
+    root.mkdir()
+    (root / "evals.html").write_text("<!doctype html><title>evals</title>", encoding="utf-8")
+    (root / "evals.json").write_text(BUNDLE_TEXT, encoding="utf-8")
+    (tmp_path / "outside.json").write_text('{"secret": "outside"}', encoding="utf-8")
+    return root
+
+
+@pytest.fixture
+def get(site: Path):
+    server = server_module.make_server("127.0.0.1", 0, site)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    def request(path: str, method: str = "GET") -> tuple[int, dict[str, str], bytes]:
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+        try:
+            connection.putrequest(method, path, skip_accept_encoding=True)
+            connection.endheaders()
+            response = connection.getresponse()
+            return response.status, {k.lower(): v for k, v in response.getheaders()}, response.read()
+        finally:
+            connection.close()
+
+    yield request
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
+
+
+@pytest.mark.parametrize(("name", "content_type"), [
+    ("evals.html", "text/html; charset=utf-8"), ("evals.json", "application/json"),
+])
+def test_the_server_serves_the_evals_page_and_bundle(site: Path, get, name: str, content_type: str) -> None:
+    status, headers, body = get(f"/{name}")
+    assert (status, headers["content-type"]) == (200, content_type)
+    assert body == (site / name).read_bytes()
+    assert headers["cache-control"] == "no-store"
+    assert headers["x-content-type-options"] == "nosniff"
+    head_status, head_headers, head_body = get(f"/{name}", method="HEAD")
+    assert (head_status, head_body, head_headers["content-length"]) == (200, b"", str(len(body)))
+
+
+def test_the_server_refuses_the_weekly_reports_and_any_other_evals_path(site: Path, get) -> None:
+    (site / "evals").mkdir()
+    for directory in (site, site / "evals"):
+        write_week(directory, GOOD)
+        (directory / "latest.json").symlink_to(GOOD)
+    write_week(site, ".evals.json.push-tmp")
+    for path in ("/weekly-2026-11-23.json", "/evals/weekly-2026-11-23.json", "/latest.json", "/evals/",
+                 "/evals", "/static/evals.json", "/evals.json/x", "/.evals.json.push-tmp", "/evals.json%2f",
+                 "/%65vals.json/..", "/evals.JSON"):
+        assert get(path)[0] == 404, path
+
+
+@pytest.mark.parametrize("link", ["symlink", "hard link"])
+def test_the_server_refuses_a_linked_evals_json(site: Path, get, link: str) -> None:
+    (site / "evals.json").unlink()
+    outside = site.parent / "outside.json"
+    if link == "symlink":
+        (site / "evals.json").symlink_to(outside)
+    else:
+        os.link(outside, site / "evals.json")
+    status, _, body = get("/evals.json")
+    assert status == 404
+    assert b"outside" not in body
+
+
+@pytest.mark.parametrize("session", [None, "signed-in"])
+def test_evals_json_is_401_json_when_signed_out_like_the_other_snapshot_json(site: Path, session) -> None:
+    (site / "status.json").write_text("{}\n", encoding="utf-8")
+    (site / "tickets.json").write_text("{}\n", encoding="utf-8")
+    handler = object.__new__(server_module.SnapshotHandler)
+    config = server_module.ActionsConfig("synthetic", "human", frozenset(), require_auth_reads=True)
+    handler.server = SimpleNamespace(
+        actions=SimpleNamespace(config=config, current=lambda _: session),
+        root_fd=server_module.open_root(site),
+    )
+    handler._cookie = lambda _: None
+    out: list[tuple[int, str, bytes]] = []
+    handler._send = lambda code, data, content_type, **_: out.append((code, content_type, data))
+    handler._json = lambda code, data: out.append((code, "application/json", json.dumps(data).encode()))
+    try:
+        for path in ("/status.json", "/tickets.json", "/evals.json", "/evals.html"):
+            handler.path = path
+            handler._serve(body=True)
+    finally:
+        os.close(handler.server.root_fd)
+    if session is None:
+        assert [(code, content_type) for code, content_type, _ in out] == [
+            (401, "application/json")] * 3 + [(401, "text/html; charset=utf-8")]
+        assert json.loads(out[2][2]) == {"error": "no-session"}
+    else:
+        assert [code for code, _, _ in out] == [200] * 4
+        assert out[2] == (200, "application/json", BUNDLE_TEXT.encode())
+
+
+EVALS_IDS = [*BAR, "hud", "evals"]
+ROUNDING = {
+    "tickets-succeeded": 1_234_567, "first-pass-approve-rate": 0.125, "cap-rate": 0.005, "poll-errors": 2,
+    "cycle-time-p50-hours": 0.25, "cycle-time-p90-hours": 1234.05, "productive-cost-usd": 12_345.675,
+    "wasted-cost-usd": 0.125, "max-interventions": 0,
+}
+ROUNDING_BEFORE = {
+    "tickets-succeeded": 1_000, "first-pass-approve-rate": 0.13, "cap-rate": 0.0049, "poll-errors": 2.5,
+    "cycle-time-p50-hours": 0.3, "cycle-time-p90-hours": 1234.1, "productive-cost-usd": 12_345.68,
+    "wasted-cost-usd": 0.1300001, "max-interventions": True,
+}
+PARITY = {
+    "no dir": {"schema": 1, "state": "no dir", "weeks": [], "skipped": 0},
+    "no snapshots, skipped": {"schema": 1, "state": "no snapshots", "weeks": [], "skipped": 2},
+    "one week": {"schema": 1, "state": "ok", "skipped": 1, "weeks": [
+        {"week": "2026-11-23", "metrics": NEWEST}]},
+    "several weeks": {"schema": 1, "state": "ok", "skipped": 0, "weeks": [
+        {"week": "2026-11-23", "metrics": NEWEST}, {"week": "2026-11-16", "metrics": MIDDLE},
+        {"week": "2026-11-09", "metrics": OLDEST}]},
+    "rounding and thousands": {"schema": 1, "state": "ok", "skipped": 0, "weeks": [
+        {"week": "2026-11-23", "metrics": ROUNDING}, {"week": "2026-11-16", "metrics": ROUNDING_BEFORE}]},
+    "hostile": {"schema": 1, "state": "ok", "skipped": 0, "weeks": [
+        {"week": '<img src=x onerror="y">&\'', "metrics": {"poll-errors": "<b>", "stuck-jobs": True}},
+        {"week": "2026-11-16", "metrics": {"poll-errors": 1, "stuck-jobs": 1}}]},
+}
+
+
+def served(bundle: dict) -> dict:
+    return {"status": 200, "body": json.loads(evals_json(bundle))}
+
+
+def section_inner(bundle: dict) -> str:
+    html = panel(bundle)
+    head = '<section class="panel" id="evals" aria-label="Weekly evals">'
+    assert html.startswith(head) and html.endswith("</section>")
+    return html[len(head):-len("</section>")]
+
+
+@needs_node
+@pytest.mark.parametrize("bundle", PARITY.values(), ids=PARITY)
+def test_the_script_draws_the_same_table_as_the_server(tmp_path: Path, bundle: dict) -> None:
+    snapshot = snapshot_for(tmp_path / "db")
+    out = _run_page(tmp_path / "page", snapshot, "evals", EVALS_IDS, evals=served(bundle))
+    assert out["evals"] == 1
+    assert out["html"]["evals"] == section_inner(bundle)
+
+
+def test_values_and_deltas_round_half_up_with_thousands_separators() -> None:
+    rows = table(panel(PARITY["rounding and thousands"]))
+    assert {label: cells[0] for label, cells in rows.items() if cells[0][0] != "n/a"} == {
+        "Throughput (tickets shipped)": ("1,233,567", "n/a", "muted"),
+        "First-pass approve rate (lifetime)": ("13%", "-1 pts", "bad"),
+        "Cap rate (lifetime)": ("1%", "0 pts", "muted"),
+        "Poll errors": ("2", "0", "muted"),
+        "Cycle time p50": ("0.3 h", "0.0 h", "muted"),
+        "Cycle time p90": ("1,234.1 h", "0.0 h", "muted"),
+        "Max interventions": ("0", "n/a", "muted"),
+        "Productive spend": ("$12,345.68", "-$0.01", "bad"),
+        "Wasted spend": ("$0.13", "-$0.01", "ok"),
+    }
+
+
+POLLING = (
+    layout.HARNESS.replace("function act(actions) {", "async function act(actions) {")
+    .replace("const intervals = [];", "const intervals = [];\nconst realSetTimeout = setTimeout;\nconst polls = [];\n"
+             "global.setTimeout = (fn, ms) => fn && fn.name === 'poll' ? polls.push(fn) : realSetTimeout(fn, ms);")
+    .replace(
+        "    } else if (kind === 'record') {",
+        "    } else if (kind === 'poll') {\n"
+        "      Object.assign(status, arg);\n"
+        "      polls.splice(0).forEach(fn => fn());\n"
+        "      await new Promise(resolve => realSetTimeout(resolve, 20));\n"
+        "    } else if (kind === 'record') {",
+    )
+    .replace("setTimeout(() => {\n  act(JSON.parse(actionsText));",
+             "realSetTimeout(async () => {\n  await act(JSON.parse(actionsText));")
+)
+
+
+@needs_node
+def test_the_script_fetches_evals_json_once_per_new_snapshot(tmp_path: Path) -> None:
+    assert POLLING.count("polls") == 3 and "await act(" in POLLING
+    snapshot = snapshot_for(tmp_path / "db")
+    epoch = snapshot["generated_at_epoch"]
+    out = layout.run_harness(
+        tmp_path / "page", POLLING, render_static_assets(snapshot)["app.js"], snapshot, "evals", EVALS_IDS,
+        [["advance", 1], ["poll", {}], ["poll", {"generated_at_epoch": epoch + 30}], ["advance", 1],
+         ["poll", {}], ["poll", {"generated_at_epoch": epoch + 60}]],
+        evals=served(PARITY["one week"]),
+    )
+    assert out["fetches"] == 5
+    assert out["evals"] == 3
+    assert out["html"]["evals"] == section_inner(PARITY["one week"])
+
+
+@needs_node
+@pytest.mark.parametrize("answer", [
+    {"status": 401, "body": PARITY["one week"]},
+    {"status": 404, "body": PARITY["one week"]},
+    {"status": 200, "body": None},
+    {"status": 200, "body": {"state": "ok", "skipped": 0, "weeks": "x"}},
+    {"status": 200, "body": {"state": "ok", "skipped": 0, "weeks": [{"week": "2026-11-23"}]}},
+], ids=["signed out", "missing", "null", "weeks not a list", "week without metrics"])
+def test_a_failed_evals_fetch_leaves_the_server_render(tmp_path: Path, answer: dict) -> None:
+    snapshot = snapshot_for(tmp_path / "db")
+    out = _run_page(tmp_path / "page", snapshot, "evals", EVALS_IDS, evals=answer, actions=[["advance", 1]])
+    assert out["evals"] == 1
+    assert out["html"]["evals"] == ""
