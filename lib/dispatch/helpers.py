@@ -16,13 +16,22 @@ from lib.dispatch.constants import (
     _NO_QUESTIONS,
     _QUESTIONS_HEADING,
 )
-from lib.dispatch.types import CIResult, Comment, FailedCheck, RoundGrant, ShipError, TrackedTicket
+from lib.dispatch.types import (
+    CIResult,
+    Comment,
+    FailedCheck,
+    RoundGrant,
+    RouterPicks,
+    ShipError,
+    TrackedTicket,
+)
 from lib.factory_md import FactoryConfig, family_findings
 from lib.handoff import matching_head as _matching_head
 from lib.queue import RECIPIENTS, Job
 from lib.role_router import (
-    KNOWN_HARNESSES,
     Candidate,
+    KNOWN_HARNESSES,
+    RoutingConfig,
     RoutingError,
     build_role_for_ticket_type,
     central_routing,
@@ -287,12 +296,20 @@ def _detail_field(detail: str | None, name: str) -> str | None:
 
 
 _UNQUEUEABLE = tuple(harness for harness in KNOWN_HARNESSES if harness not in RECIPIENTS)
-_PICK_KEYS = ("builder_model", "builder_effort", "reviewer_model", "reviewer_effort")
+_PICK_KEYS = (
+    "builder_model",
+    "builder_effort",
+    "reviewer_model",
+    "reviewer_effort",
+    "planner",
+    "plan_model",
+    "plan_effort",
+)
 
 
 def _detail_routing(
     detail: str | None,
-) -> tuple[str, str, tuple[Candidate, Candidate] | None] | None:
+) -> tuple[str, str, RouterPicks | None] | None:
     """The (builder, reviewer) a job's detail JSON was routed to (#206)."""
     if not detail:
         return None
@@ -313,9 +330,15 @@ def _detail_routing(
         value = routing.get(key)
         return value if isinstance(value, str) else None
 
-    picks = (
-        Candidate(builder, text("builder_model"), text("builder_effort")),
-        Candidate(reviewer, text("reviewer_model"), text("reviewer_effort")),
+    planner = routing.get("planner")
+    picks = RouterPicks(
+        builder=Candidate(builder, text("builder_model"), text("builder_effort")),
+        reviewer=Candidate(reviewer, text("reviewer_model"), text("reviewer_effort")),
+        planner=(
+            Candidate(planner, text("plan_model"), text("plan_effort"))
+            if planner in HARNESSES
+            else None
+        ),
     )
     return builder, reviewer, picks
 
@@ -340,9 +363,9 @@ def _route(ticket: TrackedTicket, builder: str, reviewer: str) -> TrackedTicket:
     )
 
 
-def _route_picks(ticket: TrackedTicket, picks: tuple[Candidate, Candidate]) -> TrackedTicket:
+def _route_picks(ticket: TrackedTicket, picks: RouterPicks) -> TrackedTicket:
     """ticket routed to routing.yml's picks: harness, model and effort per side."""
-    builder, reviewer = picks
+    builder, reviewer = picks.builder, picks.reviewer
     routed = _route(ticket, builder.harness, reviewer.harness)
     return replace(
         routed,
@@ -358,8 +381,7 @@ def _router_picks(
     refused: frozenset[str],
     builder_only: str | None = None,
     reviewer_only: str | None = None,
-) -> tuple[Candidate, Candidate] | None:
-    """routing.yml's (builder, reviewer), None unless factory.md sets `routing:`."""
+) -> RouterPicks | None:
     base = ticket.factory_md or ticket.factory
     if base.routing is None:
         return None
@@ -400,7 +422,27 @@ def _router_picks(
         base.reviewer_model,
         built_by=(builder.harness, builder.model),
     )
-    return builder, reviewer
+    return RouterPicks(builder, reviewer, _plan_pick(central, base, refused, on=builder.harness))
+
+
+def _plan_pick(
+    central: RoutingConfig | None,
+    base: FactoryConfig,
+    refused: frozenset[str],
+    *,
+    on: str,
+) -> Candidate | None:
+    try:
+        slot = resolve_slot(
+            "plan",
+            routing=central,
+            factory=base,
+            refused_harnesses=refused,
+            unavailable_harnesses=set(KNOWN_HARNESSES) - {on},
+        )
+    except RoutingError:
+        return None
+    return Candidate(slot.harness, slot.model, slot.effort)
 
 
 def _route_go(

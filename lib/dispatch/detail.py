@@ -774,8 +774,12 @@ class DetailMixin:
                 "builder": ticket.factory.builder_harness,
                 "reviewer": ticket.factory.reviewer_harness,
             }
-            if ticket.router_picks is not None:
-                for side, pick in zip(("builder", "reviewer"), ticket.router_picks):
+            if (picks := ticket.router_picks) is not None:
+                sides = [("builder", picks.builder), ("reviewer", picks.reviewer)]
+                if picks.planner is not None:
+                    routing_payload["planner"] = picks.planner.harness
+                    sides.append(("plan", picks.planner))
+                for side, pick in sides:
                     if pick.model is not None:
                         routing_payload[f"{side}_model"] = pick.model
                     if pick.effort is not None:
