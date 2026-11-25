@@ -18,7 +18,7 @@ keychain items on macOS.
 
 So the ticket's fallback applies: each device's `cursor-bot` login is the
 named Ultra account. `machines.yml` names it inline on each device as
-`cursor: {bot: cursor-bot, account: cursor-ultra-1}`. That form is not
+`cursor: {bot: cursor-bot, account: cursor-ultra}`. That form is not
 deprecated for Cursor (`machines_yml.DEVICE_LOGIN_ONLY`). `signed_in_on` on
 a Cursor account stays refused, and `ACCOUNT_ISOLATION` has no Cursor entry.
 One device runs one Cursor account.
@@ -47,7 +47,7 @@ without reading the login's credentials, so Cursor stays in
 `usage_readings.NOT_TRACKED`, and Efficiency and Settings show the reason
 from `usage_readings.NOT_TRACKED_REASONS`. The Ultra plan's included usage is
 one weekly pool shared with Grok. The `external` account `cursor-grok-ultra`
-keeps recording that pool from `orch usage record`; `cursor-ultra-1` is the
+keeps recording that pool from `orch usage record`; `cursor-ultra` is the
 CLI login that draws on it.
 
 ## Proposed machines.yml (not applied)
@@ -68,7 +68,7 @@ file and loads it.
  # code that reads them (README "Usage accounts"); older code refuses the key.
  orch_host: pc
 +accounts:
-+  - {id: cursor-ultra-1, harness: cursor, plan: ultra, label: "Cursor Ultra"}
++  - {id: cursor-ultra, harness: cursor, plan: ultra, label: "Cursor Ultra"}
  devices:
    # The WSL Ubuntu node on the PC, not the Windows host.
    - name: pc
@@ -77,7 +77,7 @@ file and loads it.
        claude: claude-bot
        codex: codex-bot
 -      cursor: cursor-bot
-+      cursor: {bot: cursor-bot, account: cursor-ultra-1}
++      cursor: {bot: cursor-bot, account: cursor-ultra}
      # Each bot's own home, e.g. /home/codex-bot/factory-work. Jobs stay off
      # the Windows C: drive; /mnt/ is refused.
      workdir_root: /home/{bot}/factory-work
@@ -86,7 +86,7 @@ file and loads it.
        claude: claude-bot
        codex: codex-bot
 -      cursor: cursor-bot
-+      cursor: {bot: cursor-bot, account: cursor-ultra-1}
++      cursor: {bot: cursor-bot, account: cursor-ultra}
      workdir_root: /home/box/factory-work
      ssh_alias: box-{bot}
      factory_root: /home/box/factory
@@ -96,7 +96,7 @@ file and loads it.
      slot_max: 2
 -    harnesses: {}
 +    harnesses:
-+      cursor: {bot: cursor-bot, account: cursor-ultra-1}
++      cursor: {bot: cursor-bot, account: cursor-ultra}
      workdir_root: REPLACE_WITH_MAC_WORKDIR_ROOT
      ssh_alias: REPLACE_WITH_MAC_SSH_ALIAS
      factory_root: /Users/{bot}/factory

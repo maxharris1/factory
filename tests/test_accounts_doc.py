@@ -33,6 +33,7 @@ DETAILS = (
     account_doctor.NOT_LOGGED_IN,
     account_doctor.NOT_UNDERSTOOD,
     account_doctor.EXIT_NONZERO,
+    account_doctor.PARTIAL_LOGIN,
     account_doctor.NO_IDENTITY,
     account_doctor.TOKEN_AUTH,
     account_doctor.CODEX_API_KEY,
@@ -115,9 +116,20 @@ def test_the_printed_sign_in_command_is_the_documented_one(harness: str, documen
 @pytest.mark.parametrize("harness, expected", [
     ("claude", "env -u CLAUDE_CODE_OAUTH_TOKEN -u CLAUDE_CONFIG_DIR claude auth login"),
     ("codex", "env -u CODEX_HOME codex login --device-auth"),
+    ("cursor", "env -u CURSOR_API_KEY -u CURSOR_AUTH_TOKEN -u CURSOR_CONFIG_DIR cursor-agent login"),
 ])
 def test_the_device_login_runs_the_documented_command_without_a_folder(harness: str, expected: str) -> None:
     assert account_doctor.login_command(harness, None) == expected
+    assert f"`{expected}`" in doc()
+
+
+def test_the_doc_says_cursor_stays_refused_as_orch_yml_does() -> None:
+    orch = (ROOT / "orch.yml").read_text(encoding="utf-8")
+    section = doc().partition("### Cursor is checked, not run")[2].split("\n#", 1)[0]
+
+    assert re.search(r"^refused_harnesses:\n  - cursor$", orch, flags=re.MULTILINE)
+    assert "`refused_harnesses: [cursor]`" in section
+    assert "runs no build\nor review job on Cursor" in section
 
 
 def settings_section() -> str:
@@ -344,27 +356,23 @@ def test_never_stored_leaves_the_clis_own_credentials_out_of_scope() -> None:
     assert "Keychain" in text
 
 
-def test_the_cli_fallback_promises_a_command_only_where_a_card_shows_one() -> None:
+def test_the_cli_fallback_gives_the_command_every_card_shows() -> None:
     machines = MachinesConfig(
         devices=(Device(name="pc", slot_max=2,
                         harnesses={harness: f"{harness}-bot" for harness in ADD_HARNESSES},
                         accounts={harness: f"{harness}-own" for harness in ADD_HARNESSES},
                         home="/home/{bot}"),),
-        accounts=tuple(Account(id=f"{harness}-extra", harness=harness, signed_in_on=("pc",))
-                       for harness in ADD_HARNESSES),
+        accounts=(*(Account(id=f"{harness}-extra", harness=harness, signed_in_on=("pc",))
+                    for harness in ADD_HARNESSES if harness != "cursor"),
+                  Account(id="cursor-own", harness="cursor")),
     )
     with sqlite3.connect(":memory:") as connection:
         rows = [(account["harness"], row["command"])
                 for account in read_accounts(connection, 0, machines)
                 for row in account["signed_in_on"]]
-    with_command = {harness for harness, command in rows if command is not None}
-    without = {harness for harness, _ in rows} - with_command
-
     section = doc().partition("### The CLI fallback")[2].split("\n## ", 1)[0]
-    promise, _, after = re.split(r"^```(?:sh)?$", section, flags=re.MULTILINE)
-    promise, after = " ".join(promise.split()), " ".join(after.split())
 
-    assert without
-    assert {harness for harness in ADD_HARNESSES if harness.capitalize() in promise} == with_command
-    assert {harness for harness in ADD_HARNESSES if f"A {harness.capitalize()} card row shows no command" in after} == without
-    assert "cursor-agent login" in after
+    assert {harness for harness, _ in rows} == set(ADD_HARNESSES)
+    assert [harness for harness, command in rows if command is None] == []
+    assert [command for harness, command in rows
+            if harness == "cursor" and command not in section] == []

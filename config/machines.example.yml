@@ -13,11 +13,11 @@ orch_host: pc
 # account's folder there is <home>/.factory-accounts/<id>. Cursor keeps its
 # login outside any folder, so a cursor account is each device's cursor-bot
 # login, named inline as {bot: cursor-bot, account: <id>}, never signed_in_on.
-# cursor-ultra-1 is that login; cursor-grok-ultra records the weekly Ultra
+# cursor-ultra is that login; cursor-grok-ultra records the weekly Ultra
 # pool Cursor shares with Grok, which `orch usage record` writes.
 accounts:
   - {id: codex-pro-1, harness: codex, plan: pro, label: "Codex Pro", signed_in_on: [pc]}
-  - {id: cursor-ultra-1, harness: cursor, plan: ultra, label: "Cursor Ultra"}
+  - {id: cursor-ultra, harness: cursor, plan: ultra, label: "Cursor Ultra"}
   - {id: cursor-grok-ultra, harness: external, plan: ultra, label: "Grok and Cursor Ultra"}
 devices:
   - name: pc
@@ -26,7 +26,7 @@ devices:
     harnesses:
       claude: claude-bot
       codex: codex-bot
-      cursor: {bot: cursor-bot, account: cursor-ultra-1}
+      cursor: {bot: cursor-bot, account: cursor-ultra}
     home: /home/{bot}
     # workdir_root is where job worktrees are made (empty at job start).
     # factory_root is the deployed factory checkout (skills/, bin/orch), not
@@ -43,7 +43,7 @@ devices:
     harnesses:
       claude: claude-bot
       codex: codex-bot
-      cursor: {bot: cursor-bot, account: cursor-ultra-1}
+      cursor: {bot: cursor-bot, account: cursor-ultra}
     workdir_root: /home/box/factory-work
     ssh_alias: box-{bot}
     factory_root: /home/box/factory

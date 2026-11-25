@@ -88,11 +88,11 @@ _HOLD = (f"INSERT INTO {HOLDS} (account, device, since, seen, source, reason) VA
 NOT_LOGGED_IN = "not logged in"
 NOT_UNDERSTOOD = "status reply not understood"
 EXIT_NONZERO = "status command exited nonzero"
+PARTIAL_LOGIN = "partly signed in"
 _INCONCLUSIVE = frozenset({NOT_UNDERSTOOD, EXIT_NONZERO})
 NO_IDENTITY = "sign-in names no org and email"
 TOKEN_AUTH = "auth from a token variable, not the account folder"
 CODEX_API_KEY = "api key, not a ChatGPT sign-in"
-CURSOR_API_KEY = "api key, not a Cursor sign-in"
 METHOD_NOT_UNDERSTOOD = "auth method not understood"
 SHARED_IDENTITY = "same sign-in as account {}"
 SPLIT_IDENTITY = "another sign-in on device {}"
@@ -120,14 +120,12 @@ _CODEX_LINES = (
     ("Logged in using an API key", "api_key", True),
     ("Not logged in", None, False),
 )
-_ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|.)", re.DOTALL)
-_CURSOR_API_KEY = re.compile(
-    r"(?:logged in|authenticated)\s+(?:using|via|with)\s+(?:an?\s+)?api\s*key|\bCURSOR_API_KEY\b",
-    re.IGNORECASE,
-)
-_CURSOR_IDENTITY = re.compile(r"Logged in as (?:user id (?P<user>\S+)|(?P<email>\S+))", re.IGNORECASE)
-_CURSOR_LOGGED_IN = re.compile(r"(?:Logged in|Login successful)\b", re.IGNORECASE)
-_CURSOR_LOGGED_OUT = re.compile(r"(?:Not logged in|Partially authenticated)\b", re.IGNORECASE)
+_CURSOR_STATES: dict[str, tuple[bool, str]] = {
+    "authenticated": (True, ""),
+    "partially-authenticated": (False, PARTIAL_LOGIN),
+    "unauthenticated": (False, NOT_LOGGED_IN),
+    "error": (False, EXIT_NONZERO),
+}
 
 
 @dataclass(frozen=True)
@@ -186,10 +184,7 @@ _RULES: dict[Harness, dict[str | None, _Rule]] = {
         "chatgpt": _Rule("ok"),
         "api_key": _Rule("signed-out", CODEX_API_KEY),
     },
-    "cursor": {
-        "cursor": _Rule("ok"),
-        "api_key": _Rule("signed-out", CURSOR_API_KEY),
-    },
+    "cursor": {"login": _Rule("ok")},
 }
 
 
@@ -216,15 +211,21 @@ def _subscription(value: object) -> str | None:
     return value if isinstance(value, str) and SUBSCRIPTION.fullmatch(value) else None
 
 
-def _fingerprint(org: str | None, email: str | None) -> str | None:
-    if org is None or email is None:
+def _id_text(value: object) -> str | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return value if isinstance(value, str) and value else None
+
+
+def _fingerprint(*parts: str | None) -> str | None:
+    if None in parts:
         return None
-    return hashlib.sha256(f"{org}\0{email}".encode()).hexdigest()[:12]
+    return hashlib.sha256("\0".join(parts).encode()).hexdigest()[:12]
 
 
-def _signed_in(code: int, logged_in: bool) -> tuple[bool, str]:
+def _signed_in(code: int, logged_in: bool, signed_out: str = NOT_LOGGED_IN) -> tuple[bool, str]:
     if not logged_in:
-        return False, NOT_LOGGED_IN
+        return False, signed_out
     if code != 0:
         return False, EXIT_NONZERO
     return True, ""
@@ -266,28 +267,25 @@ def parse_codex(account: str, device: str, code: int, reply: bytes) -> Probe:
     return Probe(account, device, "codex", True, False, None, None, None, NOT_UNDERSTOOD)
 
 
-def _cursor_fingerprint(identity: re.Match[str]) -> str:
-    if identity["user"] is not None:
-        return _fingerprint("cursor user id", identity["user"])
-    return _fingerprint("cursor", identity["email"].lower())
-
-
 def parse_cursor(account: str, device: str, code: int, reply: bytes) -> Probe:
-    cleaned = _ANSI.sub("", reply.decode("utf-8", errors="replace"))
-    lines = [line.strip().lstrip("\u2713 ") for line in cleaned.splitlines() if line.strip()]
-    if not lines:
+    data = _json_object(reply)
+    state = _CURSOR_STATES.get(_text(data, "status") or "") if data is not None else None
+    if state is None:
         return Probe(account, device, "cursor", True, False, None, None, None, NOT_UNDERSTOOD)
-    if any(_CURSOR_API_KEY.search(line) for line in lines):
-        signed_in, detail = _signed_in(code, True)
-        return Probe(account, device, "cursor", True, signed_in, "api_key", None, None, detail)
-    if any(_CURSOR_LOGGED_OUT.match(line) for line in lines):
-        return Probe(account, device, "cursor", True, False, None, None, None, NOT_LOGGED_IN)
-    if not _CURSOR_LOGGED_IN.match(lines[0]):
-        return Probe(account, device, "cursor", True, False, None, None, None, NOT_UNDERSTOOD)
-    signed_in, detail = _signed_in(code, True)
-    identity = _CURSOR_IDENTITY.fullmatch(lines[0])
-    fingerprint = None if identity is None else _cursor_fingerprint(identity)
-    return Probe(account, device, "cursor", True, signed_in, "cursor", None, fingerprint, detail)
+    logged_in, detail = _signed_in(code, *state)
+    user = data.get("userInfo")
+    user_id = _id_text(user.get("userId")) if isinstance(user, dict) else None
+    return Probe(
+        account=account,
+        device=device,
+        harness="cursor",
+        reached=True,
+        logged_in=logged_in,
+        auth_method="login" if logged_in else None,
+        subscription_type=None,
+        fingerprint=_fingerprint("cursor", user_id),
+        detail=detail,
+    )
 
 
 @dataclass(frozen=True)
@@ -303,7 +301,7 @@ _STATUS: dict[Harness, _Status] = {
     "claude": _Status("claude auth status", False, "CLAUDE_CONFIG_DIR",
                       ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"), parse_claude),
     "codex": _Status("codex login status", True, "CODEX_HOME", ("OPENAI_API_KEY", "CODEX_API_KEY"), parse_codex),
-    "cursor": _Status("cursor-agent status", True, "CURSOR_CONFIG_DIR",
+    "cursor": _Status("cursor-agent status --format json", False, "CURSOR_CONFIG_DIR",
                       ("CURSOR_API_KEY", "CURSOR_AUTH_TOKEN"), parse_cursor),
 }
 ACCOUNT_TOKEN_VARIABLES = tuple(name for status in _STATUS.values() for name in status.token_variables)

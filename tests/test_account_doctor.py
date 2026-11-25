@@ -10,7 +10,7 @@ import subprocess
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, get_args
 
 import pytest
 
@@ -21,7 +21,7 @@ from lib.device_pool import DevicePool
 from lib.dispatcher import Dispatcher
 from lib.machines_yml import MachinesConfig
 from lib.queue import JobRequest, SQLiteJobQueue
-from lib.remote import Exchanged
+from lib.remote import SSH_UNREACHABLE, Exchanged
 from tests.test_dispatcher import TRUSTED_LOGINS, FakeGrokDelivery, FakeReviewActions
 from tests.test_remote_start import config_of, enqueue, poll_at, poll_errors, stamp, state
 
@@ -30,8 +30,8 @@ ORG = "4b0c6c5e-0000-4000-8000-00000000a001"
 EMAIL = "bot-one@example.com"
 
 
-def fingerprint(org: str, email: str) -> str:
-    return hashlib.sha256(f"{org}\0{email}".encode()).hexdigest()[:12]
+def fingerprint(*parts: str) -> str:
+    return hashlib.sha256("\0".join(parts).encode()).hexdigest()[:12]
 
 
 def claude_reply(
@@ -62,6 +62,26 @@ def claude_reply(
 SIGNED_OUT_CLAUDE = json.dumps(
     {"loggedIn": False, "authMethod": "none", "apiProvider": "firstParty", "loginExpiresAt": None}
 ).encode()
+
+CURSOR_USER_ID = 271828
+CURSOR_SIGNED_IN = json.dumps({
+    "status": "authenticated", "isAuthenticated": True,
+    "userInfo": {"email": EMAIL, "userId": CURSOR_USER_ID, "name": "Bot One"},
+}).encode()
+CURSOR_NO_USER_DETAILS = json.dumps({
+    "status": "authenticated", "isAuthenticated": True, "message": "Logged in (unable to fetch user details)",
+}).encode()
+CURSOR_PARTIAL = json.dumps({
+    "status": "partially-authenticated", "isAuthenticated": False, "userInfo": {"email": EMAIL},
+}).encode()
+CURSOR_SIGNED_OUT = json.dumps({"status": "unauthenticated", "isAuthenticated": False}).encode()
+CURSOR_ERROR = json.dumps({"status": "error", "message": "could not reach api2.cursor.sh"}).encode()
+
+
+def cursor_signed_in_as(user_id: object) -> bytes:
+    reply = json.loads(CURSOR_SIGNED_IN)
+    reply["userInfo"]["userId"] = user_id
+    return json.dumps(reply).encode()
 
 
 def claude_probe(account: str = "acct", device: str = "box", code: int = 0, reply: bytes | None = None) -> Probe:
@@ -310,20 +330,17 @@ def leaky_config(tmp_path: Path, probes: list[Probe]) -> MachinesConfig:
     return config_of(path)
 
 
-def test_canaries_reach_neither_rows_details_nor_database(tmp_path: Path) -> None:
-    probes = leaky_probes()
+def assert_no_canary_reaches_a_surface(
+    tmp_path: Path, probes: list[Probe], config: MachinesConfig
+) -> dict[tuple[str, str], tuple[object, ...]]:
     rows = account_doctor.judge(probes, NOW)
-    config = leaky_config(tmp_path, probes)
     flagged = account_doctor.flags(rows, {}, config, "owner/factory")
     database = tmp_path / "orch.db"
     connection = connect(database)
     account_doctor.write(connection, rows, config, "owner/factory", NOW)
     stored_rows = stored(connection)
     raised = attention_rows(connection)
-    assert len(raised) == len([row for row in rows if row.status != "ok"]) > 0
-
-    expected = fingerprint(CANARY_ORG, CANARY_EMAIL)
-    assert (expected,) in connection.execute("SELECT fingerprint FROM account_signins WHERE account = 'seen'")
+    assert len(raised) == len([row for row in rows if row.status != "ok"])
     assert connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
     connection.close()
 
@@ -340,7 +357,38 @@ def test_canaries_reach_neither_rows_details_nor_database(tmp_path: Path) -> Non
     for name, data in surfaces.items():
         for canary in CANARIES:
             assert canary.encode() not in data, f"{canary} reached {name}"
-    assert expected.encode() in surfaces["orch.db"]
+    return {(str(row[0]), str(row[1])): tuple(row) for row in stored_rows}
+
+
+def test_canaries_reach_neither_rows_details_nor_database(tmp_path: Path) -> None:
+    probes = leaky_probes()
+    stored_rows = assert_no_canary_reaches_a_surface(tmp_path, probes, leaky_config(tmp_path, probes))
+    assert stored_rows[("seen", "box")][5] == fingerprint(CANARY_ORG, CANARY_EMAIL)
+    assert sum(row[2] != "ok" for row in stored_rows.values()) > 0
+
+
+def cursor_canary(reply: bytes) -> bytes:
+    data = json.loads(reply)
+    planted = {"email": CANARY_EMAIL, "accessToken": CANARY_TOKEN, "unknownKey": CANARY_EXTRA, "org": CANARY_ORG}
+    data["userInfo"] = {**data.get("userInfo", {}), **planted}
+    if "message" in data:
+        data["message"] = f"{data['message']} {CANARY_EMAIL} {CANARY_TOKEN}"
+    return json.dumps(data).encode()
+
+
+@pytest.mark.parametrize("code, reply, status", [
+    (0, cursor_canary(CURSOR_SIGNED_IN), "ok"),
+    (0, cursor_canary(CURSOR_NO_USER_DETAILS), "ok"),
+    (0, cursor_canary(CURSOR_PARTIAL), "signed-out"),
+    (0, cursor_canary(CURSOR_SIGNED_OUT), "signed-out"),
+    (1, cursor_canary(CURSOR_ERROR), "signed-out"),
+    (0, cursor_canary(CURSOR_SIGNED_IN)[:-2], "signed-out"),
+    (0, b"\xff\xfe" + " ".join(CANARIES).encode(), "signed-out"),
+], ids=["signed-in", "no-user-details", "partial", "signed-out", "error", "broken-json", "binary"])
+def test_cursor_row_never_holds_the_email(tmp_path: Path, code: int, reply: bytes, status: str) -> None:
+    probe = account_doctor.parse_cursor("cursor-default", "pc", code, reply)
+    stored_rows = assert_no_canary_reaches_a_surface(tmp_path, [probe], cursor_config(tmp_path))
+    assert stored_rows[("cursor-default", "pc")][2] == status
 
 
 ORG_B = "4b0c6c5e-0000-4000-8000-00000000b002"
@@ -367,7 +415,7 @@ devices:
   - name: pc
     tailscale_name: pc.example.ts.net
     slot_max: 2
-    harnesses: {{claude: claude-bot, codex: codex-bot}}
+    harnesses: {{claude: claude-bot, codex: codex-bot, cursor: cursor-bot}}
     workdir_root: /home/{{bot}}/work
     ssh_alias: pc-{{bot}}
     factory_root: /srv/factory
@@ -376,7 +424,7 @@ devices:
     tailscale_name: lap.example.ts.net
     slot_max: 1
     enabled: false
-    harnesses: {{claude: claude-bot, codex: codex-bot}}
+    harnesses: {{claude: claude-bot, codex: codex-bot, cursor: cursor-bot}}
     workdir_root: /home/{{bot}}/work
     ssh_alias: lap-{{bot}}
     factory_root: /srv/factory
@@ -397,12 +445,14 @@ if [ -n "{token_test}" ]; then reply=token; fi
 cat "{replies}/$reply" {stream}
 exit "$(cat "{replies}/$reply.code")"
 """
-STREAMS = {"claude": "", "codex": ">&2"}
+PROGRAMS = {"claude": "claude", "codex": "codex", "cursor": "cursor-agent"}
+STREAMS = {"claude": "", "codex": ">&2", "cursor": ""}
 TOKEN_TESTS = {
     "claude": "$CLAUDE_CODE_OAUTH_TOKEN$ANTHROPIC_API_KEY$ANTHROPIC_AUTH_TOKEN",
     "codex": "$OPENAI_API_KEY$CODEX_API_KEY",
+    "cursor": "$CURSOR_API_KEY$CURSOR_AUTH_TOKEN",
 }
-HOME_VARIABLES = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}
+HOME_VARIABLES = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME", "cursor": "CURSOR_CONFIG_DIR"}
 REPLIES = {
     "claude": {
         "default": (claude_reply(), 0),
@@ -415,10 +465,15 @@ REPLIES = {
         "codex-b": (b"Not logged in\n", 1),
         "token": (b"Logged in using an API key - sk-proj-***\n", 0),
     },
+    "cursor": {
+        "default": (CURSOR_SIGNED_IN, 0),
+        "token": (cursor_signed_in_as("user_from_a_token"), 0),
+    },
 }
 PROFILE = """\
 export PATH={bin}:$PATH
 export CLAUDE_CONFIG_DIR={home}/.factory-accounts/claude-c CODEX_HOME={home}/.factory-accounts/codex-b
+export CURSOR_CONFIG_DIR={home}/.cursor-elsewhere
 {tokens}
 echo profile says hello
 printf 'no newline at the end'
@@ -431,12 +486,10 @@ class World:
 
         self.tmp = tmp_path
         self.ssh = Ssh(tmp_path)
-        for alias in ("pc-claude-bot", "lap-claude-bot"):
-            (self.ssh.hosts / alias).write_text("claude-bot", encoding="utf-8")
-        for alias in ("pc-codex-bot", "lap-codex-bot"):
-            (self.ssh.hosts / alias).write_text("codex-bot", encoding="utf-8")
-        for alias in ("lap-claude-bot", "lap-codex-bot"):
-            self.ssh.offline(alias).touch()
+        for bot in ("claude-bot", "codex-bot", "cursor-bot"):
+            for device in ("pc", "lap"):
+                (self.ssh.hosts / f"{device}-{bot}").write_text(bot, encoding="utf-8")
+            self.ssh.offline(f"lap-{bot}").touch()
         self.device_home = tmp_path / "device-home"
         self.device_home.mkdir()
         self.bin = tmp_path / "device-bin"
@@ -448,7 +501,7 @@ class World:
             for name, (reply, code) in replies.items():
                 (folder / name).write_bytes(reply)
                 (folder / f"{name}.code").write_text(str(code), encoding="utf-8")
-            fake = self.bin / harness
+            fake = self.bin / PROGRAMS[harness]
             fake.write_text(FAKE_HARNESS.format(
                 name=harness, log=self.env_log, token_test=TOKEN_TESTS[harness],
                 replies=folder, home_variable=HOME_VARIABLES[harness], stream=STREAMS[harness],
@@ -507,7 +560,10 @@ EXPECTED = {
     ("codex-b", "pc"): "signed-out",
     ("claude-default", "lap"): "unreachable",
     ("codex-default", "lap"): "unreachable",
+    ("cursor-default", "pc"): "ok",
+    ("cursor-default", "lap"): "unreachable",
 }
+PROBED = ["claude"] * 3 + ["codex"] * 2 + ["cursor"]
 
 
 def test_doctor_reads_ok_and_signed_out_end_to_end_for_both_harnesses(world: World) -> None:
@@ -521,15 +577,30 @@ def test_doctor_reads_ok_and_signed_out_end_to_end_for_both_harnesses(world: Wor
     assert rows[("claude-c", "pc")].detail == account_doctor.NOT_LOGGED_IN
     assert rows[("codex-default", "pc")].auth_method == "chatgpt"
     assert rows[("codex-b", "pc")].detail == account_doctor.NOT_LOGGED_IN
+    cursor = rows[("cursor-default", "pc")]
+    assert (cursor.auth_method, cursor.fingerprint) == ("login", fingerprint("cursor", str(CURSOR_USER_ID)))
 
 
 def test_token_variables_from_the_login_profile_never_reach_the_harness(world: World) -> None:
     assert world.doctor() == 0
     envs = world.harness_envs()
-    assert sorted(name for name, _ in envs) == ["claude"] * 3 + ["codex"] * 2
+    assert sorted(name for name, _ in envs) == PROBED
     for _, names in envs:
         assert not names & set(TOKENS)
     assert world.statuses() == EXPECTED
+
+
+def test_cursor_probe_unsets_token_variables(world: World) -> None:
+    world.profile("export CURSOR_API_KEY=sk-planted-cursor CURSOR_AUTH_TOKEN=sk-planted-cursor-auth\n")
+    assert world.doctor() == 0
+    (names,) = [names for name, names in world.harness_envs() if name == "cursor"]
+    assert not names & {"CURSOR_API_KEY", "CURSOR_AUTH_TOKEN", "CURSOR_CONFIG_DIR"}
+    row = world.rows()[("cursor-default", "pc")]
+    assert (row.status, row.fingerprint) == ("ok", fingerprint("cursor", str(CURSOR_USER_ID)))
+    (call,) = [call for call in world.ssh.calls() if call["alias"] == "pc-cursor-bot"]
+    assert "unset " in call["script"]
+    unset = call["script"].split("unset ", 1)[1].split(";", 1)[0].split()
+    assert {"CURSOR_API_KEY", "CURSOR_AUTH_TOKEN", "CURSOR_CONFIG_DIR"} <= set(unset)
 
 
 @pytest.mark.parametrize("errexit", [
@@ -541,7 +612,7 @@ def test_token_variables_from_the_login_profile_never_reach_the_harness(world: W
 def test_errexit_from_the_login_profile_neither_skips_nor_loses_a_pair(world: World, errexit: str) -> None:
     world.profile(errexit)
     assert world.doctor() == 0
-    assert sorted(name for name, _ in world.harness_envs()) == ["claude"] * 3 + ["codex"] * 2
+    assert sorted(name for name, _ in world.harness_envs()) == PROBED
     assert world.statuses() == EXPECTED
 
 
@@ -562,10 +633,11 @@ def test_offline_device_and_device_without_ssh_alias_read_unreachable(world: Wor
     assert world.doctor() == 0
     rows = world.rows()
     assert rows[("claude-default", "box")].detail == "no ssh_alias for claude on box"
-    for account in ("claude-default", "codex-default"):
+    for account in ("claude-default", "codex-default", "cursor-default"):
         assert (rows[(account, "lap")].status, rows[(account, "lap")].detail) == ("unreachable", "device unreachable over ssh")
     calls = world.ssh.calls()
-    assert sorted(call["alias"] for call in calls) == ["lap-claude-bot", "lap-codex-bot", "pc-claude-bot", "pc-codex-bot"]
+    assert sorted(call["alias"] for call in calls) == [
+        "lap-claude-bot", "lap-codex-bot", "lap-cursor-bot", "pc-claude-bot", "pc-codex-bot", "pc-cursor-bot"]
     assert all(call["script"].startswith("exec bash -lc ") for call in calls)
 
 
@@ -607,6 +679,8 @@ def test_canaries_from_every_device_reply_reach_no_sink_end_to_end(
         (replies / "claude" / name).write_bytes(json.dumps({**reply, **planted}).encode())
     for name, (reply, _) in REPLIES["codex"].items():
         (replies / "codex" / name).write_bytes(reply + every.encode() + b"\n")
+    for name, (reply, _) in REPLIES["cursor"].items():
+        (replies / "cursor" / name).write_bytes(cursor_canary(reply))
     world.profile(
         f"echo '{every}'\necho '{every}' >&2\n"
         f"claude() {{ echo '{every}' >&2; command claude \"$@\"; }}\n"
@@ -634,6 +708,8 @@ def test_canaries_from_every_device_reply_reach_no_sink_end_to_end(
     expected = fingerprint(CANARY_ORG, CANARY_EMAIL)
     assert (rows[("claude-default", "pc")].status, rows[("claude-default", "pc")].fingerprint) == ("ok", expected)
     assert rows[("claude-b", "pc")].status == "signed-out"
+    assert (rows[("cursor-default", "pc")].status, rows[("cursor-default", "pc")].fingerprint) == (
+        "ok", fingerprint("cursor", str(CURSOR_USER_ID)))
 
     assert wal_holder.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
     details = [row[0] for row in wal_holder.execute("SELECT detail FROM jobs")]
@@ -676,10 +752,14 @@ def test_replies_without_a_frame_leave_it_out() -> None:
 
 
 DOCTOR_MACHINES = """\
-orch_host: pc
 accounts:
   - {id: claude-b, harness: claude, signed_in_on: [pc, mac]}
 devices:
+  - name: box
+    local: true
+    enabled: false
+    slot_max: 1
+    harnesses: {}
   - name: pc
     tailscale_name: pc.example.ts.net
     slot_max: 2
@@ -706,7 +786,7 @@ KEY = ("owner/factory", "claude-b@pc", "account-signin")
 
 class DoctorTransport:
     def __init__(self) -> None:
-        self.replies = {
+        self.replies: dict[str, bytes | Exchanged] = {
             "pc-claude-bot": framed((0, 0, claude_reply()), (1, 0, claude_reply(org=ORG_B, email=EMAIL_B))),
             "pc-codex-bot": framed((0, 0, b"Logged in using ChatGPT\n")),
         }
@@ -720,7 +800,8 @@ class DoctorTransport:
         self.exchanges.append(argv[-2])
         if self.error is not None:
             raise self.error
-        return Exchanged(0, self.replies[argv[-2]], "")
+        reply = self.replies[argv[-2]]
+        return reply if isinstance(reply, Exchanged) else Exchanged(0, reply, "")
 
 
 class Poller(NamedTuple):
@@ -840,6 +921,142 @@ def test_a_monitor_without_sign_ins_never_runs_the_doctor(tmp_path: Path) -> Non
         assert connection.execute(
             "SELECT name FROM sqlite_master WHERE name = ?", (account_doctor.TABLE,)
         ).fetchone() is None
+
+
+CURSOR_MACHINES = """\
+devices:
+  - name: box
+    local: true
+    slot_max: 1
+    harnesses: {cursor: cursor-bot}
+  - name: pc
+    tailscale_name: pc.example.ts.net
+    slot_max: 2
+    harnesses: {cursor: cursor-bot}
+    workdir_root: /home/{bot}/work
+    ssh_alias: pc-{bot}
+    factory_root: /srv/factory
+  - name: lap
+    tailscale_name: lap.example.ts.net
+    slot_max: 1
+    harnesses: {cursor: cursor-bot}
+    workdir_root: /home/{bot}/work
+    ssh_alias: lap-{bot}
+    factory_root: /srv/factory
+"""
+CURSOR_LOGIN = "env -u CURSOR_API_KEY -u CURSOR_AUTH_TOKEN -u CURSOR_CONFIG_DIR cursor-agent login"
+CURSOR_STEP = f"sign in as cursor-bot on pc: {CURSOR_LOGIN}, then orch accounts doctor"
+
+
+def cursor_config(tmp_path: Path) -> MachinesConfig:
+    path = tmp_path / "cursor-machines.yml"
+    path.write_text(CURSOR_MACHINES, encoding="utf-8")
+    return config_of(path)
+
+
+def cursor_transport(pc: bytes | Exchanged, lap: bytes | Exchanged | None = None) -> DoctorTransport:
+    transport = DoctorTransport()
+    transport.replies = {"pc-cursor-bot": pc, "lap-cursor-bot": framed((0, 0, CURSOR_SIGNED_IN)) if lap is None else lap}
+    return transport
+
+
+def run_cursor(
+    connection: sqlite3.Connection, tmp_path: Path, transport: DoctorTransport, now: float = NOW
+) -> dict[tuple[str, str], SignIn]:
+    rows = account_doctor.run(connection, cursor_config(tmp_path), transport, now, "Owner/Factory")
+    return {(row.account, row.device): row for row in rows}
+
+
+def cursor_flags(connection: sqlite3.Connection) -> dict[str, str]:
+    return {str(row[1]): str(row[3]) for row in attention_rows(connection)}
+
+
+@pytest.mark.parametrize("reply, expected", [
+    (CURSOR_SIGNED_IN, fingerprint("cursor", str(CURSOR_USER_ID))),
+    (cursor_signed_in_as("user_01J9ZK"), fingerprint("cursor", "user_01J9ZK")),
+    (CURSOR_NO_USER_DETAILS, None),
+    (cursor_signed_in_as(True), None),
+], ids=["numeric-id", "text-id", "no-user-details", "bool-id"])
+def test_cursor_sign_in_reads_ok_with_a_user_id_fingerprint(
+    tmp_path: Path, reply: bytes, expected: str | None
+) -> None:
+    connection = connect(tmp_path / "orch.db")
+    rows = run_cursor(connection, tmp_path, cursor_transport(framed((0, 0, reply)), framed((0, 0, reply))))
+    for device in ("pc", "lap"):
+        row = rows[("cursor-default", device)]
+        assert (row.status, row.auth_method, row.subscription_type, row.fingerprint, row.detail) == (
+            "ok", "login", None, expected, "")
+    assert list(cursor_flags(connection)) == ["cursor-default@box"]
+    assert holds(connection) == []
+
+
+@pytest.mark.parametrize("reply, detail, held", [
+    (CURSOR_PARTIAL, "partly signed in", False),
+    (CURSOR_SIGNED_OUT, account_doctor.NOT_LOGGED_IN, True),
+], ids=["partial", "signed-out"])
+def test_cursor_partial_or_signed_out_reads_signed_out(tmp_path: Path, reply: bytes, detail: str, held: bool) -> None:
+    connection = connect(tmp_path / "orch.db")
+    run_cursor(connection, tmp_path, cursor_transport(framed((0, 0, reply))))
+    assert [row for row in stored(connection) if row[1] == "pc"] == [
+        ("cursor-default", "pc", "signed-out", None, None, None, NOW, detail)]
+    assert cursor_flags(connection)["cursor-default@pc"] == f"signed-out; run: {CURSOR_STEP}; {detail}"
+    assert holds(connection) == ([("cursor-default", "pc", NOW, "doctor", detail)] if held else [])
+
+
+@pytest.mark.parametrize("code, reply, detail", [
+    (1, CURSOR_ERROR, account_doctor.EXIT_NONZERO),
+    (0, CURSOR_ERROR, account_doctor.EXIT_NONZERO),
+    (1, CURSOR_SIGNED_IN, account_doctor.EXIT_NONZERO),
+    (0, b"cursor-agent: command not found", account_doctor.NOT_UNDERSTOOD),
+    (0, b'{"status": "rate-limited"}', account_doctor.NOT_UNDERSTOOD),
+    (0, b'["authenticated"]', account_doctor.NOT_UNDERSTOOD),
+    (0, b'{"status": ["authenticated"]}', account_doctor.NOT_UNDERSTOOD),
+], ids=["error", "error-exit-0", "signed-in-exit-1", "not-json", "unknown-status", "not-an-object",
+        "status-not-text"])
+def test_cursor_status_error_is_inconclusive(tmp_path: Path, code: int, reply: bytes, detail: str) -> None:
+    connection = connect(tmp_path / "orch.db")
+    run_cursor(connection, tmp_path, cursor_transport(framed((0, 1, CURSOR_SIGNED_OUT))))
+    rows = run_cursor(connection, tmp_path, cursor_transport(framed((0, code, reply))), NOW + 120)
+    row = rows[("cursor-default", "pc")]
+    assert (row.status, row.auth_method, row.fingerprint, row.detail) == ("signed-out", None, None, detail)
+    assert holds(connection) == [("cursor-default", "pc", NOW, "doctor", account_doctor.NOT_LOGGED_IN)]
+    assert cursor_flags(connection)["cursor-default@pc"].endswith("; not logged in")
+
+
+@pytest.mark.parametrize("pc", [
+    Exchanged(SSH_UNREACHABLE, b"", "ssh: connect to host pc port 22: Connection refused"),
+    Exchanged(-9, b"", "", timed_out=True),
+], ids=["ssh-unreachable", "timeout"])
+def test_cursor_unreachable(tmp_path: Path, pc: Exchanged) -> None:
+    connection = connect(tmp_path / "orch.db")
+    rows = run_cursor(connection, tmp_path, cursor_transport(pc))
+    assert (rows[("cursor-default", "pc")].status, rows[("cursor-default", "pc")].detail) == (
+        "unreachable", account_doctor.SSH_DOWN)
+    assert (rows[("cursor-default", "box")].status, rows[("cursor-default", "box")].detail) == (
+        "unreachable", "no ssh_alias for cursor on box")
+    assert rows[("cursor-default", "lap")].status == "ok"
+    assert cursor_flags(connection)["cursor-default@pc"] == (
+        "unreachable; run: fix ssh to pc for cursor, then orch accounts doctor; device unreachable over ssh")
+    assert holds(connection) == []
+
+
+def test_one_cursor_account_as_two_users_reads_mismatch(tmp_path: Path) -> None:
+    connection = connect(tmp_path / "orch.db")
+    rows = run_cursor(connection, tmp_path, cursor_transport(
+        framed((0, 0, CURSOR_SIGNED_IN)), framed((0, 0, cursor_signed_in_as("user_other")))))
+    pc, lap = rows[("cursor-default", "pc")], rows[("cursor-default", "lap")]
+    assert (pc.status, pc.detail) == ("mismatch", "another sign-in on device lap")
+    assert (lap.status, lap.detail) == ("mismatch", "another sign-in on device pc")
+    assert cursor_flags(connection)["cursor-default@pc"] == (
+        f"mismatch; run: sign cursor-default in to its own account as cursor-bot on pc: {CURSOR_LOGIN}, "
+        "then orch accounts doctor; another sign-in on device lap")
+
+
+def test_doctor_tables_name_the_same_harnesses() -> None:
+    harnesses = set(get_args(account_doctor.Harness))
+    assert harnesses == {"claude", "codex", "cursor"}
+    for table in (account_doctor._STATUS, account_doctor._RULES, account_doctor._LOGIN, account_doctor.AUTH_METHODS):
+        assert set(table) == harnesses
 
 
 def flag_config(tmp_path: Path) -> MachinesConfig:

@@ -22,7 +22,14 @@ from lib import account_doctor
 from lib.job_state import MAX_FREE_REQUEUES, free_requeues
 from lib.machines_yml import load_machines_yml
 from lib.remote import SSH_UNREACHABLE, Exchanged
-from tests.test_account_doctor import SIGNED_OUT_CLAUDE, claude_reply, framed
+from tests.test_account_doctor import (
+    CURSOR_PARTIAL,
+    CURSOR_SIGNED_IN,
+    CURSOR_SIGNED_OUT,
+    SIGNED_OUT_CLAUDE,
+    claude_reply,
+    framed,
+)
 from tests.test_skill_preflight import with_job_events
 from tests.test_waiter import FakeSpawn, enqueue, slots, state
 from tests.test_waiter_remote import make_waiter, remote_machines
@@ -64,7 +71,8 @@ def check(tmp_path: Path, harness: str, transport: LoginTransport) -> None:
 @pytest.mark.parametrize("harness, reply", [
     ("claude", framed((0, 1, SIGNED_OUT_CLAUDE))),
     ("codex", framed((0, 1, b"Not logged in\n"))),
-], ids=["claude", "codex"])
+    ("cursor", framed((0, 0, CURSOR_SIGNED_OUT))),
+], ids=["claude", "codex", "cursor"])
 def test_a_signed_out_login_raises_signed_out(tmp_path: Path, harness: str, reply: bytes) -> None:
     transport = LoginTransport(reply)
     with pytest.raises(account_doctor.SignedOut) as raised:
@@ -78,22 +86,15 @@ def test_a_signed_out_login_raises_signed_out(tmp_path: Path, harness: str, repl
 @pytest.mark.parametrize("harness, transport", [
     ("claude", LoginTransport(framed((0, 0, claude_reply())))),
     ("codex", LoginTransport(framed((0, 0, b"Logged in using ChatGPT\n")))),
+    ("cursor", LoginTransport(framed((0, 0, CURSOR_SIGNED_IN)))),
+    ("cursor", LoginTransport(framed((0, 0, CURSOR_PARTIAL)))),
     ("claude", LoginTransport(b"", code=SSH_UNREACHABLE)),
     ("claude", LoginTransport(framed((0, 0, b"not json")))),
     ("claude", LoginTransport(b"no frame at all")),
-], ids=["claude-ok", "codex-ok", "unreachable", "not-understood", "no-reply"])
+], ids=["claude-ok", "codex-ok", "cursor-ok", "cursor-partial", "unreachable", "not-understood", "no-reply"])
 def test_a_login_not_read_as_signed_out_passes(tmp_path: Path, harness: str, transport: LoginTransport) -> None:
     check(tmp_path, harness, transport)
     assert len(transport.aliases) == 1
-
-
-def test_a_harness_without_a_status_command_is_not_checked(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delitem(account_doctor._STATUS, "cursor")
-    transport = LoginTransport(b"")
-    check(tmp_path, "cursor", transport)
-    assert transport.aliases == []
 
 
 def pc_waiter(tmp_path: Path, transport: LoginTransport):

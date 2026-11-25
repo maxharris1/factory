@@ -17,6 +17,7 @@ from lib.machines_yml import EXTERNAL, Account, Device, MachinesConfig
 from lib.queue import ACTIONS
 from lib.schema import HARNESSES
 
+TEXT_MAX = 100
 _TICKET = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,63}")
 _STATUSES = frozenset(get_args(account_doctor.Status))
 _DOCTORED = frozenset(get_args(account_doctor.Harness))
@@ -35,6 +36,10 @@ def _accounts(machines: MachinesConfig) -> list[Account]:
     for declared in machines.accounts:
         ids.setdefault(declared.id)
     return [account for account_id in ids if (account := machines.account(account_id)) is not None]
+
+
+def safe_text(value: object) -> str | None:
+    return value if isinstance(value, str) and 0 < len(value) <= TEXT_MAX and value.isprintable() else None
 
 
 def declared_devices(machines: MachinesConfig, account: Account) -> list[Device]:
@@ -166,19 +171,17 @@ def read_accounts(
             read_only = "default"
         else:
             read_only = None
-        not_tracked = account.harness in usage_readings.NOT_TRACKED
         entries.append({
             "id": account.id,
             "harness": account.harness,
-            "plan": account.plan,
+            "plan": safe_text(account.plan),
+            "not_tracked": usage_readings.NOT_TRACKED.get(account.harness),
             "max_jobs": account.max_jobs,
             "paused": account.paused,
             "read_only": read_only,
             "signed_in_on": _signed_in_on(machines, account, sign_ins, listed),
             **{f"{window}_used": _used(readings.get(window), now) for window in usage_readings.WINDOWS},
             "headroom": usage_readings.headroom(list(readings.values()), now),
-            "usage_state": "not tracked" if not_tracked else "tracked",
-            "usage_reason": usage_readings.NOT_TRACKED_REASONS.get(account.harness) if not_tracked else None,
             "floor": device_pool.FLOOR,
             "running": running.get(account.id, []),
         })

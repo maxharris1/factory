@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from lib import settings_apply
+from lib.account_requests import ADD_REFUSED
 from lib.machines_yml import load_machines_yml
 from lib.queue import SQLiteJobQueue
 from tests.pool_helpers import poller_adopts
@@ -486,3 +487,14 @@ def test_an_adopted_add_remove_or_signed_in_on_reads_applied(tmp_path: Path, sen
     assert entry.result == "pending", entry
 
     assert _audit_result(box, slots.db) == "applied"
+
+
+def test_add_with_harness_cursor_is_refused_with_the_machines_yml_step(tmp_path: Path) -> None:
+    box = Box(tmp_path)
+    _add(box, account="cursor-ultra", harness="cursor", max_jobs=None, signed_in_on=())
+
+    (entry,) = box.run()
+
+    assert (entry.result, entry.error) == ("refused", ADD_REFUSED["cursor"]), entry
+    assert "harnesses.cursor" in entry.error and "machines.yml" in entry.error
+    box.unchanged()

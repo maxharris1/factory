@@ -41,6 +41,7 @@ CSS = """\
 .ef-usage{min-width:860px;margin:0}
 .ef-usage td{padding:10px 12px 10px 0}
 .ef-usage th:last-child,.ef-usage td:last-child{padding-right:0}
+.ef-usage .ef-un td{padding-top:6px;padding-bottom:6px}
 .ef-who{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px}
 .ef-name{font-size:12px;color:var(--text-2)}
 .ef-dev{margin-top:3px;font:11px/1.5 var(--mono);color:var(--muted)}
@@ -58,13 +59,14 @@ CSS = """\
 .ef-hnote{margin:12px 0 0;max-width:720px;font-size:12px;color:var(--muted)}
 .ef-accts{display:none;flex-direction:column;gap:8px}
 .ef-acct{min-width:0;padding:10px 12px 12px;background:var(--bg);box-shadow:var(--elev)}
-.ef-acct .ef-room,.ef-acct .ef-why{margin-top:10px}
+.ef-acct .ef-room{margin-top:10px}
 .ef-acct .ef-hn{flex:none;font-size:22px;line-height:1.15;letter-spacing:-.03em}
 .ef-hl{font:500 12px/1.3 var(--mono);color:var(--muted)}
 .ef-wins{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:10px;padding-top:8px;
 border-top:1px solid var(--line)}
 .ef-wins>div{min-width:0}
 .ef-wk{font:11px/1.5 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.ef-accts .ef-un{padding:2px 12px 0}
 .ef-hnote-ph{display:none;margin:10px 0 0;font-size:12px;color:var(--muted)}
 @media (max-width:699.98px){
 body[data-page="efficiency"] main{padding:12px 12px 24px;gap:12px}
@@ -157,7 +159,7 @@ SCRIPT = r"""
   function accountName(e) { return e.label || e.account; }
   function accountAbout(e) {
     return [e.plan, e.source ? 'via ' + e.source : null,
-      e.source ? (e.age_seconds === null ? 'never read' : 'read ' + dur(e.age_seconds) + ' ago') : null]
+      e.age_seconds === null ? 'never read' : 'read ' + dur(e.age_seconds) + ' ago']
       .filter(function (x) { return x; }).join(' · ');
   }
   function accountJobs(e) {
@@ -217,20 +219,26 @@ SCRIPT = r"""
     for (var i = 0; i < METER_CELLS; i++) add(meter, el('span', i < v.lit ? v.tone : null));
     if (!phone && v.tag) add(room, el('span', 'ef-tag', v.tag));
   }
+  function untrackedWho(parent, e) {
+    var line = add(parent, el('div', 'ef-who'));
+    add(line, el('span', 'bot ' + e.harness, e.harness));
+    add(line, el('span', 'ef-name', e.account));
+    if (e.plan !== null) add(parent, el('div', 'ef-dev', e.plan));
+  }
   function untrackedLine(parent, e, row) {
-    var why = e.reason ? 'not tracked: ' + e.reason : 'not tracked';
+    var reason = 'not tracked: ' + e.not_tracked;
     if (row) {
-      var tr = add(parent, el('tr'));
-      accountWho(add(tr, el('td')), e);
-      add(tr, el('td', 'ef-v muted', why)).setAttribute('colspan', '4');
-      usageCell(tr, [accountJobs(e), null], 'td');
-      usageCell(tr, [accountDevices(e), null], 'td');
+      var tr = add(parent, el('tr', 'ef-un'));
+      untrackedWho(add(tr, el('td')), e);
+      add(tr, el('td', 'ef-v muted', reason)).setAttribute('colspan', '4');
+      usageCell(tr, [accountJobs(e), 'muted'], 'td');
+      usageCell(tr, [accountDevices(e), 'muted'], 'td');
       return;
     }
-    var block = add(parent, el('div', 'ef-acct'));
-    accountWho(block, e);
-    add(block, el('div', 'ef-v muted ef-why', why));
-    add(block, el('div', 'ef-dev', accountJobs(e) + ' · ' + accountDevices(e)));
+    var line = add(parent, el('div', 'ef-un'));
+    untrackedWho(line, e);
+    usageCell(line, [reason, 'muted'], 'div');
+    add(line, el('div', 'ef-dev', accountJobs(e) + ' · ' + accountDevices(e)));
   }
   function renderHeadroom(d) {
     var root = panel('headroom', 'Subscription headroom', 'per account');
@@ -414,11 +422,11 @@ def _name(entry: dict) -> str:
 
 
 def _about(entry: dict) -> str:
-    age, source = entry["age_seconds"], entry["source"]
+    age = entry["age_seconds"]
     return " · ".join(part for part in (
         entry["plan"],
-        source and f"via {source}",
-        source and ("never read" if age is None else f"read {duration(age)} ago"),
+        entry["source"] and f"via {entry['source']}",
+        "never read" if age is None else f"read {duration(age)} ago",
     ) if part)
 
 
@@ -435,15 +443,35 @@ def _devices(entry: dict) -> str:
     return " · ".join(part for part in parts if part) or "none"
 
 
-def _why(entry: dict) -> str:
-    return f"not tracked: {entry['reason']}" if entry["reason"] else "not tracked"
-
-
 def _who(entry: dict) -> str:
     harness = entry["harness"]
     return (
         f'<div class="ef-who">{_span("bot " + harness, harness)}{_span("ef-name", _name(entry))}</div>'
         f'<div class="ef-dev">{_e(_about(entry))}</div>'
+    )
+
+
+def _untracked_who(entry: dict) -> str:
+    harness, plan = entry["harness"], entry["plan"]
+    return (
+        f'<div class="ef-who">{_span("bot " + harness, harness)}{_span("ef-name", entry["account"])}</div>'
+        + ("" if plan is None else f'<div class="ef-dev">{_e(plan)}</div>')
+    )
+
+
+def _untracked_row(entry: dict) -> str:
+    return (
+        f'<tr class="ef-un"><td>{_untracked_who(entry)}</td>'
+        f'<td class="ef-v muted" colspan="4">{_e("not tracked: " + entry["not_tracked"])}</td>'
+        + _cell(_jobs(entry), "muted") + _cell(_devices(entry), "muted") + "</tr>"
+    )
+
+
+def _untracked_block(entry: dict) -> str:
+    return (
+        f'<div class="ef-un">{_untracked_who(entry)}'
+        + _cell("not tracked: " + entry["not_tracked"], "muted", "div")
+        + f'<div class="ef-dev">{_e(_jobs(entry) + " · " + _devices(entry))}</div></div>'
     )
 
 
@@ -484,20 +512,6 @@ def _account_block(view: dict) -> str:
         f'<div class="ef-room">{_number(view, phone=True)}{_meter(view)}</div>'
         f'<div class="ef-hl">{_e(label)}</div><div class="ef-wins">{columns}</div>'
         f'<div class="ef-dev">{_e(_jobs(view["entry"]) + " · " + _devices(view["entry"]))}</div></div>'
-    )
-
-
-def _untracked_row(entry: dict) -> str:
-    return (
-        f'<tr><td>{_who(entry)}</td><td class="ef-v muted" colspan="4">{_e(_why(entry))}</td>'
-        + _cell(_jobs(entry), None) + _cell(_devices(entry), None) + "</tr>"
-    )
-
-
-def _untracked_block(entry: dict) -> str:
-    return (
-        f'<div class="ef-acct">{_who(entry)}<div class="ef-v muted ef-why">{_e(_why(entry))}</div>'
-        f'<div class="ef-dev">{_e(_jobs(entry) + " · " + _devices(entry))}</div></div>'
     )
 
 

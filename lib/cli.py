@@ -596,14 +596,14 @@ accounts prepare --device NAME [--account ID] [--machines PATH]
 
 accounts doctor [--db PATH] [--machines PATH] [--json]
   Ask every device, over ssh as each bot, whether each account machines.yml
-  signs in there is signed in: `claude auth status` or `codex login status`
-  under the login shell, with token variables unset. Never reads a token
-  or credential file and never signs in. Replaces the account_signins rows
-  and prints one line per pair, <account>@<device> <status> <auth method
-  or -> <detail>; --json prints the rows as a JSON list. --db defaults to
-  $ORCH_DB, --machines to the checkout's machines.yml. Exits 0 after a
-  pass whatever the statuses, 2 on a config error, 1 when the database
-  cannot be written.
+  signs in there is signed in: `claude auth status`, `codex login status`
+  or `cursor-agent status` under the login shell, with token variables
+  unset. Never reads a token or credential file and never signs in.
+  Replaces the account_signins rows and prints one line per pair,
+  <account>@<device> <status> <auth method or -> <detail>; --json prints
+  the rows as a JSON list. --db defaults to $ORCH_DB, --machines to the
+  checkout's machines.yml. Exits 0 after a pass whatever the statuses, 2
+  on a config error, 1 when the database cannot be written.
 
 accounts signin-broker [--state DIR] [--db PATH] [--machines PATH] [--orch PATH] [--once]
   Take the dashboard's sign-in requests from the settings spool through

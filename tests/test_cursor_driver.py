@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -29,10 +30,6 @@ from tests.test_brief import job
 NOW = 1_800_000_000.0
 
 
-def _cursor_fp(email: str) -> str:
-    return hashlib.sha256(f"cursor\0{email.lower()}".encode()).hexdigest()[:12]
-
-
 def test_cursor_driver_registered_and_satisfies_protocol() -> None:
     assert "cursor" in harnesses.registered_names()
     driver = harnesses.get("cursor")
@@ -49,13 +46,13 @@ def test_cursor_driver_registered_and_satisfies_protocol() -> None:
     assert driver.family_for_model("auto") is None
     assert driver.family_for_model(None) is None
     assert driver.probe_usage({}, NOW) == []
-    assert usage_readings.NOT_TRACKED_REASONS["cursor"]
+    assert usage_readings.NOT_TRACKED["cursor"]
 
 
 def test_a_cursor_account_cannot_run_from_a_folder_of_its_own() -> None:
     assert "cursor" not in harness_env.ACCOUNT_ISOLATION
     with pytest.raises(ValueError):
-        harness_env.harness_env("cursor", "/home/cursor-bot/.factory-accounts/cursor-ultra-1")
+        harness_env.harness_env("cursor", "/home/cursor-bot/.factory-accounts/cursor-ultra")
     with pytest.raises(ValueError):
         harness_env.account_environ({"PATH": "/usr/bin"}, "cursor", "/home/cursor-bot/.factory-accounts/x")
 
@@ -182,16 +179,25 @@ def test_cursor_runtime_signout_and_limit_detection() -> None:
     assert lane_limit.detect("cursor", limit_event, NOW) is not None
 
 
-GREEN, RED, RESET = "\x1b[32m", "\x1b[31m", "\x1b[39m"
+def _status_json(status: str, message: str | None = None, **user: object) -> str:
+    reply: dict[str, object] = {"status": status, "isAuthenticated": status == "authenticated"}
+    if message is not None:
+        reply["message"] = message
+    if user:
+        reply["userInfo"] = user
+    return json.dumps(reply, indent=2)
+
+
 SIGNED_IN_REPLIES = {
-    "email": f"{GREEN}\u2713{RESET} Logged in as cursor.canary@example.com\nTeam: Canary Team\x1b[2m (id 42)\x1b[22m\n",
-    "user-id": f"{GREEN}\u2713{RESET} Logged in as user id synthetic-user-a\nLogged in (user details not available)\n",
-    "no-details": f"{GREEN}\u2713{RESET} Login successful!\nLogged in (user details not available)\n",
-    "lookup-failed": f"{GREEN}\u2713{RESET} Login successful!\nLogged in (unable to fetch user details)\n",
+    "email": _status_json("authenticated", email="cursor.canary@example.com", userId=42, teamName="Canary Team"),
+    "user-id": _status_json("authenticated", "Logged in (user details not available)", userId="synthetic-user-a"),
+    "no-details": _status_json("authenticated", "Logged in (user details not available)"),
+    "lookup-failed": _status_json("authenticated", "Logged in (unable to fetch user details)"),
 }
 SIGNED_OUT_REPLIES = {
-    "not-logged-in": f"{RED}Not logged in{RESET}\n",
-    "partial": f"{RED}Partially authenticated (missing refresh token){RESET}\n",
+    "not-logged-in": (_status_json("unauthenticated", "Not logged in"), account_doctor.NOT_LOGGED_IN),
+    "partial": (_status_json("partially-authenticated", "Partially authenticated (missing refresh token)"),
+                account_doctor.PARTIAL_LOGIN),
 }
 
 
@@ -204,29 +210,23 @@ def _judged(*probes: tuple[str, str, int, str]) -> list[account_doctor.SignIn]:
 
 @pytest.mark.parametrize("reply", SIGNED_IN_REPLIES.values(), ids=SIGNED_IN_REPLIES.keys())
 def test_every_signed_in_status_reply_reads_ok(reply: str) -> None:
-    [row] = _judged(("cursor-ultra-1", "pc", 0, reply))
-    assert (row.status, row.detail, row.auth_method) == ("ok", "", "cursor")
+    [row] = _judged(("cursor-ultra", "pc", 0, reply))
+    assert (row.status, row.detail, row.auth_method) == ("ok", "", "login")
 
 
-@pytest.mark.parametrize("reply", SIGNED_OUT_REPLIES.values(), ids=SIGNED_OUT_REPLIES.keys())
-def test_every_signed_out_status_reply_reads_signed_out(reply: str) -> None:
-    [row] = _judged(("cursor-ultra-1", "pc", 0, reply))
-    assert (row.status, row.detail) == ("signed-out", account_doctor.NOT_LOGGED_IN)
+@pytest.mark.parametrize(("reply", "detail"), SIGNED_OUT_REPLIES.values(), ids=SIGNED_OUT_REPLIES.keys())
+def test_every_signed_out_status_reply_reads_signed_out(reply: str, detail: str) -> None:
+    [row] = _judged(("cursor-ultra", "pc", 0, reply))
+    assert (row.status, row.detail) == ("signed-out", detail)
 
 
 def test_a_status_error_or_unknown_reply_is_inconclusive() -> None:
     error, junk = _judged(
-        ("cursor-ultra-1", "pc", 1, f"{RED}Status check error: fetch failed{RESET}\n"),
-        ("cursor-ultra-1", "box", 0, "unexpected cursor.canary@example.com\n"),
+        ("cursor-ultra", "pc", 1, _status_json("error", "Status check error: fetch failed")),
+        ("cursor-ultra", "box", 0, "\u2713 Logged in as cursor.canary@example.com\n"),
     )
-    assert (error.status, error.detail) == ("signed-out", account_doctor.NOT_UNDERSTOOD)
+    assert (error.status, error.detail) == ("signed-out", account_doctor.EXIT_NONZERO)
     assert (junk.status, junk.detail) == ("signed-out", account_doctor.NOT_UNDERSTOOD)
-
-
-def test_an_api_key_login_is_not_the_account() -> None:
-    [row] = _judged(("cursor-ultra-1", "pc", 0, "Logged in using an API key cur-key-SECRET-999\n"))
-    assert (row.status, row.detail) == ("signed-out", account_doctor.CURSOR_API_KEY)
-    assert "SECRET" not in repr(row)
 
 
 def test_different_user_ids_are_different_sign_ins() -> None:
@@ -240,18 +240,18 @@ def test_different_user_ids_are_different_sign_ins() -> None:
 
 def test_one_account_signed_in_as_two_users_is_a_mismatch() -> None:
     box, mac = _judged(
-        ("cursor-ultra-1", "box", 0, SIGNED_IN_REPLIES["user-id"]),
-        ("cursor-ultra-1", "mac", 0, SIGNED_IN_REPLIES["user-id"].replace("synthetic-user-a", "synthetic-user-b")),
+        ("cursor-ultra", "box", 0, SIGNED_IN_REPLIES["user-id"]),
+        ("cursor-ultra", "mac", 0, SIGNED_IN_REPLIES["user-id"].replace("synthetic-user-a", "synthetic-user-b")),
     )
     assert (box.status, mac.status) == ("mismatch", "mismatch")
     assert box.detail == account_doctor.SPLIT_IDENTITY.format("mac")
 
 
-def test_two_accounts_on_one_email_are_a_mismatch_and_the_email_is_never_kept() -> None:
+def test_two_accounts_on_one_user_are_a_mismatch_and_the_email_is_never_kept() -> None:
     email = SIGNED_IN_REPLIES["email"]
-    a, b = _judged(("cursor-a", "pc", 0, email), ("cursor-b", "box", 0, email.upper()))
+    a, b = _judged(("cursor-a", "pc", 0, email), ("cursor-b", "box", 0, email))
     assert (a.status, b.status) == ("mismatch", "mismatch")
-    assert a.fingerprint == _cursor_fp("cursor.canary@example.com")
+    assert a.fingerprint == hashlib.sha256(b"cursor\x0042").hexdigest()[:12]
     assert "canary" not in repr((a, b)).lower()
 
 
@@ -265,14 +265,14 @@ def test_the_login_step_unsets_the_token_variables() -> None:
 ULTRA_MACHINES = """\
 orch_host: pc
 accounts:
-  - {id: cursor-ultra-1, harness: cursor, plan: ultra, label: "Cursor Ultra"}
+  - {id: cursor-ultra, harness: cursor, plan: ultra, label: "Cursor Ultra"}
 devices:
 """ + "".join(
     f"""\
   - name: {name}
     tailscale_name: {name}.example.ts.net
     slot_max: 2
-    harnesses: {{cursor: {{bot: cursor-bot, account: cursor-ultra-1}}}}
+    harnesses: {{cursor: {{bot: cursor-bot, account: cursor-ultra}}}}
     workdir_root: /home/{{bot}}/work
     ssh_alias: {name}-{{bot}}
     factory_root: /home/{{bot}}/factory
@@ -291,13 +291,13 @@ def test_one_cursor_account_is_each_devices_cursor_login(tmp_path: Path) -> None
     config, findings = _load(tmp_path, ULTRA_MACHINES)
     assert config is not None and findings == []
     for device in ("box", "mac", "pc"):
-        assert config.accounts_on(device, "cursor") == ("cursor-ultra-1",)
-        assert config.account_home(device, "cursor", "cursor-ultra-1") is None
+        assert config.accounts_on(device, "cursor") == ("cursor-ultra",)
+        assert config.account_home(device, "cursor", "cursor-ultra") is None
 
 
 def test_a_cursor_account_signed_in_from_a_folder_is_refused(tmp_path: Path) -> None:
     text = ULTRA_MACHINES.replace('label: "Cursor Ultra"', 'label: "Cursor Ultra", signed_in_on: [pc]')
-    text = text.replace("{bot: cursor-bot, account: cursor-ultra-1}", "cursor-bot").replace(
+    text = text.replace("{bot: cursor-bot, account: cursor-ultra}", "cursor-bot").replace(
         "factory_root: /home/{bot}/factory\n", "factory_root: /home/{bot}/factory\n    home: /home/{bot}\n"
     )
     config, findings = _load(tmp_path, text)
@@ -317,7 +317,7 @@ class CursorTransport:
         self.scripts[alias] = script
         if alias == "mac-cursor-bot":
             return Exchanged(SSH_UNREACHABLE, b"", "")
-        reply = SIGNED_IN_REPLIES["user-id"] if alias == "box-cursor-bot" else SIGNED_OUT_REPLIES["not-logged-in"]
+        reply = SIGNED_IN_REPLIES["user-id"] if alias == "box-cursor-bot" else SIGNED_OUT_REPLIES["not-logged-in"][0]
         return Exchanged(0, b"\nORCH-ACCOUNTS-BEGIN\n" + reply.encode() + b"\nORCH-ACCOUNT 0 0\n", "")
 
 
@@ -328,9 +328,9 @@ def test_the_doctor_checks_the_account_on_every_device_and_writes_its_rows(tmp_p
         account_doctor.run(connection, config, transport, NOW, None)
         rows = set(connection.execute(f"SELECT account, device, status FROM {account_doctor.TABLE}"))
     assert rows == {
-        ("cursor-ultra-1", "box", "ok"),
-        ("cursor-ultra-1", "mac", "unreachable"),
-        ("cursor-ultra-1", "pc", "signed-out"),
+        ("cursor-ultra", "box", "ok"),
+        ("cursor-ultra", "mac", "unreachable"),
+        ("cursor-ultra", "pc", "signed-out"),
     }
     for script in transport.scripts.values():
         assert "cursor-agent status" in script
@@ -371,15 +371,15 @@ def test_the_proposed_machines_yml_declares_the_account_on_box_mac_and_pc(tmp_pa
     assert config is not None
     assert not [item for item in findings if item.severity == "error"]
     assert [item for item in config.accounts if item.harness == "cursor"] == [
-        Account("cursor-ultra-1", "cursor", plan="ultra", label="Cursor Ultra")
+        Account("cursor-ultra", "cursor", plan="ultra", label="Cursor Ultra")
     ]
     for device in ("box", "mac", "pc"):
-        assert config.accounts_on(device, "cursor") == ("cursor-ultra-1",)
+        assert config.accounts_on(device, "cursor") == ("cursor-ultra",)
 
 
 def test_the_example_declares_the_cursor_login_beside_the_shared_pool() -> None:
     config, findings = load_machines_yml(ROOT / "config" / "machines.example.yml", overlay=False)
     assert config is not None and not [item for item in findings if item.severity == "error"]
     for device in ("box", "pc"):
-        assert config.accounts_on(device, "cursor") == ("cursor-ultra-1",)
+        assert config.accounts_on(device, "cursor") == ("cursor-ultra",)
     assert config.account("cursor-grok-ultra").harness == "external"

@@ -24,6 +24,7 @@ import threading
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -1271,6 +1272,7 @@ def test_snapshot_usage_has_one_entry_per_account(tmp_path: Path) -> None:
         "plan": None,
         "label": None,
         "source": "get_usage",
+        "not_tracked": None,
         "bot": "claude-bot",
         "bots": ["claude-bot"],
         "harness": "claude",
@@ -1286,7 +1288,6 @@ def test_snapshot_usage_has_one_entry_per_account(tmp_path: Path) -> None:
         "signed_in": ["box"],
         "running_on": [],
         "doctor": [{"device": "box", "status": "unchecked"}],
-        "reason": None,
         "limited_until": None,
         "limit_label": None,
         "recent_placements": 0,
@@ -1297,7 +1298,7 @@ def test_snapshot_usage_has_one_entry_per_account(tmp_path: Path) -> None:
     assert accounts["codex"]["state"] == "no reading"
     assert accounts["codex"]["headroom"] is None
     assert accounts["cursor"]["state"] == "not tracked"
-    assert accounts["cursor"]["reason"] == "Cursor CLI has no non-interactive usage command"
+    assert accounts["cursor"]["not_tracked"] == usage_readings.NOT_TRACKED["cursor"]
     json.dumps(snapshot, allow_nan=False)
 
 
@@ -1411,9 +1412,9 @@ def test_a_window_left_out_of_three_fresh_readings_is_not_on_the_plan(tmp_path: 
     assert codex["seven_day"] == {"used": 0.68, "resets_at": SEVEN_DAY_RESET, "observed_at": CAPTURED + 1200,
                                   "state": "ok"}
     assert codex["headroom"] == 0.32 and codex["state"] == "ok"
-    assert set(codex) == {"account", "plan", "label", "source", "bot", "bots", "harness", "devices", "state",
-                          "five_hour", "seven_day", "headroom", "observed_at", "age_seconds", "running",
-                          "max_jobs", "signed_in", "running_on", "doctor", "reason", "limited_until", "limit_label",
+    assert set(codex) == {"account", "plan", "label", "source", "not_tracked", "bot", "bots", "harness", "devices",
+                          "state", "five_hour", "seven_day", "headroom", "observed_at", "age_seconds", "running",
+                          "max_jobs", "signed_in", "running_on", "doctor", "limited_until", "limit_label",
                           "recent_placements", "effective_score", "placement_share", "skew"}
     assert set(codex["five_hour"]) == set(codex["seven_day"]) == {"used", "resets_at", "observed_at", "state"}
 
@@ -2089,3 +2090,9 @@ def test_live_get_usage_probe_parses() -> None:
     out = usage_probe.claude_local(shutil.which("claude") or "claude", dict(os.environ))
     assert b'"control_response"' in out
     parse_get_usage(out, __import__("time").time())
+
+
+def test_not_tracked_maps_each_harness_to_a_reason() -> None:
+    assert set(usage_readings.NOT_TRACKED) == {"cursor"}
+    assert all(isinstance(reason, str) and reason.strip() for reason in usage_readings.NOT_TRACKED.values())
+    assert isinstance(usage_readings.NOT_TRACKED, MappingProxyType)
