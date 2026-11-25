@@ -427,6 +427,43 @@ def test_an_exit_0_warning_from_agy_models_keeps_the_gemini_hold(
         assert list(connection.execute("SELECT account, device FROM signin_holds")) == [("gemini-ultra", "pc")]
 
 
+def test_running_the_doctor_on_a_gemini_device_login_prepares_no_account_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lib import settings_apply
+    from lib.remote import SshTransport
+    from tests.test_settings_apply import OWNER, Runner
+
+    devices = gemini_devices(tmp_path, monkeypatch)
+    with (devices.home / ".bash_profile").open("a", encoding="utf-8") as profile:
+        profile.write("export LOGNAME=gemini-bot USER=gemini-bot\n")
+    sqlite3.connect(devices.db).close()
+    state = tmp_path / "state"
+    state.mkdir()
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    spool.chmod(0o755)
+    applier = settings_apply.Applier(
+        machines=devices.machines, state_dir=state, deploy=tmp_path / "deploy",
+        approver="maxharris1", environ={}, restart=("poller",), pending=(),
+        claims=settings_apply.claim_lock(devices.db), run=Runner(None), clock=lambda: NOW,
+        db=devices.db, transport=SshTransport(), repo=None,
+    )
+    rid = "pair-0001-abcdefghijk"
+    request = spool / f"{rid}.json"
+    request.write_text(json.dumps({
+        "id": rid, "actor": "maxharris1", "requested_at": "2026-11-22T10:00:00Z",
+        "target": "account", "op": "doctor", "account": "gemini-ultra", "device": "pc",
+    }), encoding="utf-8")
+    request.chmod(0o644)
+
+    (entry,) = settings_apply.run_pass(applier, settings_apply.LocalSpool(spool), OWNER)
+
+    assert (entry.result, entry.error, entry.new) == ("applied", None, "ok"), entry
+    assert [call for call in devices.ssh.calls() if "accounts prepare" in call["script"]] == []
+    assert not (devices.home / ".factory-accounts").exists()
+
+
 def test_the_dashboard_and_doctor_give_the_interactive_agy_sign_in_command(tmp_path: Path) -> None:
     from lib import dashboard_accounts
     from lib.machines_yml import Account, Device, MachinesConfig
