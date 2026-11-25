@@ -25,7 +25,7 @@ import shlex
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Literal, Mapping, NoReturn
+from typing import Any, Callable, Literal, Mapping, NoReturn
 
 from lib.load import load_yaml
 from lib.pstack_models import rules_text
@@ -406,6 +406,21 @@ def canary_prompt() -> str:
     )
 
 
+def canary_prompt_for(driver: Any) -> str:
+    return (
+        f"Read the factory-builder skill at {driver.skills_dir}/factory-builder/SKILL.md.\n"
+        "Name the skill you loaded: factory-builder.\n"
+        "It routes to poteto-mode, installed beside it. "
+        "Quote the whole first bold passage of the pinned poteto-mode playbook "
+        "playbooks/orchestrate.md, exactly as written but without the ** markers, "
+        "on one line.\n"
+        "Reply with these three lines:\n"
+        f"started-by: {driver.bot_user}\n"
+        "skill: factory-builder\n"
+        "token: <that passage>\n"
+    )
+
+
 def pinned_token(root: Path) -> str:
     return _canary_token(root)
 
@@ -611,22 +626,26 @@ def _score_responses(responses: Path, token: str) -> list[str]:
         except UnicodeError:
             errors.append(f"{harness}: did not load the pinned version (reply is not utf-8)")
             continue
-        lines = [line.strip() for line in text.splitlines()]
-        owner = OWNERS[harness]
-        checks = (
-            ("started-by", owner, f"not started by {owner}"),
-            ("skill", "factory-builder", "did not name factory-builder"),
-            ("token", token, "token does not match the pin"),
-        )
-        for key, expected, wrong in checks:
-            found = [line for line in lines if line.startswith(f"{key}:")]
-            if len(found) > 1:
-                errors.append(f"{harness}: did not load the pinned version (more than one {key}: line)")
-                break
-            if found != [f"{key}: {expected}"]:
-                errors.append(f"{harness}: did not load the pinned version ({wrong})")
-                break
+        error = score_reply(harness, OWNERS[harness], text, token)
+        if error is not None:
+            errors.append(error)
     return errors
+
+
+def score_reply(harness: str, owner: str, text: str, token: str) -> str | None:
+    lines = [line.strip() for line in text.splitlines()]
+    checks = (
+        ("started-by", owner, f"not started by {owner}"),
+        ("skill", "factory-builder", "did not name factory-builder"),
+        ("token", token, "token does not match the pin"),
+    )
+    for key, expected, wrong in checks:
+        found = [line for line in lines if line.startswith(f"{key}:")]
+        if len(found) > 1:
+            return f"{harness}: did not load the pinned version (more than one {key}: line)"
+        if found != [f"{key}: {expected}"]:
+            return f"{harness}: did not load the pinned version ({wrong})"
+    return None
 
 
 def _skills(root: Path) -> tuple[tuple[str, Path], ...]:

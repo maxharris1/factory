@@ -44,7 +44,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
@@ -54,7 +54,8 @@ from typing import Literal
 from lib.codex_sandbox import for_device
 from lib.device_monitor import remote_target
 from lib.harness_env import account_environ, account_tokens, harness_env
-from lib.machines_yml import BOT_USERS, MachinesConfig, load_machines_yml
+from lib.harnesses import HarnessDriver, all_drivers
+from lib.machines_yml import BOT_USERS, Device, MachinesConfig, load_machines_yml
 from lib.remote import LOGIN_SHELL, RemoteError, RemoteTarget, new_tag, ssh_argv, start_script
 from lib.waiter import WaiterError, default_harness_config, load_harness_command
 
@@ -87,6 +88,10 @@ class Style(Enum):
     READ_PATH = "read-path"
     SLASH = "slash"
     CODEX_MENTION = "codex-skill"
+
+
+class CanaryStyle(Enum):
+    CANARY = "canary"
 
 
 @dataclass(frozen=True)
@@ -126,7 +131,7 @@ UNKNOWN = Evidence("unknown", None, "unknown", "unknown", None)
 class Launch:
     device: str
     harness: str
-    style: Style
+    style: Style | CanaryStyle
     argv: tuple[str, ...]
     env: Mapping[str, str]
     run_dir: str
@@ -458,24 +463,76 @@ def plan_launches(
         for spec in STYLES:
             if harness not in spec.harnesses:
                 continue
-            job_id = f"{run_id}-{harness}-{spec.style.value}"
-            env = harness_env(harness, home)
-            if device.local:
-                launches.append(
-                    Launch(device.name, harness, spec.style, tuple(command), env,
-                           str(Path(local_root, job_id)), path, account_home=home)
-                )
-                continue
-            target = remote_target(device, harness, job_id, new_tag())
-            if target is None:
-                continue
-            neutral = for_device(command)
-            launches.append(
-                Launch(device.name, harness, spec.style, neutral.argv, env, target.job_dir,
-                       path, target, neutral.guarded_dirs, neutral.insert_at, neutral.cd,
-                       home)
+            launch = device_launch(
+                device, harness, command, job_id=f"{run_id}-{harness}-{spec.style.value}",
+                local_root=local_root, style=spec.style, skill_md=path, home=home,
             )
+            if launch is not None:
+                launches.append(launch)
     return launches
+
+
+def device_launch(
+    device: Device,
+    harness: str,
+    command: Sequence[str],
+    *,
+    job_id: str,
+    local_root: str,
+    style: Style | CanaryStyle,
+    skill_md: str,
+    home: str | None = None,
+) -> Launch | None:
+    env = harness_env(harness, home)
+    if device.local:
+        return Launch(device.name, harness, style, tuple(command), env,
+                      str(Path(local_root, job_id)), skill_md, account_home=home)
+    target = remote_target(device, harness, job_id, new_tag())
+    if target is None:
+        return None
+    neutral = for_device(command)
+    return Launch(device.name, harness, style, neutral.argv, env, target.job_dir, skill_md,
+                  target, neutral.guarded_dirs, neutral.insert_at, neutral.cd, home)
+
+
+@dataclass(frozen=True)
+class CanaryTarget:
+    harness: str
+    bot: str
+    device: str
+    launch: Launch | None
+    skip: str | None
+
+
+def plan_canary(
+    machines: MachinesConfig,
+    refused: Collection[str],
+    commands: Mapping[str, Sequence[str]],
+    *,
+    run_id: str,
+    local_root: str,
+    drivers: Sequence[HarnessDriver] | None = None,
+) -> list[CanaryTarget]:
+    rows = []
+    for device in machines.devices:
+        for driver in all_drivers() if drivers is None else drivers:
+            harness = driver.name
+            if not device.eligible(harness):
+                continue
+            launch = None
+            if harness in refused:
+                skip = "refused in orch.yml"
+            elif harness not in commands:
+                skip = "no waiter command"
+            else:
+                launch = device_launch(
+                    device, harness, commands[harness], job_id=f"{run_id}-{harness}-canary",
+                    local_root=local_root, style=CanaryStyle.CANARY,
+                    skill_md=f"~/{driver.skills_dir}/factory-builder/SKILL.md",
+                )
+                skip = None if launch is not None else "machines.yml names no ssh alias"
+            rows.append(CanaryTarget(harness, driver.bot_user, device.name, launch, skip))
+    return rows
 
 
 def with_plugin_dir(argv: Sequence[str], plugin_dir: str) -> tuple[str, ...]:
