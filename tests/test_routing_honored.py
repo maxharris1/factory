@@ -824,3 +824,60 @@ def test_build_queued_before_routing_keeps_its_actual_builder(tmp_path: Path) ->
     assert [row["recipient"] for row in reviews] == ["codex"]
     restored = dispatcher._routed(ticket(brief, go, factory_config=routed)).factory
     assert (restored.builder_harness, restored.reviewer_harness) == ("claude", "codex")
+
+
+def test_a_dispatched_plan_runs_on_the_plan_slot_and_the_build_keeps_the_build_slot(
+    tmp_path: Path,
+) -> None:
+    from lib.factory_md import load_factory_md
+    from lib.role_router import Candidate, central_routing, resolve_slot, routing_argv_for_detail
+
+    config, _ = load_factory_md(Path(__file__).resolve().parents[1] / "factory.md")
+    central = central_routing()
+    plan = resolve_slot("plan", routing=central, factory=config)
+    build = resolve_slot("build", routing=central, factory=config)
+    assert plan.harness == "claude" == build.harness
+    assert (plan.model, plan.effort) != (build.model, build.effort)
+
+    dispatcher, queue = setup(tmp_path)
+    go = comment("go-1", _go("").replace("state=building", "state=planning"), author="grok-login")
+    dispatcher.process(ticket(go, factory_config=config))
+    job = queue.claim("claude")
+    assert job is not None and job.request.action == "plan"
+    assert routing_argv_for_detail(["claude", "-p"], harness="claude", detail=job.request.detail) == [
+        "claude", "-p", "--model", plan.model, "--effort", plan.effort,
+    ]
+    routing = json.loads(job.request.detail)["routing"]
+    assert (routing["builder_model"], routing["builder_effort"]) == (build.model, build.effort)
+
+    restored = dispatcher._routed(ticket(go, factory_config=config))
+    assert (restored.factory.builder_harness, restored.factory.builder_model) == (build.harness, build.model)
+    assert restored.router_picks is not None
+    assert restored.router_picks.planner == Candidate("claude", plan.model, plan.effort)
+
+
+def test_a_plan_routed_to_another_harness_takes_that_harness_plan_candidate(tmp_path: Path) -> None:
+    from lib.factory_md import FactoryRouting
+    from lib.role_router import central_routing, resolve_slot
+    from lib.schema import HARNESSES
+
+    config = replace(factory(), routing=FactoryRouting(budget="medium"))
+    plan = resolve_slot(
+        "plan",
+        routing=central_routing(),
+        factory=config,
+        unavailable_harnesses=set(HARNESSES) - {"codex"},
+    )
+    assert plan.harness == "codex"
+
+    dispatcher, queue = setup(tmp_path)
+    go = comment(
+        "go-1",
+        _go("builder=codex reviewer=claude ").replace("state=building", "state=planning"),
+        author="grok-login",
+    )
+    dispatcher.process(ticket(go, factory_config=config))
+    job = queue.claim("codex")
+    assert job is not None and job.request.action == "plan"
+    routing = json.loads(job.request.detail)["routing"]
+    assert (routing["plan_model"], routing["plan_effort"]) == (plan.model, plan.effort)
