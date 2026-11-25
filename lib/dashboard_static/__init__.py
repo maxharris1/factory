@@ -5,7 +5,8 @@ and `lib/dashboard_static/js/` as a real `.css` / `.js` file rather than a
 multiline Python string literal. `write_snapshot_pages()` publishes the
 assembled flat files (`STATIC_ASSETS`) atomically alongside `status.json`,
 the HTML pages, and `tickets.json`, and `deploy/factory-dashboard-http.py`
-serves them under `/static/<name>` with a strict `script-src 'self'` CSP.
+serves them at `/<name>` (and `/static/<name>`) with a strict
+`script-src 'self'` CSP, remaining compatible with `python3 -m http.server`.
 """
 
 from __future__ import annotations
@@ -15,11 +16,6 @@ from pathlib import Path
 
 STATIC_DIR = Path(__file__).resolve().parent
 STATIC_ASSETS = ("app.css", "app.js", "auth.js")
-STATIC_CONTENT_TYPES = {
-    "app.css": "text/css; charset=utf-8",
-    "app.js": "application/javascript; charset=utf-8",
-    "auth.js": "application/javascript; charset=utf-8",
-}
 
 
 @functools.lru_cache(maxsize=None)
@@ -32,5 +28,5 @@ def read_asset(relpath: str) -> str:
 
 
 def auth_script() -> str:
-    """Sign-in screen script served at /static/auth.js (no inline script)."""
+    """Sign-in screen script served at /auth.js and /static/auth.js (no inline script)."""
     return read_asset("js/auth.js")

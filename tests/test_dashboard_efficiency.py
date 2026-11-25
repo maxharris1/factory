@@ -644,7 +644,7 @@ def _load(browser: Browser, snapshot: dict, width: int, script: bool) -> None:
     from lib.dashboard_page import app_css
     bare = Path(browser.tmp.name) / f"bare-{width}.html"
     bare.write_text(
-        _page(snapshot).replace('<link rel="stylesheet" href="/static/app.css">', f"<style>{app_css()}</style>", 1),
+        _page(snapshot).replace('<link rel="stylesheet" href="/app.css">', f"<style>{app_css()}</style>", 1),
         encoding="utf-8",
     )
     browser.call("Emulation.setDeviceMetricsOverride", width=width, height=900, deviceScaleFactor=1, mobile=False)

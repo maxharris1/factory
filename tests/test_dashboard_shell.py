@@ -1074,7 +1074,7 @@ def _place_harness() -> str:
 def _place(tmp_path: Path, snapshot: dict, page_name: str, ids: list[str], actions: list, hash_: str = "") -> list[dict]:
     from lib.dashboard_page import page_script
     html = render_pages(snapshot)[page_name]
-    assert '<script src="/static/app.js" defer></script>' in html
+    assert '<script src="/app.js" defer></script>' in html
     script = page_script(snapshot.get("statechart"))
     out = layout.run_harness(tmp_path, _place_harness(), script, snapshot, SCRIPT_PAGE[page_name], ids, actions, hash_)
     return [step for step in out["steps"] if "where" in step]
@@ -1289,7 +1289,7 @@ def _link_run(tmp_path: Path, snapshot: dict, actions: list, name: str = "index.
     assert "kind === 'hide'" in harness and "if (failing)" in harness
     from lib.dashboard_page import page_script
     html = render_pages(snapshot)[name]
-    assert '<script src="/static/app.js" defer></script>' in html
+    assert '<script src="/app.js" defer></script>' in html
     script = page_script(snapshot.get("statechart"))
     return layout.run_harness(tmp_path, harness, script, snapshot, SCRIPT_PAGE[name], ids or BAR, actions)
 
@@ -1806,8 +1806,8 @@ def _fresh_page(snapshot: dict, name: str = "index.html") -> str:
     )
     return (
         render_pages(snapshot)[name]
-        .replace('<link rel="stylesheet" href="/static/app.css">', f"<style>{app_css()}</style>", 1)
-        .replace('<script src="/static/app.js" defer></script>', shim + f"<script>{page_script(snapshot.get('statechart'))}</script>", 1)
+        .replace('<link rel="stylesheet" href="/app.css">', f"<style>{app_css()}</style>", 1)
+        .replace('<script src="/app.js" defer></script>', shim + f"<script>{page_script(snapshot.get('statechart'))}</script>", 1)
     )
 
 

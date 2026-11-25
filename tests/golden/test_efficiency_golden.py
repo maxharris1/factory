@@ -14,11 +14,11 @@ GOLDEN = {
     "TELEMETRY_CSS": "649dcbbee7a9591b4dac5c5d49a14247192fb5baffe024921698d935b8437071",
     "__TELEMETRY__": "a36660b73d6a3ff62efe3db3e1e644deb2aa93f51ddf1021c50b9c150f96e114",
     "seeded/main": "2da26301d0862980ebee0d08b8250a2caa63fab7ab228fefa24c56ba7f0d9351",
-    "seeded/chrome": "08ef35bff09ffaafcc0ffc50b70448d2e5daf2382f291537a934e2ac6d2116fa",
+    "seeded/chrome": "a5c1175cbda351543bf166c301723cbc475f8773091b323154c27ad3ab084eef",
     "hostile/main": "2da26301d0862980ebee0d08b8250a2caa63fab7ab228fefa24c56ba7f0d9351",
-    "hostile/chrome": "5fb72c9efeb8bf4f7e8aa2b3ad6bb77dfe4af459fa5e5aa3e92994d1a6b3f123",
+    "hostile/chrome": "7ef4c156a2146cb43d2f8fb19e6eba65e7517dcd89d86925f05c6182b2ffdd0c",
     "empty/main": "144ee7728324301e2b449e1bc72c99c3c312f88f88c9f9a08b55c6515ede68a1",
-    "empty/chrome": "6801cace7fec4800fb20f65d65b03bb564f65dcf69b3710a0319190df89e4a17",
+    "empty/chrome": "a08702330d8b0addc8938571383c714763f6f2e156926b9dbbbaac9cecdb08bd",
 }
 
 

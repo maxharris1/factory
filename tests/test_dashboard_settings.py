@@ -258,7 +258,7 @@ def _harness(session: dict | None, reply: dict | None = None) -> str:
 def _run(tmp_path: Path, snapshot: dict, harness: str, actions: list | None = None) -> dict:
     from lib.dashboard_page import page_script
     html = render_pages(snapshot)["settings.html"]
-    assert '<script src="/static/app.js" defer></script>' in html
+    assert '<script src="/app.js" defer></script>' in html
     script = page_script(snapshot.get("statechart"))
     return layout.run_harness(tmp_path, harness, script, snapshot, "settings", IDS, actions or [])
 

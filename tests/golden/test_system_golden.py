@@ -13,11 +13,11 @@ GOLDEN = {
     "system.SCRIPT_HEALTH": "3d0bbddf094e7caaba8887cb17183942d34282cf925c7dfc34df2a83af847f8d",
     "system.SCRIPT_COMPONENTS": "bc8d14f54bb5d024ae9c09abb84630b467bc1382f63be67f63badadea71fb9fb",
     "seeded/main": "156af28150ab8af8c0c18b18b378e14d7436b6be46fa87f7e43630c927b94c81",
-    "seeded/chrome": "a7b6085a4f97d6c5b806e0da65ea5a087c00de5f0d30a5a1023b7be4fedc6f46",
+    "seeded/chrome": "36c0fce702fb3843b0850ebe1ce9b53d09cf18c1d1859314a00e237c3c3dbefe",
     "hostile/main": "156af28150ab8af8c0c18b18b378e14d7436b6be46fa87f7e43630c927b94c81",
-    "hostile/chrome": "54622290ff018a63b8a847b80bd87a3f5ff667f8d699b82056d69ecf98a5462d",
+    "hostile/chrome": "3b0fdfe73db0610fdcc2d71af5dc16bd4050cb7c861404d574b2bc645591c162",
     "empty/main": "f2e250fa756639df7b11fe2b6dfb4c15056abbc5ac6b212be8a4abe9c83353aa",
-    "empty/chrome": "d433c552e1ed5481cb6eca86d59f961c52e253c6ba14e7030453bd53d645d4e4",
+    "empty/chrome": "7ccfad9c442f949a77f177ce5b31a12a9d2961d344feb4b57635cd6ca7bafcdf",
 }
 
 

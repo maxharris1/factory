@@ -561,7 +561,7 @@ def _run_series(tmp_path: Path, snapshots: list[dict]) -> list[dict]:
     """The page script fed one snapshot per poll; the strips' state after each."""
     from lib.dashboard_page import page_script
     html = render_pages(snapshots[0])["index.html"]
-    assert '<script src="/static/app.js" defer></script>' in html
+    assert '<script src="/app.js" defer></script>' in html
     script = page_script(snapshots[0].get("statechart"))
     harness = HARNESS.replace(
         "const status = JSON.parse(statusText);",
@@ -661,8 +661,8 @@ def _page_with_status_stub(snapshot: dict, page: str) -> str:
     )
     return (
         render_pages(snapshot)[page]
-        .replace('<link rel="stylesheet" href="/static/app.css">', f"<style>{app_css()}</style>", 1)
-        .replace('<script src="/static/app.js" defer></script>', shim + f"<script>{page_script(snapshot.get('statechart'))}</script>", 1)
+        .replace('<link rel="stylesheet" href="/app.css">', f"<style>{app_css()}</style>", 1)
+        .replace('<script src="/app.js" defer></script>', shim + f"<script>{page_script(snapshot.get('statechart'))}</script>", 1)
     )
 
 
@@ -830,7 +830,7 @@ def test_long_intake_reasons_wrap_on_a_phone(tmp_path: Path, browser: Browser, r
         page = Path(browser.tmp.name) / "page.html"
         page.write_text(
             _no_script(render_pages(snapshot)["index.html"]).replace(
-                '<link rel="stylesheet" href="/static/app.css">', f"<style>{app_css()}</style>", 1
+                '<link rel="stylesheet" href="/app.css">', f"<style>{app_css()}</style>", 1
             ),
             encoding="utf-8",
         )
@@ -931,7 +931,7 @@ def test_header_counts_colours_and_wrap_come_from_the_artboard() -> None:
 def _still_held(lanes: str, page: str) -> None:
     from lib.dashboard_page import app_css
     assert lanes.count('class="tile empty px-held"') == 1
-    assert '<link rel="stylesheet" href="/static/app.css">' in page
+    assert '<link rel="stylesheet" href="/app.css">' in page
     style = app_css()
     assert ".px-held::after{" in style
     assert "px-march" not in style and not re.search(r"px-held[^{}]*\{[^}]*animation", style)

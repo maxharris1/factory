@@ -280,13 +280,13 @@ def _html(tmp_path: Path) -> str:
 
 
 def _script(html: str) -> str:
-    assert '<script src="/static/app.js" defer></script>' in html
+    assert '<script src="/app.js" defer></script>' in html
     assert "<script>" not in html
     return page.page_script(None)
 
 
 def _css(html: str) -> str:
-    assert '<link rel="stylesheet" href="/static/app.css">' in html
+    assert '<link rel="stylesheet" href="/app.css">' in html
     assert "<style>" not in html
     return page.app_css()
 
@@ -329,8 +329,8 @@ def test_pages_have_every_mission_control_panel(tmp_path: Path) -> None:
 def test_page_has_no_external_assets_or_markup_sinks(tmp_path: Path) -> None:
     html = _html(tmp_path)
     assert set(re.findall(r"https://[^/'\"]*/", html)) <= {"https://github.com/"}
-    assert '<link rel="stylesheet" href="/static/app.css">' in html
-    assert '<script src="/static/app.js" defer></script>' in html
+    assert '<link rel="stylesheet" href="/app.css">' in html
+    assert '<script src="/app.js" defer></script>' in html
     assert "<script>" not in html and "<style>" not in html
     for needle in ("http://", "@import", "url(", "//cdn"):
         assert needle not in html, needle

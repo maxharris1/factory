@@ -810,7 +810,7 @@ def test_the_page_carries_the_actions_api_and_no_credential(tmp_path: Path) -> N
     _review(snapshot).update(source="#563", pr="601")
     html = render_pages(snapshot)["job.html"]
     script = page_script(snapshot.get("statechart"))
-    assert '<script src="/static/app.js" defer></script>' in html
+    assert '<script src="/app.js" defer></script>' in html
     for hook in ("/api/session", "/api/signin/poll", "/api/comment", "/api/head", "/api/ok", "X-Factory-CSRF",
                  "Enter only this code on github.com."):
         assert hook in script, hook
@@ -912,7 +912,7 @@ def test_the_ticket_page_href_is_the_script_s_and_names_any_ticket(tmp_path: Pat
     rows = [{"repo": "maxharris1/cleffy", "ticket_id": tid} for tid in AWKWARD]
     from lib.dashboard_page import page_script
     snap = _snapshot(tmp_path)
-    assert '<script src="/static/app.js" defer></script>' in render_pages(snap)["ticket.html"]
+    assert '<script src="/app.js" defer></script>' in render_pages(snap)["ticket.html"]
     script = page_script(snap.get("statechart"))
     defs = re.findall(r"^  (function (?:ticketAddress|ticketPageHref)\(.*\}$)", script, re.M)
     assert len(defs) == 2
@@ -1249,7 +1249,7 @@ def _unloaded(snapshot: dict) -> dict:
 
 def _polled(tmp_path: Path, snapshot: dict, address: str, actions: list) -> dict:
     from lib.dashboard_page import page_script
-    assert '<script src="/static/app.js" defer></script>' in render_pages(snapshot)["ticket.html"]
+    assert '<script src="/app.js" defer></script>' in render_pages(snapshot)["ticket.html"]
     script = page_script(snapshot.get("statechart"))
     return run_harness(tmp_path, POLLED, script, snapshot, "ticket", TICKET_IDS, actions, "#t=" + _quote(address),
                        tickets_json(snapshot))
@@ -1405,7 +1405,7 @@ def test_records_behind_a_status_only_push_are_fetched_once_per_snapshot(tmp_pat
     snapshot = _snapshot(tmp_path)
     ahead = {**_unloaded(snapshot), "generated_at_epoch": snapshot["generated_at_epoch"] + 5}
     from lib.dashboard_page import page_script
-    assert '<script src="/static/app.js" defer></script>' in render_pages(snapshot)["ticket.html"]
+    assert '<script src="/app.js" defer></script>' in render_pages(snapshot)["ticket.html"]
     script = page_script(snapshot.get("statechart"))
     actions = [["poll", ahead], ["poll", ahead], ["poll", ahead], ["count"]]
     out = run_harness(tmp_path, POLLED, script, ahead, "ticket", TICKET_IDS, actions, "#t=" + _quote(address),
@@ -1426,7 +1426,7 @@ def test_records_older_than_the_status_load_again_on_each_poll_until_the_ticket_
     older = {**snapshot, "generated_at_epoch": snapshot["generated_at_epoch"] - 5,
              RECORDS: {key: record for key, record in snapshot[RECORDS].items() if key != address}}
     from lib.dashboard_page import page_script
-    assert '<script src="/static/app.js" defer></script>' in render_pages(snapshot)["ticket.html"]
+    assert '<script src="/app.js" defer></script>' in render_pages(snapshot)["ticket.html"]
     script = page_script(snapshot.get("statechart"))
 
     def run(target: str, actions: list) -> dict:
@@ -2225,7 +2225,7 @@ def test_on_a_phone_picking_a_bar_selects_it_and_leaves_the_run_log_where_it_is(
     label = html.unescape(re.search(r'<ol class="journey">.*?data-visit="2"[^>]*aria-label="([^"]*)"',
                                     _ticket_server(snapshot, address), re.S).group(1))
     from lib.dashboard_page import page_script
-    assert '<script src="/static/app.js" defer></script>' in render_pages(snapshot)["ticket.html"]
+    assert '<script src="/app.js" defer></script>' in render_pages(snapshot)["ticket.html"]
     script = page_script(snapshot.get("statechart"))
     found = {}
     for phone in (False, True):

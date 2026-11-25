@@ -14,11 +14,11 @@ GOLDEN = {
     "ci.SCRIPT": "b911e0070f5debca7d894695d5484929f5abc168b05e1665bc793351c463bc34",
     "__LANES__": "0a070c5626c19ae07dc2fd8adfb927643b397d9899d61f93f67b20ee6f76e617",
     "seeded/main": "abe3aa634faae48b94196a9c3078f2f47ed827b85aefc18d4e49a032f18366e3",
-    "seeded/chrome": "1016e48ed6bddec704f880970aef82ee9ad9675391acdc94fb8b17ad63c92fdd",
+    "seeded/chrome": "9522b88ea36b14ce7c9ce4c9643e3ea92aeffbf26a7a6923d5aef01d95a1b69d",
     "hostile/main": "abe3aa634faae48b94196a9c3078f2f47ed827b85aefc18d4e49a032f18366e3",
-    "hostile/chrome": "708c8815d81f3c47fbb58031682ce654338b8d050ec2a161f1f829daa3e2156e",
+    "hostile/chrome": "a356e44f87e1f0c9da99cd3328d7dd7747c1196b0922f3bb930dd7d3309a3341",
     "empty/main": "44ef347cd5ad692e00988cca924af44859d416608870fc1b1160ab6a070d370b",
-    "empty/chrome": "33978d6d8b7d918cc494a85b52846a6474f182662ed51e50f9c233eacc45c224",
+    "empty/chrome": "cf6c770af8638b93bb7d0a6c626e8d80263d8d3a51bf8f095b1f6f4154186a20",
 }
 
 

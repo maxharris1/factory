@@ -296,7 +296,7 @@ def test_the_script_draws_a_rerun_as_the_server_does(tmp_path: Path) -> None:
     snapshot = snapshot_with(tmp_path, seed)
     from lib.dashboard_page import page_script
     html = render_pages(snapshot)["index.html"]
-    assert '<script src="/static/app.js" defer></script>' in html
+    assert '<script src="/app.js" defer></script>' in html
     script = page_script(snapshot.get("statechart"))
     out = run_harness(tmp_path, activity.HARNESS, script, snapshot, "main", IDS, [["snap", ["lanes"]]])
     assert _ci_lane(out["steps"][0]["snap"]["lanes"]) == _lane(snapshot)
@@ -330,7 +330,7 @@ def test_the_script_redraws_the_lane_live_as_the_server_draws_it(tmp_path: Path)
     passed = _moved(first, 5, "completed", "success")
     from lib.dashboard_page import page_script
     html = render_pages(first)["index.html"]
-    assert '<script src="/static/app.js" defer></script>' in html
+    assert '<script src="/app.js" defer></script>' in html
     script = page_script(first.get("statechart"))
     snap = ["snap", ["lanes"]]
     actions = [snap, ["advance", 3], snap, ["poll", running], snap, ["advance", 2], ["poll", passed], snap]
@@ -360,7 +360,7 @@ def test_the_ticket_page_script_draws_the_ci_popup_as_the_server_does(tmp_path: 
     assert "actions/runs/8800/job/8802" in dialog and "test_waiting_on_capacity" in dialog
     from lib.dashboard_page import page_script
     html = render_pages(snapshot)["ticket.html"]
-    assert '<script src="/static/app.js" defer></script>' in html
+    assert '<script src="/app.js" defer></script>' in html
     script = page_script(snapshot.get("statechart"))
     out = run_harness(tmp_path, activity.HARNESS, script, snapshot, "ticket", BAR + ["hud", "ticketview"],
                       [["snap", ["ticketview"]]], "#t=maxharris1%2Fcleffy%2313&ci=1", tickets_json(snapshot))
@@ -502,7 +502,7 @@ def _open_server_page(browser: Browser, html: str, width: int) -> None:
     from lib.dashboard_page import app_css
     page = Path(browser.tmp.name) / "page.html"
     page.write_text(
-        html.replace('<link rel="stylesheet" href="/static/app.css">', f"<style>{app_css()}</style>", 1),
+        html.replace('<link rel="stylesheet" href="/app.css">', f"<style>{app_css()}</style>", 1),
         encoding="utf-8",
     )
     browser.call("Emulation.setDeviceMetricsOverride", width=width, height=900, deviceScaleFactor=1, mobile=False)
@@ -538,7 +538,7 @@ def test_the_script_draws_a_compact_card_as_the_server_does(tmp_path: Path, name
     from lib.dashboard_page import page_script
     snapshot = SIZED[name](tmp_path)
     html = render_pages(snapshot)["index.html"]
-    assert '<script src="/static/app.js" defer></script>' in html
+    assert '<script src="/app.js" defer></script>' in html
     script = page_script(snapshot.get("statechart"))
     out = run_harness(tmp_path, activity.HARNESS, script, snapshot, "main", IDS, [["snap", ["lanes"]]])
     assert _ci_lane(out["steps"][0]["snap"]["lanes"]) == _lane(snapshot)
@@ -604,7 +604,7 @@ def test_the_script_draws_the_ci_attention_counts_as_the_server_does(tmp_path: P
     from lib.dashboard_page import page_script
     snapshot = snapshot_with(tmp_path, ci_attention_fixture)
     html = render_pages(snapshot)["index.html"]
-    assert '<script src="/static/app.js" defer></script>' in html
+    assert '<script src="/app.js" defer></script>' in html
     script = page_script(snapshot.get("statechart"))
     out = run_harness(tmp_path, activity.HARNESS, script, snapshot, "main", IDS, [["snap", ["lanes"]]])
     assert _ci_lane(out["steps"][0]["snap"]["lanes"]) == _lane(snapshot)

@@ -529,7 +529,7 @@ def _server(snapshot: dict) -> dict[str, str]:
 def _script(tmp_path: Path, snapshot: dict, actions: list | None = None, harness: str = HARNESS) -> dict:
     from lib.dashboard_page import page_script
     html = render_pages(snapshot)["activity.html"]
-    assert '<script src="/static/app.js" defer></script>' in html
+    assert '<script src="/app.js" defer></script>' in html
     script = page_script(snapshot.get("statechart"))
     return layout.run_harness(tmp_path, harness, script, snapshot, "activity", IDS, actions or [])
 
@@ -972,7 +972,7 @@ def _load(browser: Browser, snapshot: dict, width: int, script: bool) -> None:
     bare = Path(browser.tmp.name) / f"bare-{width}.html"
     bare.write_text(
         render_pages(snapshot)["activity.html"].replace(
-            '<link rel="stylesheet" href="/static/app.css">', f"<style>{app_css()}</style>", 1
+            '<link rel="stylesheet" href="/app.css">', f"<style>{app_css()}</style>", 1
         ),
         encoding="utf-8",
     )

@@ -1490,8 +1490,8 @@ def test_html_is_self_contained(tmp_path: Path) -> None:
     html = render_html(snapshot)
     script = dashboard.render_static_assets(snapshot)["app.js"]
     assert html.startswith("<!doctype html>")
-    assert '<link rel="stylesheet" href="/static/app.css">' in html
-    assert '<script src="/static/app.js" defer></script>' in html
+    assert '<link rel="stylesheet" href="/app.css">' in html
+    assert '<script src="/app.js" defer></script>' in html
     assert "<script>" not in html and "<style>" not in html
     assert "http://" not in html and "http://" not in script
     # #563: the only https:// text is a link to github.com, never an asset.

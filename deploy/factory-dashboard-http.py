@@ -127,7 +127,10 @@ PAGES = (
     "settings.html",
 )
 STATIC_ASSETS = ("app.css", "app.js", "auth.js")
-STATIC_ROUTES = {f"/static/{name}": name for name in STATIC_ASSETS}
+STATIC_ROUTES = {
+    **{f"/{name}": name for name in STATIC_ASSETS},
+    **{f"/static/{name}": name for name in STATIC_ASSETS},
+}
 STATIC_CONTENT_TYPES = {
     "app.css": "text/css; charset=utf-8",
     "app.js": "application/javascript; charset=utf-8",
@@ -229,7 +232,7 @@ _AUTH_REQUIRED_HTML = (
     "code{padding:.2rem .4rem;background:#1d2129;border-radius:4px}a{color:#7cb7ff}</style></head>"
     "<body><h1>Sign in required</h1><p>Authenticate with GitHub to view Factory Mission Control.</p>"
     "<div id='auth'><button id='go' type='button'>Sign in with GitHub</button></div><p id='msg'></p>"
-    "<script src='/static/auth.js' defer></script></body></html>\n"
+    "<script src='/auth.js' defer></script></body></html>\n"
 ).encode("utf-8")
 
 
@@ -1614,9 +1617,9 @@ class SnapshotHandler(BaseHTTPRequestHandler):
 
     def _serve(self, *, body: bool) -> None:
         path = urlsplit(self.path).path
-        # The 401 sign-in screen loads /static/auth.js under script-src 'self',
-        # so auth.js is served even before a session exists.
-        if path == "/static/auth.js":
+        # The 401 sign-in screen loads /auth.js under script-src 'self',
+        # so auth.js is served even before a session exists (both /auth.js and /static/auth.js).
+        if path in ("/auth.js", "/static/auth.js"):
             self._serve_static("auth.js", body=body)
             return
         actions: Actions | None = self.server.actions  # type: ignore[attr-defined]

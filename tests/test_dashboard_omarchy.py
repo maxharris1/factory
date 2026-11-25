@@ -30,13 +30,13 @@ def _snapshot(tmp_path: Path) -> dict:
 
 
 def _css(html: str) -> str:
-    assert '<link rel="stylesheet" href="/static/app.css">' in html
+    assert '<link rel="stylesheet" href="/app.css">' in html
     assert "<style>" not in html
     return page.app_css()
 
 
 def _script(html: str) -> str:
-    assert '<script src="/static/app.js" defer></script>' in html
+    assert '<script src="/app.js" defer></script>' in html
     assert "<script>" not in html
     return page.page_script(None)
 

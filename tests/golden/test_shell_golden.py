@@ -139,8 +139,8 @@ def test_every_page_links_the_static_css_and_script(site) -> None:
         assert assets["app.js"] == page.page_script(snapshot.get("statechart"))
         for name, html in pages.items():
             split(html)
-            assert '<link rel="stylesheet" href="/static/app.css">' in html, name
-            assert '<script src="/static/app.js" defer></script>' in html, name
+            assert '<link rel="stylesheet" href="/app.css">' in html, name
+            assert '<script src="/app.js" defer></script>' in html, name
             assert "<script>" not in html and "<style>" not in html, name
 
 

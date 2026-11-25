@@ -60,9 +60,9 @@ def test_rendered_pages_have_zero_inline_scripts_or_styles(tmp_path: Path) -> No
     pages = render_pages(snap)
     assert set(pages) == set(PAGES)
     for name, html in pages.items():
-        assert '<link rel="stylesheet" href="/static/app.css">' in html, name
-        assert '<script src="/static/app.js" defer></script>' in html, name
-        # Zero inline <script> blocks (only external src="/static/app.js")
+        assert '<link rel="stylesheet" href="/app.css">' in html, name
+        assert '<script src="/app.js" defer></script>' in html, name
+        # Zero inline <script> blocks (only external src="/app.js")
         inline_scripts = re.findall(r"<script(?![^>]*\bsrc=)[^>]*>", html, flags=re.I)
         assert inline_scripts == [], (name, inline_scripts)
         assert "<style" not in html.lower(), name
@@ -71,9 +71,37 @@ def test_rendered_pages_have_zero_inline_scripts_or_styles(tmp_path: Path) -> No
 def test_auth_required_page_has_no_inline_script_and_auth_js_matches_source() -> None:
     mod = _load_server()
     html = mod._AUTH_REQUIRED_HTML.decode("utf-8")
-    assert "<script src='/static/auth.js' defer></script>" in html
+    assert "<script src='/auth.js' defer></script>" in html
     assert re.findall(r"<script(?![^>]*\bsrc=)[^>]*>", html, flags=re.I) == []
     assert mod._AUTH_JS.decode("utf-8") == auth_script()
+
+
+def test_simple_http_server_serves_every_published_page_asset(tmp_path: Path) -> None:
+    """Retained python3 -m http.server fallback must serve every referenced asset with 200."""
+    from http.server import SimpleHTTPRequestHandler
+
+    site = tmp_path / "site"
+    write_snapshot_pages(site, snapshot_for(tmp_path))
+    for page_name in PAGES:
+        html = (site / page_name).read_text(encoding="utf-8")
+        urls = re.findall(r'(?:href|src)="(/[^"]+\.(?:css|js))"', html)
+        assert urls == ["/app.css", "/app.js"], (page_name, urls)
+        for url in urls:
+            handler = object.__new__(SimpleHTTPRequestHandler)
+            handler.directory = str(site)
+            handler.command = "GET"
+            handler.request_version = "HTTP/1.1"
+            handler.headers = {}
+            codes: list[int] = []
+            handler.send_response = lambda code, *args, _c=codes: _c.append(code)
+            handler.send_error = lambda code, *args, _c=codes: _c.append(code)
+            handler.send_header = lambda *args: None
+            handler.end_headers = lambda: None
+            handler.path = url
+            resp = handler.send_head()
+            if resp is not None:
+                resp.close()
+            assert codes == [200], (page_name, url, codes)
 
 
 def test_strict_csp_drops_unsafe_inline_from_script_src() -> None:
@@ -110,30 +138,31 @@ def test_static_routes_serve_assets_and_block_traversals_and_links(tmp_path: Pat
         }
         assets = render_static_assets(snap)
         for name, ctype in expected_types.items():
-            code, hdrs, body = req(f"/static/{name}")
-            assert code == 200, name
-            assert hdrs["content-type"] == ctype
-            assert hdrs["x-content-type-options"] == "nosniff"
-            assert hdrs["cache-control"] == "no-store"
-            assert "script-src 'self';" in hdrs["content-security-policy"]
-            assert body.decode("utf-8") == assets[name]
-            hcode, hhdrs, hbody = req(f"/static/{name}", method="HEAD")
-            assert (hcode, hbody, hhdrs["content-length"]) == (200, b"", str(len(body)))
+            for route in (f"/{name}", f"/static/{name}"):
+                code, hdrs, body = req(route)
+                assert code == 200, route
+                assert hdrs["content-type"] == ctype
+                assert hdrs["x-content-type-options"] == "nosniff"
+                assert hdrs["cache-control"] == "no-store"
+                assert "script-src 'self';" in hdrs["content-security-policy"]
+                assert body.decode("utf-8") == assets[name]
+                hcode, hhdrs, hbody = req(route, method="HEAD")
+                assert (hcode, hbody, hhdrs["content-length"]) == (200, b"", str(len(body)))
 
-        # Non-allowlisted paths, direct root asset paths, dot-temp files, traversals must 404
+        # Non-allowlisted paths, dot-temp files, traversals must 404
         for bad in (
-            "/app.css",
-            "/app.js",
-            "/auth.js",
             "/static/",
             "/static/index.html",
             "/static/status.json",
             "/static/tickets.json",
             "/static/.app.js.push-tmp",
+            "/.app.js.push-tmp",
             "/static/../secret.txt",
             "/static/%2e%2e/secret.txt",
             "/static/app.js/extra",
+            "/app.js/extra",
             "/static/unknown.js",
+            "/unknown.js",
         ):
             code, _, body = req(bad)
             assert code == 404, bad
@@ -143,16 +172,18 @@ def test_static_routes_serve_assets_and_block_traversals_and_links(tmp_path: Pat
         for name in ("app.js", "auth.js"):
             (site / name).unlink()
             (site / name).symlink_to(outside)
-            code, _, body = req(f"/static/{name}")
-            assert code == 404, f"symlink for {name} must 404"
-            assert b"TOP_SECRET_CANARY" not in body
+            for route in (f"/{name}", f"/static/{name}"):
+                code, _, body = req(route)
+                assert code == 404, f"symlink for {route} must 404"
+                assert b"TOP_SECRET_CANARY" not in body
 
         # Hardlink must be refused
         (site / "app.css").unlink()
         os.link(outside, site / "app.css")
-        code, _, body = req("/static/app.css")
-        assert code == 404
-        assert b"TOP_SECRET_CANARY" not in body
+        for route in ("/app.css", "/static/app.css"):
+            code, _, body = req(route)
+            assert code == 404
+            assert b"TOP_SECRET_CANARY" not in body
     finally:
         server.shutdown()
         server.server_close()
@@ -180,13 +211,14 @@ def test_require_auth_reads_allows_auth_js_only_before_signin(tmp_path: Path) ->
     handler._send = lambda code, data, ctype, **kw: out.append((code, ctype, data))
     handler._json = lambda code, data: out.append((code, "application/json", json.dumps(data).encode()))
     try:
-        for route in ("/", "/static/app.css", "/static/app.js", "/static/auth.js"):
+        for route in ("/", "/app.css", "/app.js", "/static/app.css", "/static/app.js", "/auth.js", "/static/auth.js"):
             handler.path = route
             handler._serve(body=True)
-        assert [c for c, _, _ in out] == [401, 401, 401, 200]
-        assert b"/static/auth.js" in out[0][2]
-        assert out[3][1] == "application/javascript; charset=utf-8"
-        assert out[3][2] == mod._AUTH_JS
+        assert [c for c, _, _ in out] == [401, 401, 401, 401, 401, 200, 200]
+        assert b"/auth.js" in out[0][2]
+        assert out[5][1] == "application/javascript; charset=utf-8"
+        assert out[5][2] == mod._AUTH_JS
+        assert out[6][2] == mod._AUTH_JS
     finally:
         os.close(handler.server.root_fd)
 
@@ -235,4 +267,5 @@ def test_app_css_and_static_assets_list_match_server_routes() -> None:
     assert tuple(STATIC_ASSETS) == tuple(mod.STATIC_ASSETS)
     assert app_css()
     for name in STATIC_ASSETS:
+        assert mod.STATIC_ROUTES[f"/{name}"] == name
         assert mod.STATIC_ROUTES[f"/static/{name}"] == name

@@ -30,8 +30,8 @@ PAGE_FILES = {
 MARKERS = {"main": "\0main\0"}
 
 _PAGE = re.compile(
-    r'(.*?<link rel="stylesheet" href="/static/app\.css"></head>.*?<main id="hud" tabindex="-1">)(.*?)'
-    r'(</main>.*?<script src="/static/app\.js" defer></script>\n</body></html>\n)',
+    r'(.*?<link rel="stylesheet" href="/app\.css"></head>.*?<main id="hud" tabindex="-1">)(.*?)'
+    r'(</main>.*?<script src="/app\.js" defer></script>\n</body></html>\n)',
     re.S,
 )
 

@@ -408,9 +408,12 @@ def test_broken_now_is_first_and_lists_each_item(tmp_path: Path) -> None:
 
 @needs_node
 def test_script_broken_now_is_first_and_lists_each_item(tmp_path: Path) -> None:
+    from lib.dashboard_page import page_script
+
     snapshot = _down(tmp_path)
     out = _run_page(tmp_path, snapshot, "health", BAR + ["hud", *PANELS])
-    assert "health: [renderBroken, renderComponents," in render_pages(snapshot)["health.html"]
+    assert '<script src="/app.js" defer></script>' in render_pages(snapshot)["health.html"]
+    assert "health: [renderBroken, renderComponents," in page_script(snapshot.get("statechart"))
     assert not out["hidden"]["broken"]
     broken = out["html"]["broken"]
     assert '<span class="count bad">2 components down · 1 component stale</span>' in broken
@@ -824,11 +827,6 @@ CHROME = next(filter(None, map(shutil.which, ("google-chrome", "chromium", "chro
 
 
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
-    def translate_path(self, path: str) -> str:
-        if path.startswith("/static/"):
-            path = "/" + path.removeprefix("/static/")
-        return super().translate_path(path)
-
     def log_message(self, format: str, *args: object) -> None:
         pass
 

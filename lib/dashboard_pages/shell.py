@@ -559,7 +559,7 @@ _PANELS = {
 }
 
 
-def _page(snapshot: dict, name: str, *, css: str = "", script: str = "") -> str:
+def _page(snapshot: dict, name: str) -> str:
     page, label = _PAGE_NAMES[name]
     refresh = int(snapshot["refresh_seconds"])
     panels = "".join(draw(snapshot) for draw in _PANELS[name])
@@ -575,7 +575,7 @@ def _page(snapshot: dict, name: str, *, css: str = "", script: str = "") -> str:
             '<meta name="robots" content="noindex">',
             '<meta name="color-scheme" content="dark">',
             f"<title>factory mission control · {label.lower()}</title>",
-            '<link rel="stylesheet" href="/static/app.css"></head>',
+            '<link rel="stylesheet" href="/app.css"></head>',
             f'<body data-page="{page}" '
             f'data-generated="{float(snapshot["generated_at_epoch"]):.3f}" '
             f'data-refresh="{refresh}">',
@@ -583,7 +583,7 @@ def _page(snapshot: dict, name: str, *, css: str = "", script: str = "") -> str:
             _topbar(snapshot, name),
             f'<main id="hud" tabindex="-1">{heading}{panels}</main>',
             _statusline(snapshot),
-            '<script src="/static/app.js" defer></script>',
+            '<script src="/app.js" defer></script>',
             "</body></html>",
         ]
     ) + "\n"

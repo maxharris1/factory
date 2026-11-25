@@ -194,7 +194,7 @@ def _script(tmp_path: Path, snapshot: dict, actions: list | None = None, page_fr
     from lib.dashboard_page import page_script
     src_snap = page_from or snapshot
     html = render_pages(src_snap)["job.html"]
-    assert '<script src="/static/app.js" defer></script>' in html
+    assert '<script src="/app.js" defer></script>' in html
     script = page_script(src_snap.get("statechart"))
     return layout.run_harness(tmp_path, HARNESS, script, snapshot, "job", IDS, actions or [])
 
@@ -806,7 +806,7 @@ def test_a_held_card_with_no_job_keeps_the_comment_and_ok_controls(tmp_path: Pat
     held.update(state="awaiting-ok", waiting_on="maxharris1", source="#563", pr="601")
     from lib.dashboard_page import page_script
     html = render_pages(snap)["job.html"]
-    assert '<script src="/static/app.js" defer></script>' in html
+    assert '<script src="/app.js" defer></script>' in html
     script = page_script(snap.get("statechart"))
     out = layout.run_harness(tmp_path, SIGNED_IN, script, snap, "job", IDS, [])
     card = _card(out["html"]["pipeline"], _key(held))
@@ -986,7 +986,7 @@ def _stored(tmp_path: Path, snapshot: dict, store: dict | None, actions: list) -
     assert "await act(" in harness and "polls.push(fn)" in harness
     from lib.dashboard_page import page_script
     html = render_pages(snapshot)["job.html"]
-    assert '<script src="/static/app.js" defer></script>' in html
+    assert '<script src="/app.js" defer></script>' in html
     script = page_script(snapshot.get("statechart"))
     return layout.run_harness(tmp_path, harness, script, snapshot, "job", IDS, actions)
 
@@ -1517,7 +1517,7 @@ MORE_HARNESS = HARNESS.replace(
 def test_script_more_box_stays_open_across_redraws(tmp_path: Path, ordered: dict) -> None:
     assert "kind === 'more'" in MORE_HARNESS
     from lib.dashboard_page import page_script
-    assert '<script src="/static/app.js" defer></script>' in render_pages(ordered)["job.html"]
+    assert '<script src="/app.js" defer></script>' in render_pages(ordered)["job.html"]
     script = page_script(ordered.get("statechart"))
     actions = [["more", "look"], ["hashchange", None], ["more", "look"], ["more", "toggle"],
                ["hashchange", None], ["more", "look"]]
@@ -1590,7 +1590,7 @@ SHELF_HARNESS = HARNESS.replace(
 def _shelf_script(tmp_path: Path, snapshot: dict, actions: list) -> list[dict]:
     assert "kind === 'shelf'" in SHELF_HARNESS
     from lib.dashboard_page import page_script
-    assert '<script src="/static/app.js" defer></script>' in render_pages(snapshot)["job.html"]
+    assert '<script src="/app.js" defer></script>' in render_pages(snapshot)["job.html"]
     script = page_script(snapshot.get("statechart"))
     return layout.run_harness(tmp_path, SHELF_HARNESS, script, snapshot, "job", IDS, actions)["steps"]
 
@@ -1820,7 +1820,7 @@ def test_a_phone_without_scripts_lists_every_phase(snapshot: dict) -> None:
         page = Path(browser.tmp.name) / "page.html"
         page.write_text(
             render_pages(snapshot)["job.html"].replace(
-                '<link rel="stylesheet" href="/static/app.css">', f"<style>{app_css()}</style>", 1
+                '<link rel="stylesheet" href="/app.css">', f"<style>{app_css()}</style>", 1
             ),
             encoding="utf-8",
         )
@@ -1847,8 +1847,8 @@ def test_a_phone_whose_status_fetch_fails_lists_every_phase(snapshot: dict) -> N
         page = Path(browser.tmp.name) / "page.html"
         page.write_text(
             render_pages(snapshot)["job.html"]
-            .replace('<link rel="stylesheet" href="/static/app.css">', f"<style>{app_css()}</style>", 1)
-            .replace('<script src="/static/app.js" defer></script>', shim + f"<script>{page_script(snapshot.get('statechart'))}</script>", 1),
+            .replace('<link rel="stylesheet" href="/app.css">', f"<style>{app_css()}</style>", 1)
+            .replace('<script src="/app.js" defer></script>', shim + f"<script>{page_script(snapshot.get('statechart'))}</script>", 1),
             encoding="utf-8",
         )
         browser.call("Emulation.setDeviceMetricsOverride", width=375, height=900, deviceScaleFactor=1, mobile=False)

@@ -639,8 +639,8 @@ def test_pages_have_no_external_assets_or_markup_sinks(tmp_path: Path) -> None:
     for name, html in render_pages(snap).items():
         # #563: the only https:// text is a link to github.com, never an asset.
         assert set(re.findall(r"https://[^/'\"]*/", html)) <= {"https://github.com/"}, name
-        assert '<link rel="stylesheet" href="/static/app.css">' in html, name
-        assert '<script src="/static/app.js" defer></script>' in html, name
+        assert '<link rel="stylesheet" href="/app.css">' in html, name
+        assert '<script src="/app.js" defer></script>' in html, name
         assert "<script>" not in html and "<style>" not in html, name
         for needle in ("http://", "@import", "url(", "//cdn"):
             assert needle not in html, (name, needle)
@@ -845,7 +845,7 @@ def _run_page(
 ) -> dict:
     name = {"main": "index.html"}.get(page, f"{page}.html")
     html = render_pages(snapshot)[name]
-    assert '<script src="/static/app.js" defer></script>' in html
+    assert '<script src="/app.js" defer></script>' in html
     script = dashboard.render_static_assets(snapshot)["app.js"]
     assert f'data-page="{page}"' in html
     out = run_harness(tmp_path, HARNESS, script, snapshot, page, ids, actions or [], hash_, tickets_json(snapshot))
