@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import ast
 import re
+import subprocess
+import urllib.request
 from pathlib import Path
 
 import pytest
 import yaml
 
-from lib import cli
+import lib.qa_runners.fake
+import lib.qa_smoke
+from lib import cli, github_actions, qa_runners, qa_storage
 from lib.factory_md import EXAMPLE_PATHS, QaRunner, parse_factory_md
 from lib.load import split_front_matter
 
@@ -100,8 +105,6 @@ def smoke_orch(tmp_path: Path, root: Path | None) -> Path:
 
 
 def smoke(orch: Path, repo: str = "owner/repo", runner: str = "fake") -> int:
-    import lib.qa_runners.fake  # noqa: F401
-
     return cli.main(["qa", "smoke", "--repo", repo, "--runner", runner, "--orch", str(orch)])
 
 
@@ -132,11 +135,6 @@ def test_qa_smoke_passes_with_a_fake_runner_and_leaves_the_evidence_root_unchang
 def test_qa_smoke_writes_where_the_dashboard_reads_and_touches_no_github(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    import subprocess
-    import urllib.request
-
-    from lib import github_actions, qa_storage
-
     def forbidden(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("orch qa smoke reached GitHub or the network")
 
@@ -158,10 +156,6 @@ def test_qa_smoke_writes_where_the_dashboard_reads_and_touches_no_github(
         out[3],
     )
     assert list(root.iterdir()) == []
-    import ast
-
-    import lib.qa_smoke
-
     tree = ast.parse(Path(lib.qa_smoke.__file__).read_text(encoding="utf-8"))
     imported = [
         f"{getattr(node, 'module', '')}.{alias.name}"
@@ -205,10 +199,7 @@ def test_qa_smoke_without_qa_storage_fails_project_and_skips_the_rest(
 def test_qa_smoke_reports_a_runner_outage_and_an_unknown_runner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from lib import qa_runners
-    from lib.qa_runners.fake import FakeRunner
-
-    down = FakeRunner()
+    down = lib.qa_runners.fake.FakeRunner()
     down.ping_error = qa_runners.RunnerOutage("docker daemon unavailable")
     monkeypatch.setitem(qa_runners._REGISTRY, "fake-down", lambda: down)
     root = tmp_path / "evidence"

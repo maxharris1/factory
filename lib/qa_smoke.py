@@ -1,7 +1,3 @@
-"""`orch qa smoke`: a synthetic readiness check of a QA runner and evidence root (#1591).
-
-It posts no GitHub comment, signs no storage link and launches no lane."""
-
 from __future__ import annotations
 
 import json
