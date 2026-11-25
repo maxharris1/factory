@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from lib.brief.build import builder_notes, proof_lines
-from lib.brief.common import TEST_SCOPE, Lead, detail_of, pr_ref, stack_lines
+from lib.brief.common import NO_CI_WAIT, TEST_SCOPE, Lead, detail_of, pr_ref, stack_lines
 from lib.queue import Job
 
 
@@ -37,6 +37,7 @@ def lead(job: Job, facts: dict) -> Lead:
             f"check that `git rev-parse HEAD` prints `{head}`, push nothing, and post a `questions` "
             "handoff that names each file. That questions handoff is the job's handoff.",
             *builder_notes(job, facts),
+            NO_CI_WAIT,
         ),
         (
             f"The ready names the pushed head: `origin/{base}` plus the PR's commits, with no merge commit.",

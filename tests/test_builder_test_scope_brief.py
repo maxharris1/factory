@@ -26,9 +26,9 @@ def test_builder_briefs_scope_tests_to_touched_files_and_never_wait_on_the_suite
     for section in sections(kind):
         lines = section.splitlines()
         assert SCOPE in lines
-        assert NEVER_FULL_SUITE in lines
+        assert (NEVER_FULL_SUITE in lines) is (kind == "merge-only")
         assert section.count("in the foreground") == 1
-        assert section.count("wait on") == 1
+        assert section.count("wait on") == (kind == "merge-only")
         step = next(line for line in lines if FOREGROUND in line)
         assert step.startswith(("3. ", "4. ")) and "in the background or in chunks" in step
         assert "however long they take" not in section

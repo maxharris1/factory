@@ -11,11 +11,9 @@ Read the findings in the verdict at https://github.com/owner/repo/pull/42#issuec
 1. Check out the PR branch (`gitBranchName` in Job data) and confirm `git rev-parse HEAD` is 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6.
 2. For each finding: name the rule it breaks, find every path that breaks that rule, fix them all, and add a test of the rule that fails on the current head. Fixing only the line the reviewer quoted is not a fix.
 3. Run only the new tests and the tests for the files you touched, plus a short smoke set, in the foreground; never the whole suite, in the background or in chunks. Then run the router's "Before ready" steps.
-4. Before `ready`: `git fetch origin dev`, then `git rebase origin/dev` (`--force-with-lease`) or `git merge origin/dev` (`git push`). Rerun touched tests if base changed them.
-5. Push, then post the ready handoff below with the head you pushed.
+4. Push, then post the ready handoff below with the head you pushed.
 Title the PR with the source issue, then a Conventional Commits title: `#<issue>: type(scope): subject` (the issue's number, not the PR's), or `<KEY>: type(scope): subject` for a Linear ticket. Fix any other title with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh pr edit --title`.
 CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
-Never poll, watch or wait on GitHub Actions or any other CI from inside this job.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
 Before `ready` counts, the factory runs `pytest -q tests/fast` (timeout 300s) in a fresh checkout of the head you name, without anything uncommitted or untracked and without your installed dependencies or generated files. `ready` is not accepted until it passes at the pushed head. Run it yourself before you post.
 
@@ -170,11 +168,9 @@ Read the findings in the verdict at https://github.com/owner/repo/pull/42#issuec
 1. Check out the PR branch (`gitBranchName` in Job data) and confirm `git rev-parse HEAD` is 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6.
 2. For each finding: name the rule it breaks, find every path that breaks that rule, fix them all, and add a test of the rule that fails on the current head. Fixing only the line the reviewer quoted is not a fix.
 3. Run only the new tests and the tests for the files you touched, plus a short smoke set, in the foreground; never the whole suite, in the background or in chunks. Then run the router's "Before ready" steps.
-4. Before `ready`: `git fetch origin dev`, then `git rebase origin/dev` (`--force-with-lease`) or `git merge origin/dev` (`git push`). Rerun touched tests if base changed them.
-5. Push, then post the ready handoff below with the head you pushed.
+4. Push, then post the ready handoff below with the head you pushed.
 Title the PR with the source issue, then a Conventional Commits title: `#<issue>: type(scope): subject` (the issue's number, not the PR's), or `<KEY>: type(scope): subject` for a Linear ticket. Fix any other title with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh pr edit --title`.
 CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
-Never poll, watch or wait on GitHub Actions or any other CI from inside this job.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
 
 ## Proof

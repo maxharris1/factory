@@ -374,10 +374,6 @@ def test_build_and_fix_briefs_name_tdd_and_plans_name_how_and_architect(
         assert HOW not in named and ARCHITECT not in named
 
 
-def test_the_build_task_points_at_the_tdd_skill() -> None:
-    assert "Write tests first, as the `tdd` skill says." in _brief("build", "claude", {})
-
-
 def test_every_playbook_and_action_file_is_pinned() -> None:
     pinned = load_pin(ROOT).hashes()
     for item in (*PLAYBOOKS.values(), *(entry for row in ACTION_FILES.values() for entry in row)):

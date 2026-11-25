@@ -7,7 +7,7 @@ Plan ticket 42 on PR #42: map every acceptance criterion to work and a proof.
 
 ## Method
 Follow the router in Skills below.
-1. Read the ticket's brief in the Ticket section below. Start with an architect scaffold.
+1. Read the ticket's brief in the Ticket section below.
 The first plan left `ac-2` unmapped. Map it, and keep what the first plan already mapped.
 The first plan is quoted in the First plan section below.
 2. Map every acceptance criterion to the work that meets it, and name each criterion's proof: the test, command or observation that will show it is met. The plan lives in the plan handoff comment, never in a file in the repo.
@@ -177,7 +177,7 @@ Plan ticket 42 on PR #42: map every acceptance criterion to work and a proof.
 
 ## Method
 Follow the router in Skills below.
-1. Read the ticket's brief in the Ticket section below. Start with an architect scaffold.
+1. Read the ticket's brief in the Ticket section below.
 The first plan left `ac-2` unmapped. Map it, and keep what the first plan already mapped.
 The first plan is quoted in the First plan section below.
 2. Map every acceptance criterion to the work that meets it, and name each criterion's proof: the test, command or observation that will show it is met. The plan lives in the plan handoff comment, never in a file in the repo.

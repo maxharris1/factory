@@ -13,8 +13,8 @@ Bring `origin/dev` into PR #42 by a merge commit, nothing else.
 5. Push, post the ready handoff below with the head you pushed, and finish the job.
 Title the PR with the source issue, then a Conventional Commits title: `#<issue>: type(scope): subject` (the issue's number, not the PR's), or `<KEY>: type(scope): subject` for a Linear ticket. Fix any other title with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh pr edit --title`.
 CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
-Never poll, watch or wait on GitHub Actions or any other CI from inside this job.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
+Never poll, watch or wait on GitHub Actions or any other CI from inside this job.
 Your router is `/srv/orch/factory/skills/factory/factory-builder/SKILL.md`. It gives a merge-only or rebase job no playbook and no helpers, so this Method is the whole job.
 
 ## Proof
@@ -122,8 +122,8 @@ Bring `origin/dev` into PR #42 by a merge commit, nothing else.
 5. Push, post the ready handoff below with the head you pushed, and finish the job.
 Title the PR with the source issue, then a Conventional Commits title: `#<issue>: type(scope): subject` (the issue's number, not the PR's), or `<KEY>: type(scope): subject` for a Linear ticket. Fix any other title with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh pr edit --title`.
 CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
-Never poll, watch or wait on GitHub Actions or any other CI from inside this job.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
+Never poll, watch or wait on GitHub Actions or any other CI from inside this job.
 Your router is `/home/claude-bot/factory/skills/factory/factory-builder/SKILL.md`. It gives a merge-only or rebase job no playbook and no helpers, so this Method is the whole job.
 
 ## Proof
