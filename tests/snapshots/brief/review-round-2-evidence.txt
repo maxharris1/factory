@@ -51,23 +51,23 @@ Read the router (the first path) and the pstack files it names, at these absolut
 Helper models, one `<role>: <value>` line per pstack role:
 
 ```
-feature, refactoring: gpt-6.1-sol high
-bug-fix: gpt-6.1-sol high
-perf-issue: gpt-6.1-sol high
-hillclimb: gpt-6.1-sol high
-judgment and prose: gpt-6.1-sol high
-hardest tasks: gpt-6.1-sol high
-how explorer: gpt-6.1-sol high
-how explainer: gpt-6.1-sol high
-why investigators: gpt-6.1-sol high
-why synthesizer: gpt-6.1-sol high
-reflect tooling: gpt-6.1-sol high
-reflect judgment, divergent, synthesizer: gpt-6.1-sol high
-arena runners: gpt-6.1-sol high, gpt-6.1-sol high
-arena cross-judge pool: gpt-6.1-sol high, gpt-6.1-sol high
-swarm workers: gpt-6.1-sol high
-architect runners: gpt-6.1-sol high, gpt-6.1-sol high
-interrogate reviewers: gpt-6.1-sol high, gpt-6.1-sol high
+feature, refactoring: gpt-6.2-astra high
+bug-fix: gpt-6.2-astra high
+perf-issue: gpt-6.2-astra high
+hillclimb: gpt-6.2-astra high
+judgment and prose: gpt-6.2-astra high
+hardest tasks: gpt-6.2-astra high
+how explorer: gpt-6.2-astra high
+how explainer: gpt-6.2-astra high
+why investigators: gpt-6.2-astra high
+why synthesizer: gpt-6.2-astra high
+reflect tooling: gpt-6.2-astra high
+reflect judgment, divergent, synthesizer: gpt-6.2-astra high
+arena runners: gpt-6.2-astra high, gpt-6.2-astra high
+arena cross-judge pool: gpt-6.2-astra high, gpt-6.2-astra high
+swarm workers: gpt-6.2-astra high
+architect runners: gpt-6.2-astra high, gpt-6.2-astra high
+interrogate reviewers: gpt-6.2-astra high, gpt-6.2-astra high
 ```
 
 You may start helper agents as pstack recommends.
@@ -272,23 +272,23 @@ Read the router (the first path) and the pstack files it names, at these absolut
 Helper models, one `<role>: <value>` line per pstack role:
 
 ```
-feature, refactoring: gpt-6.1-sol high
-bug-fix: gpt-6.1-sol high
-perf-issue: gpt-6.1-sol high
-hillclimb: gpt-6.1-sol high
-judgment and prose: gpt-6.1-sol high
-hardest tasks: gpt-6.1-sol high
-how explorer: gpt-6.1-sol high
-how explainer: gpt-6.1-sol high
-why investigators: gpt-6.1-sol high
-why synthesizer: gpt-6.1-sol high
-reflect tooling: gpt-6.1-sol high
-reflect judgment, divergent, synthesizer: gpt-6.1-sol high
-arena runners: gpt-6.1-sol high, gpt-6.1-sol high
-arena cross-judge pool: gpt-6.1-sol high, gpt-6.1-sol high
-swarm workers: gpt-6.1-sol high
-architect runners: gpt-6.1-sol high, gpt-6.1-sol high
-interrogate reviewers: gpt-6.1-sol high, gpt-6.1-sol high
+feature, refactoring: gpt-6.2-astra high
+bug-fix: gpt-6.2-astra high
+perf-issue: gpt-6.2-astra high
+hillclimb: gpt-6.2-astra high
+judgment and prose: gpt-6.2-astra high
+hardest tasks: gpt-6.2-astra high
+how explorer: gpt-6.2-astra high
+how explainer: gpt-6.2-astra high
+why investigators: gpt-6.2-astra high
+why synthesizer: gpt-6.2-astra high
+reflect tooling: gpt-6.2-astra high
+reflect judgment, divergent, synthesizer: gpt-6.2-astra high
+arena runners: gpt-6.2-astra high, gpt-6.2-astra high
+arena cross-judge pool: gpt-6.2-astra high, gpt-6.2-astra high
+swarm workers: gpt-6.2-astra high
+architect runners: gpt-6.2-astra high, gpt-6.2-astra high
+interrogate reviewers: gpt-6.2-astra high, gpt-6.2-astra high
 ```
 
 You may start helper agents as pstack recommends.

@@ -301,11 +301,11 @@ Once **E2-2** (Cursor CLI driver) and **E2-3** (Gemini CLI driver) are merged:
    ```bash
    sudo -u cursor-bot -H bash -lc 'cursor-agent login && cursor-agent --version'
    ```
-   Remove `cursor` from `refused_harnesses` in `orch.local.yml`, enable `cursor-bot` waiter, and verify `bin/orch doctor`.
+   Remove `cursor` from `refused_harnesses` in `orch.local.yml`, enable `cursor-bot` waiter, and verify `bin/orch doctor --live --harness cursor` as `cursor-bot`.
 
 2. **Gemini (`gemini`):**
    Create `gemini-bot` user (same pattern as Section 3.1). Sign it in with Google for Gemini Code Assist, then run `orch accounts doctor` (`docs/ACCOUNTS.md`). `gemini` stays in `refused_harnesses` until that passes on each device (`docs/decisions/1412-gemini-harness.md`).
-   Add `gemini: gemini-bot` under `devices[].harnesses` in `machines.local.yml`, run `bin/orch install-skills`, and verify `bin/orch doctor`.
+   Add `gemini: gemini-bot` under `devices[].harnesses` in `machines.local.yml`, run `bin/orch install-skills`, and verify `bin/orch doctor --live --harness gemini` as `gemini-bot`.
 
 3. **Additional Same-Harness Accounts (Even Usage Balancing):**
    For each secondary account (e.g., `claude-b`, `codex-b`), create its isolated directory under `/home/<bot>/accounts/<account-name>` (`0700`), sign in using `CLAUDE_CONFIG_DIR` / `CODEX_HOME`, and register it in `machines.local.yml` `accounts:`. Epic 2 ticket **E2-5** will automatically balance usage evenly across accounts of the same harness.
@@ -322,6 +322,11 @@ bin/orch check-config --orch orch.yml --machines machines.yml --factory factory.
 
 # 2. Pinned pstack skills verified across installed harnesses
 bin/orch doctor --home "$HOME"
+
+# 2b. Each enabled harness loads the pinned pstack at runtime, on every machines.yml device.
+#     Run as each bot: the doctor reads only this user's waiter config. Refused harnesses
+#     print as skipped; a failure names harness@device; --timeout (default 600s) stops a hung harness.
+bin/orch doctor --live --home "$HOME" --harness claude    # as claude-bot; likewise codex, cursor, gemini
 
 # 3. Fleet SSH mux, remote checkout parity, and waiter health
 bin/orch doctor-runtime

@@ -78,6 +78,13 @@ class PullReview:
 
 
 @dataclass(frozen=True)
+class RouterPicks:
+    builder: Candidate
+    reviewer: Candidate
+    planner: Candidate | None = None
+
+
+@dataclass(frozen=True)
 class HandoffCandidate:
     comment: Comment
     unread: bool
@@ -473,7 +480,7 @@ class TrackedTicket:
     # Issue #206: factory.md's config when a go routed this ticket to other
     # harnesses; factory then holds the routed pair.
     factory_md: FactoryConfig | None = None
-    router_picks: tuple[Candidate, Candidate] | None = None
+    router_picks: RouterPicks | None = None
     # Issue #115: the source issue (`#115`, or a Linear key) and the open
     # PR's title, so the poller can prefix a title that lacks it.
     source_issue: str | None = None

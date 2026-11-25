@@ -10,11 +10,13 @@ import getpass
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import sqlite3
 import stat
 import sys
+import tempfile
 import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
@@ -30,6 +32,7 @@ from lib import (
     codex_rollout,
     codex_sandbox,
     containers,
+    doctor_live,
     exposure,
     health,
     job_detail,
@@ -39,6 +42,7 @@ from lib import (
     oom,
     placed_run,
     skill_preflight,
+    skill_probe,
     telemetry,
     trace,
     usage_probe,
@@ -71,6 +75,7 @@ from lib.github_actions import GitHubAdapterError, _status as gh_status
 from lib.grok_delivery import GrokDeliveryError, wake_delivery
 from lib.handoff import format_header
 from lib.harness_env import CPU_CAP, account_environ, harness_env
+from lib.harnesses import all_drivers
 from lib.hold import MergeUpdate
 from lib.hook_t7 import T7Hook
 from lib.hook_t8 import T8Hook
@@ -247,10 +252,17 @@ install-skills [--home PATH] [--project PATH] [--cloud] [--allow-unstable-checko
 
 doctor [--home PATH] [--project PATH] [--cloud]
        [--responses DIR] [--print-canary]
+doctor --live [--home PATH] [--machines PATH] [--orch PATH]
+       [--harness NAME]... [--timeout SECONDS] [--work DIR]
   Print a canary that asks the harness to name poteto-mode and quote
   a token from the pinned skill. Score the replies the owning bots
   write. Exit 1 if any harness did not load that version.
   --print-canary prints the prompt and does not read replies.
+  --live starts every enabled harness (or each --harness) on each
+  machines.yml device with its bot's waiter command, scores its
+  reply, and names each failing harness@device. A harness refused in
+  orch.yml is skipped. A harness past --timeout (default 600) is
+  stopped. Run it as each bot: it reads only this user's waiter config.
 
 eval-report --input PATH [--since TIME] [--until TIME] [--json]
 eval-report --db PATH --baseline PATH
@@ -3402,12 +3414,28 @@ def _doctor(argv: list[str]) -> int:
     parser.add_argument("--cloud", action="store_true")
     parser.add_argument("--responses", type=Path)
     parser.add_argument("--print-canary", action="store_true")
+    parser.add_argument("--live", action="store_true")
+    parser.add_argument("--machines", type=Path)
+    parser.add_argument("--orch", type=Path)
+    parser.add_argument("--harness", action="append", choices=[d.name for d in all_drivers()])
+    parser.add_argument("--timeout", type=float)
+    parser.add_argument("--work", type=Path)
     args = parser.parse_args(argv)
     if args.print_canary and args.responses is not None:
         print("orch doctor: --print-canary does not take --responses", file=sys.stderr)
         return 2
+    live_only = [flag for flag in ("machines", "orch", "harness", "timeout", "work")
+                 if getattr(args, flag) is not None]
+    if args.live and (args.print_canary or args.responses is not None or args.cloud):
+        print("orch doctor: --live does not take --responses, --print-canary or --cloud",
+              file=sys.stderr)
+        return 2
+    if live_only and not args.live:
+        print(f"orch doctor: --{live_only[0]} needs --live", file=sys.stderr)
+        return 2
     try:
         anchor, mode = _anchor("doctor", args.home, args.project, args.cloud)
+        live = _live_canary(args) if args.live else None
     except ValueError as exc:
         print(exc, file=sys.stderr)
         return 2
@@ -3417,14 +3445,31 @@ def _doctor(argv: list[str]) -> int:
         mode,
         args.responses,
         print_canary=args.print_canary,
+        live=live,
     )
-    if prompt:
+    if prompt and not args.live:
         print(prompt, end="")
     for message in errors:
         print(message, file=sys.stderr)
     if code == 0 and not args.print_canary:
         print("ok")
     return code
+
+
+def _live_canary(args: argparse.Namespace) -> Callable[[str], list[str]]:
+    machines = _machines_config(args.machines, required=True)
+    orch_path = args.orch if args.orch is not None else ROOT / "orch.yml"
+    config, findings = load_orch_yml(orch_path, allow_placeholders=True)
+    errors = [item.message for item in findings if item.severity == "error"]
+    if config is None or errors:
+        raise ValueError(f"{orch_path}: {errors[0] if errors else 'not loaded'}")
+    run_id = f"doctor-{secrets.token_hex(4)}"
+    work = args.work if args.work is not None else Path(tempfile.gettempdir()) / "orch-doctor"
+    return lambda token: doctor_live.live_canary(
+        machines, config.refused_harnesses, token, harnesses=args.harness,
+        timeout=args.timeout if args.timeout is not None else skill_probe.DEFAULT_TIMEOUT,
+        work=work, run_id=run_id,
+    )
 
 
 def _doctor_runtime(argv: list[str]) -> int:

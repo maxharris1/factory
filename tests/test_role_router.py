@@ -79,7 +79,7 @@ def test_role_slot_selection_across_ticket_types() -> None:
     orch = resolve_slot("orchestrate", routing=cfg)
     qa = resolve_slot("qa", routing=cfg)
 
-    assert (feat.harness, feat.family, feat.effort) == ("claude", "anthropic", "high")
+    assert (feat.harness, feat.family, feat.effort) == ("claude", "anthropic", "medium")
     assert (perf.harness, perf.family, perf.effort) == ("codex", "openai", "high")
     assert (orch.harness, orch.family) == ("claude", "anthropic")
     assert (qa.harness, qa.effort) == ("claude", "medium")
@@ -139,7 +139,7 @@ def test_budget_ladder_overrides_and_effort_clamping() -> None:
     assert unlim_rev.effort == "xhigh"
 
     small_build = resolve_slot("build", routing=cfg, budget="small")
-    assert small_build.model == "claude-sonnet-4-6"
+    assert small_build.model == "claude-sonnet-5-5"
     assert small_build.effort == "medium"
 
     # Clamping applies when a slot has no explicit budget_override at that tier.
@@ -273,14 +273,13 @@ def test_argv_flag_injection_and_safety_checks() -> None:
         "-",
     ]
 
-    # Does not duplicate an explicit --model flag.
-    unchanged = apply_argv_flags(
+    replaced = apply_argv_flags(
         ["claude", "-p", "--model", "claude-sonnet-4-6"],
         harness="claude",
         model="claude-opus-4-6",
         effort=None,
     )
-    assert unchanged == ["claude", "-p", "--model", "claude-sonnet-4-6"]
+    assert replaced == ["claude", "-p", "--model", "claude-opus-4-6"]
 
     # Rejects untrusted / shell-injection model tokens.
     with pytest.raises(RoutingError, match="invalid model token"):
@@ -354,6 +353,18 @@ def _build_detail(harness: str, model: str, effort: str | None = None) -> str:
     return json.dumps({"action": "build", "routing": routing})
 
 
+def _plan_detail(
+    harness: str, model: str, effort: str, plan_model: str | None, plan_effort: str | None
+) -> str:
+    routing = json.loads(_build_detail(harness, model, effort))["routing"]
+    routing["planner"] = harness
+    if plan_model is not None:
+        routing["plan_model"] = plan_model
+    if plan_effort is not None:
+        routing["plan_effort"] = plan_effort
+    return json.dumps({"action": "plan", "routing": routing})
+
+
 @pytest.mark.parametrize(
     ("harness", "command", "model", "expected"),
     [
@@ -409,21 +420,99 @@ def test_model_after_the_option_terminator_is_prompt_text_not_configuration() ->
     "config",
     [["-c", "model_reasoning_effort=low"], ["--config", "model_reasoning_effort=low"], ["--config=model_reasoning_effort=low"]],
 )
-def test_existing_codex_reasoning_effort_config_is_respected(config: list[str]) -> None:
+def test_a_pinned_codex_reasoning_effort_yields_to_the_routed_one(config: list[str]) -> None:
     detail = _build_detail("codex", "gpt-5.4", effort="high")
     assert routing_argv_for_detail(
-        ["codex", "exec", *config, "--", "go"], harness="codex", detail=detail
-    ) == ["codex", "exec", *config, "--model", "gpt-5.4", "--", "go"]
+        ["codex", "exec", "-c", "sandbox_mode=workspace-write", *config, "--", "go"], harness="codex", detail=detail
+    ) == [
+        "codex", "exec", "-c", "sandbox_mode=workspace-write",
+        "--model", "gpt-5.4", "-c", "model_reasoning_effort=high", "--", "go",
+    ]
 
 
-def test_existing_claude_effort_before_terminator_is_respected_and_after_is_not() -> None:
-    detail = _build_detail("claude", "claude-opus-4-6", effort="high")
+def test_a_pinned_codex_effort_stays_when_the_route_names_none() -> None:
+    detail = _build_detail("codex", "gpt-5.4")
     assert routing_argv_for_detail(
-        ["claude", "-p", "--effort=low"], harness="claude", detail=detail
-    ) == ["claude", "-p", "--effort=low", "--model", "claude-opus-4-6"]
-    assert routing_argv_for_detail(
-        ["claude", "-p", "--", "--effort"], harness="claude", detail=detail
-    ) == ["claude", "-p", "--model", "claude-opus-4-6", "--effort", "high", "--", "--effort"]
+        ["codex", "exec", "-c", "model_reasoning_effort=low", "-"], harness="codex", detail=detail
+    ) == ["codex", "exec", "-c", "model_reasoning_effort=low", "--model", "gpt-5.4", "-"]
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        (
+            ["claude", "-p", "--effort", "medium"],
+            ["claude", "-p", "--model", "claude-fable-5-2", "--effort", "high"],
+        ),
+        (
+            ["claude", "-p", "--effort=medium", "--model", "claude-opus-5-5"],
+            ["claude", "-p", "--model", "claude-fable-5-2", "--effort", "high"],
+        ),
+        (
+            ["claude", "-m", "claude-opus-5-5", "-p", "--dangerously-skip-permissions", "-"],
+            ["claude", "-p", "--dangerously-skip-permissions", "--model", "claude-fable-5-2", "--effort", "high", "-"],
+        ),
+        (
+            ["claude", "-p", "--", "--effort"],
+            ["claude", "-p", "--model", "claude-fable-5-2", "--effort", "high", "--", "--effort"],
+        ),
+    ],
+)
+def test_a_waiter_pinned_claude_model_or_effort_yields_to_the_routed_plan(
+    command: list[str], expected: list[str]
+) -> None:
+    detail = _plan_detail("claude", "claude-opus-5-5", "medium", "claude-fable-5-2", "high")
+    assert routing_argv_for_detail(command, harness="claude", detail=detail) == expected
+
+
+def test_a_plan_job_gets_the_plan_pick_and_a_build_job_the_build_pick() -> None:
+    routing = json.loads(_plan_detail("claude", "claude-opus-5-5", "medium", "claude-fable-5-2", "high"))["routing"]
+    for action, model, effort in (
+        ("plan", "claude-fable-5-2", "high"),
+        ("build", "claude-opus-5-5", "medium"),
+        ("fix", "claude-opus-5-5", "medium"),
+    ):
+        detail = json.dumps({"action": action, "routing": routing})
+        assert routing_argv_for_detail(["claude", "-p"], harness="claude", detail=detail) == [
+            "claude", "-p", "--model", model, "--effort", effort,
+        ], action
+
+
+def test_a_plan_job_with_no_plan_pick_runs_on_the_build_pick() -> None:
+    detail = json.dumps({"action": "plan", "routing": json.loads(_build_detail("claude", "claude-opus-5-5", "medium"))["routing"]})
+    assert routing_argv_for_detail(["claude", "-p"], harness="claude", detail=detail) == [
+        "claude", "-p", "--model", "claude-opus-5-5", "--effort", "medium",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("plan_model", "plan_effort", "build_effort", "waiter", "expected"),
+    [
+        (
+            None,
+            "high",
+            "medium",
+            ["claude", "-p", "--model", "claude-fable-5-2", "--effort", "high"],
+            ["claude", "-p", "--model", "claude-fable-5-2", "--effort", "high"],
+        ),
+        (
+            "claude-fable-5-2",
+            None,
+            "low",
+            ["claude", "-p", "--effort", "medium"],
+            ["claude", "-p", "--effort", "medium", "--model", "claude-fable-5-2"],
+        ),
+    ],
+)
+def test_a_plan_pick_leaves_the_fields_it_omits_to_the_waiter_not_the_build_pick(
+    plan_model: str | None,
+    plan_effort: str | None,
+    build_effort: str,
+    waiter: list[str],
+    expected: list[str],
+) -> None:
+    detail = _plan_detail("claude", "claude-opus-5-5", build_effort, plan_model, plan_effort)
+    assert routing_argv_for_detail(waiter, harness="claude", detail=detail) == expected
 
 
 def test_non_harness_command_is_left_unchanged() -> None:

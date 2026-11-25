@@ -135,7 +135,7 @@ def test_override_changes_one_role(tmp_path):
     edit_map(root, "overrides: {}", "overrides:\n  claude:\n    bug-fix: sonnet medium")
     lines = {line.role: line.value for line in load_map(root)["claude"]}
     assert lines["bug-fix"] == "sonnet medium"
-    assert lines["perf-issue"] == "opus high"
+    assert lines["perf-issue"] == "opus medium"
 
 
 def test_claude_values_adapter_format():
@@ -148,14 +148,14 @@ def test_claude_values_adapter_format():
 @pytest.mark.parametrize("bad", ["opus-5.5 high", "claude-opus-5-5-high", "opus", "gpt-5 high"])
 def test_claude_rejects_versioned(tmp_path, bad):
     root = tmp_root(tmp_path)
-    edit_map(root, "default: opus high", f"default: {bad}")
+    edit_map(root, "default: opus medium", f"default: {bad}")
     with pytest.raises(ModelMapError, match="claude"):
         load_map(root)
 
 
 def test_claude_panel_entry_checked(tmp_path):
     root = tmp_root(tmp_path)
-    edit_map(root, "panel: [opus high, opus high]", "panel: [opus high, opus-5.5 high]")
+    edit_map(root, "panel: [fable high, opus medium]", "panel: [fable high, opus-5.5 high]")
     with pytest.raises(ModelMapError, match="opus-5.5 high"):
         load_map(root)
 
@@ -163,23 +163,23 @@ def test_claude_panel_entry_checked(tmp_path):
 def test_codex_helpers_sol():
     for line in load_map()["codex"]:
         for entry in entries(line.value):
-            assert entry.split()[0] == "gpt-6.1-sol", entry
+            assert entry.split()[0] == "gpt-6.2-astra", entry
     for line in role_lines(brief_lines("codex")):
         value = line.split(": ", 1)[1]
-        assert all(entry.split()[0] == "gpt-6.1-sol" for entry in value.split(", ")), line
+        assert all(entry.split()[0] == "gpt-6.2-astra" for entry in value.split(", ")), line
 
 
 @pytest.mark.parametrize("bad", ["sol high", "astra high", "o3 high", "6.1-sol high", "gpt-6.1-sol"])
 def test_codex_rejects_non_gpt_slug(tmp_path, bad):
     root = tmp_root(tmp_path)
-    edit_map(root, "default: gpt-6.1-sol high", f"default: {bad}")
+    edit_map(root, "default: gpt-6.2-astra high", f"default: {bad}")
     with pytest.raises(ModelMapError, match="codex"):
         load_map(root)
 
 
 def test_codex_panel_entry_checked(tmp_path):
     root = tmp_root(tmp_path)
-    edit_map(root, "panel: [gpt-6.1-sol high, gpt-6.1-sol high]", "panel: [gpt-6.1-sol high, sol high]")
+    edit_map(root, "panel: [gpt-6.2-astra high, gpt-6.2-astra high]", "panel: [gpt-6.1-sol high, sol high]")
     with pytest.raises(ModelMapError, match="'sol high'"):
         load_map(root)
 
@@ -195,10 +195,10 @@ def test_no_foreign_families():
 @pytest.mark.parametrize(
     ("old", "new"),
     [
-        ("default: opus high", "default: grok-4.7-xhigh-fast"),
-        ("default: gpt-6.1-sol high", "default: claude-opus-5-5-high"),
-        ("default: gpt-6.1-sol high", "default: grok-4.7 high"),
-        ("panel: [gpt-6.1-sol high, gpt-6.1-sol high]", "panel: [gpt-6.1-sol high, claude-opus-5-5 high]"),
+        ("default: opus medium", "default: grok-4.7-xhigh-fast"),
+        ("default: gpt-6.2-astra high", "default: claude-opus-5-5-high"),
+        ("default: gpt-6.2-astra high", "default: grok-4.7 high"),
+        ("panel: [gpt-6.2-astra high, gpt-6.2-astra high]", "panel: [gpt-6.1-sol high, claude-opus-5-5 high]"),
     ],
 )
 def test_foreign_family_rejected(tmp_path, old, new):
@@ -214,7 +214,7 @@ def test_brief_and_rules_same_source():
 
 def test_rules_follow_yaml(tmp_path):
     root = tmp_root(tmp_path)
-    edit_map(root, "default: opus high", "default: sonnet medium")
+    edit_map(root, "default: opus medium", "default: sonnet medium")
     brief = brief_lines("claude", root)
     rules = rules_text(root)
     assert "feature, refactoring: sonnet medium" in brief.splitlines()
@@ -235,7 +235,7 @@ def test_rules_shape():
     assert budget == ["# budget: medium (high)"]
     after = lines[lines.index(budget[0]) + 1 :]
     assert [line.split(": ", 1)[0] for line in after] == [role for role, _ in pinned_roles()]
-    assert "interrogate reviewers: opus high, opus high" in after
+    assert "interrogate reviewers: fable high, opus medium" in after
     assert text.endswith("\n")
 
 

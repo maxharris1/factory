@@ -320,9 +320,19 @@ def test_prompt_goes_on_stdin_only(tmp_path):
     assert (text, note) == ("", "no transcript")
 
 
+class GoneDevice:
+    def __init__(self):
+        self.calls = []
+
+    def run(self, argv, *, timeout):
+        self.calls.append(argv)
+        return 0
+
+
 def test_remote_run_fetches_the_transcript_over_the_bot_alias(tmp_path):
     launch = next(l for l in plan(tmp_path) if l.remote)
     fetched = []
+    device = GoneDevice()
 
     def fetch(argv):
         fetched.append(argv)
@@ -330,14 +340,34 @@ def test_remote_run_fetches_the_transcript_over_the_bot_alias(tmp_path):
 
     text, note = sp.run_launch(
         launch, "p", timeout=5, log_path=tmp_path / "log", run=lambda argv, **_: None,
-        fetch=fetch,
+        fetch=fetch, transport=device,
     )
     assert text == '{"type":"user"}\n'
     assert note == "timed out after 5s"
+    assert len(device.calls) == 1, "the timed-out run was checked on its device"
     (argv,) = fetched
     assert argv[argv.index("-l") + 1] == "claude-bot"
     assert argv[argv.index("--") + 1] == "mac-claude-bot"
     assert sp.claude_slug(launch.run_dir) in argv[-1]
+
+
+class RunningDevice(GoneDevice):
+    def run(self, argv, *, timeout):
+        self.calls.append(argv)
+        return 1
+
+
+def test_a_remote_run_still_running_after_the_stop_says_so(tmp_path, monkeypatch):
+    monkeypatch.setattr(sp, "REMOTE_STOP_PAUSE", 0)
+    launch = next(l for l in plan(tmp_path) if l.remote)
+    device = RunningDevice()
+    text, note = sp.run_launch(
+        launch, "p", timeout=5, log_path=tmp_path / "log", run=lambda argv, **_: None,
+        fetch=lambda argv: subprocess.CompletedProcess(argv, 3, b"", b""), transport=device,
+    )
+    assert note == "timed out after 5s; the harness on mac was not confirmed stopped (running)"
+    kills = [argv for argv in device.calls if "kill -KILL" in argv[-1]]
+    assert kills, "the stop escalated to SIGKILL"
 
 
 def test_spawn_stops_the_whole_group_on_timeout(tmp_path):
