@@ -7,6 +7,7 @@ from typing import Literal
 
 from lib.dispatch.rebase import answers_rebase_review
 from lib.dispatch.types import Comment, RoundGrant, TrackedTicket
+from lib.dispatch.verdict.convergence import policy_name, stop_policy
 from lib.dispatch.verdict.repeat import StopRecord
 from lib.handoff import HandoffError, parse_comment
 from lib.rule_engine import (
@@ -112,6 +113,7 @@ class RuleEngineMixin:
                             round=round_number,
                             cap=self._effective_cap(ticket, connection),
                             stuck=bool(state["stuck"]),
+                            policy=policy_name(stop_policy(ticket.factory)),
                         )
                     )
                     self._log_ruling(connection, ticket, "cap", subject, ruling, ids)
@@ -185,6 +187,7 @@ class RuleEngineMixin:
                 round=round_number,
                 cap=self._effective_cap(ticket, connection),
                 stuck=bool(state["stuck"]),
+                policy=policy_name(stop_policy(ticket.factory)),
             )
         )
         self._log_ruling(connection, ticket, "repeat", subject, ruling, ids)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import sys
 from pathlib import Path
@@ -9,11 +10,17 @@ import pytest
 from lib.dispatch.verdict.convergence import (
     Continue,
     Convergence,
+    ConvergencePolicy,
     Repeated,
     RoundFindings,
+    Rounds,
     Stalled,
+    cap_grant,
     converge,
+    review_step,
+    stop_policy,
 )
+from tests.test_dispatcher import factory
 
 _SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "replay_stops.py"
 _spec = importlib.util.spec_from_file_location("replay_stops", _SCRIPT)
@@ -93,6 +100,98 @@ def last(history: list[RoundFindings]) -> Convergence:
 )
 def test_converge_rule(history: list[RoundFindings], expected: Convergence) -> None:
     assert last(history) == expected
+
+
+CONVERGE_HISTORIES = [
+    rounds("f-1 f-2 f-3"),
+    rounds("", ""),
+    rounds("f-1 f-2 f-3 f-4 f-5", "f-2 f-6 f-7"),
+    rounds("f-1 f-2 f-3 f-4 f-5", "f-2 f-6 f-7", repeat={2: "f-2"}),
+    rounds("f-1 f-2 f-3", "f-4 f-5 f-6"),
+    rounds("f-1 f-2 f-3", "f-4 f-5 f-6", "f-7 f-8 f-9"),
+    rounds("f-1 f-2 f-3", "f-4 f-5", "f-6 f-7 f-8", "f-9 f-10"),
+    rounds("f-1 f-2 f-3", "f-2 f-4 f-5"),
+    rounds("f-1 f-2 f-3", "f-1 f-2 f-4", repeat={2: "f-2"}),
+    rounds("f-1 f-2 f-3", "f-4", ""),
+    rounds("f-1 f-2 f-3", "f-4 f-5", "f-1 f-6", repeat={3: "f-1"}),
+    rounds("f-1 f-2", "", "f-3"),
+]
+
+
+@pytest.mark.parametrize("history", CONVERGE_HISTORIES)
+def test_review_step_under_convergence_is_converge(history: list[RoundFindings]) -> None:
+    assert review_step(ConvergencePolicy(), history[:-1], history[-1]) == last(history)
+
+
+@pytest.mark.parametrize(
+    ("history", "expected"),
+    [
+        pytest.param(
+            rounds("f-1 f-2", "f-3", "f-1 f-4", repeat={3: "f-1"}),
+            Repeated(rule_id="f-1", earlier_round=1),
+            id="a named repeat blocks against the round that held it",
+        ),
+        pytest.param(
+            rounds("f-1", "f-1 f-2", "f-3", "f-1", repeat={4: "f-1"}),
+            Repeated(rule_id="f-1", earlier_round=2),
+            id="a named repeat blocks against the highest round that held it",
+        ),
+        pytest.param(
+            rounds("f-1", "f-2", "f-9", repeat={3: "f-9"}),
+            Repeated(rule_id="f-9", earlier_round=2),
+            id="a named id no round held falls back to the previous round",
+        ),
+        pytest.param(
+            [RoundFindings(1, frozenset({"f-1"}), None), RoundFindings(3, frozenset({"f-9"}), "f-9")],
+            Repeated(rule_id="f-9", earlier_round=0),
+            id="a named id with no holder and no previous round is round 0",
+        ),
+        pytest.param(
+            rounds("f-1 f-2 f-3", "f-3 f-2 f-4"),
+            Repeated(rule_id="f-2", earlier_round=1),
+            id="a carried id from the previous round repeats",
+        ),
+        pytest.param(
+            rounds("f-1 f-2", "f-3", "f-1 f-4"),
+            Continue(reduced=False),
+            id="an id carried only from an older round continues",
+        ),
+        pytest.param(rounds("f-1 f-2", "f-3"), Continue(reduced=False), id="fresh ids continue"),
+        pytest.param(rounds("f-1 f-2"), Continue(reduced=False), id="no earlier round continues"),
+    ],
+)
+def test_review_step_under_rounds(history: list[RoundFindings], expected: Convergence) -> None:
+    assert review_step(Rounds(auto_extra=0), history[:-1], history[-1]) == expected
+    assert review_step(Rounds(auto_extra=0), list(reversed(history[:-1])), history[-1]) == expected
+
+
+@pytest.mark.parametrize(
+    ("policy", "step", "cap_extra", "stuck", "expected"),
+    [
+        (Rounds(0), Continue(reduced=False), 0, False, None),
+        (Rounds(2), Continue(reduced=False), 0, False, 1),
+        (Rounds(2), Continue(reduced=False), 1, False, 2),
+        (Rounds(2), Continue(reduced=False), 2, False, None),
+        (Rounds(2), Stalled(rounds=(2, 3), ids=frozenset()), 0, False, 1),
+        (ConvergencePolicy(), Continue(reduced=True), 0, False, 1),
+        (ConvergencePolicy(), Continue(reduced=False), 4, False, 5),
+        (ConvergencePolicy(), Stalled(rounds=(2, 3), ids=frozenset()), 0, False, None),
+        (Rounds(2), Continue(reduced=False), 0, True, None),
+        (ConvergencePolicy(), Continue(reduced=True), 0, True, None),
+    ],
+)
+def test_cap_grant(
+    policy: Rounds | ConvergencePolicy, step: Continue | Stalled, cap_extra: int, stuck: bool, expected: int | None
+) -> None:
+    assert cap_grant(policy, step, cap_extra, stuck) == expected
+
+
+@pytest.mark.parametrize(
+    ("stop_on", "expected"),
+    [("rounds", Rounds(auto_extra=3)), ("convergence", ConvergencePolicy())],
+)
+def test_stop_policy_reads_the_config(stop_on: str, expected: Rounds | ConvergencePolicy) -> None:
+    assert stop_policy(dataclasses.replace(factory(), stop_on=stop_on, auto_extra_rounds=3)) == expected
 
 
 def test_converge_reads_earlier_rounds_in_any_order() -> None:

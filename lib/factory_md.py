@@ -51,7 +51,7 @@ to a check of the fix. Refused with tickets: linear, which has no filer.
 review.stop_on is optional (issue #1110): rounds (the default) or
 convergence. convergence lets a REVISE that cuts the open blocking findings
 to a new low, or a first flat round, go on past the cap;
-review.auto_extra_rounds is not read under it.
+review.auto_extra_rounds is ignored under it, and setting it draws a warning.
 
 rule_engine is optional (issue #1320): on or off, default off. on lets the
 rule engine rule at the cap (issue #1308), and at the repeat and moved-head
@@ -774,6 +774,13 @@ def _stop_on(review: dict, findings: list[Finding], unknown: str) -> str:
     if not isinstance(value, str) or value not in STOP_ON:
         findings.append(Finding(unknown, "review.stop_on must be rounds or convergence"))
         return "rounds"
+    if value == "convergence" and "auto_extra_rounds" in review:
+        findings.append(
+            Finding(
+                "warning",
+                "review.auto_extra_rounds is ignored under review.stop_on: convergence; remove it",
+            )
+        )
     return value
 
 

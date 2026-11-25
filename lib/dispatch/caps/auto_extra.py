@@ -1,14 +1,9 @@
-"""Auto extra rounds: the poller grants extra rounds at the cap itself.
-Under factory.md review.stop_on: rounds it grants review.auto_extra_rounds
-of them (issue #263). Under convergence it grants one per REVISE that
-converge() lets continue and none once it stalls (issue #1110)."""
-
 from __future__ import annotations
 
 import sqlite3
 
 from lib.dispatch.types import Comment, TrackedTicket
-from lib.dispatch.verdict.convergence import Continue, Stalled
+from lib.dispatch.verdict.convergence import Continue, Stalled, cap_grant, grant_reason, stop_policy
 
 
 def auto_extra_marker(comment_id: str) -> str:
@@ -22,14 +17,7 @@ class AutoExtraMixin:
         state: sqlite3.Row,
         convergence: Continue | Stalled,
     ) -> int | None:
-        if state["stuck"]:
-            return None
-        already = int(state["cap_extra"])
-        if ticket.factory.stop_on == "convergence":
-            return already + 1 if isinstance(convergence, Continue) else None
-        if already >= ticket.factory.auto_extra_rounds:
-            return None
-        return already + 1
+        return cap_grant(stop_policy(ticket.factory), convergence, int(state["cap_extra"]), bool(state["stuck"]))
 
     def _record_auto_extra(
         self,
@@ -39,21 +27,7 @@ class AutoExtraMixin:
         granted: int,
         convergence: Continue | Stalled,
     ) -> None:
-        if ticket.factory.stop_on != "convergence":
-            reason = (
-                f"Auto extra round {granted} of {ticket.factory.auto_extra_rounds} "
-                "under factory.md `review.auto_extra_rounds` (set by Max)."
-            )
-        elif isinstance(convergence, Continue) and convergence.reduced:
-            reason = (
-                f"Extra round {granted}: this round cut the open blocking findings to a new low, "
-                "so review goes on under factory.md `review.stop_on: convergence`."
-            )
-        else:
-            reason = (
-                f"Extra round {granted}: this round did not cut the open blocking findings. "
-                "One flat round is allowed under factory.md `review.stop_on: convergence`."
-            )
+        reason = grant_reason(stop_policy(ticket.factory), granted, convergence)
         body = f"{reason}\n\n{auto_extra_marker(comment.id)}"
         connection.execute(
             """

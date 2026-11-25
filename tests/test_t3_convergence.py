@@ -102,6 +102,38 @@ def test_a_flat_round_gets_one_round_then_a_second_flat_round_caps(tmp_path: Pat
     assert len(flow.actions.posted) == 1
 
 
+def _flat_then_capped(tmp_path: Path, auto_extra_rounds: int) -> tuple[tuple[str, int, int], list[str]]:
+    tmp_path.mkdir()
+    flow = ConvergingFlow(tmp_path, "convergence")
+    flow.factory = dataclasses.replace(flow.factory, auto_extra_rounds=auto_extra_rounds)
+    assert flow.go("go-1") == "queued-build"
+    flow.finish("claude")
+    for number, count in ((1, 2), (2, 1)):
+        flow.review(number)
+        assert flow.revise_with(f"{number}/3", flow.fresh(count)) == "queued-review-fix"
+        flow.finish("claude")
+    flow.review(3)
+    flow.revise_with("3/3", flow.fresh(1))
+    flow.finish("claude")
+    flow.review(4, cap=4)
+    flow.revise_with("4/4", flow.fresh(1))
+    state = flow.state()
+    with flow.queue.connect() as connection:
+        bodies = [
+            str(row["body"])
+            for row in connection.execute("SELECT body FROM auto_extra_comments ORDER BY created_at, comment_id")
+        ]
+    return (state["workflow_state"], state["review_round"], state["cap_extra"]), bodies
+
+
+def test_convergence_ignores_auto_extra_rounds(tmp_path: Path) -> None:
+    unset = _flat_then_capped(tmp_path / "unset", 0)
+    assert unset == _flat_then_capped(tmp_path / "five", 5)
+    assert unset[0] == ("capped", 4, 1)
+    [body] = unset[1]
+    assert body.startswith("Extra round 1: this round did not cut the open blocking findings.")
+
+
 def _stalled(tmp_path: Path) -> ConvergingFlow:
     flow = ConvergingFlow(tmp_path, "convergence")
     flow.factory = dataclasses.replace(flow.factory, rounds_high=4)

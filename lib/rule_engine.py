@@ -59,6 +59,7 @@ class StopFacts:
     round: int
     cap: int
     stuck: bool
+    policy: Literal["rounds", "convergence"]
 
 
 @dataclass(frozen=True)
@@ -142,6 +143,7 @@ class FirstCapGrant:
             *((Check("repeat-stops", facts.repeat_stops == 1, facts.repeat_stops),) if facts.site == "repeat" else ()),
             Check("stuck", not facts.stuck, int(facts.stuck)),
             Check("earlier-round", not repeated, repeated[0] if repeated else None),
+            Check("policy", not (facts.site == "cap" and facts.policy == "convergence"), facts.policy),
         )
         failed = next((check for check in checks if not check.passed), None)
         if failed is not None:
