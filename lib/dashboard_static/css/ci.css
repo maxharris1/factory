@@ -1,0 +1,70 @@
+.ci-body{flex:1 1 400px;min-width:0;display:flex;flex-direction:column;gap:8px}
+.ci-body .tiles{flex:none}
+.ci-slot{display:flex;flex-direction:column;gap:4px;min-width:0}
+.ci-slot>.tile{flex:1 0 auto;min-height:60px}
+.ci-rn{font:11px/1.2 var(--mono);color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ci-group{display:flex;flex-direction:column;gap:6px}
+.ci-group .igroup{margin:6px 0 0}
+.tile.ci{position:relative;min-height:60px}
+.tile.ci .cover{position:absolute;inset:0;z-index:0}
+.tile.ci:hover,.tile.ci:focus-within{border-color:var(--brand)}
+.tile.ci.bad{border-color:var(--bad)}
+.tile.ci .tile-body{position:relative;gap:2px;padding:3px 8px 4px;font-size:11px;line-height:1.25;pointer-events:none}
+.tile.ci .tile-body a{position:relative;z-index:1;pointer-events:auto}
+.tile.ci .tile-l1{gap:0 5px}
+.tile.ci .tile-l1 .ticket{font-size:11px}
+.tile.ci .ci-a{flex:none;font-size:11px;line-height:1.25}
+.tile.ci .tile-l2{flex-wrap:wrap;gap:0 6px;min-height:0;color:var(--muted)}
+.tile.ci .verb{font-size:11px;line-height:1.25}
+.tile.ci .tile-l2 .action{min-width:0;overflow-wrap:anywhere;color:var(--text-2)}
+.tile.ci .tile-l2 .t{flex:none;margin-left:auto;white-space:nowrap}
+.tile.ci .tile-l3{display:block;overflow-wrap:anywhere}
+.tile.ci .tile-l3 .what{color:var(--text-2)}
+.tile.ci .tile-l3 .ci-a{margin-left:6px}
+.cibar{display:inline-flex;gap:1px;width:40px;height:4px;margin:0 6px 0 0;vertical-align:middle;background:var(--line-hi)}
+.cibar i{display:block;min-width:2px}
+.cibar .passed{background:var(--ok)}.cibar .failed{background:var(--bad)}.cibar .running{background:var(--accent)}
+.cibar .queued{background:var(--warn)}.cibar .skipped{background:var(--muted)}
+.cibt{color:var(--text-2);font-variant-numeric:tabular-nums}
+.tile.empty.ci-cont .lbl{padding:0 8px;text-align:center;letter-spacing:0;color:var(--text-2);overflow-wrap:anywhere}
+.ci-open{display:inline-block;margin:12px 0 0;padding:4px 10px;border:1px solid var(--line-hi);
+font:600 12px/1.4 var(--mono);color:var(--text);text-decoration:none}
+.ci-open:hover{border-color:var(--brand)}
+.ci-pop{position:fixed;inset:5vh 0 auto;z-index:50;width:min(920px,calc(100vw - 24px));max-height:90vh;overflow:auto;
+margin:0 auto;padding:12px 14px;border:1px solid var(--line-hi);background:var(--panel);color:var(--text);box-shadow:var(--elev)}
+.ci-pop-head{display:flex;align-items:baseline;gap:8px;margin:0 0 8px}
+.ci-pop-t{font:600 14px/1.25 var(--mono)}
+.ci-x{margin-left:auto;font:600 16px/1 var(--mono);color:var(--muted);text-decoration:none}
+.ci-x:hover{color:var(--text)}
+.ci-run{min-width:0;padding:10px 12px;background:var(--bg);box-shadow:var(--elev)}
+.ci-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;margin:0 0 6px}
+.ci-head .ticket{min-width:0;overflow-wrap:anywhere;font:600 13px/1.25 var(--mono);color:var(--text);text-decoration:none}
+.ci-head .ticket:hover{color:var(--brand)}
+.ci-a{font:500 12px/1.5 var(--mono);color:var(--accent);text-decoration:none;white-space:nowrap}
+.ci-a:hover{text-decoration:underline}
+.ci-head .when,.ci-fails .when{margin-left:auto;font:12px/1.2 var(--mono);color:var(--muted);white-space:nowrap}
+.ci-jobs{margin:0;padding:0;list-style:none}
+.ci-job{display:grid;grid-template-columns:8px minmax(0,2fr) 96px 72px minmax(0,3fr) 44px;
+grid-template-areas:"dot name chip t runner log";align-items:baseline;gap:2px 12px;padding:6px 0;
+border-top:1px solid var(--line);font:12px/1.4 var(--mono)}
+.ci-dot{grid-area:dot;width:7px;height:7px;background:currentColor;align-self:center}
+.ci-name{grid-area:name;min-width:0;overflow-wrap:anywhere;color:var(--text)}
+.ci-job .chip{grid-area:chip;justify-self:start}
+.ci-t{grid-area:t;text-align:right;font-variant-numeric:tabular-nums;color:var(--text-2);white-space:nowrap}
+.ci-runner{grid-area:runner;min-width:0;overflow-wrap:anywhere;color:var(--muted)}
+.ci-job .log{grid-area:log}
+.ci-sub{margin:16px 0 4px;font:11px/1.3 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.ci-fails .what{min-width:0;overflow-wrap:anywhere;color:var(--text-2);font:12px/1.4 var(--mono)}
+.ci-fails .ticket{color:var(--text);text-decoration:none}
+.ci-tests{flex:1 0 100%;display:flex;flex-direction:column;gap:2px;margin:2px 0 0;padding:0 0 0 12px;list-style:none}
+.feed .ci-tests li{display:block;padding:0;border:0;background:none}
+.ci-tests a{min-width:0;overflow-wrap:anywhere;font:12px/1.5 var(--mono);color:var(--text-2);text-underline-offset:3px}
+.ci-tests a:hover{color:var(--text)}
+.ci-tests .more{margin:0}
+@keyframes ci-pulse{50%{opacity:.3}}
+@media (prefers-reduced-motion: no-preference){.ci-job.live .ci-dot{animation:ci-pulse 1.6s var(--ease) infinite}}
+@media (max-width:640px){.ci-run{padding:10px}
+.ci-job{grid-template-columns:8px auto minmax(0,1fr) auto;grid-template-areas:"dot name name chip" ". t runner log";
+gap:2px 8px}
+.ci-job .chip{justify-self:end}
+.ci-t{text-align:left}}

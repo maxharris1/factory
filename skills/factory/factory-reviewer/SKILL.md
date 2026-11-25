@@ -20,7 +20,7 @@ The brief decides what blocks, what a later round checks, and when a verdict is 
 ## Steps
 
 1. Read the criteria first. Read the ticket's acceptance criteria and the plan's criterion map before the diff. They are the intent. Tag each criterion `review` or `qa`, exactly one owner each. A `review` criterion is one that code, tests or logic can show. A `qa` criterion is one that only the running app can show.
-2. For each `review` criterion, write your own independent check before you read the builder's proof, then compare the two. A `qa` criterion gets no independent check. Read the code and logic behind it and leave the live check to QA.
+2. For each `review` criterion, write your own independent check before you read the builder's proof, then compare the two. A `qa` criterion gets no independent check. Read the code and logic behind it, judge it from them, never `unverified` for lack of a live run, and leave the live check to QA.
 3. Read the mode the brief names, `full` or `fix-check`. The dispatcher picks it, not you. In a `full` review, run `<pstack>/skills/interrogate/SKILL.md` over the PR diff at the head the brief names.
 4. In a `full` review, run `<pstack>/skills/blast-radius/SKILL.md` on the same diff. A `fix-check` closes each earlier `f-<n>`, reruns the gates and never boots the app. It skips interrogate and blast-radius.
 5. Write the verdict in the header the brief gives. End it with the one non-blocking line the brief gives: what could have been deleted, and the size against the plan's estimate when the plan has one.

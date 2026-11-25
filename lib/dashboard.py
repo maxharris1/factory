@@ -205,7 +205,7 @@ from lib.dispatch.constants import (
 )
 from lib.ci_lane import ci_lane
 from lib.dispatch.types import CHECK_FAILED
-from lib.dashboard_page import PAGES, render_pages
+from lib.dashboard_page import PAGES, STATIC_ASSETS, render_pages, render_static_assets
 from lib.dashboard_page import duration as _duration
 from lib.factory_md import QA_RUNNERS
 from lib.feeder import STATES as FEEDER_STATES
@@ -2648,20 +2648,22 @@ def write_snapshot(out_dir: Path, snapshot: dict) -> tuple[Path, Path]:
 
 
 def write_snapshot_pages(out_dir: Path, snapshot: dict) -> tuple[Path, ...]:
-    """Write status.json, every page (PAGES) and tickets.json from one
-    snapshot, as a set.
+    """Write status.json, the static assets (STATIC_ASSETS), every page (PAGES)
+    and tickets.json from one snapshot, as a set.
 
-    The ticket records (RECORDS) go to tickets.json only; status.json and the
-    pages are written from the rest of the snapshot. Each file is written to
-    a temp file in the same directory and fsynced, then renamed into place,
-    status.json first. If a later rename fails, every file already renamed is
-    put back as it was (or removed if there was none), so the directory never
-    mixes files from this snapshot with files from an earlier one. Returns
-    every path: status.json, then the pages in PAGES order, then tickets.json.
+    The ticket records (RECORDS) go to tickets.json only; status.json, the
+    static assets and the pages are written from the rest of the snapshot. Each
+    file is written to a temp file in the same directory and fsynced, then
+    renamed into place, status.json first. If a later rename fails, every file
+    already renamed is put back as it was (or removed if there was none), so the
+    directory never mixes files from this snapshot with files from an earlier
+    one. Returns every path: status.json, STATIC_ASSETS, the pages in PAGES
+    order, then tickets.json.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     status = {key: value for key, value in snapshot.items() if key != RECORDS}
     texts = {"status.json": json.dumps(status, indent=2, sort_keys=True, allow_nan=False) + "\n"}
+    texts.update(render_static_assets(status))
     texts.update(render_pages(status))
     texts["tickets.json"] = tickets_json(snapshot)
     targets = [out_dir / name for name in texts]
@@ -2736,11 +2738,13 @@ def render_html(snapshot: dict) -> str:
 
 __all__ = [
     "PAGES",
+    "STATIC_ASSETS",
     "DashboardError",
     "collect_snapshot",
     "redact",
     "render_html",
     "render_pages",
+    "render_static_assets",
     "write_snapshot",
     "write_snapshot_pages",
 ]

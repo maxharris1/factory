@@ -195,7 +195,7 @@ class RuleEngineMixin:
             ok_head, new_head = sha(ok), sha(head)
         except ValueError:
             return Escalate("bad-sha")
-        hold = ticket.factory.hold
+        hold = ticket.factory.effective_hold
         assert hold is not None
         result = ticket.ci.get(head)
         ci = "unknown" if result is None else result.status

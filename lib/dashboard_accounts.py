@@ -13,6 +13,7 @@ import sqlite3
 from typing import get_args
 
 from lib import account_doctor, device_pool, usage_readings
+from lib.dashboard_usage import safe_text
 from lib.machines_yml import EXTERNAL, Account, MachinesConfig
 from lib.queue import ACTIONS
 from lib.schema import HARNESSES
@@ -160,9 +161,11 @@ def read_accounts(
             read_only = "default"
         else:
             read_only = None
-        entry = {
+        entries.append({
             "id": account.id,
             "harness": account.harness,
+            "plan": safe_text(account.plan),
+            "not_tracked": usage_readings.NOT_TRACKED.get(account.harness),
             "max_jobs": account.max_jobs,
             "paused": account.paused,
             "read_only": read_only,
@@ -171,10 +174,5 @@ def read_accounts(
             "headroom": usage_readings.headroom(list(readings.values()), now),
             "floor": device_pool.FLOOR,
             "running": running.get(account.id, []),
-        }
-        if account.plan:
-            entry["plan"] = account.plan
-        if account.harness == "gemini" and account.harness in usage_readings.NOT_TRACKED_REASONS:
-            entry["usage_note"] = usage_readings.NOT_TRACKED_REASONS[account.harness]
-        entries.append(entry)
+        })
     return entries

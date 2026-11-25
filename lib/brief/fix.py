@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import NamedTuple
 
-from lib.brief.build import base_step, builder_notes, proof_lines
+from lib.brief.build import builder_notes, proof_lines
 from lib.brief.common import (
     GH,
     TEST_SCOPE,
@@ -148,7 +148,7 @@ def _reopen_fix(facts: dict, ask: _Ask) -> tuple[str, list[str], str]:
             f"2. `git fetch origin {base}`. If `git merge-base --is-ancestor origin/{base} HEAD` succeeds, the "
             f"base is already in: skip the merge. Otherwise `git merge origin/{base}`: a merge commit only, "
             "no rebase, no force-push. Resolve any conflict without changing behavior.",
-            f"{ask.change} Write tests first, as the `tdd` skill says.",
+            ask.change,
             f"4. Run only the new tests and the tests for the files you touched, plus a short smoke set, {TEST_SCOPE} "
             "Then run the router's \"Before ready\" steps.",
             "5. Push, then post the ready handoff below with the head you pushed.",
@@ -196,8 +196,7 @@ def _class_fix_steps(facts: dict, item: str, narrow: str) -> list[str]:
         f"and add a test of the rule that fails on the current head. {narrow}",
         f"3. Run only the new tests and the tests for the files you touched, plus a short smoke set, {TEST_SCOPE} "
         "Then run the router's \"Before ready\" steps.",
-        base_step(4, facts),
-        "5. Push, then post the ready handoff below with the head you pushed.",
+        "4. Push, then post the ready handoff below with the head you pushed.",
     ]
 
 
@@ -249,13 +248,12 @@ def _ci_fix(detail: dict[str, object], facts: dict) -> tuple[str, list[str], str
             _checkout(facts),
             "2. First decide whether this PR caused the failure. If it's infrastructure, don't patch the repo; "
             f"rerun the failed check and post `ready` at the same head. Rerun it with {rerun}, "
-            "once, and skip steps 3 to 5.",
+            "once, and skip steps 3 and 4.",
             "3. If this PR caused it: a test that fails on the current head and covers the whole class of the "
             "failure. Then fix the class. Run only that test and the tests for the files you touched, plus a "
             f"short smoke set, {TEST_SCOPE} "
             "Then run the router's \"Before ready\" steps.",
-            base_step(4, facts),
-            "5. Push, then post the ready handoff below with the head you pushed.",
+            "4. Push, then post the ready handoff below with the head you pushed.",
         ],
         "The ready names the pushed head, and the failing checks pass there or were rerun once for infrastructure.",
     )

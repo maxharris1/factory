@@ -47,7 +47,7 @@ and writes the request to the settings spool. The card then shows
 
 | Op | Keys | Control | What it does |
 | --- | --- | --- | --- |
-| `add` | `harness`, `max_jobs`, `signed_in_on` | Add account | Appends the account to `accounts:`. `harness` is `claude`, `codex` or `cursor`. `max_jobs` is 1 to 64. `signed_in_on` lists devices that list the harness. |
+| `add` | `harness`, `max_jobs`, `signed_in_on` | Add account | Appends the account to `accounts:`. `harness` is `claude` or `codex`. Choosing `cursor` shows the machines.yml step and disables Add, and the applier refuses a `cursor` add with that step. `max_jobs` is 1 to 64. `signed_in_on` lists devices that list the harness. |
 | `set` | `field`, `expect`, `value` | Apply max_jobs, Apply devices, Pause or Resume | Sets one `field`, which is `max_jobs` (1 to 64), `signed_in_on` (a list of devices) or `paused` (true or false). `expect` is the value the card showed. Pause writes `paused: true`. Resume deletes the line. |
 | `remove` | `expect` | Remove | Deletes the account's block and keeps its comments. `expect` is the account as the card showed it, with `harness`, `max_jobs`, `paused` and `signed_in_on`. |
 | `prepare` | `device` | Prepare | Makes the account's folder on `device`, then runs the doctor. It edits nothing. |
@@ -95,6 +95,7 @@ shows `refused` with the reason on the card.
 | `read-only` | A `<harness>-default` or `external` account. |
 | `unknown-account` | The account is not in `accounts:`. |
 | `exists` | An `add` names an account that exists. |
+| `a cursor account is a device's cursor login: set harnesses.cursor: {bot: cursor-bot, account: <id>} on each device in machines.yml` | An `add` with harness `cursor`. A Cursor account is a device's cursor login, which the panel cannot set, so edit `machines.yml` by hand. |
 | `bad-id`, `unknown-harness`, `bad-field`, `bad-value` | The applier's own shape checks, which repeat the server's. |
 | `unknown-device`, `harness-not-on-device` | A device in `signed_in_on` is not in `machines.yml`, or does not list the account's harness. |
 | `<field> is set in machines.local.yml`, `<account> is set in machines.local.yml` | The overlay sets that key, or names that account, so the edit would not take effect. |
@@ -105,7 +106,7 @@ shows `refused` with the reason on the card.
 | `<account> holds a running job on <device>` | A `signed_in_on` change that drops a device where the account runs a job. |
 | `cannot read running jobs` | The running-job check could not read `orch.db`. |
 | `cannot edit the account's block` | The line edit cannot find or change the account's block. |
-| `invalid after the edit: <reason>` | The edited file does not load. A Claude or Codex account needs at least one device in `signed_in_on`. A Cursor account must be a device's cursor login, which the panel cannot set, so an `add` with harness `cursor` ends here. |
+| `invalid after the edit: <reason>` | The edited file does not load. A Claude or Codex account needs at least one device in `signed_in_on`. |
 | `the edit changed more than that field`, `the edit changed more than that account` | The edit changed something besides the request. |
 | `the edit changed a comment` | The edit changed a comment line. |
 
@@ -371,13 +372,41 @@ CODEX_HOME=~/.factory-accounts/<id> codex login --device-auth
 Then press Run doctor on the card, or run `orch accounts doctor` on the
 orch host.
 
-A Cursor card row shows no command and no Sign in, because the doctor and
-the sign-in broker cover only Claude and Codex. A Cursor account is the
-device's cursor login itself, so sign it in by hand on the device as that
-login with `cursor-agent login`.
+A Cursor card row shows the doctor's status and the command, but no Sign
+in, because the sign-in broker covers only Claude and Codex. A Cursor
+account is the device's cursor login itself, so sign it in by hand on the
+device as that login:
 
-A Gemini card row shows no command and no Sign in either, for the same
-reason. Gemini sign-in waits on Max's choice of CLI (#1412).
+```sh
+env -u CURSOR_API_KEY -u CURSOR_AUTH_TOKEN -u CURSOR_CONFIG_DIR cursor-agent login
+```
+
+On macOS the Cursor CLI keeps that login in the Keychain, so no variable
+moves it to a folder and a Cursor account has no `signed_in_on`.
+
+A Cursor card shows the account's plan and `not tracked: <reason>` in place
+of 5h used, 7d used and headroom. The Efficiency page shows the same reason
+on the account's own muted row. The reason comes from `NOT_TRACKED` in
+`lib/usage_readings.py`: the Cursor CLI reports no usage without reading its
+login token, and nothing in the factory reads a credential. The shared Ultra
+pool's usage is on the `external` account.
+
+### Cursor is checked, not run
+
+The doctor checks each device's cursor login, but the factory runs no build
+or review job on Cursor. `orch.yml` keeps `refused_harnesses: [cursor]`, and
+that holds until Max says otherwise. A cursor row in `account_signins` never
+changes where a job runs.
+
+### Gemini starts refused
+
+Gemini accounts sign in with Google for Gemini Code Assist, through the
+`gemini` CLI ([decision](decisions/1412-gemini-harness.md)). The doctor
+checks each gemini login, and a card row shows its sign-in command. The
+card has no Sign in button: the broker covers Claude and Codex only. Max
+decided that `orch.yml` lists `gemini` in `refused_harnesses` until its
+accounts are signed in on the devices, so a gemini row in `account_signins`
+changes no placement until then.
 
 ## 1. Declare the account
 
@@ -441,11 +470,22 @@ CODEX_HOME=~/.factory-accounts/<id> codex login --device-auth
 
 Sign in with ChatGPT. The doctor counts an API-key login as `signed-out`.
 
-A Gemini account has no sign-in or doctor command yet. Which CLI the
-factory wraps follows from the subscription or API key Max chooses, and that
-choice is still open (#1412). The `gemini` CLI has no `auth` subcommand: it
-reads `gemini auth status` as a prompt. So `orch accounts doctor` does not
-probe Gemini accounts and writes no `account_signins` row for them. Gemini
+For a Gemini account, run:
+
+```sh
+env -u GEMINI_API_KEY -u GOOGLE_API_KEY -u GOOGLE_CLOUD_ACCESS_TOKEN -u GOOGLE_APPLICATION_CREDENTIALS -u GOOGLE_GENAI_USE_GCA -u GOOGLE_GENAI_USE_VERTEXAI -u GEMINI_CLI_USE_COMPUTE_ADC -u CLOUD_SHELL -u GOOGLE_GEMINI_BASE_URL -u GEMINI_CLI_CUSTOM_HEADERS GEMINI_CLI_HOME=$HOME/.factory-accounts/<id> NO_BROWSER=true gemini
+```
+
+The `-u` flags keep every API key and token override out of the login, so
+the sign-in lands in the folder. Choose Sign in with Google, open the link it
+prints, sign in with the Gemini Code Assist account and paste the code back.
+Then type `/quit`. The `gemini` CLI has no `auth` subcommand.
+
+The doctor runs `env NO_BROWSER=true NO_COLOR=1 gemini </dev/null` in the
+folder with the same variables unset. A cached sign-in loads, then the CLI
+exits 42 with `No input provided via stdin`, and the doctor reads `ok`. No
+prompt reaches a model. Exit 41, an auth error, reads `signed-out`. Any
+other reply reads `signed-out` with `status reply not understood`. Gemini
 quota stays `not tracked`.
 
 ## 3. Check every sign-in
@@ -457,7 +497,10 @@ orch accounts doctor
 ```
 
 It reads the database from `--db` or `$ORCH_DB`. It asks every device over
-ssh, as each harness's login there, with the token variables unset. It prints one line per
+ssh, as each harness's login there, with the token variables unset. For
+Cursor it runs `cursor-agent status --format json` with `CURSOR_API_KEY` and
+`CURSOR_AUTH_TOKEN` unset, and reads only the reply, never a credential
+file. It keeps a hash of the Cursor user id, never the email. It prints one line per
 pair, `<account>@<device> <status> <auth method or -> <detail>`. Confirm
 the new account's row on each listed device reads `ok`. The poller runs the
 same check on its first poll, every 30 minutes, and after it adopts a
@@ -495,16 +538,17 @@ The Mac's row appears once the Mac lists `claude` in `machines.yml`.
 
 | Status | Detail | Cause | Fix |
 | --- | --- | --- | --- |
-| `ok` | (empty) | Claude reports a `claude.ai` sign-in with an org and email. Codex reports `Logged in using ChatGPT`. | None. |
+| `ok` | (empty) | Claude reports a `claude.ai` sign-in with an org and email. Codex reports `Logged in using ChatGPT`. Cursor reports `authenticated`. | None. |
 | `signed-out` | `not logged in` | The status command reports no sign-in. | Run step 2. |
-| `signed-out` | `status reply not understood` | Claude's reply has no `loggedIn`, or Codex's first line is unknown. | Run the status command as the bot and read its reply. |
-| `signed-out` | `status command exited nonzero` | The reply says signed in, but the command failed. | Run the status command as the bot and read its error. |
+| `signed-out` | `status reply not understood` | Claude's reply has no `loggedIn`, Codex's first line is unknown, or Cursor's `status` is unknown. | Run the status command as the bot and read its reply. |
+| `signed-out` | `status command exited nonzero` | The reply says signed in, but the command failed, or Cursor's reply is `error`. | Run the status command as the bot and read its error. |
+| `signed-out` | `partly signed in` | Cursor reports `partially-authenticated`. | Run the Cursor login again. |
 | `signed-out` | `sign-in names no org and email` | Claude's `claude.ai` sign-in names no org and email. | Run the Claude login again. |
 | `signed-out` | `auth from a token variable, not the account folder` | Claude's auth method is `oauth_token`, `api_key`, `auth_token` or `apiKeyHelper`. | Follow [Move the Mac's profile token off the default account](#move-the-macs-profile-token-off-the-default-account). |
 | `signed-out` | `api key, not a ChatGPT sign-in` | Codex signed in with an API key. | Run the Codex login and sign in with ChatGPT. |
 | `signed-out` | `auth method not understood` | Claude names no auth method, or one the doctor does not know. | Run the Claude login again. |
-| `mismatch` | `same sign-in as account <ids>` | Another account's folder has the same Claude org and email. | Sign this account in to its own subscription. |
-| `mismatch` | `another sign-in on device <devices>` | This account has a different org and email on the named devices. | Sign the account in again on the device that has the wrong subscription. |
+| `mismatch` | `same sign-in as account <ids>` | Another account has the same Claude org and email, or the same Cursor user. | Sign this account in to its own subscription. |
+| `mismatch` | `another sign-in on device <devices>` | This account has a different org and email, or a different Cursor user, on the named devices. | Sign the account in again on the device that has the wrong subscription. |
 | `mismatch` | `signing in changed account <ids>` | A dashboard sign-in of this account changed the named accounts' sign-in on the same device. | Sign this account in with the CLI command, then check the named accounts. |
 | `unreachable` | `device has install placeholders` | A device field still holds a `REPLACE_WITH_` value. | Fill in the device in `machines.yml`. |
 | `unreachable` | `no ssh_alias for <harness> on <device>` | The device has no ssh alias for that harness. | Set `ssh_alias` on the device. |
@@ -528,8 +572,9 @@ its reason is `account-signin`. Its detail is `<status>; run: <step>;
 
 `<sign-in command>` is the step 2 command for the account's folder, with
 `<folder>` in place of `~/.factory-accounts/<id>`. For the device's own
-login it is `env -u CLAUDE_CODE_OAUTH_TOKEN -u CLAUDE_CONFIG_DIR claude auth login`
-or `env -u CODEX_HOME codex login --device-auth`.
+login it is `env -u CLAUDE_CODE_OAUTH_TOKEN -u CLAUDE_CONFIG_DIR claude auth login`,
+`env -u CODEX_HOME codex login --device-auth` or
+`env -u CURSOR_API_KEY -u CURSOR_AUTH_TOKEN -u CURSOR_CONFIG_DIR cursor-agent login`.
 
 The next pass that finds the row `ok` clears the flag. So does the pass
 after the account leaves the device's `signed_in_on`. A flag still raised

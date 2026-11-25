@@ -38,7 +38,7 @@ is everything under ``a/``, ``a/**/b`` includes ``a/b``).
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -46,6 +46,7 @@ from lib.factory_md import HoldConfig
 from lib.handoff import HandoffError, parse_comment
 
 FACTORY_MD = "factory.md"
+VISUAL_QA_REASON = "visual-qa-review"
 _FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 _SLASH_OK = re.compile(r"/ok[ \t]+([0-9a-f]{40})")
 
@@ -203,12 +204,28 @@ def decide(
     approver_allowed: bool,
     covers: Callable[[str], bool],
     factory_md_trust_changed: bool | None,
+    check_configured_hold: bool = True,
+    visual_qa_hold: bool = False,
+    approvers: Collection[str] | None = None,
 ) -> HoldDecision:
     """Whether the hold blocks a merge of the current head.
 
     comments are dispatcher Comments; an edited one never clears. covers(head) says
     whether an ok naming head covers the current head by the ship rule.
     """
+    allowed_approvers = (
+        frozenset(item.casefold() for item in approvers)
+        if approvers is not None
+        else frozenset({hold.approver.casefold()})
+    )
+    if not check_configured_hold:
+        if not visual_qa_hold:
+            return HoldDecision()
+        reasons = (VISUAL_QA_REASON,)
+        ok_at = _approver_ok(comments, allowed_approvers, covers) if approver_allowed else None
+        if ok_at is not None:
+            return HoldDecision(reasons=reasons, cleared="ok")
+        return HoldDecision(reasons=reasons)
     if labels is None:
         return HoldDecision(unread="labels")
     if changed_files is None:
@@ -233,12 +250,18 @@ def decide(
         if not factory_md_trust_changed:
             paths = tuple(path for path in paths if path != FACTORY_MD)
     reasons = tuple(
-        name for name, active in (("label", label_hold), ("paths", bool(paths))) if active
+        name
+        for name, active in (
+            ("label", label_hold),
+            ("paths", bool(paths)),
+            (VISUAL_QA_REASON, visual_qa_hold),
+        )
+        if active
     )
     if not reasons:
         cleared = "label-removed" if removed_by_approver and not on_pr else None
         return HoldDecision(cleared=cleared)
-    ok_at = _approver_ok(comments, approver, covers) if approver_allowed else None
+    ok_at = _approver_ok(comments, allowed_approvers, covers) if approver_allowed else None
     relabeled = ok_at is not None and label_hold and any(
         event.action == "labeled"
         and event.label.casefold() == wanted
@@ -252,14 +275,19 @@ def decide(
 
 def _approver_ok(
     comments: Iterable[object],
-    approver: str,
+    approver: str | Collection[str],
     covers: Callable[[str], bool],
 ) -> float | None:
+    allowed = (
+        frozenset({approver.casefold()})
+        if isinstance(approver, str)
+        else frozenset(item.casefold() for item in approver)
+    )
     newest_first = sorted(
         comments, key=lambda item: float(getattr(item, "created_at", 0)), reverse=True
     )
     for item in newest_first:
-        if str(getattr(item, "author", "")).casefold() != approver:
+        if str(getattr(item, "author", "")).casefold() not in allowed:
             continue
         if getattr(item, "edited_at", None) is not None:
             continue

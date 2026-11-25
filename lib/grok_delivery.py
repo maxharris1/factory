@@ -125,6 +125,17 @@ class NoGrokWebhook:
         )
 
 
+class PullDriverDelivery:
+    """Marker delivery for driver: pull (E3-1).
+
+    The dispatcher writes wakes directly into driver_inbox for `orch wait
+    orchestrator` instead of pushing external webhooks.
+    """
+
+    def deliver(self, job: Job, *, logical_key: str) -> str:
+        return f"pull:{logical_key}"
+
+
 class WebhookGrokDelivery:
     def __init__(
         self,
@@ -217,9 +228,15 @@ def _claude_wake_delivery(config: OrchConfig) -> GrokDelivery:
     )
 
 
+def _pull_wake_delivery(config: OrchConfig) -> GrokDelivery:
+    del config
+    return PullDriverDelivery()
+
+
 _WAKE_DELIVERIES: dict[Driver, Callable[[OrchConfig], GrokDelivery]] = {
     "grok": _grok_wake_delivery,
     "claude": _claude_wake_delivery,
+    "pull": _pull_wake_delivery,
 }
 
 

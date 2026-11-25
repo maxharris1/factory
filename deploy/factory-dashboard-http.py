@@ -126,6 +126,16 @@ PAGES = (
     "index.html", "activity.html", "efficiency.html", "job.html", "health.html", "ticket.html",
     "settings.html",
 )
+STATIC_ASSETS = ("app.css", "app.js", "auth.js")
+STATIC_ROUTES = {
+    **{f"/{name}": name for name in STATIC_ASSETS},
+    **{f"/static/{name}": name for name in STATIC_ASSETS},
+}
+STATIC_CONTENT_TYPES = {
+    "app.css": "text/css; charset=utf-8",
+    "app.js": "application/javascript; charset=utf-8",
+    "auth.js": "application/javascript; charset=utf-8",
+}
 ROUTES = {
     "/": "index.html",
     "/status.json": "status.json",
@@ -142,11 +152,11 @@ SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
     "X-Frame-Options": "DENY",
-    # The snapshot pages are self-contained: inline style and script only.
-    # Their script fetches this server's own status.json (connect-src 'self') to
-    # update in place; nothing else is ever loaded.
+    # External static assets under /static/ with strict script-src 'self' (no
+    # 'unsafe-inline' for scripts). style-src keeps 'unsafe-inline' only for
+    # inline style attributes on PixelStrip canvases and QA evidence pages.
     "Content-Security-Policy": (
-        "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+        "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; "
         "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     ),
 }
@@ -163,6 +173,57 @@ QA_HEADERS = {
 }
 QA_DOWNLOAD = ("text/plain; charset=utf-8", {**QA_HEADERS, "Content-Disposition": "attachment"})
 QA_CHUNK = 1024 * 1024
+_AUTH_JS = (
+    "(function () {\n"
+    "  'use strict';\n"
+    "  var btn = document.getElementById('go');\n"
+    "  var msg = document.getElementById('msg');\n"
+    "  if (!btn || !msg) return;\n"
+    "\n"
+    "  function poll(sec) {\n"
+    "    setTimeout(function () {\n"
+    "      fetch('/api/signin/poll', {\n"
+    "        method: 'POST',\n"
+    "        credentials: 'same-origin',\n"
+    "        headers: {'Content-Type': 'application/json'},\n"
+    "        body: '{}'\n"
+    "      })\n"
+    "        .then(function (r) { return r.json(); })\n"
+    "        .then(function (d) {\n"
+    "          if (d.state === 'signed-in') { location.reload(); return; }\n"
+    "          if (d.state === 'pending') { poll(sec); return; }\n"
+    "          msg.textContent = 'Sign-in ' + (d.state || 'failed');\n"
+    "        })\n"
+    "        .catch(function () { msg.textContent = 'Sign-in error'; });\n"
+    "    }, sec * 1000);\n"
+    "  }\n"
+    "\n"
+    "  btn.addEventListener('click', function () {\n"
+    "    btn.disabled = true;\n"
+    "    msg.textContent = 'Starting sign-in...';\n"
+    "    fetch('/api/signin', {\n"
+    "      method: 'POST',\n"
+    "      credentials: 'same-origin',\n"
+    "      headers: {'Content-Type': 'application/json'},\n"
+    "      body: '{}'\n"
+    "    })\n"
+    "      .then(function (r) { return r.json(); })\n"
+    "      .then(function (d) {\n"
+    "        if (!d.user_code) {\n"
+    "          msg.textContent = 'Sign-in unavailable';\n"
+    "          btn.disabled = false;\n"
+    "          return;\n"
+    "        }\n"
+    "        msg.textContent = 'Enter code ' + d.user_code + ' at ' + d.verification_uri;\n"
+    "        poll(Math.max(1, Number(d.interval) || 5));\n"
+    "      })\n"
+    "      .catch(function () {\n"
+    "        msg.textContent = 'Sign-in failed';\n"
+    "        btn.disabled = false;\n"
+    "      });\n"
+    "  });\n"
+    "})();\n"
+).encode("utf-8")
 _AUTH_REQUIRED_HTML = (
     "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
     "<title>Factory Mission Control — Sign in</title>"
@@ -171,19 +232,7 @@ _AUTH_REQUIRED_HTML = (
     "code{padding:.2rem .4rem;background:#1d2129;border-radius:4px}a{color:#7cb7ff}</style></head>"
     "<body><h1>Sign in required</h1><p>Authenticate with GitHub to view Factory Mission Control.</p>"
     "<div id='auth'><button id='go' type='button'>Sign in with GitHub</button></div><p id='msg'></p>"
-    "<script>(function(){var btn=document.getElementById('go'),msg=document.getElementById('msg');"
-    "function poll(sec){setTimeout(function(){fetch('/api/signin/poll',{method:'POST',"
-    "credentials:'same-origin',headers:{'Content-Type':'application/json'},body:'{}'})"
-    ".then(function(r){return r.json()}).then(function(d){if(d.state==='signed-in'){location.reload();return}"
-    "if(d.state==='pending'){poll(sec);return}msg.textContent='Sign-in '+(d.state||'failed')})"
-    ".catch(function(){msg.textContent='Sign-in error'})},sec*1000)}"
-    "btn.addEventListener('click',function(){btn.disabled=true;msg.textContent='Starting sign-in...';"
-    "fetch('/api/signin',{method:'POST',credentials:'same-origin',"
-    "headers:{'Content-Type':'application/json'},body:'{}'}).then(function(r){return r.json()})"
-    ".then(function(d){if(!d.user_code){msg.textContent='Sign-in unavailable';btn.disabled=false;return}"
-    "msg.textContent='Enter code '+d.user_code+' at '+d.verification_uri;"
-    "poll(Math.max(1,Number(d.interval)||5))}).catch(function(){msg.textContent='Sign-in failed';"
-    "btn.disabled=false})});})();</script></body></html>\n"
+    "<script src='/auth.js' defer></script></body></html>\n"
 ).encode("utf-8")
 
 
@@ -1568,13 +1617,18 @@ class SnapshotHandler(BaseHTTPRequestHandler):
 
     def _serve(self, *, body: bool) -> None:
         path = urlsplit(self.path).path
+        # The 401 sign-in screen loads /auth.js under script-src 'self',
+        # so auth.js is served even before a session exists (both /auth.js and /static/auth.js).
+        if path in ("/auth.js", "/static/auth.js"):
+            self._serve_static("auth.js", body=body)
+            return
         actions: Actions | None = self.server.actions  # type: ignore[attr-defined]
         if (
             actions is not None
             and actions.config.require_auth_reads
             and actions.current(self._cookie("factory_session")) is None
         ):
-            if path in ("/status.json", "/tickets.json") or path.startswith(QA_RUNS):
+            if path in ("/status.json", "/tickets.json") or path.startswith(QA_RUNS) or path in STATIC_ROUTES:
                 self._json(401, {"error": "no-session"})
                 return
             if path in ROUTES:
@@ -1583,12 +1637,28 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         if path.startswith(QA_RUNS):
             self._serve_qa(path, body=body)
             return
+        static_name = STATIC_ROUTES.get(path)
+        if static_name is not None:
+            self._serve_static(static_name, body=body)
+            return
         name = ROUTES.get(path)
         data = read_snapshot_file(self.server.root_fd, name) if name else None  # type: ignore[attr-defined]
         if name is None or data is None:
             self._send(404, b"not found\n", "text/plain; charset=utf-8", body=body)
             return
         self._send(200, data, CONTENT_TYPES[name], body=body)
+
+    def _serve_static(self, name: str, *, body: bool) -> None:
+        data = read_snapshot_file(self.server.root_fd, name)  # type: ignore[attr-defined]
+        if data is None and name == "auth.js":
+            try:
+                os.stat(name, dir_fd=self.server.root_fd, follow_symlinks=False)  # type: ignore[attr-defined]
+            except FileNotFoundError:
+                data = _AUTH_JS
+        if data is None:
+            self._send(404, b"not found\n", "text/plain; charset=utf-8", body=body)
+            return
+        self._send(200, data, STATIC_CONTENT_TYPES[name], body=body)
 
     def _serve_qa(self, path: str, *, body: bool) -> None:
         route = qa_route(path)

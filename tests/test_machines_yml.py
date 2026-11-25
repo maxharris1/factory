@@ -234,6 +234,10 @@ def test_example_passes_strict_check() -> None:
     assert config.account_home("pc", "codex", "codex-pro-1") == (
         "/home/codex-bot/.factory-accounts/codex-pro-1"
     )
+    for device in ("pc", "box"):
+        assert config.accounts_on(device, "cursor") == ("cursor-ultra",)
+        assert config.account_home(device, "cursor", "cursor-ultra") is None
+    assert [a.id for a in config.external_accounts()] == ["cursor-grok-ultra"]
     assert orch_host(config) == "pc"
     assert [device.name for device in config.devices] == ["pc", "box"]
     assert not any(device.local for device in config.devices)
@@ -860,6 +864,30 @@ def test_accounts_signed_in_on_devices_run_beside_each_devices_own_login(
     assert config.serving("codex") == frozenset({"codex-default", "codex-a"})
 
 
+CURSOR_LOGIN = "{cursor: {bot: cursor-bot, account: cursor-ultra}}"
+
+
+def test_cursor_account_is_each_devices_cursor_login(tmp_path: Path) -> None:
+    text = (
+        "orch_host: pc\naccounts:\n"
+        '  - {id: cursor-ultra, harness: cursor, plan: ultra, label: "Cursor Ultra"}\n'
+        "devices:\n"
+        + "".join(
+            remote(name=name, tailscale_name=f"{name}.example.ts.net", harnesses=CURSOR_LOGIN)
+            for name in ("pc", "box", "mac")
+        )
+    )
+
+    config, findings = load_machines_yml(write(tmp_path, text))
+
+    assert config is not None, findings
+    assert findings == []
+    for device in ("pc", "box", "mac"):
+        assert config.accounts_on(device, "cursor") == ("cursor-ultra",)
+        assert config.account_home(device, "cursor", "cursor-ultra") is None
+    assert config.serving("cursor") == frozenset({"cursor-ultra"})
+
+
 def signed_in(account: str, **device: str) -> str:
     fields = {"harnesses": "{claude: claude-bot}", "home": "/home/{bot}", **device}
     return (
@@ -910,6 +938,16 @@ def signed_in(account: str, **device: str) -> str:
         (
             "orch_host: pc\naccounts:\n  - {id: cursor-a, harness: cursor, signed_in_on: [pc]}\n"
             "devices:\n" + remote(harnesses="{cursor: cursor-bot}", home="/home/{bot}"),
+            "accounts[0].signed_in_on is not supported for a cursor account",
+        ),
+        (
+            "orch_host: pc\naccounts:\n  - {id: cursor-ultra, harness: cursor, signed_in_on: [pc, box, mac]}\n"
+            "devices:\n"
+            + "".join(
+                remote(name=name, tailscale_name=f"{name}.example.ts.net",
+                       harnesses="{cursor: cursor-bot}", home="/home/{bot}")
+                for name in ("pc", "box", "mac")
+            ),
             "accounts[0].signed_in_on is not supported for a cursor account",
         ),
         (

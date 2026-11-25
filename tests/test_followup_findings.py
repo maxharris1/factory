@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -228,7 +229,8 @@ def review_brief(round_text: str, followup: int | None) -> str:
     )
 
 
-FOLLOWUP_STEP = "9. Mark a finding `[follow-up]` instead of `[blocking]`"
+FOLLOWUP_STEP = "Mark a finding `[follow-up]` instead of `[blocking]`"
+VERDICT_STEP = "Pick `ac` and the verdict"
 FOLLOWUP_RULES = (
     "- From round 4 (`review.followup_from_round`), variants of an already-raised rule are follow-ups, "
     "not blockers. A real new failure still blocks at any round.",
@@ -249,11 +251,16 @@ def test_review_brief_before_the_follow_up_round_is_unchanged() -> None:
     assert "[follow-up]" not in review_brief("3/5", 4)
 
 
+def step_number(brief: str, step: str) -> int:
+    match = re.search(rf"^(\d+)\. {re.escape(step)}", brief, re.MULTILINE)
+    assert match, step
+    return int(match.group(1))
+
+
 @pytest.mark.parametrize("round_text", ["4/5", "5/5"])
 def test_review_brief_from_the_follow_up_round_defines_the_tag(round_text: str) -> None:
     brief = review_brief(round_text, 4)
-    assert FOLLOWUP_STEP in brief
-    assert "10. Pick `ac` and the verdict" in brief
+    assert step_number(brief, VERDICT_STEP) == step_number(brief, FOLLOWUP_STEP) + 1
     assert "`[blocking]`, `[follow-up]` or `[minor]`" in brief
     for rule in FOLLOWUP_RULES:
         assert rule in brief.splitlines()

@@ -163,6 +163,20 @@ def brief(job) -> str:
     )
 
 
+ROUTER_PATH = "skills/factory/factory-builder/SKILL.md"
+
+
+def assert_runs_against(builder_brief: str, base: str) -> None:
+    assert f"- base branch: {base}" in builder_brief
+    assert "- base branch: main" not in builder_brief
+    assert "origin/main" not in builder_brief
+    assert f"`{BOX_FACTORY_ROOT}/{ROUTER_PATH}`" in builder_brief
+    assert "router's \"Before ready\" steps" in builder_brief
+    router = (Path(__file__).resolve().parents[1] / ROUTER_PATH).read_text(encoding="utf-8")
+    assert "### Before ready" in router
+    assert "Rebase on the current base" in router
+
+
 def test_build_review_and_fix_run_against_the_tickets_base(tmp_path: Path) -> None:
     (upload,), _, _ = polled("project-2", pr_base=FEATURE)
     dispatcher, queue = linear_dispatcher(tmp_path)
@@ -172,8 +186,7 @@ def test_build_review_and_fix_run_against_the_tickets_base(tmp_path: Path) -> No
     assert build is not None
     assert json.loads(build.request.detail or "{}")["base_branch"] == FEATURE
     build_brief = brief(build)
-    assert f"git fetch origin {FEATURE}" in build_brief
-    assert "origin/main" not in build_brief
+    assert_runs_against(build_brief, FEATURE)
     assert "read `factory.md` from branch main of acme/widgets" in build_brief
     queue.finish(build.id, owner="claude", handoff_comment_id="ready")
 
@@ -202,8 +215,7 @@ def test_build_review_and_fix_run_against_the_tickets_base(tmp_path: Path) -> No
     fix = queue.claim("claude")
     assert fix is not None and fix.request.action == "fix"
     fix_brief = brief(fix)
-    assert f"git fetch origin {FEATURE}" in fix_brief
-    assert "origin/main" not in fix_brief
+    assert_runs_against(fix_brief, FEATURE)
 
 
 def attention(tmp_path: Path) -> dict[str, str]:

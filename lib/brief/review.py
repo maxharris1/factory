@@ -1,4 +1,4 @@
-"""The review job: the one cross-family reviewer's verdict."""
+"""The review job: the reviewer's verdict."""
 
 from __future__ import annotations
 
@@ -24,14 +24,10 @@ PSTACK_FIX_ROUND = (
     "merge-conflict resolution, or a minor fix gets a single verifier at the new head"
 )
 _MODES = {
-    "full": (
-        "A `full` review runs interrogate and blast-radius.",
-        "Run interrogate and blast-radius, and say which checks did not run.",
-    ),
+    "full": "Run interrogate and blast-radius, and say which checks did not run.",
     "fix-check": (
-        "A `fix-check` closes each earlier `f-<n>`, reruns the gates and does not boot the app.",
         "Do not run interrogate or blast-radius: the dispatcher picked `fix-check`. "
-        "In the verdict, say which checks did not run.",
+        "In the verdict, say which checks did not run."
     ),
 }
 _QA_GATE_COVERAGE = {
@@ -208,7 +204,7 @@ def lead(facts: dict) -> Lead:
     variant = followups_active(facts["followup_from"], facts["round_number"])
     user_impact = facts["block_on"] == "user-impact"
     mode, reason = review_mode(facts)
-    summary, gate = _MODES[mode]
+    gate = _MODES[mode]
     read = "Read the fix delta" if mode == "fix-check" else "Read the whole diff"
     if user_impact:
         unchanged_tag = "`[follow-up]`."
@@ -218,16 +214,13 @@ def lead(facts: dict) -> Lead:
         unchanged_tag = "`[minor]`."
     steps = [
         "Requirements first. Before the diff, tag each `ac-<n>` in the Ticket section below with one "
-        "owner, `review` (code, tests or logic show it) or `qa` (only the running app can), and mark it `met`, "
+        "owner, `review` or `qa`, and mark it `met`, "
         "`unmet`, `unverified` or `unsatisfiable` with evidence (file:line, test or run). `unsatisfiable` means "
         "no change to this PR can meet it, such as one about other PRs' state, and sets `unsat=<id>` in the "
         "header. A criterion needing a live provider without credentials here is `unverified`, not "
         "`verdict=BLOCKED`: name what is missing and the builder's live-run evidence or a human check. Never "
         "read, request or look for credentials. Count `unverified` and `unsatisfiable` as unmet for `ac`."
         + _qa_owner(facts["qa_criteria"]),
-        "QA owns live checks, so judge a `qa` criterion from its code, never `unverified` for lack of a live run. "
-        "For each `review` criterion, write your own check (test, script or trace) before reading the builder's "
-        "proof, then compare. A `qa` criterion gets none.",
         *([_qa_gate_step(facts["qa_gate"], facts["qa_criteria"] is not None)] if facts["qa_gate"] else []),
         *(
             _update_steps(facts, base, head, unchanged_tag)
@@ -257,9 +250,7 @@ def lead(facts: dict) -> Lead:
                 *([_rebased_step(facts["rebase"], base, head)] if facts["rebased"] else []),
             ]
         ),
-        gate,
         "Mark a finding `[blocking]` only when you have run it and seen it fail, and give the repro.",
-        "Give each helper a distinct question: one criterion group or one risk.",
         *([_bar_step(variant)] if user_impact else []),
         "Give each finding an id `f-<n>` and name the rule it breaks. Reuse an earlier round's id for the same "
         "finding and number new ones after the highest earlier id. The same problem means the same broken rule, "
@@ -290,17 +281,17 @@ def lead(facts: dict) -> Lead:
         *([_size_flag_step(facts)] if facts["size_flag"] else []),
         "Pick `ac` and the verdict by the definitions in the Review rules below. Leave `repeat=` and `unsat=` "
         "out of the header when they do not apply. Post the verdict handoff below on the head you reviewed. "
-        "Do not merge. Do not push to the PR.",
+        "Do not push to the PR.",
     ]
     return Lead(
         f"Review {pr_ref(facts)} at {head} against every acceptance criterion and post one verdict.",
         (
-            f"Review against `{base}`. You are the one cross-family reviewer. Follow the router in Skills below.",
+            f"Review against `{base}`. Follow the router in Skills below.",
             *(
                 f"{line} Read its files with `git diff --stat origin/{facts['stack']['branch']}...{tip}`."
                 for line in stacked
             ),
-            f"Mode: `{mode}`. {reason} {summary}",
+            f"Mode: `{mode}`. {reason} {gate}",
             *(f"{number}. {step}" for number, step in enumerate(steps, 1)),
         ),
         ("The verdict names each `ac-<n>` with an owner, a state and evidence, and each finding in the Handoff form.",),
@@ -388,7 +379,7 @@ def _fix_check_step(rebase: dict | None, head: str) -> str:
         "a `[closed]` item in the form below. (b) Rerun the gates on this head: the tests for the files the fix "
         "touched, in a throwaway copy, and the CI result. (c) Read the fix delta for a bug the fix introduced. "
         + _delta_line(rebase, head)
-        + "Do not boot or drive the app. A new finding in code the delta did not change is `[follow-up]` unless "
+        + "A new finding in code the delta did not change is `[follow-up]` unless "
         "it fails a criterion."
     )
 

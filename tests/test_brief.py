@@ -158,7 +158,7 @@ def test_review_brief_states_the_round_and_the_verdict_header() -> None:
         "head=3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6 ac=<met|unmet> "
         "verdict=<APPROVE|REVISE|BLOCKED> risk=high repeat=<id> unsat=<id> -->"
     ) in text
-    assert "Do not merge" in text
+    assert "A reviewer never merges." in text
     assert "verify-cleffy" in text
 
 
