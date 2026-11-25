@@ -1,0 +1,202 @@
+# Central pstack benchmark-driven role routing table (E2-4).
+#
+# Assigns ordered `(harness, model, effort)` preference pools to each factory
+# and pstack role across Claude, Codex, Gemini, and Cursor.
+#
+# - `budget` selects the active cost/effort tier: unlimited, large, medium, small.
+# - `review` mechanically filters out any candidate sharing the builder's model
+#   family (anthropic / openai / google) and fails closed if none is eligible.
+# - Harnesses listed in orch.yml `refused_harnesses` (or currently paused /
+#   unavailable) are skipped automatically in preference order.
+# - Individual repositories may override `budget` or specific slots via an
+#   optional `routing:` block in `factory.md`, or specify `inherit` to fall back
+#   to legacy `builder:` / `reviewer:` front matter.
+budget: medium
+
+roles:
+  orchestrate:
+    - harness: claude
+      model: claude-opus-4-6
+      effort: high
+    - harness: gemini
+      model: gemini-2.5-pro
+      effort: high
+    - harness: codex
+      model: gpt-5.4
+      effort: high
+
+  plan:
+    - harness: claude
+      model: claude-opus-4-6
+      effort: high
+    - harness: codex
+      model: gpt-5.4
+      effort: high
+    - harness: gemini
+      model: gemini-2.5-pro
+      effort: high
+
+  build:
+    - harness: claude
+      model: claude-opus-4-6
+      effort: high
+    - harness: codex
+      model: gpt-5.4
+      effort: high
+    - harness: gemini
+      model: gemini-2.5-pro
+      effort: high
+    - harness: cursor
+      model: claude-opus-4-6
+      effort: high
+
+  build:feature:
+    - harness: claude
+      model: claude-opus-4-6
+      effort: high
+    - harness: codex
+      model: gpt-5.4
+      effort: high
+    - harness: gemini
+      model: gemini-2.5-pro
+      effort: high
+
+  build:bug:
+    - harness: claude
+      model: claude-opus-4-6
+      effort: high
+    - harness: codex
+      model: gpt-5.4
+      effort: high
+    - harness: gemini
+      model: gemini-2.5-pro
+      effort: high
+
+  build:refactor:
+    - harness: claude
+      model: claude-opus-4-6
+      effort: high
+    - harness: codex
+      model: gpt-5.4
+      effort: high
+    - harness: gemini
+      model: gemini-2.5-pro
+      effort: high
+
+  build:perf:
+    - harness: codex
+      model: gpt-5.4
+      effort: high
+    - harness: claude
+      model: claude-opus-4-6
+      effort: high
+    - harness: gemini
+      model: gemini-2.5-pro
+      effort: high
+
+  review:
+    - harness: codex
+      model: gpt-5.4
+      effort: high
+    - harness: claude
+      model: claude-opus-4-6
+      effort: high
+    - harness: gemini
+      model: gemini-2.5-pro
+      effort: high
+    - harness: cursor
+      model: gpt-5.4
+      effort: high
+
+  qa:
+    - harness: claude
+      model: claude-sonnet-4-6
+      effort: medium
+    - harness: codex
+      model: gpt-5.4
+      effort: medium
+    - harness: gemini
+      model: gemini-2.5-flash
+      effort: medium
+
+  helper:deep:
+    - harness: claude
+      model: claude-opus-4-6
+      effort: high
+    - harness: codex
+      model: gpt-5.4
+      effort: high
+
+  helper:standard:
+    - harness: claude
+      model: claude-sonnet-4-6
+      effort: medium
+    - harness: codex
+      model: gpt-5.4
+      effort: medium
+    - harness: gemini
+      model: gemini-2.5-pro
+      effort: medium
+
+  helper:fast:
+    - harness: claude
+      model: claude-haiku-4-5
+      effort: low
+    - harness: gemini
+      model: gemini-2.5-flash
+      effort: low
+    - harness: codex
+      model: gpt-5.4-mini
+      effort: low
+
+budget_overrides:
+  unlimited:
+    orchestrate:
+      - harness: claude
+        model: claude-opus-4-6
+        effort: max
+      - harness: gemini
+        model: gemini-2.5-pro
+        effort: max
+      - harness: codex
+        model: gpt-5.4
+        effort: xhigh
+    plan:
+      - harness: claude
+        model: claude-opus-4-6
+        effort: max
+      - harness: codex
+        model: gpt-5.4
+        effort: xhigh
+    review:
+      - harness: codex
+        model: gpt-5.4
+        effort: xhigh
+      - harness: claude
+        model: claude-opus-4-6
+        effort: max
+      - harness: gemini
+        model: gemini-2.5-pro
+        effort: max
+
+  small:
+    build:
+      - harness: claude
+        model: claude-sonnet-4-6
+        effort: medium
+      - harness: gemini
+        model: gemini-2.5-flash
+        effort: medium
+      - harness: codex
+        model: gpt-5.4-mini
+        effort: medium
+    review:
+      - harness: codex
+        model: gpt-5.4-mini
+        effort: medium
+      - harness: claude
+        model: claude-sonnet-4-6
+        effort: medium
+      - harness: gemini
+        model: gemini-2.5-flash
+        effort: medium

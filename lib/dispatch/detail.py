@@ -770,10 +770,17 @@ class DetailMixin:
         if action in ("plan", "build", "fix", "review") and (decisions := self._decisions(ticket, connection)):
             context["decisions"] = decisions
         if ticket.factory_md is not None:
-            context["routing"] = {
+            routing_payload: dict[str, object] = {
                 "builder": ticket.factory.builder_harness,
                 "reviewer": ticket.factory.reviewer_harness,
             }
+            if ticket.router_picks is not None:
+                for side, pick in zip(("builder", "reviewer"), ticket.router_picks):
+                    if pick.model is not None:
+                        routing_payload[f"{side}_model"] = pick.model
+                    if pick.effort is not None:
+                        routing_payload[f"{side}_effort"] = pick.effort
+            context["routing"] = routing_payload
         if kind is not None:
             context["kind"] = kind
         if plan_round is not None:

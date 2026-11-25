@@ -141,6 +141,7 @@ from lib.queue import (
     require_proof,
 )
 from lib.remote import SshTransport
+from lib.role_router import RoutingError, load_routing_yml, routing_argv_for_detail
 from lib.state_backup import (
     BackupError,
     CycleBackup,
@@ -764,6 +765,12 @@ def _check_config(argv: list[str]) -> int:
         failed = _report(machines_path, machines_findings) or failed
     if orch_config is not None and machines_config is not None:
         failed = _report(orch_path, project_device_findings(orch_config, machines_config)) or failed
+    routing_path = args.routing
+    if routing_path is None and (ROOT / "config" / "routing.yml").is_file():
+        routing_path = ROOT / "config" / "routing.yml"
+    if routing_path is not None:
+        _routing_cfg, routing_findings = load_routing_yml(routing_path)
+        failed = _report(routing_path, routing_findings) or failed
     for repo, path in factory_paths:
         factory, findings = load_factory_md(path)
         if orch_config is not None and factory is not None:
@@ -2657,6 +2664,10 @@ def _job_run_command(argv: list[str]) -> int:
         # Not sent to a remote device: it would be on the ssh command line.
         environment[job_token.PROOF_ENV] = proof
     factory_root = skill_preflight.checkout_root(placed.device, owner, ROOT)
+    try:
+        command = routing_argv_for_detail(command, harness=owner, detail=detail)
+    except RoutingError as exc:
+        log(f"role router refused job detail flags: {exc}")
     # #100 r8: the summary's scrubber knows the harness's own environment,
     # the proof included.
     session = telemetry.start_session(
@@ -3306,6 +3317,7 @@ def _parser() -> _Parser:
     parser.add_argument("--orch", type=Path)
     parser.add_argument("--machines", type=Path)
     parser.add_argument("--factory", type=_factory_arg, action="append")
+    parser.add_argument("--routing", type=Path)
     parser.add_argument("--allow-placeholders", action="store_true")
     parser.add_argument("--digest", action="store_true")
     return parser
