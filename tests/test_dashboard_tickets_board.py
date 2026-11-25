@@ -191,8 +191,11 @@ def _script(tmp_path: Path, snapshot: dict, actions: list | None = None, page_fr
     assert "kind === 'press'" in HARNESS and f"nowMs = {int(NOW * 1000)};" in HARNESS
     assert "windowListeners[type].push" in HARNESS
     assert "kind === 'keyon'" in HARNESS and "this.tagName === 'input'" in HARNESS
-    html = render_pages(page_from or snapshot)["job.html"]
-    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    from lib.dashboard_page import page_script
+    src_snap = page_from or snapshot
+    html = render_pages(src_snap)["job.html"]
+    assert '<script src="/app.js" defer></script>' in html
+    script = page_script(src_snap.get("statechart"))
     return layout.run_harness(tmp_path, HARNESS, script, snapshot, "job", IDS, actions or [])
 
 
@@ -801,8 +804,10 @@ def test_a_held_card_with_no_job_keeps_the_comment_and_ok_controls(tmp_path: Pat
             if not c.get("live") and not c.get("queued")]
     held = next(row for row in snap["tickets"] if _key(row) == _key(idle[0]))
     held.update(state="awaiting-ok", waiting_on="maxharris1", source="#563", pr="601")
+    from lib.dashboard_page import page_script
     html = render_pages(snap)["job.html"]
-    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    assert '<script src="/app.js" defer></script>' in html
+    script = page_script(snap.get("statechart"))
     out = layout.run_harness(tmp_path, SIGNED_IN, script, snap, "job", IDS, [])
     card = _card(out["html"]["pipeline"], _key(held))
     (panel,) = _all(card, lambda n: "jd-gh" in n["attrs"].get("class", "").split())
@@ -979,8 +984,10 @@ def _stored(tmp_path: Path, snapshot: dict, store: dict | None, actions: list) -
     )
     assert "global.sessionStorage = " in harness and "kind === 'store'" in harness
     assert "await act(" in harness and "polls.push(fn)" in harness
+    from lib.dashboard_page import page_script
     html = render_pages(snapshot)["job.html"]
-    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    assert '<script src="/app.js" defer></script>' in html
+    script = page_script(snapshot.get("statechart"))
     return layout.run_harness(tmp_path, harness, script, snapshot, "job", IDS, actions)
 
 
@@ -1509,7 +1516,9 @@ MORE_HARNESS = HARNESS.replace(
 @layout.needs_node
 def test_script_more_box_stays_open_across_redraws(tmp_path: Path, ordered: dict) -> None:
     assert "kind === 'more'" in MORE_HARNESS
-    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(ordered)["job.html"], flags=re.S)
+    from lib.dashboard_page import page_script
+    assert '<script src="/app.js" defer></script>' in render_pages(ordered)["job.html"]
+    script = page_script(ordered.get("statechart"))
     actions = [["more", "look"], ["hashchange", None], ["more", "look"], ["more", "toggle"],
                ["hashchange", None], ["more", "look"]]
     out = layout.run_harness(tmp_path, MORE_HARNESS, script, ordered, "job", IDS, actions)
@@ -1580,7 +1589,9 @@ SHELF_HARNESS = HARNESS.replace(
 
 def _shelf_script(tmp_path: Path, snapshot: dict, actions: list) -> list[dict]:
     assert "kind === 'shelf'" in SHELF_HARNESS
-    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(snapshot)["job.html"], flags=re.S)
+    from lib.dashboard_page import page_script
+    assert '<script src="/app.js" defer></script>' in render_pages(snapshot)["job.html"]
+    script = page_script(snapshot.get("statechart"))
     return layout.run_harness(tmp_path, SHELF_HARNESS, script, snapshot, "job", IDS, actions)["steps"]
 
 
@@ -1805,8 +1816,14 @@ def test_a_phone_without_scripts_lists_every_phase(snapshot: dict) -> None:
     browser = Browser()
     try:
         browser.call("Emulation.setScriptExecutionDisabled", value=True)
+        from lib.dashboard_page import app_css
         page = Path(browser.tmp.name) / "page.html"
-        page.write_text(render_pages(snapshot)["job.html"], encoding="utf-8")
+        page.write_text(
+            render_pages(snapshot)["job.html"].replace(
+                '<link rel="stylesheet" href="/app.css">', f"<style>{app_css()}</style>", 1
+            ),
+            encoding="utf-8",
+        )
         browser.call("Emulation.setDeviceMetricsOverride", width=375, height=900, deviceScaleFactor=1, mobile=False)
         browser.call("Page.navigate", url=page.as_uri())
         deadline = time.monotonic() + 30
@@ -1826,8 +1843,14 @@ def test_a_phone_whose_status_fetch_fails_lists_every_phase(snapshot: dict) -> N
     shim = "<script>window.fetch = function () { return Promise.reject(new Error('offline')); };</script>"
     browser = Browser()
     try:
+        from lib.dashboard_page import app_css, page_script
         page = Path(browser.tmp.name) / "page.html"
-        page.write_text(render_pages(snapshot)["job.html"].replace("<script>", shim + "<script>", 1), encoding="utf-8")
+        page.write_text(
+            render_pages(snapshot)["job.html"]
+            .replace('<link rel="stylesheet" href="/app.css">', f"<style>{app_css()}</style>", 1)
+            .replace('<script src="/app.js" defer></script>', shim + f"<script>{page_script(snapshot.get('statechart'))}</script>", 1),
+            encoding="utf-8",
+        )
         browser.call("Emulation.setDeviceMetricsOverride", width=375, height=900, deviceScaleFactor=1, mobile=False)
         browser.call("Page.navigate", url=page.as_uri())
         deadline = time.monotonic() + 30
@@ -2052,7 +2075,7 @@ def test_the_first_render_keeps_a_keyboard_selection_in_the_find_box(tmp_path: P
     import http.server
     import threading
 
-    from tests.test_dashboard_system import CHROME, QuietHandler, _Chrome
+    from tests.test_dashboard_system import CHROME, QuietHandler, _Chrome, publish_assets
 
     if CHROME is None:
         pytest.skip("Chrome is not installed")
@@ -2060,6 +2083,7 @@ def test_the_first_render_keeps_a_keyboard_selection_in_the_find_box(tmp_path: P
     site.mkdir()
     (site / "job.html").write_text(render_pages(snapshot)["job.html"], encoding="utf-8")
     (site / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    publish_assets(site, snapshot)
     gate = threading.Event()
 
     class Held(QuietHandler):

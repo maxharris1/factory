@@ -13,6 +13,7 @@ import sqlite3
 from typing import get_args
 
 from lib import account_doctor, device_pool, usage_readings
+from lib.dashboard_usage import safe_text
 from lib.machines_yml import EXTERNAL, Account, MachinesConfig
 from lib.queue import ACTIONS
 from lib.schema import HARNESSES
@@ -163,6 +164,8 @@ def read_accounts(
         entries.append({
             "id": account.id,
             "harness": account.harness,
+            "plan": safe_text(account.plan),
+            "not_tracked": usage_readings.NOT_TRACKED.get(account.harness),
             "max_jobs": account.max_jobs,
             "paused": account.paused,
             "read_only": read_only,

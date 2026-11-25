@@ -31,6 +31,7 @@ from lib.factory_md import (
 )
 from lib.handoff import Handoff, format_comment
 from lib.load import Finding, split_front_matter
+from lib.role_router import RoutingConfig, RoutingError, central_routing, resolve_pair
 from lib.schema import HARNESSES
 
 FROM = "grok-bot"
@@ -354,13 +355,20 @@ def refused_stop(findings: Sequence[Finding]) -> StopReport:
 def choose_route(
     request: RouteRequest,
     usage: object | None = None,
+    *,
+    routing: object | None = None,
+    ticket_type: str | None = None,
+    refused_harnesses: Sequence[str] = (),
+    unavailable_harnesses: Sequence[str] = (),
 ) -> RouteDecision:
-    """Resolve builder and cross-family reviewer from factory.md (and built_by).
+    """Resolve builder and cross-family reviewer from routing.yml / factory.md.
 
     The factory.md pair must pass `assert_cross_family` first, so a config
     check-config would refuse is refused here rather than routed around.
-    When `request.built_by` is set and shares a family with factory.md's
-    reviewer, picks the first cross-family harness in schema order.
+    When `routing` (a `RoutingConfig`) or `request.config.routing` is set,
+    delegates to `lib.role_router.resolve_pair` with mechanical cross-family
+    filtering, reading the shipped `config/routing.yml` when `routing` is
+    None. Otherwise keeps legacy `factory.md` pair resolution.
     """
     del usage  # dead cross-harness reserve removed; kept as optional kwarg for caller compatibility
     _check_request(request)
@@ -371,6 +379,42 @@ def choose_route(
         config.reviewer_harness,
         config.reviewer_model,
     )
+    if routing is not None or config.routing is not None:
+        if routing is not None and not isinstance(routing, RoutingConfig):
+            raise RouteError("routing must be a RoutingConfig")
+        try:
+            if routing is None:
+                routing = central_routing()
+            builder_slot, reviewer_slot = resolve_pair(
+                routing=routing,
+                factory=config,
+                ticket_type=ticket_type,
+                built_by=request.built_by,
+                refused_harnesses=refused_harnesses,
+                unavailable_harnesses=unavailable_harnesses,
+            )
+        except RoutingError as exc:
+            raise RouteError(str(exc)) from exc
+        file_count = len(request.likely_files)
+        job = job_for_file_count(file_count, scope_changed=request.scope_changed)
+        return RouteDecision(
+            builder_harness=builder_slot.harness,
+            builder_model=builder_slot.model,
+            reviewer_harness=reviewer_slot.harness,
+            reviewer_model=reviewer_slot.model,
+            builder_family=builder_slot.family,
+            reviewer_family=reviewer_slot.family,
+            job=job,
+            urgent=request.urgent,
+            risk=request.risk,
+            file_count=file_count,
+            scope_changed=request.scope_changed,
+            builder_using_reserve=False,
+            reviewer_using_reserve=False,
+            builder_fallback=builder_slot.harness != config.builder_harness,
+            reviewer_fallback=reviewer_slot.harness != config.reviewer_harness,
+            built_by=request.built_by,
+        )
     if request.built_by is None:
         builder_harness = config.builder_harness
         builder_model = config.builder_model

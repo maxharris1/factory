@@ -1,0 +1,22 @@
+# The harness command for `orch wait orchestrator --autostart`
+# (deploy/orch-orchestrator.service).
+#
+# Copy to ~/.config/factory/waiter-orchestrator.yml in the home of the user
+# that runs the unit, as that user, and chmod 600: the runner refuses a file
+# it does not own or one that its group or others can write.
+#
+# `command` is an argv list, run with no shell. Nothing from a wake, a PR or
+# a comment is ever added to it: a short prompt naming
+# skills/factory/orchestrator/SKILL.md arrives on the harness's stdin, and
+# the claimed wake's JSON is in the file $ORCH_WAKE_FILE. ORCH_DB,
+# ORCH_WAKE_JOB_ID and ORCH_WAKE_LEASE_TOKEN are set, and the harness must
+# end with `orch orchestrator finish` as the prompt says, so its spend is
+# recorded.
+#
+# Pick the flags the harness already uses for unattended runs; the lines
+# below are an example shape, not a recommendation. Only `bot` and
+# `command` are accepted, and `bot` must be `orchestrator`.
+bot: orchestrator
+command:
+  - REPLACE_WITH_HARNESS_BINARY
+  - REPLACE_WITH_FLAG_THAT_READS_THE_PROMPT_FROM_STDIN

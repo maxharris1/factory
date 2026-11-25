@@ -19,8 +19,17 @@ from lib.dispatch.constants import (
 from lib.dispatch.types import CIResult, Comment, FailedCheck, RoundGrant, ShipError, TrackedTicket
 from lib.factory_md import FactoryConfig, family_findings
 from lib.handoff import matching_head as _matching_head
-from lib.queue import Job
+from lib.queue import RECIPIENTS, Job
+from lib.role_router import (
+    KNOWN_HARNESSES,
+    Candidate,
+    RoutingError,
+    build_role_for_ticket_type,
+    central_routing,
+    resolve_slot,
+)
 from lib.schema import HARNESSES
+from lib.ticket_type import ticket_type_of
 
 
 def _spread(repo: str, ticket_id: str) -> int:
@@ -277,7 +286,13 @@ def _detail_field(detail: str | None, name: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _detail_routing(detail: str | None) -> tuple[str, str] | None:
+_UNQUEUEABLE = tuple(harness for harness in KNOWN_HARNESSES if harness not in RECIPIENTS)
+_PICK_KEYS = ("builder_model", "builder_effort", "reviewer_model", "reviewer_effort")
+
+
+def _detail_routing(
+    detail: str | None,
+) -> tuple[str, str, tuple[Candidate, Candidate] | None] | None:
     """The (builder, reviewer) a job's detail JSON was routed to (#206)."""
     if not detail:
         return None
@@ -291,7 +306,18 @@ def _detail_routing(detail: str | None) -> tuple[str, str] | None:
     builder, reviewer = routing.get("builder"), routing.get("reviewer")
     if builder not in HARNESSES or reviewer not in HARNESSES:
         return None
-    return builder, reviewer
+    if not any(isinstance(routing.get(key), str) for key in _PICK_KEYS):
+        return builder, reviewer, None
+
+    def text(key: str) -> str | None:
+        value = routing.get(key)
+        return value if isinstance(value, str) else None
+
+    picks = (
+        Candidate(builder, text("builder_model"), text("builder_effort")),
+        Candidate(reviewer, text("reviewer_model"), text("reviewer_effort")),
+    )
+    return builder, reviewer, picks
 
 
 def _route(ticket: TrackedTicket, builder: str, reviewer: str) -> TrackedTicket:
@@ -301,6 +327,7 @@ def _route(ticket: TrackedTicket, builder: str, reviewer: str) -> TrackedTicket:
     return replace(
         ticket,
         factory_md=base,
+        router_picks=None,
         factory=replace(
             base,
             builder_harness=builder,
@@ -313,18 +340,93 @@ def _route(ticket: TrackedTicket, builder: str, reviewer: str) -> TrackedTicket:
     )
 
 
-def _route_go(ticket: TrackedTicket, fields: Mapping[str, str]) -> TrackedTicket | None:
+def _route_picks(ticket: TrackedTicket, picks: tuple[Candidate, Candidate]) -> TrackedTicket:
+    """ticket routed to routing.yml's picks: harness, model and effort per side."""
+    builder, reviewer = picks
+    routed = _route(ticket, builder.harness, reviewer.harness)
+    return replace(
+        routed,
+        router_picks=picks,
+        factory=replace(
+            routed.factory, builder_model=builder.model, reviewer_model=reviewer.model
+        ),
+    )
+
+
+def _router_picks(
+    ticket: TrackedTicket,
+    refused: frozenset[str],
+    builder_only: str | None = None,
+    reviewer_only: str | None = None,
+) -> tuple[Candidate, Candidate] | None:
+    """routing.yml's (builder, reviewer), None unless factory.md sets `routing:`."""
+    base = ticket.factory_md or ticket.factory
+    if base.routing is None:
+        return None
+    central = central_routing()
+    brief = ticket.brief_comment
+    build_role = build_role_for_ticket_type(None if brief is None else ticket_type_of(brief.body))
+
+    def pick(
+        role: str,
+        only: str | None,
+        base_harness: str,
+        base_model: str | None,
+        built_by: tuple[str, str | None] | None = None,
+    ) -> Candidate:
+        blocked = set(_UNQUEUEABLE)
+        if only is not None:
+            blocked |= set(KNOWN_HARNESSES) - {only}
+        try:
+            slot = resolve_slot(
+                role,
+                routing=central,
+                factory=base,
+                built_by=built_by,
+                refused_harnesses=refused,
+                unavailable_harnesses=blocked,
+            )
+        except RoutingError:
+            if only is None:
+                raise
+            return Candidate(only, base_model if only == base_harness else None)
+        return Candidate(slot.harness, slot.model, slot.effort)
+
+    builder = pick(build_role, builder_only, base.builder_harness, base.builder_model)
+    reviewer = pick(
+        "review",
+        reviewer_only,
+        base.reviewer_harness,
+        base.reviewer_model,
+        built_by=(builder.harness, builder.model),
+    )
+    return builder, reviewer
+
+
+def _route_go(
+    ticket: TrackedTicket, fields: Mapping[str, str], refused: frozenset[str] = frozenset()
+) -> TrackedTicket | None:
     """The ticket routed as a go names it (#206), or None when the pair
     fails factory.md's cross-family rule. A go naming neither harness
     routes back to factory.md's."""
     base = ticket.factory_md or ticket.factory
-    if "builder" not in fields and "reviewer" not in fields:
-        return replace(ticket, factory=base, factory_md=None)
-    routed = _route(
+    named = "builder" in fields or "reviewer" in fields
+    picks = _router_picks(
         ticket,
-        fields.get("builder", base.builder_harness),
-        fields.get("reviewer", base.reviewer_harness),
+        refused,
+        builder_only=fields.get("builder", base.builder_harness) if named else None,
+        reviewer_only=fields.get("reviewer", base.reviewer_harness) if named else None,
     )
+    if picks is not None:
+        routed = _route_picks(ticket, picks)
+    elif not named:
+        return replace(ticket, factory=base, factory_md=None, router_picks=None)
+    else:
+        routed = _route(
+            ticket,
+            fields.get("builder", base.builder_harness),
+            fields.get("reviewer", base.reviewer_harness),
+        )
     return None if _family_errors(routed.factory) else routed
 
 

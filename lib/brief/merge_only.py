@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from lib.brief.build import builder_notes, proof_lines
-from lib.brief.common import TEST_SCOPE, Lead, detail_of, pr_ref
+from lib.brief.common import NO_CI_WAIT, TEST_SCOPE, Lead, detail_of, pr_ref
 from lib.queue import Job
 
 
@@ -21,6 +21,7 @@ def lead(job: Job, facts: dict) -> Lead:
             "5. Push, post the ready handoff below with the head you pushed, and finish the job.",
             *_approved_note(job),
             *builder_notes(job, facts),
+            NO_CI_WAIT,
         ),
         (
             f"The ready names the pushed head, a merge commit of `origin/{base}` that changes only conflict hunks.",

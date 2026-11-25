@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from lib.dispatch.errors_text import poll_error_text
 from lib.dispatch.types import IssueComments
 from lib.orch_yml import DriverInbox, Project
+from lib.orchestrator_pull import enqueue_pull_wake
 from lib.pr_title import SOURCES_TABLE
 from lib.queue import Job
 from lib.schema import AUT0_REPO
@@ -39,6 +40,22 @@ class InboxMixin:
                 """,
                 (job.id, inbox.repo, inbox.number, body, self.queue.now()),
             )
+
+    def _queue_pull_wake(
+        self, job: Job, logical_key: str, inbox: DriverInbox | None = None
+    ) -> None:
+        body = self._inbox_body(job, inbox) if inbox is not None else ""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            enqueue_pull_wake(
+                connection,
+                job,
+                logical_key,
+                now=self.queue.now(),
+                inbox=inbox,
+                body=body,
+            )
+            connection.commit()
 
     def _inbox_body(self, job: Job, inbox: DriverInbox) -> str:
         request = job.request

@@ -44,6 +44,7 @@ from lib.dashboard_pages.tickets import _board, _tickets  # noqa: F401
 from lib.dashboard_telemetry import (  # noqa: F401
     TELEMETRY_CSS, TELEMETRY_SCRIPT, rollup_panel,
 )
+from lib.dashboard_static import STATIC_ASSETS, auth_script
 from lib.health import CODE_COMPONENTS  # noqa: F401
 from lib.pr_title import label  # noqa: F401
 
@@ -106,7 +107,20 @@ def page_script(chart: dict | None) -> str:
     )
 
 
+def app_css() -> str:
+    """Combined stylesheet served at /app.css (and /static/app.css)."""
+    return CSS + TELEMETRY_CSS
+
+
+def render_static_assets(snapshot: dict) -> dict[str, str]:
+    """Static files published alongside the pages and served at /<name> (and /static/<name>)."""
+    return {
+        "app.css": app_css(),
+        "app.js": page_script(snapshot.get("statechart")),
+        "auth.js": auth_script(),
+    }
+
+
 def render_pages(snapshot: dict) -> dict[str, str]:
     """Every page, by file name. Every value is escaped and already redacted."""
-    script = page_script(snapshot.get("statechart"))
-    return {name: _page(snapshot, name, css=CSS, script=script) for name in PAGES}
+    return {name: _page(snapshot, name) for name in PAGES}

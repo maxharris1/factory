@@ -477,6 +477,9 @@ class SchemaMixin:
                 )
                 """
             )
+            from lib.orchestrator_pull import ensure_inbox_columns
+
+            ensure_inbox_columns(connection)
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS auto_extra_comments (
@@ -755,6 +758,7 @@ class SchemaMixin:
                     "ruled_at": "REAL",
                     "ruling_reason": "TEXT",
                     "evidence_dir": "TEXT",
+                    "visual": "INTEGER NOT NULL DEFAULT 0",
                     "cause": "TEXT CHECK (cause IS NULL OR cause IN ('product', 'drift'))",
                 },
             )

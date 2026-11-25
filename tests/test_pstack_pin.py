@@ -27,7 +27,7 @@ OWNERS = {
     "claude": "claude-bot",
     "codex": "codex-bot",
 }
-FACTORY_SKILLS = ("factory-builder", "factory-qa", "factory-reviewer")
+FACTORY_SKILLS = ("factory-builder", "factory-qa", "factory-reviewer", "orchestrator")
 KIT_SKILLS = ("deslop",)
 
 

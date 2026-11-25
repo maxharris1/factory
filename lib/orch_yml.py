@@ -93,7 +93,7 @@ DEFAULT_MAX_CLOUD_LANES = 10
 _GITHUB_APP_KEYS = {"enabled", "apps"}
 _APP_KEYS = {"bot_login", "app_id", "installations", "private_key_file"}
 _MOVED_APP_KEYS = ("bot_login", "app_id", "installations", "private_key_file")
-Driver = Literal["grok", "claude"]
+Driver = Literal["grok", "claude", "pull"]
 APP_BOTS = ("grok-bot", "claude-bot", "codex-bot", "cursor-bot")
 _USER_LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
 _BOT_LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*\[bot\]$")
@@ -1751,10 +1751,9 @@ def _grok(data: dict, findings: list[Finding]) -> GrokConfig | None:
 
 def _driver(data: dict, findings: list[Finding]) -> Driver:
     value = data.get("driver", "grok")
-    if value == "claude":
-        return "claude"
-    if value != "grok":
-        findings.append(Finding("error", "driver must be grok or claude"))
+    if value in ("grok", "claude", "pull"):
+        return value
+    findings.append(Finding("error", "driver must be grok, claude or pull"))
     return "grok"
 
 

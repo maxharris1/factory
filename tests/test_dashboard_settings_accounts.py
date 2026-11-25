@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import contextlib
+import html
 import json
 import re
+import sqlite3
 from pathlib import Path
 
 import pytest
 
+from lib import account_doctor, usage_readings
+from lib.account_requests import ADD_REFUSED
 from lib.dashboard import collect_snapshot, render_pages
 from tests import test_dashboard_layout as layout
 from tests import test_dashboard_settings as test_settings
-from tests.test_dashboard_accounts import NOW, world
+from tests.test_dashboard_accounts import MACHINES, NOW, SIGN_INS, sign_in, world
+from tests.test_remote_start import config_of
 from tests.test_dashboard_layout import BAR, HARNESS, _no_script, _section, _text, needs_node
 
 CHECKED = "2027-01-15T07:55:00Z"
@@ -223,9 +229,41 @@ def test_no_accounts_reads_empty(tmp_path: Path) -> None:
     assert '<p class="empty">no accounts: machines.yml lists none</p>' in panel
 
 
+CURSOR_LOGIN = "env -u CURSOR_API_KEY -u CURSOR_AUTH_TOKEN -u CURSOR_CONFIG_DIR cursor-agent login"
+CURSOR_MACHINES = MACHINES.replace(
+    "accounts:\n", "accounts:\n  - {id: cursor-ultra, harness: cursor, plan: ultra}\n"
+).replace("harnesses: {claude: claude-bot, codex: codex-bot}",
+          "harnesses: {claude: claude-bot, codex: codex-bot, cursor: {bot: cursor-bot, account: cursor-ultra}}")
+
+
+def _cursor_snapshot(tmp_path: Path) -> dict:
+    db, machines = world(tmp_path)
+    machines.write_text(CURSOR_MACHINES, encoding="utf-8")
+    cursor = (sign_in("cursor-ultra", "box", "signed-out", method=None, subscription=None),
+              sign_in("cursor-ultra", "pc", "ok", method="login", subscription=None))
+    with contextlib.closing(sqlite3.connect(db)) as connection, connection:
+        account_doctor.write(connection, SIGN_INS + cursor, config_of(machines), None, NOW - 300)
+    return collect_snapshot(db, tmp_path / "poll.log", now=NOW, machines_path=machines)
+
+
+def test_a_cursor_card_shows_plan_doctor_status_login_command_and_not_tracked_reason(tmp_path: Path) -> None:
+    card = _card(_panel(_cursor_snapshot(tmp_path)), "cursor-ultra")
+    facts = _facts(card)
+    assert (facts["harness"], facts["plan"]) == ("cursor", "ultra")
+    assert facts["usage"] == f"not tracked: {usage_readings.NOT_TRACKED['cursor']}"
+    assert not {"5h used", "7d used", "headroom"} & set(facts)
+    assert '<dd class="muted">not tracked: ' in card
+    assert '<span class="chip bad">signed-out</span>' in _device(card, "box")
+    assert '<span class="chip ok">ok</span>' in _device(card, "pc")
+    assert re.findall(r'<code class="ac-cmd">([^<]*)</code>', card) == [CURSOR_LOGIN]
+    assert "plan" not in _facts(_card(_panel(_cursor_snapshot(tmp_path / "again")), "claude-b"))
+
+
 def _run(tmp_path: Path, snapshot: dict) -> dict:
+    from lib.dashboard_page import page_script
     html = render_pages(snapshot)["settings.html"]
-    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    assert '<script src="/app.js" defer></script>' in html
+    script = page_script(snapshot.get("statechart"))
     return layout.run_harness(tmp_path, HARNESS, script, snapshot, "settings", BAR + ["settings", "accounts"], [])
 
 
@@ -239,6 +277,15 @@ def test_script_draws_the_accounts_like_the_server(tmp_path: Path) -> None:
     assert out["html"]["accounts"] == server[server.index(">") + 1:server.rindex("<")]
     for flag in NOT_DOCUMENTED:
         assert flag not in out["html"]["accounts"]
+
+
+@needs_node
+def test_script_draws_a_cursor_card_like_the_server(tmp_path: Path) -> None:
+    snapshot = _cursor_snapshot(tmp_path)
+    out = _run(tmp_path / "run", snapshot)
+    server = _panel(snapshot)
+    assert out["html"]["accounts"] == server[server.index(">") + 1:server.rindex("<")]
+    assert "not tracked: " in _card(out["html"]["accounts"], "cursor-ultra")
 
 
 @needs_node
@@ -274,9 +321,11 @@ def _session_harness(session: dict, reply: dict | None = None) -> str:
 
 def _signed_in(tmp_path: Path, actions: list | None = None, reply: dict | None = None,
                snapshot: dict | None = None) -> dict:
+    from lib.dashboard_page import page_script
     snapshot = snapshot or _snapshot(tmp_path)
     html = render_pages(snapshot)["settings.html"]
-    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    assert '<script src="/app.js" defer></script>' in html
+    script = page_script(snapshot.get("statechart"))
     return layout.run_harness(tmp_path / "run", _session_harness(SIGNED_IN, reply), script, snapshot, "settings",
                               BAR + ["settings", "accounts"], actions or [])
 
@@ -308,9 +357,11 @@ def _set(within: dict, props: dict, **attr: str) -> list:
 
 @needs_node
 def test_signed_out_the_accounts_panel_has_no_controls(tmp_path: Path) -> None:
+    from lib.dashboard_page import page_script
     snapshot = _snapshot(tmp_path)
     html = render_pages(snapshot)["settings.html"]
-    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    assert '<script src="/app.js" defer></script>' in html
+    script = page_script(snapshot.get("statechart"))
     out = layout.run_harness(tmp_path / "run", _session_harness({"signed_in": False}), script, snapshot,
                              "settings", BAR + ["settings", "accounts"], [])
     accounts = out["html"]["accounts"]
@@ -349,6 +400,38 @@ def test_the_add_form_lists_only_devices_that_run_the_chosen_harness(tmp_path: P
     assert _boxes(_add_form(out["html"]["accounts"])) == ["box", "pc"]
     out = _signed_in(tmp_path / "cursor", [_set(ADD, {"value": "cursor"}, **{"data-field": "harness"})])
     assert _boxes(_add_form(out["html"]["accounts"])) == []
+
+
+DISABLED = ("Object.defineProperty(Node.prototype, 'disabled', {get() { return 'disabled' in this.attrs; },\n"
+            "  set(v) { if (v) this.attrs.disabled = ''; else delete this.attrs.disabled; }});\n")
+GENERATED = "body.attrs['data-generated']"
+ADD_BUTTON = '<button type="button" data-op="add"( disabled="")?>Add account</button>'
+
+
+def _add_form_after(tmp_path: Path, harness: list[str]) -> str:
+    from lib.dashboard_page import page_script
+    snapshot = _snapshot(tmp_path)
+    assert '<script src="/app.js" defer></script>' in render_pages(snapshot)["settings.html"]
+    script = page_script(snapshot.get("statechart"))
+    page = _session_harness(SIGNED_IN).replace(GENERATED, DISABLED + GENERATED, 1)
+    actions = [_set(ADD, {"value": value}, **{"data-field": "harness"}) for value in harness]
+    out = layout.run_harness(tmp_path / "run", page, script, snapshot, "settings", BAR + ["settings", "accounts"],
+                             actions)
+    accounts = out["html"]["accounts"]
+    start = accounts.index('data-form="add"')
+    return accounts[start:accounts.index("</div>", accounts.index('role="status"', start))]
+
+
+@needs_node
+def test_choosing_cursor_in_the_add_form_shows_the_refusal(tmp_path: Path) -> None:
+    refusal = ADD_REFUSED["cursor"]
+    assert "harnesses.cursor" in refusal and "machines.yml" in refusal
+    form = _add_form_after(tmp_path / "cursor", ["cursor"])
+    assert re.search(ADD_BUTTON, form).group(1) == ' disabled=""', form
+    assert form.endswith(f'role="status">{html.escape(refusal)}'), form
+    form = _add_form_after(tmp_path / "back", ["cursor", "codex"])
+    assert re.search(ADD_BUTTON, form).group(1) is None, form
+    assert form.endswith('role="status">'), form
 
 
 ACCEPTED = {"status": 202, "body": {"id": "x" * 22}}
@@ -530,9 +613,11 @@ def _relay_harness(account_signin: bool | None, replies: list) -> str:
 
 def _relay(tmp_path: Path, actions: list, replies: list | tuple = (), *, account_signin: bool | None = True,
            snapshot: dict | None = None) -> dict:
+    from lib.dashboard_page import page_script
     snapshot = snapshot or _snapshot(tmp_path)
     html = render_pages(snapshot)["settings.html"]
-    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    assert '<script src="/app.js" defer></script>' in html
+    script = page_script(snapshot.get("statechart"))
     return layout.run_harness(tmp_path / "run", _relay_harness(account_signin, list(replies)), script, snapshot,
                               "settings", BAR + ["settings", "accounts"], actions)
 

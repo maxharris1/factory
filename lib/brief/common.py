@@ -29,6 +29,7 @@ NO_EDIT_RULE = (
 QUESTIONS_LINES = [
     "If the ticket lists a dependency that has not merged, post `questions` before any work.",
 ]
+NO_CI_WAIT = "Never poll, watch or wait on GitHub Actions or any other CI from inside this job."
 TEST_SCOPE = "in the foreground; never the whole suite, in the background or in chunks."
 BOTS = {"claude-bot": "Claude Bot", "codex-bot": "Codex Bot", "cursor-bot": "Cursor Bot"}
 # SPEC section 8: one round for low risk, up to three for high.
