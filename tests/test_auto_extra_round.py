@@ -278,11 +278,12 @@ def test_bad_values_are_refused_strictly_and_read_as_zero_leniently(value: str) 
     assert [f.severity for f in findings] == ["warning"]
 
 
-def test_the_factory_repo_turns_it_on() -> None:
+def test_the_factory_repo_runs_convergence_without_the_key() -> None:
     config, findings = parse_factory_md((REPO / "factory.md").read_text(), strict=True)
-    assert config is not None and config.auto_extra_rounds == 2
+    assert config is not None and config.auto_extra_rounds == 0
     assert config.stop_on == "convergence"
     assert not [f for f in findings if f.severity == "error"]
+    assert not [f for f in findings if "auto_extra_rounds" in f.message]
 
 
 def _facts(auto_extra: int) -> dict:

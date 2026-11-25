@@ -733,6 +733,36 @@ def test_check_config_refuses_a_pre_ready_timeout_over_900(tmp_path: Path) -> No
     )
 
 
+def with_review(**keys: object) -> str:
+    data = copy.deepcopy(VALID)
+    data["review"].update(keys)
+    return f"---\n{yaml.safe_dump(data, sort_keys=False)}---\n"
+
+
+@pytest.mark.parametrize("strict", [True, False])
+def test_auto_extra_rounds_warns_under_convergence(strict: bool) -> None:
+    text = with_review(stop_on="convergence", auto_extra_rounds=2)
+
+    config, findings = parse_factory_md(text, strict=strict)
+
+    assert config is not None and config.auto_extra_rounds == 2
+    assert [(f.severity, f.message) for f in findings] == [
+        ("warning", "review.auto_extra_rounds is ignored under review.stop_on: convergence; remove it")
+    ]
+
+
+@pytest.mark.parametrize(
+    "keys",
+    [{"stop_on": "rounds", "auto_extra_rounds": 2}, {"auto_extra_rounds": 2}, {"stop_on": "convergence"}],
+)
+@pytest.mark.parametrize("strict", [True, False])
+def test_auto_extra_rounds_warns_only_beside_convergence(keys: dict, strict: bool) -> None:
+    config, findings = parse_factory_md(with_review(**keys), strict=strict)
+
+    assert config is not None
+    assert findings == []
+
+
 def test_plan_thresholds_default_to_400_lines_and_5_criteria(tmp_path: Path) -> None:
     config, findings = load_factory_md(write_factory(tmp_path, VALID))
     assert findings == []
