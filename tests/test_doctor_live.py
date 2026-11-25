@@ -4,8 +4,22 @@ from pathlib import Path
 
 import pytest
 
+from lib.harnesses import all_drivers
+from lib.machines_yml import load_machines_yml
+from lib.orch_yml import load_orch_yml
 from lib.pstack_models import rules_text
-from lib.pstack_pin import RULES_PATH, ROOT, install_skills, installed_errors, load_pin, remove_claude_extras
+from lib.pstack_pin import (
+    RULES_PATH,
+    ROOT,
+    canary_prompt_for,
+    install_skills,
+    installed_errors,
+    load_pin,
+    pinned_token,
+    remove_claude_extras,
+    score_reply,
+)
+from lib.skill_probe import launch_argv, plan_canary
 from tests.test_pstack_install import snapshot
 
 PSTACK = ROOT / "skills" / "pstack"
@@ -183,3 +197,91 @@ def test_pstack_models_does_not_import_the_pin() -> None:
     imported = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
     imported |= {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
     assert "lib.pstack_pin" not in imported
+
+
+CANARY_MACHINES = """\
+devices:
+  - name: box
+    local: true
+    slot_max: 3
+    harnesses: {claude: claude-bot, codex: codex-bot, cursor: cursor-bot, gemini: gemini-bot}
+  - name: mac
+    tailscale_name: mac.example.ts.net
+    slot_max: 2
+    harnesses: {claude: claude-bot, codex: codex-bot, cursor: cursor-bot, gemini: gemini-bot}
+    workdir_root: /Users/{bot}/factory-work
+    ssh_alias: mac-{bot}
+    factory_root: /Users/{bot}/factory
+"""
+
+WAITERS = {driver.name: (driver.name, "-p", f"--{driver.name}-waiter") for driver in all_drivers()}
+
+
+def canary_rows(tmp_path: Path, refused: str = "[]"):
+    machines_path = tmp_path / "machines.yml"
+    machines_path.write_text(CANARY_MACHINES, encoding="utf-8")
+    machines, findings = load_machines_yml(machines_path)
+    assert machines is not None, findings
+    orch_path = tmp_path / "orch.yml"
+    orch_path.write_text(
+        f"poll_seconds: 30\nprojects:\n  - repo: acme/widgets\nrefused_harnesses: {refused}\n",
+        encoding="utf-8",
+    )
+    orch, findings = load_orch_yml(orch_path, allow_placeholders=True)
+    assert orch is not None, findings
+    return plan_canary(
+        machines, orch.refused_harnesses, WAITERS, run_id="doctor-0000", local_root=str(tmp_path / "work")
+    )
+
+
+def test_plan_canary_has_a_row_per_harness_on_local_and_remote_devices(tmp_path: Path) -> None:
+    rows = canary_rows(tmp_path)
+    names = [driver.name for driver in all_drivers()]
+    assert [(row.device, row.harness) for row in rows] == [
+        (device, name) for device in ("box", "mac") for name in names
+    ]
+    bots = {driver.name: driver.bot_user for driver in all_drivers()}
+    for row in rows:
+        assert row.skip is None and row.launch is not None
+        assert row.bot == bots[row.harness]
+        argv = launch_argv(row.launch)
+        if row.device == "box":
+            assert argv == list(WAITERS[row.harness])
+        else:
+            assert argv[0] == "ssh"
+            assert argv[argv.index("--") + 1] == f"mac-{row.bot}"
+
+
+def test_plan_canary_skips_harnesses_refused_in_orch_yml(tmp_path: Path) -> None:
+    rows = canary_rows(tmp_path, refused="[cursor]")
+    refused = [row for row in rows if row.harness == "cursor"]
+    assert [row.device for row in refused] == ["box", "mac"]
+    assert all(row.skip == "refused in orch.yml" and row.launch is None for row in refused)
+    others = [row for row in rows if row.harness != "cursor"]
+    assert len(others) == 6
+    assert all(row.skip is None and row.launch is not None for row in others)
+
+
+def test_canary_prompt_for_names_each_drivers_skills_dir_and_bot() -> None:
+    for driver in all_drivers():
+        prompt = canary_prompt_for(driver)
+        assert f"{driver.skills_dir}/factory-builder/SKILL.md" in prompt
+        assert f"started-by: {driver.bot_user}" in prompt
+
+
+def test_score_reply_needs_the_exact_pinned_passage() -> None:
+    token = pinned_token(ROOT)
+    changed = token[:-1] + ("x" if token[-1] != "x" else "y")
+    for driver in all_drivers():
+        name, bot = driver.name, driver.bot_user
+
+        def reply(started_by: str = bot, passage: str = token) -> str:
+            return f"started-by: {started_by}\nskill: factory-builder\ntoken: {passage}\n"
+
+        assert score_reply(name, bot, reply(), token) is None
+        mismatch = f"{name}: did not load the pinned version (token does not match the pin)"
+        assert score_reply(name, bot, reply(passage=changed), token) == mismatch
+        assert score_reply(name, bot, reply(passage=token + " and more"), token) == mismatch
+        assert score_reply(name, bot, reply(started_by="someone-else"), token) == (
+            f"{name}: did not load the pinned version (not started by {bot})"
+        )
