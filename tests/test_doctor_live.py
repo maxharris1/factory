@@ -1,4 +1,5 @@
 import ast
+import shlex
 from pathlib import Path
 
 import pytest
@@ -18,19 +19,24 @@ def home(tmp_path: Path) -> Path:
     return home
 
 
+def install(home: Path) -> str:
+    return f"bin/orch install-skills --home {shlex.quote(str(home))}"
+
+
 def run_fix(home: Path) -> str:
-    return f"run bin/orch install-skills --home {home}"
+    return f"run {install(home)}"
 
 
 def remove_then_install(home: Path) -> str:
-    return (
-        f"run bin/orch install-skills --home {home} --remove-claude-extras, "
-        f"then bin/orch install-skills --home {home}"
-    )
+    return f"run {install(home)} --remove-claude-extras, then {install(home)}"
 
 
 def move_aside(home: Path) -> str:
-    return f"move it aside, then run bin/orch install-skills --home {home}"
+    return f"move it aside, then {run_fix(home)}"
+
+
+def move_blocker(home: Path, blocker: Path) -> str:
+    return f"move {blocker} aside, then {run_fix(home)}"
 
 
 def flagged(home: Path) -> list[str]:
@@ -117,6 +123,54 @@ def test_a_leftover_owned_link_the_pin_no_longer_lists_is_flagged(home: Path) ->
     assert remove_claude_extras(home, rules_text(ROOT)) == []
     install_fixes(home)
     assert not leftover.is_symlink()
+
+
+def test_the_repair_command_passes_a_home_with_spaces_as_one_argument(tmp_path: Path) -> None:
+    home = tmp_path / "home with spaces"
+    install_fixes(home)
+    (home / ".claude" / "agents" / "poteto-agent.md").unlink()
+    [error] = flagged(home)
+    command = error.rpartition("; run ")[2]
+    assert shlex.split(command) == ["bin/orch", "install-skills", "--home", str(home)]
+    install_fixes(home)
+
+
+def test_a_file_in_place_of_a_docs_dir_must_be_moved_aside(home: Path, tmp_path: Path) -> None:
+    harness = home / ".claude" / "docs" / "harness"
+    for link in harness.iterdir():
+        link.unlink()
+    harness.rmdir()
+    harness.write_text("mine\n", encoding="utf-8")
+    assert flagged(home) == [
+        f"claude: did not load the pinned version ({harness} is not a directory); {move_blocker(home, harness)}"
+    ]
+    harness.rename(tmp_path / "harness-aside")
+    install_fixes(home)
+
+
+def test_a_symlinked_agents_dir_must_be_moved_aside(home: Path, tmp_path: Path) -> None:
+    agents = home / ".claude" / "agents"
+    for link in agents.iterdir():
+        link.unlink()
+    agents.rmdir()
+    agents.symlink_to(PSTACK.resolve() / "agents")
+    assert flagged(home) == [
+        f"claude: did not load the pinned version ({agents} is a symlink); {move_blocker(home, agents)}"
+    ]
+    agents.rename(tmp_path / "agents-aside")
+    install_fixes(home)
+
+
+def test_a_file_in_place_of_the_rules_dir_must_be_moved_aside(home: Path, tmp_path: Path) -> None:
+    rules_dir = home / RULES_PATH.parent
+    (home / RULES_PATH).unlink()
+    rules_dir.rmdir()
+    rules_dir.write_text("mine\n", encoding="utf-8")
+    assert flagged(home) == [
+        f"claude: did not load the pinned version ({rules_dir} is not a directory); {move_blocker(home, rules_dir)}"
+    ]
+    rules_dir.rename(tmp_path / "rules-aside")
+    install_fixes(home)
 
 
 def test_a_users_own_agent_beside_the_pinned_ones_is_not_flagged(home: Path) -> None:

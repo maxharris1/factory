@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -458,8 +459,8 @@ def _check_installed(root: Path, anchor: Path, mode: Mode) -> list[str]:
             harness = _harness_for(dest, anchor, mode)
             errors.extend(_check_dest(anchor, src, dest, expected, prefix, harness, mode))
     if mode == "local":
-        errors.extend(_extras_errors(root, anchor, loaded))
-        errors.extend(_rules_file_errors(root, anchor))
+        claude = _extras_errors(root, anchor, loaded) + _rules_file_errors(root, anchor)
+        errors.extend(dict.fromkeys(claude))
     return errors
 
 
@@ -468,6 +469,10 @@ def _extras_errors(root: Path, anchor: Path, pin: Pin) -> list[str]:
     extras = _claude_extras(root, anchor, pin)
     errors: list[str] = []
     for src, dest in extras:
+        blocked = _blocked_error(anchor, dest)
+        if blocked is not None:
+            errors.append(blocked)
+            continue
         if not dest.exists() and not dest.is_symlink():
             errors.append(_claude_error(anchor, dest, "is missing", "run"))
             continue
@@ -493,6 +498,9 @@ def _rules_file_errors(root: Path, anchor: Path) -> list[str]:
     except (OSError, ValueError):
         return []
     dest = anchor / RULES_PATH
+    blocked = _blocked_error(anchor, dest)
+    if blocked is not None:
+        return [blocked]
     if dest.is_symlink():
         problem, fix = "is a symlink", "move"
     elif not dest.exists():
@@ -506,11 +514,31 @@ def _rules_file_errors(root: Path, anchor: Path) -> list[str]:
     return [_claude_error(anchor, dest, problem, fix)]
 
 
-def _claude_error(anchor: Path, dest: Path, problem: str, fix: Literal["run", "move", "remove"]) -> str:
-    install = f"bin/orch install-skills --home {anchor}"
+def _blocked_error(anchor: Path, dest: Path) -> str | None:
+    blocker = _blocking_parent(anchor, dest)
+    if blocker is None:
+        return None
+    problem = "is a symlink" if blocker.is_symlink() else "is not a directory"
+    return _claude_error(anchor, blocker, problem, "move-named")
+
+
+def _blocking_parent(anchor: Path, dest: Path) -> Path | None:
+    current = anchor
+    for part in dest.parent.relative_to(anchor).parts:
+        current = current / part
+        if current.is_symlink() or (current.exists() and not current.is_dir()):
+            return current
+    return None
+
+
+def _claude_error(
+    anchor: Path, dest: Path, problem: str, fix: Literal["run", "move", "move-named", "remove"]
+) -> str:
+    install = f"bin/orch install-skills --home {shlex.quote(str(anchor))}"
     fixes = {
         "run": f"run {install}",
         "move": f"move it aside, then run {install}",
+        "move-named": f"move {dest} aside, then run {install}",
         "remove": f"run {install} --remove-claude-extras, then {install}",
     }
     return f"claude: did not load the pinned version ({dest} {problem}); {fixes[fix]}"
