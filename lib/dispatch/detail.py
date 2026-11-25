@@ -29,7 +29,7 @@ from lib.dispatch.helpers import (
 )
 from lib.dispatch.retry import _harness_job_active
 from lib.dispatch.types import CIResult, Comment, TrackedTicket
-from lib.grok_delivery import GrokDeliveryError, wake_body
+from lib.grok_delivery import GrokDeliveryError, PullDriverDelivery, wake_body
 from lib.handoff import HandoffError, parse_comment
 from lib.max_actions import wait_facts, wait_of
 from lib.queue import LOCAL_GATE_PASSED, Job, JobRequest, job_from_row, passed_head
@@ -70,13 +70,18 @@ class DetailMixin:
         ) is not None:
             route = self._wake_route(job)
             inbox = route.driver_inbox if route is not None else None
-            uses_webhook = inbox is None or route.grok_webhook
+            pull_driver = isinstance(self.grok_delivery, PullDriverDelivery)
+            uses_webhook = (not pull_driver) and (inbox is None or route.grok_webhook)
             if uses_webhook and self.queue.now() < getattr(self, "_grok_backoff_until", 0.0):
                 self.queue.release(job.id, owner="grok")
                 deferred.add(job.id)
                 continue
             try:
-                if inbox is not None and not route.grok_webhook:
+                if pull_driver:
+                    logical_key = _grok_logical_key(job)
+                    self._queue_pull_wake(job, logical_key, inbox=inbox)
+                    receipt = self.grok_delivery.deliver(job, logical_key=logical_key)
+                elif inbox is not None and not route.grok_webhook:
                     self._queue_inbox_post(job, inbox)
                     receipt = f"inbox:{_grok_logical_key(job)}"
                 else:
@@ -142,7 +147,10 @@ class DetailMixin:
                 SELECT jobs.id, jobs.repo, jobs.ticket_id, jobs.source_comment_id, jobs.state
                 FROM jobs LEFT JOIN driver_inbox AS inbox ON inbox.job_id = jobs.id
                 WHERE jobs.dedupe_key LIKE 'driver-rewake:%'
-                  AND (jobs.state = 'queued' OR (jobs.state = 'done' AND inbox.status != 'posted'))
+                  AND (
+                      jobs.state = 'queued'
+                      OR (jobs.state = 'done' AND (inbox.status != 'posted' OR inbox.pull_state = 'queued'))
+                  )
                 """
             ).fetchall()
 
@@ -168,7 +176,7 @@ class DetailMixin:
                         self.queue.cancel(row["id"], "question-settled", connection=connection)
                     else:
                         connection.execute(
-                            "DELETE FROM driver_inbox WHERE job_id = ? AND status != 'posted'",
+                            "DELETE FROM driver_inbox WHERE job_id = ? AND (status != 'posted' OR pull_state = 'queued')",
                             (row["id"],),
                         )
                     connection.commit()
@@ -238,6 +246,7 @@ class DetailMixin:
                 SELECT jobs.*, CASE
                     WHEN jobs.state != 'done' THEN NULL
                     WHEN jobs.handoff_comment_id LIKE 'inbox:%' THEN inbox.posted_at
+                    WHEN jobs.handoff_comment_id LIKE 'pull:%' THEN COALESCE(inbox.acked_at, inbox.finished_at, inbox.created_at)
                     ELSE jobs.finished_at
                 END AS delivered_at
                 FROM jobs LEFT JOIN driver_inbox AS inbox ON inbox.job_id = jobs.id

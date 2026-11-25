@@ -1299,6 +1299,28 @@ the routine limits of 30 fires per hour per task and 100 per hour per account.
 `grok_webhook: false` with `driver_inbox` keeps its meaning under either
 driver. Heal and deploy escalations still use the `grok:` webhook.
 
+Setting `driver: pull` (E3-1) decouples orchestration from external webhooks
+altogether: the poller writes each wake job directly into `driver_inbox`
+(one row per job, with `pull_state = 'queued'`) and requires neither a
+`grok:` nor `claude:` block. A row a webhook driver left unposted becomes
+claimable when the driver changes to `pull`, and a backstop re-wake is a new
+job sharing the first wake's `logical_key`, so it is claimable too. Any AI orchestrator (Claude, Codex,
+Gemini, Grok, or Cursor) blocks at zero idle token cost with
+`orch wait orchestrator`, acknowledges and extends its lease with
+`orch orchestrator ack` / `heartbeat`, and finishes with
+`orch orchestrator finish` (adding each attempt's token usage and USD
+spend, released attempts included, to `job_telemetry` under
+`bot = 'orchestrator'`). Expired leases are reclaimed
+automatically back to `'queued'`. The vendor-neutral skill lives at
+`skills/factory/orchestrator/SKILL.md` (pinned in `skills/skills.lock`).
+`deploy/orch-orchestrator.service` runs `orch wait orchestrator --autostart`,
+which hands each claimed wake to the harness argv in
+`~/.config/factory/waiter-orchestrator.yml`
+(`config/orchestrator-runner.example.yml`), renews the lease while it runs,
+and finishes the wake on exit 0 or releases it for retry otherwise, unless the
+harness finished it itself. Stopping the runner ends its harness and releases
+the wake.
+
 ### Project devices
 
 `projects[].devices` (optional, issue #1171) lists the machines.yml device

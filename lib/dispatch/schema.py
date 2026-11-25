@@ -477,6 +477,9 @@ class SchemaMixin:
                 )
                 """
             )
+            from lib.orchestrator_pull import ensure_inbox_columns
+
+            ensure_inbox_columns(connection)
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS auto_extra_comments (
