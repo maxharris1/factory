@@ -28,7 +28,7 @@ from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, ShipError, TrackedTicket
 from lib.factory_md import DEFAULT_HOLD_APPROVER, DEFAULT_HOLD_LABEL, HoldConfig
 from lib.handoff import parse_comment
-from lib.hold import HoldDecision, decide, ok_carries
+from lib.hold import VISUAL_QA_REASON, HoldDecision, decide, ok_carries
 from lib.rule_engine import Escalate, Land, Wait
 
 _HELD_BASE_UPDATE = "held-base-update"
@@ -152,7 +152,7 @@ class HoldsMixin:
             ),
         }
         if ticket.factory.qa is not None:
-            qa = self._held_qa(ticket, head)
+            qa = self._held_qa(ticket, head, VISUAL_QA_REASON in decision.reasons)
             if qa is None:
                 return False, "awaiting-ok"
             detail["qa"] = qa

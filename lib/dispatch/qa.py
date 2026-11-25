@@ -892,7 +892,8 @@ class QaMixin:
                 seen.add(source_id)
                 source = connection.execute(
                     """
-                    SELECT run_id, scope, state, result, reason, comment_id, started_at, evidence_dir
+                    SELECT run_id, scope, state, result, reason, comment_id, started_at, evidence_dir,
+                           visual
                     FROM qa_runs WHERE run_id = ?
                     """,
                     (source_id,),
@@ -930,34 +931,59 @@ class QaMixin:
             connection.commit()
         return True
 
-    def _held_qa(self, ticket: TrackedTicket, head: str) -> dict[str, object] | None:
+    def _held_qa(
+        self, ticket: TrackedTicket, head: str, visual: bool
+    ) -> dict[str, object] | None:
         qa = ticket.factory.qa
         assert qa is not None
         self._record_unhandled_qa(ticket)
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT run_id, scope, state, result, reason, comment_id, started_at
+                SELECT run_id, scope, state, result, reason, comment_id, started_at, visual
                 FROM qa_runs
                 WHERE repo = ? AND ticket_id = ? AND head = ? AND arm = 'primary'
                 ORDER BY rowid DESC LIMIT 1
                 """,
                 (ticket.repo.lower(), ticket.ticket_id, head),
             ).fetchone()
-        if row is None:
-            return {"result": None, "reason": "no-qa-run", "summary": "No QA run: no-qa-run."}
-        if row["scope"] == "none":
+            visual_source = (
+                connection.execute(
+                    """
+                    SELECT run_id, scope, state, result, reason, comment_id, started_at, visual
+                    FROM qa_runs
+                    WHERE repo = ? AND ticket_id = ? AND arm = 'primary' AND visual = 1
+                      AND state = 'reported' AND comment_id IS NOT NULL
+                    ORDER BY rowid DESC LIMIT 1
+                    """,
+                    (ticket.repo.lower(), ticket.ticket_id),
+                ).fetchone()
+                if visual
+                else None
+            )
+        if row is not None and row["scope"] == "none":
             reason = row["reason"] or ""
             if reason.startswith("carried:"):
                 source = self._carried_qa_source(row["run_id"], reason)
                 if source is not None and source["state"] == "reported" and source["comment_id"] is not None:
                     row = source
-            if row["scope"] == "none":
-                return {
-                    "result": row["result"],
-                    "reason": row["reason"],
-                    "summary": f"No QA run: {row['reason']}.",
-                }
+        if visual_source is not None and not (
+            row is not None
+            and (
+                row["state"] in OPEN_STATES
+                or row["visual"]
+                or (row["state"] == "reported" and row["result"] != "PASS")
+            )
+        ):
+            row = visual_source
+        if row is None:
+            return {"result": None, "reason": "no-qa-run", "summary": "No QA run: no-qa-run."}
+        if row["scope"] == "none":
+            return {
+                "result": row["result"],
+                "reason": row["reason"],
+                "summary": f"No QA run: {row['reason']}.",
+            }
         if row["state"] in OPEN_STATES and self.queue.now() < (
             row["started_at"] + qa.timeout_minutes * 60
         ):

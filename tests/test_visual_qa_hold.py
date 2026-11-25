@@ -443,10 +443,13 @@ def test_aut0_handoff_repo_holds_on_visual_qa_and_hands_off_never_merges(tmp_pat
     assert run.rows("SELECT workflow_state FROM ticket_state") == [("handed-off",)]
 
 
-def _same_patch_rebase_held(tmp_path: Path, gate: str) -> tuple[Harness, Path]:
+def _same_patch_rebase_held(
+    tmp_path: Path, gate: str, ship: str = "merge"
+) -> tuple[Harness, Path]:
     patch_ids = {HEAD_A: "1" * 40, HEAD_B: "1" * 40}
     run = _setup_approved(
         tmp_path,
+        ship=ship,
         gate=gate,
         qa_diff=lambda *_args: HeadDiff("1" * 40, (("src/page.tsx", 5),)),
         patch_ids=patch_ids,
@@ -473,6 +476,48 @@ def test_same_patch_rebase_stays_held_under_either_qa_gate(tmp_path: Path, gate:
 
     assert run.rows("SELECT workflow_state FROM ticket_state") == [("awaiting-ok",)]
     assert run.actions.merges == []
+
+
+@pytest.mark.parametrize("ship", ["merge", "handoff"])
+@pytest.mark.parametrize("gate", ["report", "block"])
+def test_rebased_visual_hold_wake_links_the_source_evidence(
+    tmp_path: Path, gate: str, ship: str
+) -> None:
+    run, _screen = _same_patch_rebase_held(tmp_path, gate, ship)
+    run.poll(3)
+
+    [wake] = [w for w in _wakes(run) if w["head"] == HEAD_B]
+    assert VISUAL_QA_REASON in wake["reasons"]
+    assert wake["qa"]["result"] == "PASS"
+    assert wake["qa"]["evidence_link"] == EVIDENCE_URL
+
+
+@pytest.mark.parametrize("gate", ["report", "block"])
+def test_visual_hold_wake_links_the_visual_run_over_a_later_non_visual_pass(
+    tmp_path: Path, gate: str
+) -> None:
+    patch_ids = {HEAD_A: "1" * 40, HEAD_B: "2" * 40}
+    run = _setup_approved(
+        tmp_path,
+        gate=gate,
+        qa_diff=lambda _repo, _base, _since, head: HeadDiff(patch_ids[head], (("src/page.tsx", 12),)),
+        patch_ids=patch_ids,
+    )
+    _record_primary_evidence(run, HEAD_A, _make_evidence(tmp_path / "ev_a", "lane-1/qa-1/screen.png"))
+    run.post("q1", qa_report(HEAD_A, "PASS", body=EVIDENCED))
+    run.poll(4)
+    run.thread.head = HEAD_B
+    run.poll(2)
+    run.finish("codex", "v2")
+    run.post("v2", verdict(HEAD_B, "APPROVE", "1/3"))
+    run.poll(2)
+    _record_primary_evidence(run, HEAD_B, _make_evidence(tmp_path / "ev_b", "lane-1/qa-1/log.txt"))
+    run.post("q2", qa_report(HEAD_B, "PASS", body=TABLE + "Evidence: https://qa.example/runs/logs-2\n"))
+    run.poll(4)
+
+    assert run.rows("SELECT head, reasons FROM ship_holds") == [(HEAD_B, VISUAL_QA_REASON)]
+    [wake] = [w for w in _wakes(run) if w["head"] == HEAD_B]
+    assert wake["qa"]["evidence_link"] == EVIDENCE_URL
 
 
 def test_recycling_keeps_the_carried_source_visuals_and_the_hold(tmp_path: Path) -> None:
