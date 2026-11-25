@@ -351,5 +351,6 @@ def _attention(snapshot: dict) -> str:
 
 
 SCRIPT = _SCRIPT.replace("__ACT__", json.dumps(
-    {"label": {name: spec.label for name, spec in ACTIONS.items()}, "why": _WHY},
+    {"label": {name: spec.label for name, spec in ACTIONS.items()}, "why": _WHY,
+     "head": [name for name, spec in ACTIONS.items() if spec.head_bound]},
 ))

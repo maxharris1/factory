@@ -13,7 +13,7 @@ GOLDEN = {
     "ci.CSS": "544cfa203943aaabe9f99f5e42e54dfed2fb9d9d4a505db18a8b125e2b12c883",
     "ci.SCRIPT": "b911e0070f5debca7d894695d5484929f5abc168b05e1665bc793351c463bc34",
     "cockpit.CSS": "2bddd9fe81e8baf1d6f29272a6eba6ee66f5ebd00860f1fb7e9cdca1fce763e6",
-    "cockpit.SCRIPT": "9b7e55a9d89ab926bdc159278f1a325ddfeb62386525a78429ddb2edc77998f7",
+    "cockpit.SCRIPT": "c2110e91918538773e559ae2846b4dc96844d9ded357a2374b8f46028f898e67",
     "__LANES__": "0a070c5626c19ae07dc2fd8adfb927643b397d9899d61f93f67b20ee6f76e617",
     "seeded/main": "bb842118ba687d913788c3f03d6a959aee29cdff79d661695f1db635dbf79736",
     "seeded/chrome": "9522b88ea36b14ce7c9ce4c9643e3ea92aeffbf26a7a6923d5aef01d95a1b69d",
