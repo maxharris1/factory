@@ -1,17 +1,17 @@
-"""Tests for E2-3: Gemini CLI harness driver, google model family, accounts, and doctor (#1412)."""
-
 from __future__ import annotations
 
-import hashlib
+import io
 import json
+import re
+import sqlite3
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
 from lib import (
     account_doctor,
     account_home,
-    account_signin,
     factory_md,
     harness_env,
     harnesses,
@@ -24,18 +24,15 @@ from lib import (
     telemetry,
     usage_readings,
     wait,
+    waiter,
 )
 from lib.brief import render_brief
 from lib.harnesses import AccountIsolation, HarnessDriver, StreamFlags
-from lib.harnesses.gemini import GeminiDriver
+from lib.harnesses.gemini import AUTH_OVERRIDES, GeminiDriver
 from lib.machines_yml import load_machines_yml
 from tests.test_brief import job
 
 NOW = 1_800_000_000.0
-
-
-def _gemini_fp(email: str) -> str:
-    return hashlib.sha256(f"gemini\0{email.lower()}".encode()).hexdigest()[:12]
 
 
 def test_gemini_is_first_class_in_schema_wait_queue_and_registry() -> None:
@@ -55,32 +52,83 @@ def test_gemini_is_first_class_in_schema_wait_queue_and_registry() -> None:
     assert driver.family_for_model("gemini-3.1-pro") == "google"
     assert driver.family_for_model(None) == "google"
     assert harnesses.driver_for_bot("gemini-bot") is driver
-    assert driver.account_isolation() == AccountIsolation(
-        "GEMINI_CLI_HOME", ("GEMINI_API_KEY", "GOOGLE_API_KEY")
-    )
+    assert driver.account_isolation() == AccountIsolation("GEMINI_CLI_HOME", AUTH_OVERRIDES)
     assert driver.probe_usage({}, NOW) == []
     assert "gemini" in usage_readings.NOT_TRACKED
     assert usage_readings.NOT_TRACKED_REASONS["gemini"]
 
 
-def test_gemini_account_isolation_scrubs_api_keys_and_sets_cli_home() -> None:
-    secret_a = "AIza-SYNTHETIC-GEMINI-KEY"
-    secret_b = "AIza-SYNTHETIC-GOOGLE-KEY"
-    scrubbed = harness_env.account_environ(
-        {
-            "PATH": "/usr/bin",
-            "GEMINI_API_KEY": secret_a,
-            "GOOGLE_API_KEY": secret_b,
-            "KEEP": "ok",
-        },
-        "gemini",
-        "/home/gemini-bot/.factory-accounts/gemini-pro",
+UPSTREAM_AUTH_OVERRIDES = (
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GOOGLE_CLOUD_ACCESS_TOKEN",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_GENAI_USE_GCA",
+    "GOOGLE_GENAI_USE_VERTEXAI",
+    "GEMINI_CLI_USE_COMPUTE_ADC",
+    "CLOUD_SHELL",
+)
+
+
+def test_an_account_job_drops_every_gemini_auth_override_and_signs_in_from_its_folder() -> None:
+    home = "/home/gemini-bot/.factory-accounts/gemini-pro"
+    secrets = {name: f"SYNTHETIC-{index}-{name}" for index, name in enumerate(AUTH_OVERRIDES)}
+    scrubbed = harness_env.account_environ({"PATH": "/usr/bin", "KEEP": "ok", **secrets}, "gemini", home)
+
+    assert set(UPSTREAM_AUTH_OVERRIDES) <= set(AUTH_OVERRIDES)
+    assert scrubbed == {"PATH": "/usr/bin", "KEEP": "ok", "GEMINI_CLI_HOME": home}
+    assert not [value for value in secrets.values() if value in repr(scrubbed)]
+
+
+@pytest.mark.parametrize("path", ["README.md", "docs/SPEC.md", "bots/gemini-bot/SKILL.md"])
+def test_the_docs_name_every_gemini_auth_override_the_job_drops(path: str) -> None:
+    text = (pstack_pin.ROOT / path).read_text(encoding="utf-8")
+    assert [name for name in AUTH_OVERRIDES if f"`{name}`" not in text] == []
+
+
+def _gemini_session(tmp_path: Path) -> tuple[telemetry.Session, io.BytesIO]:
+    out = io.BytesIO()
+    clock = iter(range(2000, 100000))
+    session = telemetry.Session(
+        connect=lambda: sqlite3.connect(tmp_path / "orch.db"),
+        job_id="job-gem",
+        bot="gemini-bot",
+        repo="acme/widgets",
+        harness="gemini",
+        flags=harnesses.get("gemini").stream_flags(["gemini", "-p", "hi"]),
+        raw_log=None,
+        scrub=telemetry.Scrubber({}),
+        log=lambda message: None,
+        stdout=out,
+        clock=lambda: float(next(clock)),
     )
-    assert "GEMINI_API_KEY" not in scrubbed
-    assert "GOOGLE_API_KEY" not in scrubbed
-    assert scrubbed["GEMINI_CLI_HOME"] == "/home/gemini-bot/.factory-accounts/gemini-pro"
-    assert secret_a not in repr(scrubbed)
-    assert secret_b not in repr(scrubbed)
+    return session, out
+
+
+def _assistant(text: str) -> dict[str, object]:
+    return {"type": "message", "role": "assistant", "content": text, "delta": True}
+
+
+def _stream(*events: dict[str, object]) -> io.BytesIO:
+    return io.BytesIO(b"".join(json.dumps(event).encode() + b"\n" for event in events))
+
+
+def test_a_handoff_marker_split_across_streamed_deltas_reaches_stdout(tmp_path: Path) -> None:
+    session, out = _gemini_session(tmp_path)
+    session.consume(_stream(
+        {"type": "init", "model": "gemini-3.1-pro"},
+        _assistant("ORCH-HANDOFF: 1"),
+        {"type": "tool_use", "tool_name": "run_shell_command", "tool_id": "t1", "parameters": {"command": "ls"}},
+        {"type": "tool_result", "tool_id": "t1", "status": "success", "output": "x"},
+        _assistant("Done.\nORCH-"),
+        _assistant("HANDOFF: "),
+        _assistant("4242424242\n"),
+        {"type": "result", "status": "success", "stats": {}},
+    ))
+    session.finish(0)
+
+    assert out.getvalue() == b"ORCH-HANDOFF: 4242424242\n"
+    assert waiter.handoff_marker(out.getvalue().decode()) == "4242424242"
 
 
 @pytest.mark.parametrize(
@@ -112,9 +160,9 @@ def test_gemini_account_isolation_scrubs_api_keys_and_sets_cli_home() -> None:
             ),
         ),
         (
-            ["gemini", "auth", "status"],
+            ["gemini", "models", "list"],
             "gemini",
-            StreamFlags(["gemini", "auth", "status"], "gemini", False, "not print mode"),
+            StreamFlags(["gemini", "models", "list"], "gemini", False, "not print mode"),
         ),
         (
             ["/srv/bin/wrap-gemini", "-p", ""],
@@ -205,65 +253,14 @@ skills: []
         _, findings = factory_md.load_factory_md(p)
         return [f.message for f in findings if f.severity == "error"]
 
-    # Same-family google+google is refused
     assert any("same-family reviewer" in m for m in check_md("gemini", "gemini"))
     assert any("same-family reviewer" in m for m in check_md("cursor", "gemini", b_model="gemini-3.1-pro"))
-    # Cross-family pairs with anthropic and openai are accepted
     assert check_md("gemini", "claude") == []
     assert check_md("gemini", "codex") == []
     assert check_md("claude", "gemini") == []
     assert check_md("codex", "gemini") == []
-    # Contradicting model hint on gemini harness is refused
     assert any("contradicts gemini harness" in m for m in check_md("gemini", "codex", b_model="claude-opus-4-6"))
-    # Gemini pstack model map loads cleanly
     assert "gemini" in pstack_models.load_map()
-
-
-def test_parse_gemini_doctor_variants_and_canary_scrubbing() -> None:
-    email = "gemini.canary@example.com"
-    secret = "AIza-CANARY-SECRET-888"
-
-    ok_text = account_doctor.parse_gemini("gem-a", "pc", 0, f"\x1b[32m✓\x1b[0m Logged in as {email}\n".encode())
-    ok_json = account_doctor.parse_gemini(
-        "gem-b",
-        "pc",
-        0,
-        json.dumps({"loggedIn": True, "email": email.upper(), "plan": "ultra"}).encode(),
-    )
-    ok_google = account_doctor.parse_gemini("gem-c", "pc", 0, b"Authenticated with Google\n")
-    api_key = account_doctor.parse_gemini(
-        "gem-key", "pc", 0, f"Authenticated via API key {secret}\n".encode()
-    )
-    logged_out = account_doctor.parse_gemini("gem-out", "pc", 1, b"Not logged in\n")
-    garbage = account_doctor.parse_gemini("gem-junk", "pc", 0, f"wat {email} {secret}\n".encode())
-
-    rows = {
-        row.account: row
-        for row in account_doctor.judge([ok_text, ok_json, ok_google, api_key, logged_out, garbage], NOW)
-    }
-    assert rows["gem-a"].status == "mismatch"
-    assert rows["gem-b"].status == "mismatch"
-    assert rows["gem-a"].fingerprint == _gemini_fp(email)
-    assert rows["gem-b"].subscription_type == "ultra"
-    assert rows["gem-c"].status == "ok"
-    assert rows["gem-c"].fingerprint is None
-    assert (rows["gem-key"].status, rows["gem-key"].detail) == (
-        "signed-out",
-        account_doctor.GEMINI_API_KEY_DETAIL,
-    )
-    assert (rows["gem-out"].status, rows["gem-out"].detail) == ("signed-out", account_doctor.NOT_LOGGED_IN)
-    assert (rows["gem-junk"].status, rows["gem-junk"].detail) == ("signed-out", account_doctor.NOT_UNDERSTOOD)
-
-    # Multi-word provider identity strings (e.g. "Logged in as user id 1111") must produce distinct fingerprints
-    u1 = account_doctor.parse_gemini("gem-u", "box", 0, b"Logged in as user id 1111\n")
-    u2 = account_doctor.parse_gemini("gem-u", "mac", 0, b"Logged in as user id 2222\n")
-    split_rows = account_doctor.judge([u1, u2], NOW)
-    assert all(r.status == "mismatch" for r in split_rows)
-    assert u1.fingerprint != u2.fingerprint
-
-    blob = repr([ok_text, ok_json, ok_google, api_key, logged_out, garbage, rows])
-    assert email not in blob
-    assert secret not in blob
 
 
 def test_gemini_not_tracked_reason_surfaces_in_efficiency_and_settings(tmp_path: Path) -> None:
@@ -294,23 +291,20 @@ def test_gemini_not_tracked_reason_surfaces_in_efficiency_and_settings(tmp_path:
         assert usage_readings.NOT_TRACKED_REASONS["gemini"] in facts["usage"]
 
 
-def test_gemini_login_logout_runtime_signout_and_machines_yml(tmp_path: Path) -> None:
-    assert (
-        account_doctor.login_command("gemini", "/home/gemini-bot/.factory-accounts/gem-a")
-        == "env -u GEMINI_API_KEY -u GOOGLE_API_KEY "
-        "GEMINI_CLI_HOME=/home/gemini-bot/.factory-accounts/gem-a gemini auth login"
+def test_no_doctor_probe_or_sign_in_command_is_promised_for_gemini(tmp_path: Path) -> None:
+    from lib import dashboard_accounts
+    from lib.machines_yml import Account, Device, MachinesConfig
+
+    assert "gemini" not in get_args(account_doctor.Harness)
+    config = MachinesConfig(
+        (Device("pc", 1, {"gemini": "gemini-bot"}, home="/home/gemini-bot"),),
+        accounts=(Account("gemini-pro", "gemini", signed_in_on=frozenset({"pc"})),),
     )
-    script = account_doctor.status_script("gemini", [None, "/home/gemini-bot/.factory-accounts/gem-a"])
-    assert "gemini auth status" in script
-    assert "GEMINI_CLI_HOME=" in script
-    assert "GEMINI_API_KEY" in script and "GOOGLE_API_KEY" in script
+    with sqlite3.connect(":memory:") as db:
+        rows = dashboard_accounts.read_accounts(db, NOW, config)
+    assert [row["command"] for account in rows for row in account["signed_in_on"]] == [None, None]
 
-    logout = account_signin.logout_script("gemini", "/home/gemini-bot/.factory-accounts/gem-a")
-    assert "gemini auth logout" in logout
-    assert "GEMINI_CLI_HOME=/home/gemini-bot/.factory-accounts/gem-a" in logout
-
-    err = {"type": "error", "message": "Not logged in. Run gemini auth login."}
-    assert account_doctor.detect_signout("gemini", err) is True
+    err = {"type": "error", "message": "quota exhausted"}
     assert lane_limit.error_text("gemini", err) == err["message"]
 
     bot_home = tmp_path / "gemini-home"
@@ -339,6 +333,13 @@ devices:
     assert config.accounts_on("pc", "gemini") == ("gemini-default", "gemini-pro")
     changes = account_home.prepare(config, "pc", "gemini-bot", bot_home)
     assert any(c.action == "made" and c.path.endswith("gemini-pro") for c in changes)
+
+
+@pytest.mark.parametrize("path", ["docs/ACCOUNTS.md", "docs/RUNBOOK-HARDENING.md", "bots/gemini-bot/SKILL.md"])
+def test_no_shipped_procedure_runs_a_gemini_auth_subcommand(path: str) -> None:
+    text = (pstack_pin.ROOT / path).read_text(encoding="utf-8")
+    blocks = re.findall(r"^\s*```[a-z]*\n(.*?)^\s*```", text, flags=re.MULTILINE | re.DOTALL)
+    assert [block for block in blocks if re.search(r"\bgemini\s+auth\b", block)] == []
 
 
 def test_gemini_pstack_adapter_and_bot_skill_exist_and_verify() -> None:

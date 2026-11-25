@@ -304,10 +304,7 @@ Once **E2-2** (Cursor CLI driver) and **E2-3** (Gemini CLI driver) are merged:
    Remove `cursor` from `refused_harnesses` in `orch.local.yml`, enable `cursor-bot` waiter, and verify `bin/orch doctor`.
 
 2. **Gemini (`gemini`):**
-   Create `gemini-bot` user (same pattern as Section 3.1), authenticate in its isolated account home(s):
-   ```bash
-   sudo -u gemini-bot -H bash -lc 'gemini auth login && gemini --version'
-   ```
+   Create `gemini-bot` user (same pattern as Section 3.1). Its sign-in waits on Max's choice of CLI (#1412). See `docs/ACCOUNTS.md`.
    Add `gemini: gemini-bot` under `devices[].harnesses` in `machines.local.yml`, run `bin/orch install-skills`, and verify `bin/orch doctor`.
 
 3. **Additional Same-Harness Accounts (Even Usage Balancing):**

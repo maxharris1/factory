@@ -376,6 +376,9 @@ the sign-in broker cover only Claude and Codex. A Cursor account is the
 device's cursor login itself, so sign it in by hand on the device as that
 login with `cursor-agent login`.
 
+A Gemini card row shows no command and no Sign in either, for the same
+reason. Gemini sign-in waits on Max's choice of CLI (#1412).
+
 ## 1. Declare the account
 
 Use Add account on the Accounts panel. Give the id, the harness, `max_jobs`
@@ -438,16 +441,12 @@ CODEX_HOME=~/.factory-accounts/<id> codex login --device-auth
 
 Sign in with ChatGPT. The doctor counts an API-key login as `signed-out`.
 
-For a Gemini account, run:
-
-```sh
-env -u GEMINI_API_KEY -u GOOGLE_API_KEY GEMINI_CLI_HOME=~/.factory-accounts/<id> gemini auth login
-```
-
-Sign in with Google. The doctor counts an API-key login (`GEMINI_API_KEY` or
-`GOOGLE_API_KEY`) as `signed-out`, and Gemini quota stays `not tracked` because
-Gemini CLI has no non-interactive quota command that avoids reading credential
-files.
+A Gemini account has no sign-in or doctor command yet. Which CLI the
+factory wraps follows from the subscription or API key Max chooses, and that
+choice is still open (#1412). The `gemini` CLI has no `auth` subcommand: it
+reads `gemini auth status` as a prompt. So `orch accounts doctor` does not
+probe Gemini accounts and writes no `account_signins` row for them. Gemini
+quota stays `not tracked`.
 
 ## 3. Check every sign-in
 

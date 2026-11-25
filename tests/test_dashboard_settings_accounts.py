@@ -326,7 +326,7 @@ def test_signed_in_the_panel_has_the_add_form_and_each_editable_card_its_control
     accounts = _signed_in(tmp_path)["html"]["accounts"]
     form = _add_form(accounts)
     assert 'data-field="id"' in form
-    assert re.findall(r"<option[^>]*>([^<]*)</option>", form) == ["claude", "codex", "cursor"]
+    assert re.findall(r"<option[^>]*>([^<]*)</option>", form) == ["claude", "codex", "cursor", "gemini"]
     assert 'type="number" min="1" max="64" data-field="max_jobs"' in form
     assert _boxes(form) == ["box", "pc", "mac"]
     assert ">Add account</button>" in form

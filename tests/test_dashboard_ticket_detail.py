@@ -36,7 +36,7 @@ from tests.test_dashboard_activity import HARNESS as POLLING
 from tests.test_dashboard_layout import BAR, HARNESS, _no_script, _run_page, _section, _snapshot, needs_node, run_harness
 from tests.test_dashboard_system import CHROME, QuietHandler, _Chrome
 
-WHO = {"script", "claude", "codex", "cursor", "grok", "human"}
+WHO = {"script", "claude", "codex", "cursor", "gemini", "grok", "human"}
 
 
 def _rows(markup: str, cls: str) -> list[tuple[str, str, str]]:
@@ -115,7 +115,7 @@ def test_chart_colours_come_from_who_never_from_the_phase() -> None:
     assert STOP_RED == ticket_detail.STOP_TINT
     css = ticket_detail.CSS
     assert not re.search(r"\.g-[a-z]+", css)
-    assert not re.search(r"--g:var\(--(?:codex|cursor|claude|grok)\)", css)
+    assert not re.search(r"--g:var\(--(?:codex|cursor|claude|gemini|grok)\)", css)
 
 
 def test_can_come_next_lists_normal_then_human_then_stop(tmp_path: Path) -> None:

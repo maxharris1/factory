@@ -86,11 +86,7 @@ def _unchanged(row: SignIn, later: SignIn | None) -> bool:
 
 _TOKENS = " ".join(name for isolation in ACCOUNT_ISOLATION.values() for name in isolation.tokens)
 _LOGIN: dict[Harness, str] = {"claude": "claude auth login --claudeai", "codex": "codex login --device-auth"}
-_LOGOUT: dict[Harness, str] = {
-    "claude": "claude auth logout",
-    "codex": "codex logout",
-    "gemini": "gemini auth logout",
-}
+_LOGOUT: dict[Harness, str] = {"claude": "claude auth logout", "codex": "codex logout"}
 
 
 def login_script(harness: Harness, home: str) -> str:

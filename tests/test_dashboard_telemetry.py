@@ -145,7 +145,7 @@ def test_secrets_and_bad_values_in_the_table_never_reach_the_snapshot(tmp_path: 
         turns=-4,
         tokens_in="many",
         cost_usd=-1,
-        harness="gemini",
+        harness="aider",
     )
     snapshot = collect_snapshot(db, log, now=NOW)
     text = json.dumps(snapshot)

@@ -1422,8 +1422,6 @@ class Summary:
         if reason != "success":
             self._step(now, "error", reason, "error")
 
-    # -- Gemini CLI: gemini -p --output-format stream-json --
-
     def _gemini(self, kind: str, event: dict, now: float) -> None:
         if kind == "init":
             if self.model is None:
@@ -1684,6 +1682,7 @@ class Session:
         self._warned: set[str] = set()
         self._final: str | None = None  # the run's last final message (#87 handoff line)
         self._final_sent = True
+        self._streaming = False
         self._worker_env = worker_env  # a remote start's environment report is still to come
         self._limit: lane_limit.UsageLimit | None = None
         self._limit_recorded = False
@@ -1759,9 +1758,11 @@ class Session:
                 message = final_message(event)
             except Exception:
                 message = None
+            delta = message is not None and event.get("delta") is True
             if message is not None:
-                self._final = message
+                self._final = (self._final or "") + message if delta and self._streaming else message
                 self._final_sent = False
+            self._streaming = delta
             if _is_end_event(event.get("type")):
                 self._send_handoff()
 

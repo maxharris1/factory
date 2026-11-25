@@ -1929,7 +1929,8 @@ an account that is not the device's own login runs with `CLAUDE_CONFIG_DIR`
 Its token variables are dropped by name after the login profile runs:
 `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`
 for Claude, `OPENAI_API_KEY` and `CODEX_API_KEY` for Codex, and
-`GEMINI_API_KEY` and `GOOGLE_API_KEY` for Gemini. The harness then
+`GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_ACCESS_TOKEN`, `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_GENAI_USE_GCA`, `GOOGLE_GENAI_USE_VERTEXAI`, `GEMINI_CLI_USE_COMPUTE_ADC`, `CLOUD_SHELL`, `GOOGLE_GEMINI_BASE_URL` and `GEMINI_CLI_CUSTOM_HEADERS`
+for Gemini. The harness then
 signs in from the folder, never from a variable, and the values never reach
 the run log, the telemetry or the job detail. The job's usage probe and
 `skill-probe run --account <id>` run the same way, and the skill probe reads

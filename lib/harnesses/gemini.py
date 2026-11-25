@@ -1,5 +1,3 @@
-"""Google Gemini CLI (`gemini`) harness driver (E2-3, #1412)."""
-
 from __future__ import annotations
 
 import os
@@ -9,6 +7,18 @@ from typing import Any
 from lib.harnesses import AccountIsolation, StreamFlags, register
 
 GEMINI_EVENTS = frozenset({"init", "message", "tool_use", "tool_result", "error", "result"})
+AUTH_OVERRIDES = (
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GOOGLE_CLOUD_ACCESS_TOKEN",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_GENAI_USE_GCA",
+    "GOOGLE_GENAI_USE_VERTEXAI",
+    "GEMINI_CLI_USE_COMPUTE_ADC",
+    "CLOUD_SHELL",
+    "GOOGLE_GEMINI_BASE_URL",
+    "GEMINI_CLI_CUSTOM_HEADERS",
+)
 
 
 class GeminiDriver:
@@ -21,10 +31,7 @@ class GeminiDriver:
         return "google"
 
     def account_isolation(self) -> AccountIsolation | None:
-        return AccountIsolation(
-            "GEMINI_CLI_HOME",
-            ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
-        )
+        return AccountIsolation("GEMINI_CLI_HOME", AUTH_OVERRIDES)
 
     def extra_env(self) -> Mapping[str, str]:
         return {}

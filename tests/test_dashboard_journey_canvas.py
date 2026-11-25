@@ -212,7 +212,7 @@ def test_after_draw_in_the_frame_keeps_moving_unless_reduced(tmp_path: Path) -> 
 
 
 def test_tint_is_keyed_by_who_with_a_separate_stop_colour() -> None:
-    assert set(TINT) == {"script", "claude", "codex", "cursor", "grok", "human"}
+    assert set(TINT) == {"script", "claude", "codex", "cursor", "gemini", "grok", "human"}
     assert STOP == "#f7768e" and STOP not in TINT.values()
     assert LANE["merge-queue"] == "ship" and LANE["updating"] == "ship"
     shared = json.loads(re.search(r"var JOURNEY = (\{.*?\});\n", SCRIPT).group(1))
