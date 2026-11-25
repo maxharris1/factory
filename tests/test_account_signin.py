@@ -8,6 +8,7 @@ from lib import account_doctor
 from lib.account_doctor import TOKEN_AUTH, SignIn
 from lib.account_signin import Outcome, Prompt, judge, login_script, logout_script, parse_output
 from lib.harness_env import ACCOUNT_ISOLATION
+from lib.harnesses.gemini import AUTH_OVERRIDES
 from lib.machines_yml import load_machines_yml
 from lib.remote import SshTransport
 from tests.test_account_doctor import World
@@ -108,7 +109,7 @@ def test_judge_table(new: SignIn, before: dict[str, SignIn], after: dict[str, Si
 
 
 SECURE = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
-TOKENS = tuple(name for isolation in ACCOUNT_ISOLATION.values() for name in isolation.tokens)
+TOKENS = account_doctor.ACCOUNT_TOKEN_VARIABLES
 FAKE_CLI = """\
 #!/bin/sh
 {{ printf 'argv=%s\\n' "$*"; env; }} > {dump}
@@ -137,7 +138,8 @@ def test_the_cli_sees_the_account_home_and_none_of_the_profile_tokens(
 ) -> None:
     profile = (world.device_home / ".bash_profile").read_text(encoding="utf-8")
     assert all(f"export {name}=" in profile for name in TOKENS) and f"{SECURE}=/planted/secure" in profile
-    assert len(TOKENS) == 15
+    assert len(set(TOKENS)) == 17
+    assert set(AUTH_OVERRIDES) <= set(TOKENS)
     dump = world.tmp / f"{harness}-{action}.env"
     fake = world.bin / harness
     fake.write_text(FAKE_CLI.format(dump=dump, name=harness), encoding="utf-8")
