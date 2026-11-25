@@ -1,5 +1,3 @@
-"""Cursor CLI (`cursor-agent` / `agent`) harness driver (E2-2, #1411, #1037)."""
-
 from __future__ import annotations
 
 import os
@@ -78,8 +76,6 @@ class CursorDriver:
         summary._cursor(kind, event, now)
 
     def probe_usage(self, payload: object, now: float) -> list[Any]:
-        # Cursor CLI `/usage` is interactive-only; there is no non-interactive
-        # quota probe that avoids opening credential files (#1411).
         return []
 
     def handoff_marker(self, event: Mapping[str, Any]) -> str | None:

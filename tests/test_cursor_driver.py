@@ -1,5 +1,3 @@
-"""Tests for E2-2: Cursor CLI harness driver, account doctor, and pstack adapter (#1411, #1037)."""
-
 from __future__ import annotations
 
 import contextlib

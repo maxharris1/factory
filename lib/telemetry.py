@@ -1422,8 +1422,6 @@ class Summary:
         if reason != "success":
             self._step(now, "error", reason, "error")
 
-    # -- Cursor CLI: cursor-agent -p --output-format stream-json --
-
     def _cursor(self, kind: str, event: dict, now: float) -> None:
         if kind == "thinking":
             return
