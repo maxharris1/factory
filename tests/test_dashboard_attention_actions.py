@@ -237,7 +237,7 @@ def test_answer_posts_the_words_and_the_expected_state_and_shows_the_comment(tmp
     assert kept == ["Use the second option.", True, False]
     assert posts == [{"url": "/api/act", "csrf": "x", "body": {
         "repo": REPO, "ticket_id": "33", "action": "answer", "expect_state": "waiting-max",
-        "expect_why": "question", "words": "Use the second option."}}]
+        "expect_why": "question", "words": "Use the second option.", "expect_comment_id": "1003"}}]
     assert out == [f"sent {url}", url]
 
 

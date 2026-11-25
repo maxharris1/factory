@@ -61,6 +61,39 @@ def run_page(run_folder: Path, run_id: str) -> str:
     )
 
 
+def visual_media(run_folder: Path, run_id: str, *, limit: int = 24) -> list[dict[str, object]]:
+    """Safe, symlink-checked list of inline screenshot/video URLs for a QA run.
+
+    Each entry points to the existing `/qa/runs/<run_id>/lane-<n>/<path>` route
+    served by `deploy/factory-dashboard-http.py`.
+    """
+    media: list[dict[str, object]] = []
+    if limit <= 0:
+        return media
+    encoded_run = quote(run_id, safe="")
+    for lane in _lanes(run_folder):
+        if lane.scenarios is None:
+            continue
+        for scenario in lane.scenarios:
+            for item in scenario.evidence:
+                if item.kind not in ("image", "video"):
+                    continue
+                encoded_path = "/".join(quote(part, safe="") for part in item.path.split("/"))
+                media.append(
+                    {
+                        "url": f"/qa/runs/{encoded_run}/lane-{lane.n}/{encoded_path}",
+                        "kind": item.kind,
+                        "path": item.path,
+                        "scenario": scenario.id,
+                        "result": scenario.result,
+                        "lane": lane.n,
+                    }
+                )
+                if len(media) >= limit:
+                    return media
+    return media
+
+
 def _lanes(run_folder: Path) -> list[Lane]:
     try:
         with os.scandir(run_folder) as entries:

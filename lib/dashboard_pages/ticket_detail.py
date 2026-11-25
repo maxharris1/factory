@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from lib.dashboard_flow import FLOWMAP_SCRIPT, flowmap_layout, ticket_phases
 from lib.dashboard_telemetry import NO_DATA
+from lib.dashboard_pages.cockpit import ticket_cockpit_html
 from lib.dashboard_pages.common import (
     anchor, _bot, _chip, duration, _e, _span, _state_chip,
     _thread_key, ticket_address, _tile_label,
@@ -1003,8 +1004,9 @@ def ticket_view(snapshot: dict, address: str | None, open_ci: bool = False) -> s
     found = None if address is None else resolve_ticket(snapshot, address, records)
     if not found:
         return f'<div id="ticketview">{_no_ticket(address, records is not None)}</div>'
+    cockpit = ticket_cockpit_html(found.get("ticket"))
     extras = ci_extras(snapshot, found["address"], found["row"], open_ci)
-    return f'<div id="ticketview">{_ticket_article(found, snapshot)}{extras}</div>'
+    return f'<div id="ticketview">{_ticket_article(found, snapshot)}{cockpit}{extras}</div>'
 
 
 def _ticketview(snapshot: dict) -> str:

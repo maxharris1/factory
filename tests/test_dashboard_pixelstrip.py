@@ -677,5 +677,6 @@ def test_csp_header_is_strict() -> None:
     source = (ROOT / "deploy" / "factory-dashboard-http.py").read_text(encoding="utf-8")
     assert (
         '"default-src \'none\'; style-src \'self\' \'unsafe-inline\'; script-src \'self\'; "\n'
-        '        "connect-src \'self\'; base-uri \'none\'; form-action \'none\'; frame-ancestors \'none\'"'
+        '        "connect-src \'self\'; img-src \'self\'; media-src \'self\'; "\n'
+        '        "base-uri \'none\'; form-action \'none\'; frame-ancestors \'none\'"'
     ) in source

@@ -21,6 +21,7 @@ from lib.dispatch.constants import HANDED_OFF_EXTERNALLY, NOT_STARTED, TERMINAL_
 
 Why = Literal[
     "awaiting-ok",
+    "visual-qa-review",
     "plan-size",
     "question",
     "repeat-stop",
@@ -32,6 +33,7 @@ Why = Literal[
 ]
 WHYS: tuple[Why, ...] = (
     "awaiting-ok",
+    "visual-qa-review",
     "plan-size",
     "question",
     "repeat-stop",
@@ -43,7 +45,7 @@ WHYS: tuple[Why, ...] = (
 )
 
 ActionName = Literal[
-    "ok", "approve-plan", "split", "another-round", "answer", "retry", "resume", "close",
+    "ok", "request-changes", "rerun-qa", "approve-plan", "split", "another-round", "answer", "retry", "resume", "close",
     "hand-off",
 ]
 
@@ -56,7 +58,9 @@ class ActionSpec:
 
 
 ACTIONS: dict[ActionName, ActionSpec] = {
-    "ok": ActionSpec("Merge OK", frozenset({"awaiting-ok"}), head_bound=True),
+    "ok": ActionSpec("Merge OK", frozenset({"awaiting-ok", "visual-qa-review"}), head_bound=True),
+    "request-changes": ActionSpec("Request changes", frozenset({"visual-qa-review"}), head_bound=True),
+    "rerun-qa": ActionSpec("Re-run QA", frozenset({"visual-qa-review"}), head_bound=True),
     "approve-plan": ActionSpec("Approve plan as-is", frozenset({"plan-size"})),
     "split": ActionSpec("Split", frozenset({"plan-size"})),
     "another-round": ActionSpec("Another round", frozenset({"capped", "repeat-stop", "unsat"})),
@@ -122,6 +126,7 @@ def wait_of(
     question_id: str | None = None,
     parked_outcome: str | None = None,
     approve_comment_id: str | None = None,
+    hold_reasons: str | None = None,
     stop_comment_id: str | None = None,
 ) -> Wait | None:
     """Why a ticket in `state` waits on Max, or None when it does not.
@@ -132,6 +137,9 @@ def wait_of(
     if state == "waiting-max":
         return Wait(_PARKED.get(parked_outcome or "", "question"), question_id)
     if state == "awaiting-ok":
+        reasons = {part.strip() for part in (hold_reasons or "").split(",") if part.strip()}
+        if "visual-qa-review" in reasons:
+            return Wait("visual-qa-review", approve_comment_id, "visual-qa-review")
         return Wait("awaiting-ok", approve_comment_id)
     if state in ("capped", "blocked"):
         return Wait(state, stop_comment_id or question_id)
@@ -163,6 +171,12 @@ def wait_facts(connection: sqlite3.Connection) -> dict[tuple[str, str], dict[str
         if table in tables
     )
     holds = "ship_holds" in tables
+    hold_columns = (
+        {str(row[1]) for row in connection.execute("PRAGMA table_info(ship_holds)")}
+        if holds
+        else set()
+    )
+    hold_reasons_col = "hold.reasons" if "reasons" in hold_columns else "NULL"
     stop = (
         f"""(SELECT stop.comment_id FROM review_events AS stop
              WHERE stop.repo = state.repo AND stop.ticket_id = state.ticket_id
@@ -186,6 +200,7 @@ def wait_facts(connection: sqlite3.Connection) -> dict[tuple[str, str], dict[str
                {column("stuck_source_comment_id")} AS stuck_comment_id,
                {"parked.outcome" if parked else "NULL"} AS parked,
                {"hold.approve_comment_id" if holds else "NULL"} AS approve_comment_id,
+               {hold_reasons_col} AS hold_reasons,
                {stop} AS stop_comment_id,
                {running} AS running
         FROM ticket_state AS state
@@ -203,7 +218,7 @@ def wait_facts(connection: sqlite3.Connection) -> dict[tuple[str, str], dict[str
             key: None if value is None else str(value)
             for key, value in zip(
                 ("question_id", "stuck_comment_id", "parked", "approve_comment_id",
-                 "stop_comment_id", "running"),
+                 "hold_reasons", "stop_comment_id", "running"),
                 tuple(row)[2:],
             )
         }

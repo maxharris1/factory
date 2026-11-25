@@ -622,3 +622,25 @@ def test_hand_edited_base_merge_needs_a_fresh_visual_ok(tmp_path: Path, ship: st
     assert run.actions.merges == []
     assert run.actions.handoffs == []
     assert run.rows("SELECT workflow_state FROM ticket_state") == [("awaiting-ok",)]
+
+
+def test_rerun_qa_keeps_visual_hold_and_never_merges_without_ok(tmp_path: Path) -> None:
+    from tests.test_dashboard_cockpit import _body
+
+    run = _setup_approved(tmp_path, ship="merge", gate="observe", hold=None)
+    folder = _make_evidence(tmp_path / "ev_rerun", "lane-1/qa-1/home.png")
+    _record_primary_evidence(run, HEAD_A, folder)
+    run.post("q1", qa_report(HEAD_A, "PASS", body=EVIDENCED))
+    run.poll(4)
+    assert run.rows("SELECT workflow_state FROM ticket_state") == [("awaiting-ok",)]
+
+    run.post("rr-1", _body("rerun-qa", "Re-check the drawer.", head=HEAD_A))
+    run.poll()
+    assert run.rows("SELECT outcome FROM handled_comments WHERE comment_id = 'rr-1'") == [
+        ("queued-rerun-qa",)
+    ]
+    run.poll(2)
+
+    assert run.actions.merges == []
+    assert run.rows("SELECT workflow_state FROM ticket_state") == [("awaiting-ok",)]
+    assert run.rows("SELECT reasons FROM ship_holds") == [(VISUAL_QA_REASON,)]

@@ -44,7 +44,7 @@ _REFUSED_VERDICT_OUTCOMES = (
     "woke-grok-unparsed",
 )
 _LIST_ITEM = re.compile(r"^(\s*)(?:[-*]|[0-9]+[.)])\s+(\S.*?)\s*$")
-_CLASSIFIED = re.compile(r"\[(?:observable|default-able|product)\]\s+(\S.*)")
+_CLASSIFIED = re.compile(r"\[(observable|default-able|product)\]\s+(\S.*)")
 _DEFAULT = re.compile(r"^(\s*)Default:\s*(\S.*?)\s*$")
 _STOP_DEFAULTS = {"repeat": "Another round", "unsat": "Change the criterion"}
 
@@ -55,6 +55,7 @@ class _Offer:
     classified: bool
     depth: int
     options: tuple[str, ...]
+    tag: str | None = None
 
 
 def decisions_of(question: Comment | None, answer: Comment) -> list[Decision]:
@@ -90,10 +91,42 @@ def _offers(asked: str) -> list[_Offer]:
             continue
         item = _LIST_ITEM.match(line)
         classified = _CLASSIFIED.fullmatch(item.group(2)) if item else None
-        text = classified.group(1) if classified else item.group(2) if item else line.strip()
+        text = classified.group(2) if classified else item.group(2) if item else line.strip()
         depth = len(item.group(1)) if item else -1
-        offers.append(_Offer(text, classified is not None, depth, _options_after(lines[index + 1 :], depth)))
+        tag = classified.group(1) if classified else None
+        offers.append(_Offer(text, classified is not None, depth, _options_after(lines[index + 1 :], depth), tag))
     return offers
+
+
+def extract_open_questions(raw_body: str, *, limit: int = 8) -> list[dict[str, object]]:
+    """Structured open product questions parsed from a paused `kind=questions` body."""
+    if limit <= 0 or not raw_body or not raw_body.strip():
+        return []
+    try:
+        body = parse_comment(raw_body).body
+    except HandoffError:
+        body = raw_body
+    offers = _offers(body)
+    if not offers:
+        return []
+    product = [offer for offer in offers if offer.tag == "product"]
+    if product:
+        chosen = product[:limit]
+    else:
+        top_bullets = [offer for offer in offers if offer.depth == 0 and offer.tag is None]
+        prose = [offer for offer in offers if offer.depth < 0]
+        if top_bullets and any("?" in offer.text or offer.options for offer in top_bullets):
+            chosen = top_bullets[:limit]
+        elif prose:
+            opts = tuple(offer.text for offer in top_bullets)
+            chosen = [_Offer(prose[0].text, False, -1, prose[0].options or opts)]
+        else:
+            chosen = [offer for offer in offers if offer.tag is None][:limit]
+    return [
+        {"text": offer.text, "options": list(offer.options)}
+        for offer in chosen
+        if offer.text.strip()
+    ]
 
 
 def _options_after(lines: list[str], depth: int) -> tuple[str, ...]:
@@ -185,6 +218,7 @@ class QuestionsMixin:
                 "paused_head": head,
                 "paused_generation": generation,
                 "paused_question_id": comment.id,
+                "paused_question_text": _handoff_body(comment).strip() or None,
                 "paused_plan_text": None,
             }
             write_workflow_state(
@@ -462,6 +496,7 @@ class QuestionsMixin:
                 "paused_head": None,
                 "paused_generation": None,
                 "paused_question_id": None,
+                "paused_question_text": None,
                 "paused_plan_text": None,
             },
         )

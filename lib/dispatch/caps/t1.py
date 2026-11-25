@@ -45,6 +45,7 @@ class T1Mixin:
                 or self._resume_for_max(ticket, comment)
                 or self._resume_after_blocked(ticket, comment)
                 or self._resume_after_cap(ticket, comment, building=state == "building")
+                or (self._resume_after_hold(ticket, comment) if state == "building" else None)
             )
             if resumed is not None:
                 self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket

@@ -854,7 +854,7 @@ def _run_page(
 
 
 def run_harness(
-    tmp_path: Path, harness: str, script: str, snapshot: dict, page: str, ids: list[str], actions: list,
+    tmp_path: Path, harness: str, script: str, snapshot: dict, page: str, ids: list[str], actions: list | dict,
     hash_: str = "", tickets: str = "null",
 ) -> dict:
     """Linux caps one argument at 128 KiB, so actions and tickets.json go by file like the script and snapshot."""
