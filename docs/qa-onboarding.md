@@ -270,5 +270,5 @@ Preconditions:
 1. Copy the verify skill and the feature map into the project repo, and run the skill once end to end.
 2. Add the project's `qa_storage` entry under its project in `orch.local.yml`.
 3. Set `enabled: true` in the stanza.
-4. Run `orch check-config --factory factory.md`. It must report no error.
+4. Run `orch check-config --factory <owner>/<repo>=factory.md`. It must report no error.
 5. Run `orch qa smoke --repo <owner>/<repo> --runner local-docker` on each machine that runs QA. Every line must start with `ok`.

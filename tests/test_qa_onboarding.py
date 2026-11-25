@@ -415,3 +415,26 @@ def test_onboarding_feature_map_links_a_journey_the_map_accepts() -> None:
     links = re.findall(r"\]\(\./([^)]+)\)", readme)
     assert links == ["sign-in.md"]
     assert map_ids({"README.md", *links}) == {"sign-in"}
+
+
+def test_onboarding_check_config_command_passes_once_qa_is_turned_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("ORCH_NO_LOCAL_OVERLAY", raising=False)
+    monkeypatch.chdir(tmp_path)
+    smoke_orch(tmp_path, None)
+    (tmp_path / "orch.local.yml").write_text(
+        "projects:\n  - repo: owner/repo\n" + SMOKE_STORAGE.format(root=tmp_path), encoding="utf-8"
+    )
+    raw, body = split_front_matter((ROOT / "examples/aut0/factory.md").read_text(encoding="utf-8"))
+    front = yaml.safe_load(raw)
+    front["qa"] = {**yaml.safe_load(_template("Web stanza").replace("<project>", "aut0"))["qa"], "enabled": True}
+    (tmp_path / "factory.md").write_text(f"---\n{yaml.safe_dump(front, sort_keys=False)}---\n{body}", encoding="utf-8")
+
+    commands = re.findall(r"`orch check-config ([^`]*)`", ONBOARDING.read_text(encoding="utf-8"))
+    assert commands
+    for command in commands:
+        argv = command.replace("<owner>/<repo>", "owner/repo").split()
+        status = cli._check_config([*argv, "--orch", str(tmp_path / "orch.yml")])
+        output = capsys.readouterr()
+        assert status == 0, output.err
