@@ -21,31 +21,29 @@ import stat
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING
 
+from lib import harnesses
 from lib.github_app_token import TOKEN_VARIABLES
+from lib.harnesses import AccountIsolation
+from lib.harnesses.claude import CLAUDE_BG_WAIT_ENV, CLAUDE_SECURE_STORAGE_ENV
 
 if TYPE_CHECKING:
     from lib.orch_yml import Approvals
 
-CLAUDE_BG_WAIT_ENV = "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"
 CPU_CAP = 4
 
-_BY_HARNESS = {"claude": {CLAUDE_BG_WAIT_ENV: "0"}}
-
-
-class AccountIsolation(NamedTuple):
-    home: str
-    tokens: tuple[str, ...]
-
+_BY_HARNESS = {
+    driver.name: dict(driver.extra_env())
+    for driver in harnesses.all_drivers()
+    if driver.extra_env()
+}
 
 ACCOUNT_ISOLATION = MappingProxyType(
     {
-        "claude": AccountIsolation(
-            "CLAUDE_CONFIG_DIR",
-            ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
-        ),
-        "codex": AccountIsolation("CODEX_HOME", ("OPENAI_API_KEY", "CODEX_API_KEY")),
+        driver.name: isolation
+        for driver in harnesses.all_drivers()
+        if (isolation := driver.account_isolation()) is not None
     }
 )
 
@@ -75,7 +73,9 @@ def cpu_window(allowed: Iterable[int], cap: int, tag: str) -> frozenset[int] | N
 
 
 def harness_env(harness: str, home: str | None = None) -> dict[str, str]:
-    env = {**cpu_cap_env(), **_BY_HARNESS.get(harness, {})}
+    driver = harnesses.find(harness)
+    extra = dict(driver.extra_env()) if driver is not None else _BY_HARNESS.get(harness, {})
+    env = {**cpu_cap_env(), **extra}
     if home is not None:
         env[_isolation(harness).home] = home
     return env
@@ -85,14 +85,13 @@ def account_tokens(harness: str, home: str | None = None) -> tuple[str, ...]:
     return () if home is None else _isolation(harness).tokens
 
 
-CLAUDE_SECURE_STORAGE_ENV = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
-
-
 def account_environ(base: Mapping[str, str], harness: str, home: str | None) -> dict[str, str]:
     """base as the account at home sees it; None is the device's own login."""
     dropped = set(account_tokens(harness, home))
-    if harness == "claude" and home is not None:
-        dropped.add(CLAUDE_SECURE_STORAGE_ENV)
+    if home is not None:
+        driver = harnesses.find(harness)
+        if driver is not None:
+            dropped.update(driver.dropped_account_env())
     env = {name: value for name, value in base.items() if name not in dropped}
     if home is not None:
         env[_isolation(harness).home] = home
@@ -100,9 +99,14 @@ def account_environ(base: Mapping[str, str], harness: str, home: str | None) -> 
 
 
 def _isolation(harness: str) -> AccountIsolation:
-    if harness not in ACCOUNT_ISOLATION:
-        raise ValueError(f"harness {harness!r} cannot run from an account folder")
-    return ACCOUNT_ISOLATION[harness]
+    driver = harnesses.find(harness)
+    if driver is not None:
+        isolation = driver.account_isolation()
+        if isolation is not None:
+            return isolation
+    if harness in ACCOUNT_ISOLATION:
+        return ACCOUNT_ISOLATION[harness]
+    raise ValueError(f"harness {harness!r} cannot run from an account folder")
 
 
 class ApproverProfileExposed(Exception):

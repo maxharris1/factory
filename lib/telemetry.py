@@ -145,7 +145,9 @@ from lib.remote import TAG_ENV, WORKER_ENV_END, WORKER_ENV_MARK
 from lib.codex_rollout import THREAD_ID
 from lib.codex_rollout import latest as rollout_latest
 from lib.codex_rollout import default_home as codex_home
-from lib import account_doctor, exposure, lane_limit
+from lib import account_doctor, exposure, harnesses, lane_limit
+from lib.harnesses import StreamFlags
+from lib.harnesses.codex import CODEX_EVENTS as _CODEX_EVENTS
 from lib.job_state import SIGNED_OUT, USAGE_LIMIT, record_job_event
 from lib.machines_yml import DEFAULT_ORCH_HOST, default_account
 from lib.usage_readings import Reading, parse_codex, parse_rate_limit_event, store
@@ -170,7 +172,10 @@ HIDDEN = "[redacted-env]"
 SCAN_BYTES = 64 * 1024
 MAX_COUNT = 2**53 - 1
 
-HARNESS_BY_BOT = {"claude-bot": "claude", "codex-bot": "codex", "cursor-bot": "cursor"}
+HARNESS_BY_BOT = {
+    "cursor-bot": "cursor",
+    **{driver.bot_user: driver.name for driver in harnesses.all_drivers()},
+}
 _OFF = frozenset({"0", "off", "no", "false"})
 COUNTERS_ONLY = "counters"
 
@@ -296,17 +301,6 @@ def last_seen(connection: sqlite3.Connection, job_id: str) -> float | None:
 # --- the harness argv ---------------------------------------------------------
 
 
-class StreamFlags(NamedTuple):
-    """What `stream_flags` made of a command: the argv to run, the harness it
-    names (None when it names none), whether the flags were added, and why
-    (one of the fixed STREAM_REASONS)."""
-
-    argv: list[str]
-    harness: str | None
-    added: bool
-    reason: str
-
-
 STREAM_REASONS = (
     "claude",
     "claude wrapper",
@@ -325,49 +319,18 @@ STREAM_REASONS = (
 def stream_flags(command: Sequence[str], bot_harness: str | None = None) -> StreamFlags:
     """The command with its stream flags added, the harness it names, and why.
 
-    Only constants are added. `claude` with `-p`/`--print` and no
-    `--output-format` gets `--output-format stream-json` (and `--verbose`,
-    which stream-json needs with --print); `codex ... exec` (or `e`) with no
-    `--json` gets `--json` right after the subcommand word, found by skipping
-    option values (`codex --profile exec exec` names its subcommand second).
-    A bot's wrapper is read the same way when its arguments go on to the CLI
-    as they are: for a claude bot, one whose first argument is an option
-    (claude-bot's `claude-harness -p ...`, which runs `claude "$@"`, #264);
-    for a codex bot, one whose own first word is `exec` (codex-bot's
-    `codex-review-harness exec ...`, #151). Anything else is returned
-    unchanged.
+    Delegates per-harness flag injection to the registered ``HarnessDriver``
+    in ``lib.harnesses``. Unregistered harnesses and non-matching commands are
+    returned unchanged with a fixed reason.
     """
     argv = list(command)
     if not argv:
         return StreamFlags(argv, None, False, "empty command")
     name = os.path.basename(argv[0])
-    rest = argv[1:]
-    if name == "claude" or bot_harness == "claude":
-        wrapper = name != "claude"
-        harness = None if wrapper else "claude"
-        if wrapper and not (rest and rest[0].startswith("-")):
-            return StreamFlags(argv, None, False, "wrapper does not pass harness options")
-        if "-p" not in rest and "--print" not in rest:
-            return StreamFlags(argv, harness, False, "not print mode")
-        if any(part == "--output-format" or part.startswith("--output-format=") for part in rest):
-            return StreamFlags(argv, harness, False, "output format already set")
-        extra = ["--output-format", "stream-json"]
-        if "--verbose" not in rest:
-            extra.append("--verbose")
-        return StreamFlags(
-            [argv[0], *extra, *rest], "claude", True, "claude wrapper" if wrapper else "claude"
-        )
-    if name == "codex" or bot_harness == "codex":
-        harness = "codex" if name == "codex" else None
-        index = exec_index(["codex", *rest])
-        options = rest[: rest.index("--")] if "--" in rest else rest
-        if index is None:
-            return StreamFlags(argv, harness, False, "no exec subcommand")
-        if "--json" in options or "--experimental-json" in options:
-            return StreamFlags(argv, harness, False, "json already set")
-        reason = "codex" if name == "codex" else "codex wrapper"
-        return StreamFlags([*argv[: index + 1], "--json", *argv[index + 1 :]], "codex", True, reason)
-    return StreamFlags(argv, None, False, "not a known harness")
+    driver = harnesses.driver_for_command(name, bot_harness)
+    if driver is None:
+        return StreamFlags(argv, None, False, "not a known harness")
+    return driver.stream_flags(argv, bot_harness)
 
 
 def harness_argv(
@@ -690,18 +653,6 @@ _CLAUDE_REASONS = {
     "error_max_turns": "max turns reached",
     "error_during_execution": "error during execution",
 }
-_CODEX_EVENTS = frozenset(
-    {
-        "thread.started",
-        "turn.started",
-        "turn.completed",
-        "turn.failed",
-        "item.started",
-        "item.updated",
-        "item.completed",
-        "error",
-    }
-)
 _TEST_COMMAND = re.compile(
     r"(?:^|[\s/;&|('\"])(?:pytest|py\.test|unittest|tox|nox|jest|vitest|mocha|rspec|phpunit"
     r"|go test|cargo test|(?:npm|yarn|pnpm|bun)(?: run)? test|make (?:test|check))\b"
@@ -1291,10 +1242,12 @@ class Summary:
         self.events += 1
         self.last_event_at = now
         kind = event.get("type")
-        if kind in ("system", "assistant", "user", "result"):
-            self._claude(kind, event, now)
-        elif kind in _CODEX_EVENTS:
-            self._codex(kind, event, now)
+        if not isinstance(kind, str):
+            return
+        for driver in harnesses.all_drivers():
+            if driver.handles_event(kind):
+                driver.parse_event(self, kind, event, now)
+                return
 
     def _tool(self, name: str) -> str:
         """Count a call of the harness's tool `name`; its label for the step."""
@@ -1592,25 +1545,22 @@ def exit_reason(code: int | None, cli_reason: str | None) -> str:
 
 # The CLI's own end of a run: the line goes out then (and at the end of the
 # stream otherwise), so a process left holding the pipe cannot keep it back.
-_END_EVENTS = frozenset({"result", "turn.completed"})
+_END_EVENTS = frozenset().union(*(driver.end_events for driver in harnesses.all_drivers()))
+
+
+def _is_end_event(kind: object) -> bool:
+    return isinstance(kind, str) and any(kind in driver.end_events for driver in harnesses.all_drivers())
 
 
 def final_message(event: dict) -> str | None:
     """The CLI's final answer text in this event, or None.
 
-    Claude Code's `result` event carries what `claude -p` prints in text
-    mode; Codex's completed `agent_message` items are its messages, the last
-    of which is what `codex exec` prints in text mode.
+    Delegates to each registered ``HarnessDriver.handoff_marker``.
     """
-    kind = event.get("type")
-    if kind == "result":
-        text = event.get("result")
-        return text if isinstance(text, str) else None
-    if kind == "item.completed":
-        item = event.get("item")
-        if isinstance(item, dict) and item.get("type") == "agent_message":
-            text = item.get("text")
-            return text if isinstance(text, str) else None
+    for driver in harnesses.all_drivers():
+        text = driver.handoff_marker(event)
+        if text is not None:
+            return text
     return None
 
 
@@ -1747,8 +1697,7 @@ class Session:
             if message is not None:
                 self._final = message
                 self._final_sent = False
-            kind = event.get("type")
-            if isinstance(kind, str) and kind in _END_EVENTS:
+            if _is_end_event(event.get("type")):
                 self._send_handoff()
 
     def _learn(self, line: bytes) -> None:
