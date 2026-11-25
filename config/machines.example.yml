@@ -10,7 +10,11 @@ orch_host: pc
 # device's harnesses means the account <harness>-default, which needs no
 # entry. signed_in_on lists the devices a claude or codex account is signed
 # in on; each such device names home, the bot's home folder, and the
-# account's folder there is <home>/.factory-accounts/<id>.
+# account's folder there is <home>/.factory-accounts/<id>. Cursor keeps its
+# login outside any folder, so a cursor account is each device's cursor-bot
+# login, named inline as {bot: cursor-bot, account: <id>}, never signed_in_on.
+# cursor-ultra is that login; cursor-grok-ultra records the weekly Ultra
+# pool Cursor shares with Grok, which `orch usage record` writes.
 accounts:
   - {id: codex-pro-1, harness: codex, plan: pro, label: "Codex Pro", signed_in_on: [pc]}
   - {id: cursor-ultra, harness: cursor, plan: ultra, label: "Cursor Ultra"}

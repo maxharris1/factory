@@ -391,12 +391,13 @@ on the account's own muted row. The reason comes from `NOT_TRACKED` in
 login token, and nothing in the factory reads a credential. The shared Ultra
 pool's usage is on the `external` account.
 
-### Cursor is checked, not run
+### Cursor builds and reviews
 
-The doctor checks each device's cursor login, but the factory runs no build
-or review job on Cursor. `orch.yml` keeps `refused_harnesses: [cursor]`, and
-that holds until Max says otherwise. A cursor row in `account_signins` never
-changes where a job runs.
+Max allowed Cursor as a build and review harness, so `orch.yml` no longer
+lists it in `refused_harnesses` (`docs/decisions/1411-cursor-accounts.md`).
+A Cursor job runs on the device's `cursor-bot` login, the one Cursor account
+there, and the cross-family rule still picks a reviewer of another model
+family.
 
 ## 1. Declare the account
 
@@ -459,6 +460,15 @@ CODEX_HOME=~/.factory-accounts/<id> codex login --device-auth
 ```
 
 Sign in with ChatGPT. The doctor counts an API-key login as `signed-out`.
+
+For a Cursor account there is no account folder. `CURSOR_CONFIG_DIR` moves
+only `cli-config.json`; the login stays in `~/.config/cursor/auth.json` on
+Linux and in the Keychain on macOS. So the account is the `cursor-bot` login
+on each device, named inline in `machines.yml` on every device that runs it
+(`cursor: {bot: cursor-bot, account: <id>}`). Sign `cursor-bot` in on each
+device with the command under "A Cursor card row" above. Settings cannot
+sign a device login out; run `cursor-agent logout` as `cursor-bot` on the
+device instead.
 
 ## 3. Check every sign-in
 

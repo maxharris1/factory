@@ -14,6 +14,7 @@ from lib.dashboard_pages import efficiency
 from lib.machines_yml import load_machines_yml
 from lib.usage_readings import Reading
 from tests.test_dashboard import NOW, add_ticket, make_db, seeded
+from tests.test_dashboard_accounts import CURSOR_REASON, cursor_snapshot
 from tests.test_dashboard_lanes import Browser, _page_with_status_stub, needs_chrome
 from tests.test_dashboard_layout import _run_page, _section, _text, needs_node
 from tests.test_dashboard_telemetry import add_telemetry
@@ -226,11 +227,11 @@ CLAUDE = "claude claude-default via get_usage · read 1m 00s ago"
 CODEX = "codex codex-default via rollout · read 1m 00s ago"
 CLAUDE_UNREAD = "claude claude-default via get_usage · never read"
 CODEX_UNREAD = "codex codex-default via rollout · never read"
-CLAUDE_LOAD = ["0 running · no max", "signed in on box, pc"]
-CODEX_LOAD = ["0 running · no max", "signed in on box"]
+CLAUDE_LOAD = ["0 running · no max", "box unchecked, pc unchecked"]
+CODEX_LOAD = ["0 running · no max", "box unchecked"]
 NOT_TRACKED = f"not tracked: {usage_readings.NOT_TRACKED['cursor']}"
 CURSOR = "cursor cursor-default"
-CURSOR_CELLS = [NOT_TRACKED, "0 running · no max", "signed in on box"]
+CURSOR_CELLS = [NOT_TRACKED, "0 running · no max", "box unchecked"]
 
 
 @pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
@@ -373,15 +374,15 @@ def test_each_untracked_account_is_one_muted_row_with_its_reason(tmp_path: Path,
     assert re.findall(r'<tr class="ef-un">(.*?)</tr>', table) == [
         '<td><div class="ef-who"><span class="bot cursor">cursor</span><span class="ef-name">cursor-default</span>'
         f'</div></td>{muted}<td class="ef-v muted">0 running · no max</td>'
-        '<td class="ef-v muted">signed in on box</td>',
+        '<td class="ef-v muted">box unchecked</td>',
         '<td><div class="ef-who"><span class="bot cursor">cursor</span><span class="ef-name">cursor-ultra</span>'
         f'</div><div class="ef-dev">ultra</div></td>{muted}<td class="ef-v muted">0 running · no max</td>'
-        '<td class="ef-v muted">signed in on pc</td>',
+        '<td class="ef-v muted">pc unchecked</td>',
     ]
     blocks = [_text(block) for block in _blocks(headroom) if block.startswith('<div class="ef-un">')]
     assert blocks == [
-        f"cursor cursor-default {NOT_TRACKED} 0 running · no max · signed in on box",
-        f"cursor cursor-ultra ultra {NOT_TRACKED} 0 running · no max · signed in on pc",
+        f"cursor cursor-default {NOT_TRACKED} 0 running · no max · box unchecked",
+        f"cursor cursor-ultra ultra {NOT_TRACKED} 0 running · no max · pc unchecked",
     ]
     assert "never read" not in " ".join(blocks) and "never read" not in "".join(
         re.findall(r'<tr class="ef-un">.*?</tr>', table))
@@ -402,10 +403,10 @@ def test_headroom_phone_block_per_account(tmp_path: Path, render: str) -> None:
     blocks = _blocks(_render(tmp_path, _snapshot(tmp_path), render, "headroom"))
     assert [_text(block) for block in blocks] == [
         f"{CLAUDE} 59% headroom 5-hour 41% used 7-day 26% used resets in 2h 05m"
-        " 0 running · no max · signed in on box, pc",
+        " 0 running · no max · box unchecked, pc unchecked",
         f"{CODEX} 90% headroom (5-hour only) 5-hour 10% used 7-day stale resets in 1h 00m"
-        " 0 running · no max · signed in on box",
-        f"{CURSOR} {NOT_TRACKED} 0 running · no max · signed in on box",
+        " 0 running · no max · box unchecked",
+        f"{CURSOR} {NOT_TRACKED} 0 running · no max · box unchecked",
     ]
     assert [block[: block.index(">") + 1] for block in blocks] == ['<div class="ef-acct">'] * 2 + [
         '<div class="ef-un">']
@@ -505,8 +506,8 @@ def test_two_accounts_on_one_bot_never_mix_readings(tmp_path: Path) -> None:
 def test_two_accounts_on_one_bot_render_their_own_rows(tmp_path: Path, render: str) -> None:
     headroom = _render(tmp_path, _accounts_snapshot(tmp_path), render, "headroom")
     rows = _rows(headroom)
-    assert rows[CODEX_A] == ["90% used", "30% used", "in 30m 00s", "10%", "0 running · no max", "signed in on box"]
-    assert rows[CODEX_B] == ["20% used", "15% used", "in 2h 30m", "80%", "0 running · no max", "signed in on pc"]
+    assert rows[CODEX_A] == ["90% used", "30% used", "in 30m 00s", "10%", "0 running · no max", "box unchecked"]
+    assert rows[CODEX_B] == ["20% used", "15% used", "in 2h 30m", "80%", "0 running · no max", "pc unchecked"]
     a, b = " ".join([CODEX_A, *rows[CODEX_A]]), " ".join([CODEX_B, *rows[CODEX_B]])
     assert not [text for text in ("90%", "30m 00s", "10%") if text in b]
     assert not [text for text in ("20%", "2h 30m", "80%") if text in a]
@@ -525,6 +526,31 @@ def test_headroom_has_one_row_per_account_with_plan_source_age_and_devices(tmp_p
     assert len(blocks) == len(rows) and all(_text(block).startswith(key) for block, key in zip(blocks, rows))
 
 
+@pytest.mark.parametrize("usage_tables", [False, True], ids=["no-usage-tables", "usage-tables"])
+def test_a_declared_cursor_account_is_not_tracked_and_lists_each_device_doctor_status(
+    tmp_path: Path, usage_tables: bool
+) -> None:
+    entries = {e["account"]: e for e in cursor_snapshot(tmp_path, usage_tables=usage_tables)["usage"]["accounts"]}
+    cursor = entries["cursor-ultra"]
+    assert (cursor["state"], cursor["not_tracked"], cursor["plan"], cursor["label"]) == (
+        "not tracked", CURSOR_REASON, "ultra", "Cursor Ultra")
+    assert cursor["doctor"] == [{"device": "box", "status": "ok"}, {"device": "mac", "status": "signed-out"},
+                                {"device": "pc", "status": "unreachable"}]
+    claude = entries["claude-default"]
+    assert (claude["not_tracked"], claude["doctor"]) == (None, [{"device": "box", "status": "unchecked"}])
+
+
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+def test_a_declared_cursor_account_row_shows_its_plan_doctor_status_and_why_it_is_not_tracked(
+    tmp_path: Path, render: str
+) -> None:
+    headroom = _render(tmp_path, cursor_snapshot(tmp_path), render, "headroom")
+    devices = "box ok, mac signed-out, pc unreachable"
+    assert _rows(headroom)["cursor cursor-ultra ultra"] == [NOT_TRACKED, "0 running · no max", devices]
+    assert f"cursor cursor-ultra ultra {NOT_TRACKED} 0 running · no max · {devices}" in [
+        _text(block) for block in _blocks(headroom)]
+
+
 @pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
 def test_a_declared_cursor_account_is_not_tracked_with_its_reason(tmp_path: Path, render: str) -> None:
     snapshot = _accounts_snapshot(tmp_path, CURSOR_ULTRA)
@@ -534,7 +560,7 @@ def test_a_declared_cursor_account_is_not_tracked_with_its_reason(tmp_path: Path
         assert (entries[account]["state"], entries[account]["not_tracked"]) == ("not tracked", reason)
     assert {entries[a]["not_tracked"] for a in ("claude-default", "codex-a", "cursor-grok-ultra")} == {None}
     rows = _rows(_render(tmp_path, snapshot, render, "headroom"))
-    assert rows["cursor cursor-ultra ultra"] == [NOT_TRACKED, "0 running · no max", "signed in on pc"]
+    assert rows["cursor cursor-ultra ultra"] == [NOT_TRACKED, "0 running · no max", "pc unchecked"]
 
 
 @pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
@@ -979,12 +1005,12 @@ def test_two_claude_accounts_on_shared_devices_render_one_row_each(tmp_path: Pat
         "account", "5-hour window", "7-day window", "resets", "headroom", "jobs", "devices"]
     assert _rows(headroom) == {
         SHARED_A: ["40% used", "20% used", "in 2h 05m", "60%", "2 running · no max",
-                   "signed in on box, pc · running on box, pc"],
+                   "box unchecked, pc unchecked · running on box, pc"],
         SHARED_B: ["70% used", "10% used", "in 2h 05m", "30%", "1 running · max 2",
-                   "signed in on box · running on box"],
+                   "box ok, pc signed-out · running on box"],
     }
     blocks = [_text(block) for block in _blocks(headroom)]
     assert blocks[0].startswith(SHARED_A) and blocks[0].endswith(
-        "2 running · no max · signed in on box, pc · running on box, pc")
+        "2 running · no max · box unchecked, pc unchecked · running on box, pc")
     assert blocks[1].startswith(SHARED_B) and blocks[1].endswith(
-        "1 running · max 2 · signed in on box · running on box")
+        "1 running · max 2 · box ok, pc signed-out · running on box")

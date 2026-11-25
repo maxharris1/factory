@@ -153,6 +153,13 @@ def error_text(harness: str, event: dict) -> str | None:
         if kind != "result" or not event.get("is_error"):
             return None
         message = event.get("result")
+    elif harness == "cursor":
+        if kind == "result" and event.get("is_error"):
+            message = event.get("result")
+        elif kind == "error":
+            message = event.get("message")
+        else:
+            return None
     else:
         return None
     return message if isinstance(message, str) else None

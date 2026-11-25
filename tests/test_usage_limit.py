@@ -146,7 +146,8 @@ def test_detect_ignores_ordinary_errors() -> None:
     assert lane_limit.detect("codex", {"type": "error", "message": "stream disconnected"}, START) is None
     assert lane_limit.detect("claude", {**CLAUDE_LIMIT, "result": "API Error: 500"}, START) is None
     assert lane_limit.detect("claude", {**CLAUDE_LIMIT, "is_error": False}, START) is None
-    assert lane_limit.detect("cursor", {"type": "error", "message": CODEX_INCIDENT}, START) is None
+    assert lane_limit.detect("cursor", {"type": "error", "message": "API Error: 500"}, START) is None
+    assert lane_limit.detect("unknown", {"type": "error", "message": CODEX_INCIDENT}, START) is None
 
 
 def test_until_prefers_the_message_then_a_full_reading_then_an_hour() -> None:

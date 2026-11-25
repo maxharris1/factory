@@ -306,6 +306,8 @@ STREAM_REASONS = (
     "claude wrapper",
     "codex",
     "codex wrapper",
+    "cursor",
+    "cursor wrapper",
     "empty command",
     "not print mode",
     "output format already set",
@@ -1244,8 +1246,12 @@ class Summary:
         kind = event.get("type")
         if not isinstance(kind, str):
             return
+        own = harnesses.find(self.harness)
+        if own is not None and own.handles_event(kind):
+            own.parse_event(self, kind, event, now)
+            return
         for driver in harnesses.all_drivers():
-            if driver.handles_event(kind):
+            if driver is not own and driver.handles_event(kind):
                 driver.parse_event(self, kind, event, now)
                 return
 
@@ -1415,6 +1421,54 @@ class Summary:
         self.cli_reason = reason
         if reason != "success":
             self._step(now, "error", reason, "error")
+
+    def _cursor(self, kind: str, event: dict, now: float) -> None:
+        if kind == "thinking":
+            return
+        if kind == "tool_call":
+            self._cursor_tool_call(event, now)
+            return
+        self._claude(kind, event, now)
+
+    def _cursor_tool_call(self, event: dict, now: float) -> None:
+        subtype = event.get("subtype")
+        call_id = str(event.get("call_id") or f"cursor-call-{self.events}")
+        payload = event.get("tool_call")
+        if not isinstance(payload, dict) or not payload:
+            return
+        tool_key, body = next(iter(payload.items()))
+        if not isinstance(body, dict):
+            body = {}
+        args = body.get("args") if isinstance(body.get("args"), dict) else {}
+        if subtype == "started":
+            lower = tool_key.lower()
+            if "shell" in lower or "terminal" in lower or "bash" in lower:
+                command = _command_text(args.get("command"))
+                self._tool("shell")
+                self.commands += 1
+                step = self._step(now, "command", "command", "running")
+                self._open[call_id] = (step, command)
+            else:
+                label = self._tool(tool_key.removesuffix("ToolCall") or tool_key)
+                if any(word in lower for word in ("write", "edit", "delete", "patch")):
+                    self._touch(args.get("path") or args.get("file_path") or args.get("filePath"))
+                step = self._step(now, "tool", label, "running")
+                self._open[call_id] = (step, None)
+        elif subtype == "completed":
+            result = body.get("result")
+            error = False
+            output = ""
+            if isinstance(result, dict):
+                error = "error" in result or bool(result.get("isError"))
+                success = result.get("success")
+                if isinstance(success, dict):
+                    exit_code = success.get("exitCode")
+                    if isinstance(exit_code, int) and exit_code != 0:
+                        error = True
+                    output = _text_of(success.get("stdout") or success.get("content") or "")
+                elif isinstance(result.get("error"), dict):
+                    output = _text_of(result["error"].get("message") or "")
+            self._finished(call_id, error, output)
 
     # -- Codex: codex exec --json --
 

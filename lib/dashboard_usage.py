@@ -17,13 +17,15 @@ window holds the newest reading across the account's rows and is `ok`,
 `stale` (the window has reset or the reading is older than STALE_SECONDS,
 and `used` is then null), `not on plan` (Codex only: left out of
 NOT_ON_PLAN_READINGS fresh readings in a row that report other limits) or
-`no reading`. An account is `not tracked`, `no reading` (no row yet), `no
-telemetry` (no table: an older database, or telemetry never on), `stale` or
-`ok`. Its limit is its own lane pause, else an older recipient-wide pause
-on its harness. No value is guessed: a missing utilization stays null. Each
-entry also carries what placement reads (lib/device_pool.py account_loads):
-its `running` jobs, `max_jobs`, the devices it is `signed_in` on and those it
-is `running_on` now.
+`no reading`. An account is `not tracked` (its harness is in NOT_TRACKED,
+and `not_tracked` says why), `no reading` (no row yet), `no telemetry` (no
+table: an older database, or telemetry never on), `stale` or `ok`. Its
+limit is its own lane pause, else an older recipient-wide pause on its
+harness. No value is guessed: a missing utilization stays null. Each entry
+also carries what placement reads (lib/device_pool.py account_loads): its
+`running` jobs, `max_jobs`, the devices it is `signed_in` on and those it is
+`running_on` now, and `doctor`: every device machines.yml declares for it
+with the account doctor's last status there, or `unchecked`.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ import sqlite3
 from dataclasses import dataclass, field
 
 from lib import device_pool, lane_limit
+from lib.dashboard_accounts import declared_devices, doctor_statuses, safe_text
 from lib.machines_yml import EXTERNAL, MachinesConfig
 from lib.usage_readings import (
     NOT_TRACKED,
@@ -47,7 +50,7 @@ from lib.usage_readings import (
 HARNESSES = ("claude", "codex", "cursor")
 ROW_HARNESSES = (*HARNESSES, EXTERNAL)
 ROW_LIMIT = 500
-TEXT_MAX = 100
+UNCHECKED = "unchecked"
 _NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
 
@@ -67,10 +70,6 @@ class _Account:
 
 def _names(*values: object) -> bool:
     return all(isinstance(value, str) and _NAME.fullmatch(value) for value in values)
-
-
-def safe_text(value: object) -> str | None:
-    return value if isinstance(value, str) and 0 < len(value) <= TEXT_MAX and value.isprintable() else None
 
 
 def _configured(machines: MachinesConfig | None) -> dict[str, _Account]:
@@ -133,6 +132,7 @@ def _entry(
     machines: MachinesConfig | None,
     loads: device_pool.AccountLoads,
     signed_in: dict[str, list[str]],
+    statuses: dict[tuple[str, str], str],
 ) -> dict:
     harness = account.harness
     windows = readings or {}
@@ -156,6 +156,10 @@ def _entry(
         "max_jobs": None if declared is None else declared.max_jobs,
         "signed_in": signed_in.get(account_id, []),
         "running_on": [device for device in loads.running_on.get(account_id, ()) if _names(device)],
+        "doctor": [] if machines is None or declared is None else [
+            {"device": device.name, "status": statuses.get((account_id, device.name), UNCHECKED)}
+            for device in declared_devices(machines, declared)
+        ],
     }
     states = {entry[window]["state"] for window in WINDOWS}
     if harness in NOT_TRACKED:
@@ -182,6 +186,7 @@ def read_usage(
     limits = lane_limit.account_limits(connection, now)
     loads = device_pool.account_loads(connection, machines, now)
     signed_in = {} if machines is None else loads.signed_in_devices(machines)
+    statuses = doctor_statuses(connection)
     legacy: dict[str, lane_limit.LaneLimit] = {}
     for limit in lane_limit.all_active(connection, now):
         legacy.setdefault(limit.harness, limit)
@@ -195,6 +200,7 @@ def read_usage(
                 machines,
                 loads,
                 signed_in,
+                statuses,
             ),
             limits.get(account_id) or legacy.get(account.harness),
         )

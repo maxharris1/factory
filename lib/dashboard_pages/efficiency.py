@@ -166,12 +166,11 @@ def _jobs(entry: dict) -> str:
 
 
 def _devices(entry: dict) -> str:
-    parts = [
-        f"{verb} {', '.join(entry[key])}"
-        for verb, key in (("signed in on", "signed_in"), ("running on", "running_on"))
-        if entry[key]
-    ]
-    return " · ".join(parts) or "none"
+    parts = (
+        ", ".join(f"{row['device']} {row['status']}" for row in entry["doctor"]),
+        entry["running_on"] and f"running on {', '.join(entry['running_on'])}",
+    )
+    return " · ".join(part for part in parts if part) or "none"
 
 
 def _who(entry: dict) -> str:

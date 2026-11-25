@@ -26,6 +26,8 @@ ROUTER_JOBS = [
     ("build", "codex", {}),
     ("review", "codex", {"round": "2/3"}),
     ("review", "claude", {"round": "2/3"}),
+    ("build", "cursor", {}),
+    ("review", "cursor", {"round": "2/3"}),
 ]
 ALL_JOBS = [*ROUTER_JOBS, ("fix", "claude", {"kind": "merge-only"})]
 
@@ -80,12 +82,13 @@ def _skills_prose(text: str) -> str:
 ADAPTER_PROSE = {
     "claude": "`skills/pstack/docs/harness/claude-code.md`",
     "codex": "`skills/factory/harness/codex.md`",
+    "cursor": "`skills/factory/harness/cursor.md`",
 }
 
 
 @pytest.mark.parametrize(
     ("action", "recipient", "extra"),
-    [job_ for job_ in ROUTER_JOBS if job_[1] == "codex" or job_[0] in ("plan", "build")],
+    [job_ for job_ in ROUTER_JOBS if job_[1] in ("codex", "cursor") or job_[0] in ("plan", "build")],
 )
 def test_the_read_with_line_names_the_adapter_by_its_full_skills_path(
     action: str, recipient: str, extra: dict
@@ -93,7 +96,7 @@ def test_the_read_with_line_names_the_adapter_by_its_full_skills_path(
     text = _brief(action, recipient, extra)
     read_with = next(line for line in _skills_prose(text).splitlines() if "Read each file with" in line)
     assert ADAPTER_PROSE[recipient] in read_with
-    assert not re.search(r"`(docs/)?harness/(codex|claude-code)\.md`", text)
+    assert not re.search(r"`(docs/)?harness/(codex|claude-code|cursor)\.md`", text)
 
 
 @pytest.mark.parametrize(("action", "recipient", "extra"), ROUTER_JOBS)
@@ -194,7 +197,10 @@ def test_a_bad_factory_root_fails_closed(root: str | None) -> None:
         _assert_questions_only(text, "factory_root")
 
 
-def test_a_harness_with_no_adapter_fails_closed() -> None:
+def test_a_harness_with_no_adapter_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from lib.brief import skills as brief_skills
+
+    monkeypatch.delitem(brief_skills.ADAPTERS, "cursor-bot")
     _assert_questions_only(_brief("build", "cursor", {}), "cursor")
 
 
@@ -207,7 +213,7 @@ def test_the_device_check_runs_before_any_read(action: str, recipient: str, extr
     assert "post a `questions` handoff naming it, then stop" in section
 
 
-@pytest.mark.parametrize("recipient", ["claude", "codex"])
+@pytest.mark.parametrize("recipient", ["claude", "codex", "cursor"])
 def test_the_brief_lists_the_agent_files_and_leaves_the_fallback_to_the_adapter(recipient: str) -> None:
     text = _brief("build", recipient, {})
     for gone in ('`subagent_type: "general-purpose"`', '`agent_type: "default"`',

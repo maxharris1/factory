@@ -132,7 +132,7 @@ def test_codex_json_goes_after_the_exec_subcommand_never_an_option_value(
 
 
 def test_any_other_command_runs_unchanged() -> None:
-    for command in ([sys.executable, "-c", "pass"], ["cursor-agent", "-p"], []):
+    for command in ([sys.executable, "-c", "pass"], ["unknown-agent", "-p"], []):
         assert harness_argv(command) == (command, None)
 
 

@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
-from lib.account_doctor import TOKEN_AUTH, Harness, SignIn
+from lib.account_doctor import ACCOUNT_TOKEN_VARIABLES, TOKEN_AUTH, Harness, SignIn
 from lib.harness_env import ACCOUNT_ISOLATION
 from lib.remote import _UNTRACE, _login
 
@@ -84,7 +84,7 @@ def _unchanged(row: SignIn, later: SignIn | None) -> bool:
     return later is not None and (later.status, later.fingerprint) == (row.status, row.fingerprint)
 
 
-_TOKENS = " ".join(name for isolation in ACCOUNT_ISOLATION.values() for name in isolation.tokens)
+_TOKENS = " ".join(ACCOUNT_TOKEN_VARIABLES)
 _LOGIN: dict[Harness, str] = {"claude": "claude auth login --claudeai", "codex": "codex login --device-auth"}
 _LOGOUT: dict[Harness, str] = {"claude": "claude auth logout", "codex": "codex logout"}
 

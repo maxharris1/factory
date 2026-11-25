@@ -1581,7 +1581,7 @@ check, whichever process made it. Once any heartbeat exists, every expected comp
 with no row is shown down (`never seen`, or `never reached` for a probe):
 the poller; each bot's waiter on some device `machines.yml` makes eligible
 for its harness, unless `orch.yml` lists that harness in
-`refused_harnesses` (`[cursor]` here, issue #107), and each probed device;
+`refused_harnesses` (issue #107; none here), and each probed device;
 the Linear listener when `orch.yml` has `linear_webhook`, and its tunnel
 when that sets `public_url`; and the dashboard writer when
 `dashboard.push.transport` is `ssh`. A row nothing expects (a retired bot or
@@ -1922,6 +1922,30 @@ integer, caps the account's running jobs across every device. Placement
 `paused` (true or false, default false) gives the account no new job while
 its running jobs finish. A pause or a lower `max_jobs` reaches placement at
 once, and a resume or a higher `max_jobs` once the poller adopts the file.
+
+Cursor accounts (issue #1411). Cursor has no folder setting for its login.
+`CURSOR_CONFIG_DIR` moves only `cli-config.json`; the login stays in
+`~/.config/cursor/auth.json` on Linux and in the `cursor-user`,
+`cursor-access-token` and `cursor-refresh-token` keychain items on macOS. So
+a Cursor account never runs from a folder: each device's `cursor-bot` login
+is the account, named inline on every device that runs it, as in `cursor:
+{bot: cursor-bot, account: cursor-ultra}`. That inline form is not
+deprecated for Cursor. `machines.yml` refuses `signed_in_on` on a Cursor
+account and a declared Cursor account that no device names as its login.
+`orch accounts doctor` runs `cursor-agent status --format json` as
+`cursor-bot` on each of those devices with `CURSOR_API_KEY`,
+`CURSOR_AUTH_TOKEN` and `CURSOR_CONFIG_DIR` unset, and keeps only the status
+and a 12-character hash of the user id the reply names, never the email.
+Settings cannot sign a device login out. Cursor usage stays `not tracked`:
+the CLI shows its usage meters only in the interactive `/usage` view, and no
+documented non-interactive command or API reports used and reset without
+reading the login's credentials. Efficiency and Settings show that reason on
+the account. The Ultra plan's included usage is one weekly pool shared with
+Grok, so the `external` account `cursor-grok-ultra` keeps recording that
+pool from `orch usage record`, and the Cursor account is the CLI login that
+draws on it. Max allowed Cursor as a build and review harness, so `orch.yml`
+no longer lists it in `refused_harnesses`
+(`docs/decisions/1411-cursor-accounts.md`).
 
 Account homes (issues #1183 and #1184). One bot user on one device can run
 several accounts of its harness, each from its own folder. A job placed on

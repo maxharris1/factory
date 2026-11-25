@@ -334,7 +334,7 @@ def test_signout_runs_the_logout_as_the_bot_under_the_home_with_tokens_unset_the
     home = str(box.world.device_home / ".factory-accounts" / "claude-b")
     ((argv, logged_home, names),) = logout.calls()
     assert (argv, logged_home) == ("auth logout", home)
-    assert not names & {*account_doctor._TOKEN_VARIABLES, SECURE}, names
+    assert not names & {*account_doctor.ACCOUNT_TOKEN_VARIABLES, SECURE}, names
     (call,) = [c for c in box.world.ssh.calls() if "orch-accounts-logout" in c["script"]]
     assert (call["alias"], call["user"]) == ("pc-claude-bot", "claude-bot")
     assert call["script"].startswith("exec bash -lc ")
@@ -360,7 +360,7 @@ def test_a_codex_signout_runs_codex_logout_under_its_home(box: Box) -> None:
     home = str(box.world.device_home / ".factory-accounts" / "codex-b")
     ((argv, logged_home, names),) = logout.calls()
     assert (argv, logged_home) == ("logout", home)
-    assert not names & {*account_doctor._TOKEN_VARIABLES, SECURE}, names
+    assert not names & {*account_doctor.ACCOUNT_TOKEN_VARIABLES, SECURE}, names
     (call,) = [c for c in box.world.ssh.calls() if "orch-accounts-logout" in c["script"]]
     assert (call["alias"], call["user"]) == ("pc-codex-bot", "codex-bot")
     line = _signout_line(box)
