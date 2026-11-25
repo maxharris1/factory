@@ -2077,7 +2077,8 @@ already listed as stuck, each once).
 - **Efficiency** (`efficiency.html`): poll health and Linear-budget health,
   and handoff savings with a one-line definition of scripted share.
 - **Evals** (`evals.html`): the weekly eval reports as one table, a column
-  per week, newest first, each value with its change from the week before.
+  per week, newest first, each value with its change from the previous
+  available report, so a delta after a missing week spans two weeks.
 - **Health** (`health.html`, issue #92): every component heartbeat as up,
   stale or down, with last seen in ET, its age, pid, device, version and
   start time, and each harness whose queued jobs have no live waiter (see
@@ -2095,7 +2096,10 @@ panels in place, with no reload; ages tick every second between fetches,
 rows that appear since the last snapshot flash briefly, and the job page
 redraws each job's path (SVG nodes made with `createElementNS`, in the
 namespace of the server-drawn chart) and copies the server-drawn full chart
-with the highlight moved. If `status.json`
+with the highlight moved. The Evals table is the exception. `status.json`
+carries no eval bundle and the page has no script twin for the table, so
+with script the table changes only when the page is reloaded, which picks
+up the latest published `evals.html`. If `status.json`
 cannot be fetched at all, the server-rendered page stays and reloads as
 without script. Everything is inline: no external asset, font or CDN, so it
 works offline on the tailnet. The look follows Omarchy (omarchy.org): the

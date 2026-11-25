@@ -7,7 +7,8 @@ job.html, activity.html, efficiency.html, evals.html, health.html, settings.html
 lib/dashboard_page.py) and tickets.json to an output directory, each
 atomically (temp file in the same directory, fsync, then rename), as one
 set: a failed rename puts back every file already renamed. Each page's inline script fetches status.json every 1 to 2
-seconds and updates in place. Without script (or when status.json cannot
+seconds and updates in place. The Evals table is not in status.json, so
+only a page reload refreshes it. Without script (or when status.json cannot
 be fetched) the server-rendered page reloads every refresh_seconds (15 to
 30). The job page's diagram is model/chart.mmd (lib/dashboard_flow.py).
 

@@ -10,12 +10,16 @@ from pathlib import Path
 
 import pytest
 
-from lib import dashboard_evals
+from lib import dashboard, dashboard_evals
 from lib.dashboard import EVALS, write_snapshot_pages
 from lib.dashboard_evals import KEEP, METRIC_KEYS, collect_weekly, evals_json
 from lib.dashboard_page import render_pages
 from lib.dashboard_pages.evals import EVAL_ROWS, _evals
+from lib.dashboard_pages.shell import _PAGE_NAMES
+from lib.dashboard_static import read_asset
 from tests.test_dashboard import run_orch, seeded, snapshot_for
+
+ROOT = Path(__file__).resolve().parents[1]
 
 GOOD = "weekly-2026-11-23.json"
 BAD = "weekly-2026-11-16.json"
@@ -439,3 +443,29 @@ def test_the_page_with_several_weeks_shows_every_row_newest_first(tmp_path: Path
     main = evals_page(tmp_path, tmp_path / "evals")
     assert headers(main) == ["2026-11-23", "2026-11-16", "2026-11-09"]
     assert list(table(main)) == [row.label for row in EVAL_ROWS]
+
+
+def flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def test_the_guides_name_the_report_a_delta_compares() -> None:
+    guide = flat((ROOT / "README.md").read_text(encoding="utf-8"))
+    pages = (ROOT / "lib/dashboard_pages/README.md").read_text(encoding="utf-8")
+    bullet = re.search(r"- \*\*Evals\*\*.*?(?= - \*\*)", guide).group(0)
+    row = flat(re.search(r"^\| `evals\.html`.*$", pages, re.M).group(0))
+    for text in (bullet, row):
+        assert "previous available report" in text
+        assert "week before" not in text
+
+
+def test_the_guides_say_the_evals_table_refreshes_on_reload() -> None:
+    block = re.search(r"var PAGES = \{(.*?)\n  \};", read_asset("js/common_tail.js"), re.S).group(1)
+    scripted = set(re.findall(r"^\s*(\w+):", block, re.M))
+    assert {name for name, _ in _PAGE_NAMES.values()} - scripted == {"evals"}
+    guide = (ROOT / "README.md").read_text(encoding="utf-8")
+    paragraph = flat(re.search(r"Each page is rendered in full on the box.*?(?=\n\n)", guide, re.S).group(0))
+    assert "Evals table" in paragraph and "reload" in paragraph
+    assert "Evals" in dashboard.__doc__ and "reload" in dashboard.__doc__.split("Evals", 1)[1]
+    intro = (ROOT / "lib/dashboard_pages/README.md").read_text(encoding="utf-8").split("## Page to module")[0]
+    assert "Evals table" in intro
