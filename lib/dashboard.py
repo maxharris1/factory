@@ -181,6 +181,7 @@ from lib import live_settings
 from lib.config_overlay import apply_overlay
 from lib.dashboard_accounts import read_accounts
 from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
+from lib.dashboard_evals import evals_json
 from lib.dashboard_flow import (
     JobStep,
     Transition,
@@ -247,6 +248,7 @@ from lib.worktrees import pid_alive
 
 SCHEMA = "factory-dashboard/v1"
 RECORDS = "ticket_records"
+EVALS = "evals"
 TICKETS_SCHEMA = 1
 LOG_TAIL_LINES = 50
 LOG_TAIL_BYTES = 256 * 1024
@@ -2814,24 +2816,27 @@ def write_snapshot(out_dir: Path, snapshot: dict) -> tuple[Path, Path]:
 
 
 def write_snapshot_pages(out_dir: Path, snapshot: dict) -> tuple[Path, ...]:
-    """Write status.json, the static assets (STATIC_ASSETS), every page (PAGES)
-    and tickets.json from one snapshot, as a set.
+    """Write status.json, the static assets (STATIC_ASSETS), every page (PAGES),
+    tickets.json and evals.json from one snapshot, as a set.
 
-    The ticket records (RECORDS) go to tickets.json only; status.json, the
+    The ticket records (RECORDS) go to tickets.json only and the weekly eval
+    bundle (EVALS, lib/dashboard_evals.py) to evals.json only, a "no dir"
+    bundle when the snapshot has none; status.json, the
     static assets and the pages are written from the rest of the snapshot. Each
     file is written to a temp file in the same directory and fsynced, then
     renamed into place, status.json first. If a later rename fails, every file
     already renamed is put back as it was (or removed if there was none), so the
     directory never mixes files from this snapshot with files from an earlier
     one. Returns every path: status.json, STATIC_ASSETS, the pages in PAGES
-    order, then tickets.json.
+    order, then tickets.json and evals.json.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    status = {key: value for key, value in snapshot.items() if key != RECORDS}
+    status = {key: value for key, value in snapshot.items() if key not in (RECORDS, EVALS)}
     texts = {"status.json": json.dumps(status, indent=2, sort_keys=True, allow_nan=False) + "\n"}
     texts.update(render_static_assets(status))
     texts.update(render_pages(status))
     texts["tickets.json"] = tickets_json(snapshot)
+    texts["evals.json"] = evals_json(snapshot.get(EVALS))
     targets = [out_dir / name for name in texts]
     temps: list[str] = []
     try:

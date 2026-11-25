@@ -160,9 +160,10 @@ def test_snapshot_writes_status_json_and_every_page(tmp_path: Path) -> None:
         *(out / name for name in dashboard.STATIC_ASSETS),
         *(out / name for name in PAGES),
         out / "tickets.json",
+        out / "evals.json",
     )
     assert sorted(path.name for path in out.iterdir()) == sorted(
-        ("status.json", *dashboard.STATIC_ASSETS, *PAGES, "tickets.json")
+        ("status.json", *dashboard.STATIC_ASSETS, *PAGES, "tickets.json", "evals.json")
     )
 
 
@@ -993,7 +994,7 @@ def test_cli_full_push_publishes_every_page_in_one_rename(tmp_path: Path) -> Non
     )
     assert result.returncode == 0, result.stderr
     calls = [eval(line) for line in remote_log.read_text().splitlines()]  # noqa: S307
-    names = ("status.json", *dashboard.STATIC_ASSETS, *PAGES, "tickets.json")
+    names = ("status.json", *dashboard.STATIC_ASSETS, *PAGES, "tickets.json", "evals.json")
     assert [call[0] for call in calls] == ["scp"] * len(names) + ["ssh"]
     assert calls[-1][-1] == "cd -- factory-dashboard && " + " && ".join(
         f"mv -f -- .{name}.push-tmp {name}" for name in names

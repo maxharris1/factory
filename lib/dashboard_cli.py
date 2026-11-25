@@ -9,11 +9,13 @@ when configured, pushes it out. Paths:
   --orch else the checkout's orch.yml (only its dashboard, job_states and
          poll_seconds are used)
   --machines else the checkout's machines.yml, when present
+  --evals-dir else $ORCH_STATE_DIR/evals, else evals/ next to the database
 
 `snapshot` writes status.json, the five pages (index.html, job.html,
-activity.html, efficiency.html, health.html) and tickets.json (a record per
-tracked ticket); `push` sends them all and, over ssh, each settled QA run's
-evidence folder (lib/qa_evidence_push.py).
+activity.html, efficiency.html, health.html), tickets.json (a record per
+tracked ticket) and evals.json (the newest weekly eval reports in the evals
+dir, lib/dashboard_evals.py); `push` sends them all and, over ssh, each
+settled QA run's evidence folder (lib/qa_evidence_push.py).
 `push --status-only` sends status.json alone (the live pushes `orch poll`
 starts on every orch.db change); `--last-cycle EPOCH` is when the poller's
 last cycle ended, reported as poll health. `--poll-seconds` (30 or 60) is the
@@ -39,11 +41,13 @@ from pathlib import Path
 
 from lib import health
 from lib.dashboard import (
+    EVALS,
     DashboardError,
     collect_snapshot,
     write_snapshot_pages,
 )
 from lib.dashboard_config import DashboardConfig, REFRESH_MAX, REFRESH_MIN
+from lib.dashboard_evals import collect_weekly
 from lib.dashboard_push import NoopTransport, SshTransport, run_push, transport_for
 from lib.job_state import JobStateConfig
 from lib.orch_yml import POLL_SECONDS, POLL_SECONDS_ALLOWED, OrchConfig, load_orch_yml
@@ -62,7 +66,9 @@ class _Parser(argparse.ArgumentParser):
 def _parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="orch dashboard", add_help=True)
     commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
-    snapshot = commands.add_parser("snapshot", help="write status.json, the pages and tickets.json")
+    snapshot = commands.add_parser(
+        "snapshot", help="write status.json, the pages, tickets.json and evals.json"
+    )
     push = commands.add_parser("push", help="snapshot and push when configured")
     for sub in (snapshot, push):
         sub.add_argument("--db", type=Path)
@@ -70,6 +76,7 @@ def _parser() -> argparse.ArgumentParser:
         sub.add_argument("--out", type=Path)
         sub.add_argument("--orch", type=Path)
         sub.add_argument("--machines", type=Path)
+        sub.add_argument("--evals-dir", type=Path)
     snapshot.add_argument("--refresh", type=int)
     push.add_argument("--once", action="store_true")
     push.add_argument("--status-only", action="store_true")
@@ -246,6 +253,7 @@ def _snapshot(
         orch=orch,
         publish_seconds=publish_seconds,
     )
+    snapshot[EVALS] = collect_weekly(_evals_dir(args))
     return write_snapshot_pages(_out(args), snapshot)
 
 
@@ -255,6 +263,12 @@ def _db(args: argparse.Namespace) -> Path:
 
 def _out(args: argparse.Namespace) -> Path:
     return args.out or _env_path("ORCH_DASHBOARD_DIR") or _db(args).parent / "dashboard"
+
+
+def _evals_dir(args: argparse.Namespace) -> Path:
+    if args.evals_dir is not None:
+        return args.evals_dir
+    return (_env_path("ORCH_STATE_DIR") or _db(args).parent) / "evals"
 
 
 def _env_path(name: str) -> Path | None:

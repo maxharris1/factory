@@ -38,6 +38,7 @@ ENV = {
     "ORCH_DB": str(DB),
     "ORCH_POLL_LOG": "/state/poller.log",
     "ORCH_DASHBOARD_DIR": "/state/dashboard",
+    "ORCH_STATE_DIR": "/state",
     "GH_TOKEN": GH,
     "GITHUB_TOKEN": GH,
     "FACTORY_WEBHOOK_URL": HOOK,
@@ -187,6 +188,7 @@ def test_child_environment_holds_no_secrets() -> None:
         "ORCH_DB": str(DB),
         "ORCH_POLL_LOG": "/state/poller.log",
         "ORCH_DASHBOARD_DIR": "/state/dashboard",
+        "ORCH_STATE_DIR": "/state",
         "PYTHONUNBUFFERED": "1",
     }
     text = repr(spawn.calls)

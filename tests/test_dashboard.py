@@ -1409,12 +1409,12 @@ def test_write_snapshot_is_atomic_and_leaves_no_temp_files(
     monkeypatch.setattr(dashboard.os, "replace", spy)
     paths = dashboard.write_snapshot_pages(out, snapshot)
     names = ["status.json", *dashboard.STATIC_ASSETS, "index.html", "job.html", "activity.html", "efficiency.html",
-             "health.html", "settings.html", "ticket.html", "tickets.json"]
+             "health.html", "settings.html", "ticket.html", "tickets.json", "evals.json"]
     assert [target for _, target in replaced] == names
     assert all(source.startswith(".") for source, _ in replaced)
     assert paths == tuple(out / name for name in names)
     assert sorted(path.name for path in out.iterdir()) == sorted(names)
-    status = {key: value for key, value in snapshot.items() if key != "ticket_records"}
+    status = {key: value for key, value in snapshot.items() if key not in ("ticket_records", "evals")}
     assert json.loads((out / "status.json").read_text(encoding="utf-8")) == status
 
 
@@ -1527,7 +1527,7 @@ def test_cli_snapshot_writes_both_files(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     names = ["status.json", *dashboard.STATIC_ASSETS, "index.html", "job.html", "activity.html", "efficiency.html",
-             "health.html", "settings.html", "ticket.html", "tickets.json"]
+             "health.html", "settings.html", "ticket.html", "tickets.json", "evals.json"]
     assert sorted(path.name for path in out.iterdir()) == sorted(names)
     status = json.loads((out / "status.json").read_text(encoding="utf-8"))
     assert status["queue"]["totals"]["queued"] == 2
@@ -1774,7 +1774,8 @@ def test_tickets_json_carries_a_finished_job_s_exposure(tmp_path: Path) -> None:
 
     snapshot = collect_snapshot(db, tmp_path / "missing.log", now=NOW)
     assert snapshot["running"] == []
-    path = dashboard.write_snapshot_pages(tmp_path / "out", snapshot)[-1]
+    path = tmp_path / "out" / "tickets.json"
+    dashboard.write_snapshot_pages(tmp_path / "out", snapshot)
     (record,) = json.loads(path.read_text(encoding="utf-8"))["tickets"].values()
     assert [visit["jobs"] for visit in record["visits"] if visit["state"] == "building"] == [[{
         "job": job.id[:8],
