@@ -22,6 +22,7 @@ class Lane:
     base_ref: str
     environment_name: str
     model: str | None
+    commits: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,4 @@ def create(name: str) -> Runner:
         raise KeyError(f"no QA runner named {name!r}") from None
 
 
-# Register built-in production runners when the package loads so
-# ``qa_runners.registered()`` exposes them to ``orch qa-worker``.
 from lib.qa_runners import local_docker as _local_docker  # noqa: E402, F401
