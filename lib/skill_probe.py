@@ -56,7 +56,20 @@ from lib.device_monitor import remote_target
 from lib.harness_env import account_environ, account_tokens, harness_env
 from lib.harnesses import HarnessDriver, all_drivers
 from lib.machines_yml import BOT_USERS, Device, MachinesConfig, load_machines_yml
-from lib.remote import LOGIN_SHELL, RemoteError, RemoteTarget, new_tag, ssh_argv, start_script
+from lib.remote import (
+    GONE,
+    LOGIN_SHELL,
+    RUNNING,
+    RemoteError,
+    RemoteTarget,
+    SshTransport,
+    Transport,
+    check_worker,
+    new_tag,
+    ssh_argv,
+    start_script,
+    stop_worker,
+)
 from lib.waiter import WaiterError, default_harness_config, load_harness_command
 
 Harness = Literal["claude", "codex"]
@@ -77,6 +90,9 @@ INSTALLED = {
 }
 DEFAULT_TIMEOUT = 600.0
 FETCH_TIMEOUT = 120.0
+STOP_GRACE = 1.0
+REMOTE_STOP_CHECKS = 5
+REMOTE_STOP_PAUSE = 2.0
 
 
 class ProbeError(Exception):
@@ -652,7 +668,7 @@ Call = Callable[..., subprocess.CompletedProcess]
 
 def spawn(argv: Sequence[str], *, stdin: bytes, log: Path, cwd: str | None,
           env: Mapping[str, str], timeout: float) -> int | None:
-    """Run argv in its own session; on timeout stop its whole group. None on timeout."""
+    """Run argv in its own session; on timeout SIGTERM then SIGKILL its whole group. None on timeout."""
     with log.open("wb") as out:
         child = subprocess.Popen(
             list(argv), stdin=subprocess.PIPE, stdout=out, stderr=subprocess.STDOUT,
@@ -661,19 +677,74 @@ def spawn(argv: Sequence[str], *, stdin: bytes, log: Path, cwd: str | None,
         try:
             child.communicate(stdin, timeout=timeout)
         except subprocess.TimeoutExpired:
+            _signal_group(child.pid, signal.SIGTERM)
             try:
-                os.killpg(child.pid, signal.SIGTERM)
-            except ProcessLookupError:
+                child.wait(timeout=STOP_GRACE)
+            except subprocess.TimeoutExpired:
                 pass
+            _signal_group(child.pid, signal.SIGKILL)
             child.wait()
             return None
     return child.returncode
+
+
+def _signal_group(pgid: int, sig: signal.Signals) -> None:
+    try:
+        os.killpg(pgid, sig)
+    except ProcessLookupError:
+        pass
+
+
+def stop_remote(target: RemoteTarget, transport: Transport) -> str:
+    """Stop the run's worker on its device, escalating to SIGKILL; return its last checked state."""
+    status = check_worker(transport, target)
+    for attempt in range(REMOTE_STOP_CHECKS):
+        if status != RUNNING:
+            break
+        stop_worker(transport, target, kill=attempt > 0)
+        time.sleep(REMOTE_STOP_PAUSE)
+        status = check_worker(transport, target)
+    return status
 
 
 def call(argv: Sequence[str], *, timeout: float = FETCH_TIMEOUT) -> subprocess.CompletedProcess:
     return subprocess.run(
         list(argv), input=b"", capture_output=True, timeout=timeout, check=False
     )
+
+
+def start_launch(
+    launch: Launch,
+    prompt: str,
+    *,
+    timeout: float,
+    log_path: Path,
+    run: Spawn = spawn,
+    transport: Transport | None = None,
+) -> int | None:
+    """Run the launch; None on timeout.
+
+    Killing the local ssh client leaves a remote harness running, so a timed-out
+    remote launch is stopped on its device; RemoteError if it is not confirmed gone.
+    """
+    if launch.remote is None:
+        Path(launch.run_dir).mkdir(parents=True, exist_ok=False)
+    code = run(
+        launch_argv(launch),
+        stdin=prompt.encode("utf-8"),
+        log=log_path,
+        cwd=launch.run_dir if launch.remote is None else None,
+        env={**account_environ(os.environ, launch.harness, launch.account_home), **launch.env},
+        timeout=timeout,
+    )
+    if code is None and launch.remote is not None:
+        status = stop_remote(launch.remote, transport or SshTransport())
+        if status != GONE:
+            raise RemoteError(
+                f"timed out after {timeout:g}s; the harness on {launch.device} "
+                f"was not confirmed stopped ({status})"
+            )
+    return code
 
 
 def run_launch(
@@ -687,20 +758,16 @@ def run_launch(
     clock: Callable[[], float] = time.time,
     claude_dir: Path | None = None,
     codex_home: Path | None = None,
+    transport: Transport | None = None,
 ) -> tuple[str, str]:
     """Start the harness once, then return (transcript JSONL text, note)."""
     started = clock()
-    if launch.remote is None:
-        Path(launch.run_dir).mkdir(parents=True, exist_ok=False)
-    code = run(
-        launch_argv(launch),
-        stdin=prompt.encode("utf-8"),
-        log=log_path,
-        cwd=launch.run_dir if launch.remote is None else None,
-        env={**account_environ(os.environ, launch.harness, launch.account_home), **launch.env},
-        timeout=timeout,
-    )
-    note = f"timed out after {timeout:g}s" if code is None else (f"exit {code}" if code else "")
+    try:
+        code = start_launch(launch, prompt, timeout=timeout, log_path=log_path, run=run,
+                            transport=transport)
+        note = f"timed out after {timeout:g}s" if code is None else (f"exit {code}" if code else "")
+    except RemoteError as exc:
+        note = str(exc)
     if launch.remote is not None:
         try:
             script = fetch_script(launch.harness, launch.run_dir, launch.account_home)

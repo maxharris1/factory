@@ -10,9 +10,7 @@ copies them into the project for a cloud run. A local install also links
 pstack's agents/ and docs/ into ~/.claude and, given the rules text, writes
 ~/.claude/rules/pstack-models.md (docs/decisions/178-plugin-dir-and-deslop.md).
 doctor prints a canary that asks Claude and Codex
-to load factory-builder and quote a token from the pinned poteto-mode. The
-owning bot starts the harness and writes the reply. This module does not
-start claude or codex.
+to load factory-builder and quote a token from the pinned poteto-mode.
 """
 
 from __future__ import annotations
@@ -432,6 +430,7 @@ def doctor(
     responses: Path | None,
     *,
     print_canary: bool,
+    live: Callable[[str], list[str]] | None = None,
 ) -> tuple[int, str, list[str]]:
     errors = verify_pin(root)
     if errors:
@@ -446,13 +445,16 @@ def doctor(
     errors = _check_installed(root, anchor, mode)
     if errors:
         return 1, prompt, errors
-    if responses is None:
+    if live is not None:
+        errors = live(token)
+    elif responses is None:
         errors = [
             f"{harness}: did not load the pinned version (no canary response)"
             for harness in CANARY_HARNESSES
         ]
         return 1, prompt, errors
-    errors = _score_responses(responses, token)
+    else:
+        errors = _score_responses(responses, token)
     if errors:
         return 1, prompt, errors
     return 0, prompt, []
