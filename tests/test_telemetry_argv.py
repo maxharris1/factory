@@ -68,7 +68,9 @@ def test_each_configured_command_form_gets_its_stream_flags(
         (["claude-harness"], "claude", "wrapper does not pass harness options"),
         (["codex-review-harness", "exec", "--json", "-"], "codex", "json already set"),
         (["codex-review-harness", "resume"], "codex", "no exec subcommand"),
-        (["cursor-agent", "-p"], "cursor", "not a known harness"),
+        (["cursor-agent", "-p", "--output-format", "stream-json"], "cursor", "output format already set"),
+        (["cursor-agent", "status"], "cursor", "not print mode"),
+        (["unknown-agent", "-p"], "unknown", "not a known harness"),
         ([], "claude", "empty command"),
     ],
 )

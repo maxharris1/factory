@@ -135,9 +135,11 @@ def test_detect_signout_reads_each_harness_auth_failure(harness: str, event: dic
     ("codex", {"type": "item.completed", "item": {"text": "Not logged in"}}),
     ("codex", CODEX_TRANSIENT),
     ("codex", {"type": "error", "message": "Failed to refresh token: 500 Internal Server Error"}),
-    ("cursor", {"type": "error", "message": "Not logged in"}),
+    ("cursor", {"type": "error", "message": "stream disconnected before completion"}),
+    ("unknown", {"type": "error", "message": "Not logged in"}),
 ], ids=["claude-usage-limit", "claude-not-error", "claude-500", "claude-other-error", "claude-plain-text",
-        "codex-disconnect", "codex-agent-text", "codex-refresh-503", "codex-refresh-500", "other-harness"])
+        "codex-disconnect", "codex-agent-text", "codex-refresh-503", "codex-refresh-500", "cursor-disconnect",
+        "other-harness"])
 def test_detect_signout_ignores_other_failures_and_agent_text(harness: str, event: dict) -> None:
     assert not account_doctor.detect_signout(harness, event)
 

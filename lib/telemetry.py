@@ -306,6 +306,8 @@ STREAM_REASONS = (
     "claude wrapper",
     "codex",
     "codex wrapper",
+    "cursor",
+    "cursor wrapper",
     "empty command",
     "not print mode",
     "output format already set",

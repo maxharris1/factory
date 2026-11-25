@@ -87,7 +87,10 @@ def test_a_login_not_read_as_signed_out_passes(tmp_path: Path, harness: str, tra
     assert len(transport.aliases) == 1
 
 
-def test_a_harness_without_a_status_command_is_not_checked(tmp_path: Path) -> None:
+def test_a_harness_without_a_status_command_is_not_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delitem(account_doctor._STATUS, "cursor")
     transport = LoginTransport(b"")
     check(tmp_path, "cursor", transport)
     assert transport.aliases == []

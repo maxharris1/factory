@@ -100,6 +100,7 @@ ACCOUNT_HOME = "/home/claude-bot/.factory-accounts/acct-a"
             ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
         ),
         ("codex", {"CODEX_HOME": ACCOUNT_HOME}, ("OPENAI_API_KEY", "CODEX_API_KEY")),
+        ("cursor", {"CURSOR_CONFIG_DIR": ACCOUNT_HOME}, ("CURSOR_API_KEY", "CURSOR_AUTH_TOKEN")),
     ],
 )
 def test_an_account_home_names_its_folder_and_the_tokens_to_drop(
@@ -116,6 +117,6 @@ def test_without_a_home_nothing_is_dropped(harness: str) -> None:
 
 def test_a_home_for_a_harness_without_account_isolation_is_refused() -> None:
     with pytest.raises(ValueError):
-        harness_env("cursor", ACCOUNT_HOME)
+        harness_env("unknown-harness", ACCOUNT_HOME)
     with pytest.raises(ValueError):
-        account_tokens("cursor", ACCOUNT_HOME)
+        account_tokens("unknown-harness", ACCOUNT_HOME)
