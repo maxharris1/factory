@@ -39,7 +39,7 @@ def test_repo_orch_yml_lists_projects_and_polls_github_every_30_seconds(
     assert config.grok.webhook_auth_env == "FACTORY_WEBHOOK_AUTH"
     assert config.trusted_logins == {
         "maxharris1": frozenset(
-            {"grok-bot", "claude-bot", "codex-bot", "cursor-bot"}
+            {"grok-bot", "claude-bot", "codex-bot", "cursor-bot", "gemini-bot"}
         )
     }
     assert config.trusted_linear_users == {}
@@ -571,7 +571,7 @@ def test_linear_webhook_requires_a_linear_project(tmp_path: Path) -> None:
     ]
 
 
-def test_refused_harnesses_defaults_empty_and_the_shipped_file_refuses_none(
+def test_refused_harnesses_defaults_empty_and_the_shipped_file_refuses_gemini_only(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "orch.yml"
@@ -581,7 +581,12 @@ def test_refused_harnesses_defaults_empty_and_the_shipped_file_refuses_none(
     assert config.refused_harnesses == ()
     shipped, _ = load_orch_yml(ROOT / "orch.yml", allow_placeholders=True)
     assert shipped is not None
-    assert shipped.refused_harnesses == ()
+    assert shipped.refused_harnesses == ("gemini",)
+    assert "cursor" not in shipped.refused_harnesses
+    by_repo = {p.repo: p for p in shipped.projects}
+    for repo in ("maxharris1/Cleffy", "maxharris1/factory", "maxharris1/coo"):
+        assert by_repo[repo].intake is not None
+        assert by_repo[repo].intake.natural_label == "intake-clarify"
 
 
 @pytest.mark.parametrize("value, message", [

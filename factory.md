@@ -5,6 +5,8 @@ builder:
   harness: claude
 reviewer:
   harness: codex
+routing:
+  budget: medium
 review:
   rounds:
     low: 1

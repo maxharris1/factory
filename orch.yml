@@ -22,6 +22,7 @@ trusted_logins:
     - claude-bot
     - codex-bot
     - cursor-bot
+    - gemini-bot
 # Who may give a capped-ticket go or a hold ok once github_app.enabled is
 # true (#122, docs/decisions/122-approver-credential.md). Until then
 # trusted_logins decides, as before. Each worker bot gets its own App (#170,
@@ -35,6 +36,10 @@ trusted_logins:
 # sets enabled: true and runs orch check-config, which must end ok.
 approver_logins:
   - maxharris1
+# Gemini starts refused until signed in on devices and passing `orch accounts doctor`
+# (docs/decisions/1412-gemini-harness.md). Cursor stays enabled (1411-cursor-accounts.md).
+refused_harnesses:
+  - gemini
 # approver_gh_config_dir: /home/grok/.config/factory/gh-approver
 # github_app:
 #   enabled: false
@@ -83,6 +88,7 @@ projects:
     factory_ref: dev
     intake:
       label: factory:ready
+      natural_label: intake-clarify
   - repo: maxharris1/tracy-harris-coaching
     factory_ref: main
   # The factory's own PRs: GitHub only, no Linear. They are built outside
@@ -95,11 +101,13 @@ projects:
     job_timeout: 120
     intake:
       label: factory:ready
+      natural_label: intake-clarify
       priority_labels: [priority:p0, priority:p1, priority:p2, priority:p3]
   - repo: maxharris1/coo
     factory_ref: main
     intake:
       label: factory:ready
+      natural_label: intake-clarify
 # Host-specific values (the Linear project id, trusted_linear_users,
 # linear_webhook, a device's slots) go in the gitignored orch.local.yml
 # beside this file, merged in at load (config/orch.local.example.yml).
