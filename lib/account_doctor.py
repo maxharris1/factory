@@ -131,6 +131,7 @@ _CURSOR_STATES: dict[str, tuple[bool, str]] = {
     "error": (False, EXIT_NONZERO),
 }
 GEMINI_SIGNED_OUT = "Please sign in to view available models"
+_GEMINI_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*")
 _GEMINI_UNSET = (*GEMINI_AUTH_OVERRIDES, "GEMINI_CLI_HOME")
 
 
@@ -296,12 +297,16 @@ def parse_cursor(account: str, device: str, code: int, reply: bytes) -> Probe:
     )
 
 
+def _gemini_model_list(text: str) -> bool:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return bool(lines) and all(_GEMINI_MODEL.fullmatch(line) for line in lines)
+
+
 def parse_gemini(account: str, device: str, code: int, reply: bytes) -> Probe:
     text = reply.decode("utf-8", errors="replace")
-    signed_out = GEMINI_SIGNED_OUT in text
-    if code == 0 and text.strip() and not signed_out:
+    if code == 0 and _gemini_model_list(text):
         return Probe(account, device, "gemini", True, True, "login", None, None, "")
-    if code == 1 and signed_out:
+    if code == 1 and GEMINI_SIGNED_OUT in text:
         return Probe(account, device, "gemini", True, False, None, None, None, NOT_LOGGED_IN)
     return Probe(account, device, "gemini", True, False, None, None, None, NOT_UNDERSTOOD)
 

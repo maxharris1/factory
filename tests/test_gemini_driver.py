@@ -4,6 +4,7 @@ import io
 import json
 import re
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 from typing import get_args
 
@@ -12,6 +13,7 @@ import pytest
 from lib import (
     account_doctor,
     account_home,
+    cli,
     factory_md,
     harness_env,
     harnesses,
@@ -30,6 +32,9 @@ from lib.harnesses import HarnessDriver, StreamFlags
 from lib.harnesses.gemini import AUTH_OVERRIDES, GeminiDriver
 from lib.machines_yml import DEVICE_LOGIN_ONLY, load_machines_yml
 from tests.test_brief import job
+from tests.test_remote_start import Ssh
+
+ROOT = pstack_pin.ROOT
 
 NOW = 1_800_000_000.0
 
@@ -320,6 +325,7 @@ def gemini_status(name: str) -> tuple[int, bytes]:
     ("signed-in", True, ""),
     ("signed-out", False, account_doctor.NOT_LOGGED_IN),
     ("no-models", False, account_doctor.NOT_UNDERSTOOD),
+    ("cache-warning", False, account_doctor.NOT_UNDERSTOOD),
 ])
 def test_the_gemini_status_probe_reads_each_recorded_reply(name: str, logged_in: bool, detail: str) -> None:
     probe = account_doctor.parse_gemini("gemini-ultra", "pc", *gemini_status(name))
@@ -332,18 +338,26 @@ def test_the_gemini_status_probe_reads_each_recorded_reply(name: str, logged_in:
     (42, b"No input provided via stdin.\n"),
     (41, b"Please set an Auth method in your settings.json\n"),
     (127, b"sh: 1: agy: not found\n"),
-], ids=["other-error", "sign-in-text-exit-0", "upstream-no-input", "upstream-no-auth", "missing-binary"])
+    (0, b"Warning: model cache is unavailable\ngemini-3.1-pro\n"),
+], ids=[
+    "other-error", "sign-in-text-exit-0", "upstream-no-input", "upstream-no-auth", "missing-binary",
+    "warning-mixed-into-a-list",
+])
 def test_a_gemini_model_reply_or_other_failure_never_reads_signed_in(code: int, reply: bytes) -> None:
     probe = account_doctor.parse_gemini("gemini-ultra", "pc", code, reply)
     assert (probe.logged_in, probe.detail) == (False, account_doctor.NOT_UNDERSTOOD)
 
 
-def test_the_doctor_probes_the_gemini_bot_login_with_agy_models_and_every_override_unset(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from lib import cli
-    from tests.test_remote_start import Ssh
+@dataclass(frozen=True)
+class GeminiDevices:
+    ssh: Ssh
+    agy: FakeAgy
+    home: Path
+    machines: Path
+    db: Path
 
+
+def gemini_devices(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> GeminiDevices:
     ssh = Ssh(tmp_path)
     for device in ("pc", "lap"):
         (ssh.hosts / f"{device}-gemini-bot").write_text("gemini-bot", encoding="utf-8")
@@ -364,34 +378,52 @@ def test_the_doctor_probes_the_gemini_bot_login_with_agy_models_and_every_overri
     harnesses: {{gemini: {{bot: gemini-bot, account: gemini-ultra}}}}
     workdir_root: /home/{{bot}}/work
     ssh_alias: {device}-{{bot}}
-    factory_root: /srv/factory
+    factory_root: {ROOT}
     home: {home}
 """ for device in ("pc", "lap")), encoding="utf-8")
     for name, value in ssh.env().items():
         monkeypatch.setenv(name, value)
     monkeypatch.setenv("FAKE_SSH_HOME", str(home))
     monkeypatch.setenv("ORCH_SSH_MUX", "off")
-    db = tmp_path / "orch.db"
+    return GeminiDevices(ssh, agy, home, machines, tmp_path / "orch.db")
 
-    def doctor() -> dict[tuple[str, str], tuple[str, str]]:
-        assert cli.main(["accounts", "doctor", "--db", str(db), "--machines", str(machines)]) == 0
-        with sqlite3.connect(db) as connection:
-            rows = list(connection.execute(f"SELECT account, device, status, detail FROM {account_doctor.TABLE}"))
-        assert not [value for value in PLANTED_LOGIN.values() if value in repr(rows)]
-        return {(account, device): (status, detail) for account, device, status, detail in rows}
 
-    assert doctor() == {
+def run_doctor(devices: GeminiDevices) -> dict[tuple[str, str], tuple[str, str]]:
+    assert cli.main(["accounts", "doctor", "--db", str(devices.db), "--machines", str(devices.machines)]) == 0
+    with sqlite3.connect(devices.db) as connection:
+        rows = list(connection.execute(f"SELECT account, device, status, detail FROM {account_doctor.TABLE}"))
+    assert not [value for value in PLANTED_LOGIN.values() if value in repr(rows)]
+    return {(account, device): (status, detail) for account, device, status, detail in rows}
+
+
+def test_the_doctor_probes_the_gemini_bot_login_with_agy_models_and_every_override_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    devices = gemini_devices(tmp_path, monkeypatch)
+    assert run_doctor(devices) == {
         ("gemini-ultra", "pc"): ("ok", ""),
         ("gemini-ultra", "lap"): ("unreachable", account_doctor.SSH_DOWN),
     }
-    agy.answer("signed-out")
-    assert doctor() == {
+    devices.agy.answer("signed-out")
+    assert run_doctor(devices) == {
         ("gemini-ultra", "pc"): ("signed-out", account_doctor.NOT_LOGGED_IN),
         ("gemini-ultra", "lap"): ("unreachable", account_doctor.SSH_DOWN),
     }
-    calls = agy.calls()
+    calls = devices.agy.calls()
     assert [args for _, args in calls] == ["models", "models"]
     assert [names & set(PLANTED_LOGIN) for names, _ in calls] == [set(), set()]
+
+
+def test_an_exit_0_warning_from_agy_models_keeps_the_gemini_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    devices = gemini_devices(tmp_path, monkeypatch)
+    with sqlite3.connect(devices.db) as connection:
+        account_doctor.hold(connection, "gemini-ultra", "pc", "runtime", account_doctor.AUTHENTICATION_FAILED, NOW)
+    devices.agy.answer("cache-warning")
+    assert run_doctor(devices)[("gemini-ultra", "pc")] == ("signed-out", account_doctor.NOT_UNDERSTOOD)
+    with sqlite3.connect(devices.db) as connection:
+        assert list(connection.execute("SELECT account, device FROM signin_holds")) == [("gemini-ultra", "pc")]
 
 
 def test_the_dashboard_and_doctor_give_the_interactive_agy_sign_in_command(tmp_path: Path) -> None:

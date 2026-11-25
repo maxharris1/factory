@@ -9,5 +9,7 @@ Antigravity `agy` 1.5.15:
   capture can replace them.
 - `signed-out`: no login, exit 1 with the CLI's exact sign-in error.
 - `no-models`: exit 0 with no output, which the doctor does not read as signed in.
+- `cache-warning`: exit 0 with a warning only, which the doctor does not read as
+  signed in.
 
 `agy models` sends no prompt to a model.
