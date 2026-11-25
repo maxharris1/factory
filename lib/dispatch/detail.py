@@ -761,10 +761,34 @@ class DetailMixin:
         if action in ("plan", "build", "fix", "review") and (decisions := self._decisions(ticket, connection)):
             context["decisions"] = decisions
         if ticket.factory_md is not None:
-            context["routing"] = {
+            routing_payload: dict[str, object] = {
                 "builder": ticket.factory.builder_harness,
                 "reviewer": ticket.factory.reviewer_harness,
             }
+            if ticket.factory.routing is not None:
+                from lib.role_router import RoutingError, resolve_pair
+
+                try:
+                    b_slot, r_slot = resolve_pair(
+                        routing=None,
+                        factory=ticket.factory,
+                        ticket_type=context.get("ticket_type") if isinstance(context.get("ticket_type"), str) else None,
+                        refused_harnesses=self.refused_harnesses,
+                    )
+                except RoutingError:
+                    pass
+                else:
+                    routing_payload["builder"] = b_slot.harness
+                    routing_payload["reviewer"] = r_slot.harness
+                    if b_slot.model is not None:
+                        routing_payload["builder_model"] = b_slot.model
+                    if b_slot.effort is not None:
+                        routing_payload["builder_effort"] = b_slot.effort
+                    if r_slot.model is not None:
+                        routing_payload["reviewer_model"] = r_slot.model
+                    if r_slot.effort is not None:
+                        routing_payload["reviewer_effort"] = r_slot.effort
+            context["routing"] = routing_payload
         if kind is not None:
             context["kind"] = kind
         if plan_round is not None:
