@@ -15,9 +15,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lib.load import load_yaml
-from lib.pstack_pin import ROOT
 from lib.schema import HARNESSES
 
+ROOT = Path(__file__).resolve().parent.parent
 MAP_PATH = Path("config") / "pstack-models.yml"
 SETUP_SKILL = Path("skills") / "pstack" / "skills" / "setup-pstack" / "SKILL.md"
 STEP_HEADING = "### 5. Write the rule"
