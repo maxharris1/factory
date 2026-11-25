@@ -40,6 +40,7 @@ STOP = StopFacts(
     round=3,
     cap=3,
     stuck=False,
+    policy="rounds",
 )
 MOVED = MovedHeadFacts(
     ok_head=sha("a" * 40),
@@ -186,6 +187,7 @@ def test_a_first_cap_on_fresh_findings_grants_one_round_with_the_go_header() -> 
             Check("finding-ids", True, 2),
             Check("stuck", True, 0),
             Check("earlier-round", True, None),
+            Check("policy", True, "rounds"),
             Check("header", True, "<!-- orch:v1 kind=go from=orch round=4/4 state=fixing -->"),
         ),
     )
@@ -212,6 +214,16 @@ def test_a_cap_that_fails_one_check_escalates_on_that_check(change: dict, failed
 def test_a_prior_grant_on_another_finding_still_grants() -> None:
     ruling = decide(dataclasses.replace(STOP, prior_grants=frozenset({finding_id("f-2")})))
     assert isinstance(ruling.outcome, Grant)
+
+
+def test_a_cap_under_convergence_escalates_on_policy() -> None:
+    ruling = decide(dataclasses.replace(STOP, policy="convergence"))
+    assert ruling.outcome == Escalate("policy")
+    assert [check for check in ruling.checks if check.passed is False] == [Check("policy", False, "convergence")]
+
+
+def test_a_cap_under_rounds_grants() -> None:
+    assert isinstance(decide(dataclasses.replace(STOP, policy="rounds")).outcome, Grant)
 
 
 def test_a_cap_whose_header_does_not_round_trip_escalates_header_invalid(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -269,9 +281,14 @@ def test_a_first_repeat_stop_grants_the_round_and_the_cap_round_only_at_the_cap(
             Check("repeat-stops", True, 1),
             Check("stuck", True, 0),
             Check("earlier-round", True, None),
+            Check("policy", True, "rounds"),
             Check("header", True, line),
         ),
     )
+
+
+def test_a_first_repeat_stop_under_convergence_grants() -> None:
+    assert isinstance(decide(dataclasses.replace(REPEAT, policy="convergence")).outcome, Grant)
 
 
 @pytest.mark.parametrize(

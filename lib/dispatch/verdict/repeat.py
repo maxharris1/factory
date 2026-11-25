@@ -14,7 +14,7 @@ from lib.dispatch.qa import QaFix, failed_column
 from lib.dispatch.helpers import _comment_link, _comment_order, _matching_head, _round_number, _scope
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, PausedStep, RoundGrant, TrackedTicket
-from lib.dispatch.verdict.convergence import Continue, Convergence, Repeated, RoundFindings, converge
+from lib.dispatch.verdict.convergence import Convergence, Repeated, RoundFindings, review_step, stop_policy
 from lib.handoff import HandoffError, parse_comment, repeat_id
 from lib.markdown_items import MARKDOWN
 from lib.queue import JobRequest
@@ -233,21 +233,14 @@ class RepeatBlockMixin:
             next(revises)
             for _, revises in groupby(self._accepted_revises(ticket, reported_round), key=lambda item: item.round)
         ]
-        if ticket.factory.stop_on == "convergence":
-            current = RoundFindings(
-                reported_round or 0,
-                frozenset(blocking_ids(handoff.body) | qa_ids | ({named} if named else set())),
-                named,
-            )
-            return converge([RoundFindings(item.round, item.blocking, None) for item in earlier], current)
-        previous = next((item for item in earlier if item.round == (reported_round or 0) - 1), None)
-        if named is not None:
-            holding = next((item for item in earlier if named in item.blocking), previous)
-            return Repeated(named, 0 if holding is None else holding.round)
-        if previous is None:
-            return Continue(reduced=False)
-        shared = (blocking_ids(handoff.body) | qa_ids) & previous.blocking
-        return Repeated(min(shared), previous.round) if shared else Continue(reduced=False)
+        current = RoundFindings(
+            reported_round or 0,
+            frozenset(blocking_ids(handoff.body) | qa_ids | ({named} if named else set())),
+            named,
+        )
+        return review_step(
+            stop_policy(ticket.factory), [RoundFindings(item.round, item.blocking, None) for item in earlier], current
+        )
 
     def _accepted_revises(
         self, ticket: TrackedTicket, reported_round: int | None
