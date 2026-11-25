@@ -559,8 +559,10 @@ def test_server_render_equals_script_render(tmp_path: Path, panel: str) -> None:
 
 def _run_series(tmp_path: Path, snapshots: list[dict]) -> list[dict]:
     """The page script fed one snapshot per poll; the strips' state after each."""
+    from lib.dashboard_page import page_script
     html = render_pages(snapshots[0])["index.html"]
-    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    assert '<script src="/static/app.js" defer></script>' in html
+    script = page_script(snapshots[0].get("statechart"))
     harness = HARNESS.replace(
         "const status = JSON.parse(statusText);",
         "const series = JSON.parse(statusText); let status = series[0];",
@@ -652,11 +654,16 @@ def fifteen_slot_snapshot(tmp_path: Path) -> dict:
 
 
 def _page_with_status_stub(snapshot: dict, page: str) -> str:
+    from lib.dashboard_page import app_css, page_script
     shim = (
         "<script>window.fetch = function () { return Promise.resolve({ok: true, status: 200,"
         f" json: function () {{ return Promise.resolve({json.dumps(snapshot)}); }}}}); }};</script>"
     )
-    return render_pages(snapshot)[page].replace("<script>", shim + "<script>", 1)
+    return (
+        render_pages(snapshot)[page]
+        .replace('<link rel="stylesheet" href="/static/app.css">', f"<style>{app_css()}</style>", 1)
+        .replace('<script src="/static/app.js" defer></script>', shim + f"<script>{page_script(snapshot.get('statechart'))}</script>", 1)
+    )
 
 
 class Browser:
@@ -819,8 +826,14 @@ def test_long_intake_reasons_wrap_on_a_phone(tmp_path: Path, browser: Browser, r
     if render == "script":
         browser.open(_page_with_status_stub(snapshot, "index.html"), 375)
     else:
+        from lib.dashboard_page import app_css
         page = Path(browser.tmp.name) / "page.html"
-        page.write_text(_no_script(render_pages(snapshot)["index.html"]), encoding="utf-8")
+        page.write_text(
+            _no_script(render_pages(snapshot)["index.html"]).replace(
+                '<link rel="stylesheet" href="/static/app.css">', f"<style>{app_css()}</style>", 1
+            ),
+            encoding="utf-8",
+        )
         browser.call("Emulation.setDeviceMetricsOverride", width=375, height=FOLD, deviceScaleFactor=1, mobile=False)
         browser.call("Page.navigate", url=page.as_uri())
         browser.eval("""new Promise(function (done) { (function wait() {
@@ -916,8 +929,10 @@ def test_header_counts_colours_and_wrap_come_from_the_artboard() -> None:
 
 
 def _still_held(lanes: str, page: str) -> None:
+    from lib.dashboard_page import app_css
     assert lanes.count('class="tile empty px-held"') == 1
-    style = "".join(re.findall(r"<style[^>]*>(.*?)</style>", page, re.S))
+    assert '<link rel="stylesheet" href="/static/app.css">' in page
+    style = app_css()
     assert ".px-held::after{" in style
     assert "px-march" not in style and not re.search(r"px-held[^{}]*\{[^}]*animation", style)
 

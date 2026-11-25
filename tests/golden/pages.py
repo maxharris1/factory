@@ -27,11 +27,11 @@ PAGE_FILES = {
     "ticket.html": "test_ticket_golden",
 }
 
-MARKERS = {"style": "\0style\0", "main": "\0main\0", "script": "\0script\0"}
+MARKERS = {"main": "\0main\0"}
 
 _PAGE = re.compile(
-    r'(.*?<style>)(.*?)(</style></head>.*?<main id="hud" tabindex="-1">)(.*?)'
-    r"(</main>.*?<script>)(.*)(</script>\n</body></html>\n)",
+    r'(.*?<link rel="stylesheet" href="/static/app\.css"></head>.*?<main id="hud" tabindex="-1">)(.*?)'
+    r'(</main>.*?<script src="/static/app\.js" defer></script>\n</body></html>\n)',
     re.S,
 )
 
@@ -87,14 +87,11 @@ def served(root: Path) -> dict[str, dict[str, str]]:
 
 def split(html: str) -> dict[str, str]:
     match = _PAGE.fullmatch(html)
-    assert match, "the page has a style, a main and a script"
-    head, style, middle, main, tail, script, end = match.groups()
-    chrome = head + MARKERS["style"] + middle + MARKERS["main"] + tail + MARKERS["script"] + end
-    parts = {"style": style, "main": main, "script": script, "chrome": chrome}
-    rebuilt = chrome
-    for key, marker in MARKERS.items():
-        rebuilt = rebuilt.replace(marker, parts[key])
-    assert rebuilt == html, "the split puts the page back together byte for byte"
+    assert match, "the page links static css/js and has a main"
+    head, main, tail = match.groups()
+    chrome = head + MARKERS["main"] + tail
+    parts = {"main": main, "chrome": chrome}
+    assert chrome.replace(MARKERS["main"], main) == html, "the split puts the page back together byte for byte"
     return parts
 
 

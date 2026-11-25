@@ -527,8 +527,10 @@ def _server(snapshot: dict) -> dict[str, str]:
 
 
 def _script(tmp_path: Path, snapshot: dict, actions: list | None = None, harness: str = HARNESS) -> dict:
+    from lib.dashboard_page import page_script
     html = render_pages(snapshot)["activity.html"]
-    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    assert '<script src="/static/app.js" defer></script>' in html
+    script = page_script(snapshot.get("statechart"))
     return layout.run_harness(tmp_path, harness, script, snapshot, "activity", IDS, actions or [])
 
 
@@ -966,8 +968,14 @@ def _load(browser: Browser, snapshot: dict, width: int, script: bool) -> None:
     if script:
         browser.open(_page_with_status_stub(snapshot, "activity.html"), width)
         return
+    from lib.dashboard_page import app_css
     bare = Path(browser.tmp.name) / f"bare-{width}.html"
-    bare.write_text(render_pages(snapshot)["activity.html"], encoding="utf-8")
+    bare.write_text(
+        render_pages(snapshot)["activity.html"].replace(
+            '<link rel="stylesheet" href="/static/app.css">', f"<style>{app_css()}</style>", 1
+        ),
+        encoding="utf-8",
+    )
     browser.call("Emulation.setDeviceMetricsOverride", width=width, height=900, deviceScaleFactor=1, mobile=False)
     browser.call("Page.navigate", url=bare.as_uri())
     deadline = time.monotonic() + 30

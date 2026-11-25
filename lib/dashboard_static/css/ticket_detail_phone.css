@@ -1,0 +1,35 @@
+.ticketpage{gap:12px}
+.ticketpage .jd-cols{gap:12px}
+.ticketpage .jd-hero .body{flex-direction:column;align-items:stretch;gap:12px;padding:12px}
+.ticketpage .jd-hero .who,.ticketpage .jd-tiles{flex:none}
+.ticketpage .jd-hero .who{gap:8px}
+.ticketpage .jd-hero .title{gap:6px 10px}
+.ticketpage .jd-hero h1{font-size:20px}
+.ticketpage .jd-hero .line{font-size:14px}
+.ticketpage .jd-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}
+.ticketpage .jd-panel{padding:12px}
+.ticketpage .jd-panel h2{flex-wrap:wrap;gap:2px 8px;margin:0 0 10px}
+.ticketpage .runlog li{margin:0 -6px}
+.ticketpage .runlog .visit{min-height:44px;padding:8px 6px}
+.ticketpage .jd-foot{margin:10px 0 0}
+.ticketpage .jd-next .head{flex-wrap:wrap;gap:2px 8px}
+.ticketpage canvas.jd-journey{width:auto;max-width:100%}
+.ticketpage .journey{width:auto}
+.ticketpage .jd-cap{padding:8px 12px}
+.ticketpage .jd-cap .idx,.ticketpage .jd-cap .note,.ticketpage .jd-cap .end{display:none}
+.ticketpage .jd-ctl{gap:6px 10px;padding:0 12px 8px}
+.ticketpage .jd-ctl .axis,.ticketpage .jd-ctl .gap,.ticketpage .jd-ctl .key.stop,.ticketpage .jd-ctl .key.hop,.ticketpage .jd-ctl .endnote~.key{display:none}
+.ticketpage .jd-ctl .endnote{display:inline}
+.ticketpage .count .desk{display:none}
+.ticketpage .count .tap{display:inline}
+.ticketpage .jd-chart{padding:0 12px}
+.ticketpage .jd-chart summary{padding:12px 0;line-height:1.5}
+.ticketpage .jd-chart .jd-box{margin-top:0}
+.ticketpage .jd-legend{gap:6px 16px;margin-top:0;padding:10px 0 12px}
+.ticketpage .lr{padding:12px;gap:12px}
+.ticketpage .lr-head{gap:6px 8px}
+.ticketpage .lr-task,.ticketpage .lr-last{flex:1 0 100%}
+.ticketpage .lr-task{font-size:17px}
+.ticketpage .lr-cols{gap:12px}
+.ticketpage .lr-col{flex:1 0 100%}
+.lr-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}

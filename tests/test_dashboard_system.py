@@ -273,8 +273,11 @@ DETAILS_HARNESS = board.HARNESS.replace(
 
 
 def _details_steps(tmp_path: Path, actions: list) -> list[dict]:
+    from lib.dashboard_page import page_script
     snapshot = _snapshot(tmp_path)
-    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(snapshot)["health.html"], flags=re.S)
+    html = render_pages(snapshot)["health.html"]
+    assert '<script src="/static/app.js" defer></script>' in html
+    script = page_script(snapshot.get("statechart"))
     out = run_harness(tmp_path, DETAILS_HARNESS, script, snapshot, "health", BAR + ["hud", "components"], actions)
     return [step for step in out["steps"] if "open" in step]
 
@@ -740,12 +743,15 @@ def test_script_poller_log_shows_the_newest_line_first(tmp_path: Path) -> None:
 
 
 def test_moved_panels_left_their_old_pages(tmp_path: Path) -> None:
-    pages = render_pages(_snapshot(tmp_path))
+    from lib.dashboard_page import page_script
+    snap = _snapshot(tmp_path)
+    pages = render_pages(snap)
+    script = page_script(snap.get("statechart"))
     assert 'id="health"' not in pages["efficiency.html"]
     assert 'id="log"' not in pages["activity.html"]
-    assert "renderHealth, renderLog" in pages["health.html"]
+    assert "renderHealth, renderLog" in script
     assert re.search(r"efficiency: \[renderHeadroom, renderTokens, renderRounds, renderSavings, renderJobsLifetime\]",
-                     pages["health.html"])
+                     script)
 
 
 
@@ -818,6 +824,11 @@ CHROME = next(filter(None, map(shutil.which, ("google-chrome", "chromium", "chro
 
 
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
+    def translate_path(self, path: str) -> str:
+        if path.startswith("/static/"):
+            path = "/" + path.removeprefix("/static/")
+        return super().translate_path(path)
+
     def log_message(self, format: str, *args: object) -> None:
         pass
 

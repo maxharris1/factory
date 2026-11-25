@@ -1,0 +1,7 @@
+.definition{margin:8px 0 4px;color:var(--text-2)}
+[hidden]{display:none !important}
+.vh,.skip:not(:focus){position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;
+clip:rect(0 0 0 0);white-space:nowrap}
+.skip:focus{position:fixed;top:8px;left:8px;z-index:100;padding:6px 10px;background:var(--panel);
+color:var(--text);box-shadow:var(--elev);font:600 13px/1.2 var(--mono)}
+#hud:focus{outline:none}

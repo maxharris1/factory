@@ -805,14 +805,17 @@ def test_the_script_legends_list_only_this_ticket_s_actors(tmp_path: Path) -> No
 
 
 def test_the_page_carries_the_actions_api_and_no_credential(tmp_path: Path) -> None:
+    from lib.dashboard_page import page_script
     snapshot = _snapshot(tmp_path)
     _review(snapshot).update(source="#563", pr="601")
     html = render_pages(snapshot)["job.html"]
+    script = page_script(snapshot.get("statechart"))
+    assert '<script src="/static/app.js" defer></script>' in html
     for hook in ("/api/session", "/api/signin/poll", "/api/comment", "/api/head", "/api/ok", "X-Factory-CSRF",
                  "Enter only this code on github.com."):
-        assert hook in html, hook
+        assert hook in script, hook
     for secret in ("gho_", "ghp_", "github_pat_", "client_secret"):
-        assert secret not in html, secret
+        assert secret not in html and secret not in script, secret
 
 
 HELD = "maxharris1/tracy-harris-coaching#5"
@@ -907,7 +910,10 @@ def test_the_ticket_page_href_is_the_script_s_and_names_any_ticket(tmp_path: Pat
     from lib.dashboard_pages.common import ticket_address, ticket_page_href
     from tests.test_dashboard_layout import NODE
     rows = [{"repo": "maxharris1/cleffy", "ticket_id": tid} for tid in AWKWARD]
-    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(_snapshot(tmp_path))["ticket.html"], re.S)
+    from lib.dashboard_page import page_script
+    snap = _snapshot(tmp_path)
+    assert '<script src="/static/app.js" defer></script>' in render_pages(snap)["ticket.html"]
+    script = page_script(snap.get("statechart"))
     defs = re.findall(r"^  (function (?:ticketAddress|ticketPageHref)\(.*\}$)", script, re.M)
     assert len(defs) == 2
     (tmp_path / "href.js").write_text("\n".join(defs) + "\nconsole.log(JSON.stringify(JSON.parse(process.argv[2])"
@@ -1242,7 +1248,9 @@ def _unloaded(snapshot: dict) -> dict:
 
 
 def _polled(tmp_path: Path, snapshot: dict, address: str, actions: list) -> dict:
-    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(snapshot)["ticket.html"], re.S)
+    from lib.dashboard_page import page_script
+    assert '<script src="/static/app.js" defer></script>' in render_pages(snapshot)["ticket.html"]
+    script = page_script(snapshot.get("statechart"))
     return run_harness(tmp_path, POLLED, script, snapshot, "ticket", TICKET_IDS, actions, "#t=" + _quote(address),
                        tickets_json(snapshot))
 
@@ -1396,7 +1404,9 @@ def test_the_ticket_page_fetches_tickets_json_once_per_snapshot(tmp_path: Path) 
 def test_records_behind_a_status_only_push_are_fetched_once_per_snapshot(tmp_path: Path, address: str) -> None:
     snapshot = _snapshot(tmp_path)
     ahead = {**_unloaded(snapshot), "generated_at_epoch": snapshot["generated_at_epoch"] + 5}
-    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(snapshot)["ticket.html"], re.S)
+    from lib.dashboard_page import page_script
+    assert '<script src="/static/app.js" defer></script>' in render_pages(snapshot)["ticket.html"]
+    script = page_script(snapshot.get("statechart"))
     actions = [["poll", ahead], ["poll", ahead], ["poll", ahead], ["count"]]
     out = run_harness(tmp_path, POLLED, script, ahead, "ticket", TICKET_IDS, actions, "#t=" + _quote(address),
                       tickets_json(snapshot))
@@ -1415,7 +1425,9 @@ def test_records_older_than_the_status_load_again_on_each_poll_until_the_ticket_
     status = _unloaded(snapshot)
     older = {**snapshot, "generated_at_epoch": snapshot["generated_at_epoch"] - 5,
              RECORDS: {key: record for key, record in snapshot[RECORDS].items() if key != address}}
-    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(snapshot)["ticket.html"], re.S)
+    from lib.dashboard_page import page_script
+    assert '<script src="/static/app.js" defer></script>' in render_pages(snapshot)["ticket.html"]
+    script = page_script(snapshot.get("statechart"))
 
     def run(target: str, actions: list) -> dict:
         return run_harness(tmp_path / str(len(actions)), SKEWED, script, status, "ticket", TICKET_IDS, actions,
@@ -2212,7 +2224,9 @@ def test_on_a_phone_picking_a_bar_selects_it_and_leaves_the_run_log_where_it_is(
     visit = _review(snapshot)["flow"]["visits"][2]
     label = html.unescape(re.search(r'<ol class="journey">.*?data-visit="2"[^>]*aria-label="([^"]*)"',
                                     _ticket_server(snapshot, address), re.S).group(1))
-    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(snapshot)["ticket.html"], re.S)
+    from lib.dashboard_page import page_script
+    assert '<script src="/static/app.js" defer></script>' in render_pages(snapshot)["ticket.html"]
+    script = page_script(snapshot.get("statechart"))
     found = {}
     for phone in (False, True):
         found[phone] = run_harness(tmp_path / ("phone" if phone else "desktop"), _media_harness(phone), script, snapshot,

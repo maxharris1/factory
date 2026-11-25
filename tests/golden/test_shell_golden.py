@@ -132,13 +132,16 @@ def test_page_script_fills_the_placeholders_in_order(site) -> None:
         assert page.page_script(chart) == expected
 
 
-def test_every_page_inlines_the_css_and_its_page_script(site) -> None:
+def test_every_page_links_the_static_css_and_script(site) -> None:
     for snapshot, pages in site.values():
-        script = page.page_script(snapshot.get("statechart"))
+        assets = page.render_static_assets(snapshot)
+        assert assets["app.css"] == page.CSS + page.TELEMETRY_CSS
+        assert assets["app.js"] == page.page_script(snapshot.get("statechart"))
         for name, html in pages.items():
-            parts = split(html)
-            assert parts["style"] == page.CSS + page.TELEMETRY_CSS, name
-            assert parts["script"] == script, name
+            split(html)
+            assert '<link rel="stylesheet" href="/static/app.css">' in html, name
+            assert '<script src="/static/app.js" defer></script>' in html, name
+            assert "<script>" not in html and "<style>" not in html, name
 
 
 def test_every_page_has_one_golden_file() -> None:

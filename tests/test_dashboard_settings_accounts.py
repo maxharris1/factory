@@ -224,8 +224,10 @@ def test_no_accounts_reads_empty(tmp_path: Path) -> None:
 
 
 def _run(tmp_path: Path, snapshot: dict) -> dict:
+    from lib.dashboard_page import page_script
     html = render_pages(snapshot)["settings.html"]
-    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    assert '<script src="/static/app.js" defer></script>' in html
+    script = page_script(snapshot.get("statechart"))
     return layout.run_harness(tmp_path, HARNESS, script, snapshot, "settings", BAR + ["settings", "accounts"], [])
 
 
@@ -274,9 +276,11 @@ def _session_harness(session: dict, reply: dict | None = None) -> str:
 
 def _signed_in(tmp_path: Path, actions: list | None = None, reply: dict | None = None,
                snapshot: dict | None = None) -> dict:
+    from lib.dashboard_page import page_script
     snapshot = snapshot or _snapshot(tmp_path)
     html = render_pages(snapshot)["settings.html"]
-    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    assert '<script src="/static/app.js" defer></script>' in html
+    script = page_script(snapshot.get("statechart"))
     return layout.run_harness(tmp_path / "run", _session_harness(SIGNED_IN, reply), script, snapshot, "settings",
                               BAR + ["settings", "accounts"], actions or [])
 
@@ -308,9 +312,11 @@ def _set(within: dict, props: dict, **attr: str) -> list:
 
 @needs_node
 def test_signed_out_the_accounts_panel_has_no_controls(tmp_path: Path) -> None:
+    from lib.dashboard_page import page_script
     snapshot = _snapshot(tmp_path)
     html = render_pages(snapshot)["settings.html"]
-    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    assert '<script src="/static/app.js" defer></script>' in html
+    script = page_script(snapshot.get("statechart"))
     out = layout.run_harness(tmp_path / "run", _session_harness({"signed_in": False}), script, snapshot,
                              "settings", BAR + ["settings", "accounts"], [])
     accounts = out["html"]["accounts"]
@@ -530,9 +536,11 @@ def _relay_harness(account_signin: bool | None, replies: list) -> str:
 
 def _relay(tmp_path: Path, actions: list, replies: list | tuple = (), *, account_signin: bool | None = True,
            snapshot: dict | None = None) -> dict:
+    from lib.dashboard_page import page_script
     snapshot = snapshot or _snapshot(tmp_path)
     html = render_pages(snapshot)["settings.html"]
-    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    assert '<script src="/static/app.js" defer></script>' in html
+    script = page_script(snapshot.get("statechart"))
     return layout.run_harness(tmp_path / "run", _relay_harness(account_signin, list(replies)), script, snapshot,
                               "settings", BAR + ["settings", "accounts"], actions)
 
