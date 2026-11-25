@@ -523,35 +523,21 @@ HARNESS_BINARIES: Mapping[str, frozenset[str]] = MappingProxyType(
 _CODEX_EFFORT_KEY = "model_reasoning_effort"
 
 
-def _options(argv: Sequence[str]) -> Sequence[str]:
+def _without_option(
+    argv: Sequence[str], names: Collection[str], value_prefix: str = ""
+) -> list[str]:
     end = argv.index("--") if "--" in argv else len(argv)
-    return argv[1:end]
-
-
-def _has_flag(argv: Sequence[str], names: Collection[str]) -> bool:
-    return any(
-        arg in names or any(arg.startswith(f"{name}=") for name in names)
-        for arg in _options(argv)
-    )
-
-
-def _option_values(argv: Sequence[str], names: Collection[str]) -> list[str]:
-    options = _options(argv)
-    values: list[str] = []
-    for idx, arg in enumerate(options):
-        if arg in names:
-            if idx + 1 < len(options):
-                values.append(options[idx + 1])
+    kept = list(argv[:1])
+    idx = 1
+    while idx < end:
+        arg = argv[idx]
+        if arg in names and (idx + 1 == end or argv[idx + 1].startswith(value_prefix)):
+            idx = min(idx + 2, end)
             continue
-        values.extend(arg[len(name) + 1 :] for name in names if arg.startswith(f"{name}="))
-    return values
-
-
-def _has_codex_effort(argv: Sequence[str]) -> bool:
-    return any(
-        value.startswith(f"{_CODEX_EFFORT_KEY}=")
-        for value in _option_values(argv, ("-c", "--config"))
-    )
+        if not any(arg.startswith(f"{name}={value_prefix}") for name in names):
+            kept.append(arg)
+        idx += 1
+    return [*kept, *argv[end:]]
 
 
 _PROMPT_OPTIONS: Mapping[str, frozenset[str]] = MappingProxyType(
@@ -576,10 +562,11 @@ def apply_argv_flags(
     model: str | None,
     effort: str | None,
 ) -> list[str]:
-    """Return `command` with validated `--model` and effort flags inserted when unset.
+    """Return `command` with validated `--model` and effort flags.
 
-    Never mutates `command`. Inserts before `--` or a trailing `-` stdin marker.
-    Rejects any model or effort value outside the strict token allowlist so
+    A routed flag replaces the same flag pinned before `--`. Never mutates
+    `command`. Inserts before `--` or a trailing `-` stdin marker. Rejects
+    any model or effort value outside the strict token allowlist so
     untrusted text can never reach argv.
     """
     argv = list(command)
@@ -589,14 +576,16 @@ def apply_argv_flags(
     if model is not None:
         if not isinstance(model, str) or _MODEL_TOKEN.fullmatch(model) is None:
             raise RoutingError(f"invalid model token {model!r}")
-        if not _has_flag(argv, ("--model", "-m")):
-            extra.extend(["--model", model])
+        argv = _without_option(argv, ("--model", "-m"))
+        extra.extend(["--model", model])
     if effort is not None:
         if not isinstance(effort, str) or effort not in EFFORTS:
             raise RoutingError(f"invalid effort level {effort!r}")
-        if harness == "claude" and not _has_flag(argv, ("--effort",)):
+        if harness == "claude":
+            argv = _without_option(argv, ("--effort",))
             extra.extend(["--effort", effort])
-        elif harness == "codex" and not _has_codex_effort(argv):
+        elif harness == "codex":
+            argv = _without_option(argv, ("-c", "--config"), f"{_CODEX_EFFORT_KEY}=")
             extra.extend(["-c", f"{_CODEX_EFFORT_KEY}={effort}"])
     if not extra:
         return argv
@@ -635,6 +624,12 @@ def routing_argv_for_detail(
         return list(command)
     model = routing.get(f"{side}_model")
     effort = routing.get(f"{side}_effort")
+    if action == "plan":
+        plan_model, plan_effort = routing.get("plan_model"), routing.get("plan_effort")
+        if isinstance(plan_model, str):
+            model = plan_model
+        if isinstance(plan_effort, str):
+            effort = plan_effort
     if model is None and effort is None:
         return list(command)
     return apply_argv_flags(

@@ -573,9 +573,16 @@ def _override_config():
 def test_factory_routing_override_picks_the_recipient_and_its_model(
     tmp_path: Path,
 ) -> None:
-    from lib.role_router import routing_argv_for_detail
+    from lib.role_router import central_routing, resolve_slot, routing_argv_for_detail
+    from lib.schema import HARNESSES
 
     config = _override_config()
+    plan = resolve_slot(
+        "plan",
+        routing=central_routing(),
+        factory=config,
+        unavailable_harnesses=set(HARNESSES) - {"codex"},
+    )
     dispatcher, queue = setup(tmp_path)
     go = comment("go-1", _go(""), author="grok-login")
     dispatcher.process(ticket(go, factory_config=config))
@@ -590,6 +597,8 @@ def test_factory_routing_override_picks_the_recipient_and_its_model(
         "reviewer": "claude",
         "reviewer_model": "claude-opus-4-6",
         "reviewer_effort": "high",
+        "plan_model": plan.model,
+        "plan_effort": plan.effort,
     }
     assert json.loads(build.request.detail)["routing"] == picks
     assert routing_argv_for_detail(
