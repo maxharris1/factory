@@ -31,8 +31,7 @@ the policy is off. Refused with tickets: linear, which has no filer.
 review.auto_extra_rounds is optional (issue #263): a non-negative integer,
 default 0. A trusted REVISE at the cap gets an extra round from the poller
 itself while ticket_state.cap_extra is below it; after that the ticket
-waits for a person as before. Under review.stop_on: convergence the key
-is ignored and draws a warning.
+waits for a person as before.
 
 plan.max_lines and plan.max_criteria are optional (issue #502): positive
 integers, default 400 and 5. A plan's Estimate is multiplied by 1.35 and

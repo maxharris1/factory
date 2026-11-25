@@ -1,8 +1,3 @@
-"""Auto extra rounds: the poller grants extra rounds at the cap itself
-(issues #263, #1110). How many, and the comment each grant posts, come
-from the StopPolicy in lib/dispatch/verdict/convergence.py: cap_grant
-and grant_reason."""
-
 from __future__ import annotations
 
 import sqlite3
