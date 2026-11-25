@@ -8,7 +8,7 @@ import shlex
 import sqlite3
 import subprocess
 from collections import defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
@@ -39,7 +39,9 @@ REASON = "account-signin"
 INTERVAL_SECONDS = 30 * 60
 HELD_INTERVAL_SECONDS = 2 * 60
 SIGNOUTS = "signout_locks"
+FENCES = "signin_fences"
 SIGNOUT_LEASE_SECONDS = 10 * 60
+FENCE_OWNER = "broker-restart"
 
 _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS {TABLE} (
@@ -72,6 +74,12 @@ CREATE TABLE IF NOT EXISTS {SIGNOUTS} (
     since REAL NOT NULL,
     owner TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (account, device)
+)
+"""
+_FENCES_SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS {FENCES} (
+    owner TEXT PRIMARY KEY,
+    since REAL NOT NULL
 )
 """
 _HOLD = (f"INSERT INTO {HOLDS} (account, device, since, seen, source, reason) VALUES (?1, ?2, ?3, ?3, ?4, ?5) "
@@ -536,8 +544,22 @@ def _signouts(connection: sqlite3.Connection) -> None:
         connection.execute(f"ALTER TABLE {SIGNOUTS} ADD COLUMN owner TEXT NOT NULL DEFAULT ''")
 
 
+def _fences(connection: sqlite3.Connection) -> None:
+    connection.execute(_FENCES_SCHEMA)
+
+
+def declared_pairs(config: MachinesConfig) -> list[tuple[str, str]]:
+    return sorted({(a.id, d) for a in config.accounts for d in a.signed_in_on})
+
+
 def reserve_pair(connection: sqlite3.Connection, account: str, device: str, owner: str, now: float) -> bool:
     _signouts(connection)
+    _fences(connection)
+    if connection.execute(
+        f"SELECT 1 FROM {FENCES} WHERE since > ? LIMIT 1",
+        (now - SIGNOUT_LEASE_SECONDS,),
+    ).fetchone() is not None:
+        return False
     taken = connection.execute(
         f"INSERT INTO {SIGNOUTS} (account, device, since, owner) VALUES (?1, ?2, ?3, ?4) "
         "ON CONFLICT(account, device) DO UPDATE SET since = excluded.since, owner = excluded.owner "
@@ -564,6 +586,57 @@ def signing_out(connection: sqlite3.Connection, now: float) -> frozenset[tuple[s
         (str(account), str(device))
         for account, device in connection.execute(
             f"SELECT account, device FROM {SIGNOUTS} WHERE since > ?", (now - SIGNOUT_LEASE_SECONDS,)))
+
+
+def fence_signins(connection: sqlite3.Connection, pairs: Collection[tuple[str, str]], now: float) -> bool:
+    """Reserve every pair a sign-in could take, unless a sign-in, sign-out or
+    restart fence already holds one. Any broker's admission then refuses the
+    pair as signing out. The caller supplies the transaction."""
+    _signouts(connection)
+    _fences(connection)
+    if signing_out(connection, now):
+        return False
+    if connection.execute(
+        f"SELECT 1 FROM {FENCES} WHERE since > ? LIMIT 1",
+        (now - SIGNOUT_LEASE_SECONDS,),
+    ).fetchone() is not None:
+        return False
+    connection.execute(
+        f"INSERT OR REPLACE INTO {FENCES} (owner, since) VALUES (?, ?)",
+        (FENCE_OWNER, now),
+    )
+    connection.executemany(
+        f"INSERT OR REPLACE INTO {SIGNOUTS} (account, device, since, owner) VALUES (?, ?, ?, ?)",
+        [(account, device, now, FENCE_OWNER) for account, device in sorted(pairs)])
+    return True
+
+
+def extend_signin_fence(connection: sqlite3.Connection, pairs: Collection[tuple[str, str]]) -> None:
+    """Extend an active restart fence to cover pairs newly added to machines.yml
+    so even an un-upgraded broker refuses them under the same BEGIN IMMEDIATE
+    transaction. Caller supplies the transaction."""
+    _signouts(connection)
+    _fences(connection)
+    row = connection.execute(
+        f"SELECT since FROM {FENCES} WHERE owner = ?", (FENCE_OWNER,)
+    ).fetchone()
+    if row is None:
+        return
+    fence_since = float(row[0])
+    stale_cutoff = fence_since - SIGNOUT_LEASE_SECONDS
+    connection.executemany(
+        f"INSERT INTO {SIGNOUTS} (account, device, since, owner) VALUES (?1, ?2, ?3, ?4) "
+        "ON CONFLICT(account, device) DO UPDATE SET since = excluded.since, owner = excluded.owner "
+        "WHERE owner = excluded.owner OR since <= ?5",
+        [(account, device, fence_since, FENCE_OWNER, stale_cutoff) for account, device in sorted(pairs)],
+    )
+
+
+def unfence_signins(connection: sqlite3.Connection) -> None:
+    _signouts(connection)
+    _fences(connection)
+    connection.execute(f"DELETE FROM {FENCES} WHERE owner = ?", (FENCE_OWNER,))
+    connection.execute(f"DELETE FROM {SIGNOUTS} WHERE owner = ?", (FENCE_OWNER,))
 
 
 def newest_hold(connection: sqlite3.Connection) -> float | None:

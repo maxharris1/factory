@@ -5,11 +5,13 @@ from __future__ import annotations
 import io
 import json
 import re
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
 
-from lib import heal, health
+from lib import account_doctor, heal, health
 from lib.grok_delivery import WebhookResult
 from lib.heal import DEFER, DRAIN, ESCALATE, RESTART, SKIP, Facts, KeyState, Webhook
 from lib.queue import SQLiteJobQueue
@@ -18,7 +20,7 @@ from tests.test_health import orch as orch_config
 
 NOW = 1_800_000_000.0
 CHECKOUT = "ba9876543210"
-OWNED = frozenset({"poller", "waiter:codex-bot", "linear-webhook"})
+OWNED = frozenset({"poller", "waiter:codex-bot", "linear-webhook", "signin-broker"})
 SECRETS = {
     "FACTORY_WEBHOOK_URL": "https://hooks.example.test/secret-path",
     "FACTORY_WEBHOOK_AUTH": "Bearer secret-auth-value",
@@ -72,6 +74,7 @@ def test_a_healthy_component_is_left_alone() -> None:
     ("poller", "", "poller"),
     ("waiter", "codex-bot", "waiter:codex-bot"),
     ("linear-listener", "", "linear-webhook"),
+    ("signin-broker", "", "signin-broker"),
 ])
 def test_stale_code_restarts_an_idle_component(name: str, bot: str, service: str) -> None:
     (action,) = heal.decide(report(component(name, bot=bot, version="0123456789ab")), {},
@@ -89,6 +92,27 @@ def test_a_busy_listener_with_stale_code_is_deferred() -> None:
 def test_a_down_busy_listener_is_still_restarted() -> None:
     item = component("linear-listener", bot="", state="down")
     (action,) = heal.decide(report(item), {}, facts(listener_busy=True), NOW)
+    assert action.kind == RESTART
+
+
+def test_the_signin_broker_is_its_own_service() -> None:
+    assert heal.service_of(health.SIGNIN_BROKER, "") == "signin-broker"
+
+
+def test_a_signin_broker_with_stale_code_waits_while_a_pair_is_held() -> None:
+    item = component("signin-broker", bot="", version="0123456789ab")
+    (action,) = heal.decide(report(item), {}, facts(signin_busy=True), NOW)
+    assert (action.kind, action.service, action.reason) == (
+        DEFER, "signin-broker", "stale code, a sign-in or sign-out holds a pair")
+
+
+@pytest.mark.parametrize("item, host", [
+    (component("signin-broker", bot="", version="0123456789ab"), facts(listener_busy=True)),
+    (component("signin-broker", bot="", state="down"), facts(signin_busy=True)),
+    (component("linear-listener", bot="", version="0123456789ab"), facts(signin_busy=True)),
+], ids=["stale-not-busy", "down-busy", "listener-not-held-by-a-pair"])
+def test_only_a_stale_broker_waits_for_a_held_pair(item: dict, host: Facts) -> None:
+    (action,) = heal.decide(report(item), {}, host, NOW)
     assert action.kind == RESTART
 
 
@@ -240,6 +264,15 @@ def test_service_scripts_never_get_the_webhook_or_linear_secrets(tmp_path: Path)
     assert env == {"PATH": "/usr/bin"}
 
 
+def test_the_signin_broker_restarts_with_its_own_script_log_and_no_secrets(
+        tmp_path: Path) -> None:
+    _, runs, _ = run_heal(tmp_path, report(component("signin-broker", bot="", state="down")))
+    (argv, env, log_path), = runs.calls
+    assert argv == ["/srv/factory/deploy/signin-broker-service.sh", "restart"]
+    assert log_path == tmp_path / "signin-broker-service.log"
+    assert env == {"PATH": "/usr/bin"}
+
+
 def test_skips_and_defers_are_logged_once_per_change(tmp_path: Path) -> None:
     host = facts(held=frozenset({"waiter:codex-bot"}))
     for step in range(3):
@@ -333,6 +366,152 @@ def test_facts_come_from_autostart_flags_and_stop_markers(tmp_path: Path) -> Non
     assert host.owned == frozenset({"poller", "waiter:codex-bot"})
     assert host.held == frozenset({"waiter:codex-bot"})
     assert host.listener_busy is False
+
+
+def test_the_signin_broker_facts_come_from_its_autostart_flag_and_stop_marker(
+        tmp_path: Path) -> None:
+    config = tmp_path / "config"
+    state = tmp_path / "state"
+    config.mkdir()
+    state.mkdir()
+    assert "signin-broker" not in heal.facts_for("box", config, state, None, NOW).owned
+    (config / "signin-broker-autostart").touch()
+    (state / "signin-broker.stopped").touch()
+    host = heal.facts_for("box", config, state, None, NOW)
+    assert host.owned == frozenset({"signin-broker"})
+    assert host.held == frozenset({"signin-broker"})
+    assert host.signin_busy is False
+
+
+def signout_db(tmp_path: Path, *since: float) -> Path:
+    import sqlite3
+
+    from lib import account_doctor
+
+    db = tmp_path / "orch.db"
+    with sqlite3.connect(db) as connection:
+        account_doctor.signing_out(connection, NOW)
+        connection.executemany(
+            f"INSERT INTO {account_doctor.SIGNOUTS} (account, device, since) VALUES (?, 'box', ?)",
+            [(f"account-{n}", at) for n, at in enumerate(since)])
+    return db
+
+
+def test_the_signin_broker_is_busy_while_a_signout_lock_is_live(tmp_path: Path) -> None:
+    from lib.account_doctor import SIGNOUT_LEASE_SECONDS
+
+    db = signout_db(tmp_path, NOW - SIGNOUT_LEASE_SECONDS - 1, NOW - 30)
+    assert heal.facts_for("box", tmp_path, tmp_path, db, NOW).signin_busy is True
+    assert heal.facts_for("box", tmp_path, tmp_path, db, NOW + SIGNOUT_LEASE_SECONDS).signin_busy is False
+
+
+def test_a_lapsed_or_missing_signout_lock_is_not_busy(tmp_path: Path) -> None:
+    import sqlite3
+
+    from lib.account_doctor import SIGNOUT_LEASE_SECONDS
+
+    lapsed = signout_db(tmp_path, NOW - SIGNOUT_LEASE_SECONDS - 1)
+    assert heal.facts_for("box", tmp_path, tmp_path, lapsed, NOW).signin_busy is False
+    assert heal.facts_for("box", tmp_path, tmp_path, None, NOW).signin_busy is False
+    assert heal.facts_for("box", tmp_path, tmp_path, tmp_path / "absent.db", NOW).signin_busy is False
+    bare = tmp_path / "bare.db"
+    sqlite3.connect(bare).close()
+    assert heal.facts_for("box", tmp_path, tmp_path, bare, NOW).signin_busy is False
+    with sqlite3.connect(bare) as connection:
+        assert connection.execute("SELECT name FROM sqlite_master").fetchall() == []
+
+
+STALE_BROKER = component("signin-broker", bot="", version="0123456789ab")
+MACHINES_WITH_ACCOUNTS = """\
+orch_host: box
+accounts:
+  - {id: claude-b, harness: claude, signed_in_on: [pc, box]}
+  - {id: codex-b, harness: codex, signed_in_on: [pc]}
+devices:
+  - name: box
+    tailscale_name: box.example.ts.net
+    slot_max: 1
+    harnesses: {claude: claude-bot}
+    workdir_root: /home/{bot}/work
+    ssh_alias: box-{bot}
+    factory_root: /srv/factory
+    home: /home/{bot}
+  - name: pc
+    tailscale_name: pc.example.ts.net
+    slot_max: 2
+    harnesses: {claude: claude-bot, codex: codex-bot}
+    workdir_root: /home/{bot}/work
+    ssh_alias: pc-{bot}
+    factory_root: /srv/factory
+    home: /home/{bot}
+"""
+
+
+def test_a_signin_admitted_during_an_earlier_restart_defers_the_stale_broker(tmp_path: Path) -> None:
+    config = tmp_path / "config"
+    config.mkdir()
+    for service in ("poller", "signin-broker"):
+        (config / f"{service}-autostart").touch()
+    db = tmp_path / "orch.db"
+
+    def snapshot() -> Facts:
+        return heal.facts_for("box", config, tmp_path, db, NOW)
+
+    calls = []
+
+    def run(argv, env, log_path):
+        script = Path(argv[0]).name
+        if script == "poller-service.sh":
+            with sqlite3.connect(db) as connection:
+                assert account_doctor.reserve_pair(connection, "claude-c", "box", "signin-1", NOW)
+        calls.append((script, snapshot().signin_busy))
+        return 0
+
+    data = report(component("poller", bot="", version="0123456789ab"), STALE_BROKER)
+    actions = heal.heal(data, facts=snapshot(), state_dir=tmp_path, deploy=Path("/srv/factory/deploy"),
+                        webhook=WEBHOOK, environ={}, now=NOW, run=run, refresh=snapshot)
+
+    assert calls == [("poller-service.sh", True)]
+    assert kinds(actions) == [(RESTART, "poller @ box"), (DEFER, "signin-broker @ box")]
+    assert actions[1].reason == "stale code, a sign-in or sign-out holds a pair"
+    assert log_lines(tmp_path)[-1].endswith(
+        "defer signin-broker @ box (stale code, a sign-in or sign-out holds a pair)")
+
+
+def test_every_signin_pair_is_reserved_while_a_stale_broker_restarts(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    sqlite3.connect(db).close()
+    machines = tmp_path / "machines.yml"
+    machines.write_text(MACHINES_WITH_ACCOUNTS, encoding="utf-8")
+    reserved = []
+
+    def run(argv, env, log_path):
+        with closing(sqlite3.connect(db, isolation_level=None)) as connection:
+            reserved.append(account_doctor.signing_out(connection, NOW))
+        return 0
+
+    actions, _, _ = run_heal(tmp_path, report(STALE_BROKER), runs=run, host=facts(db=db, machines=machines))
+
+    assert reserved == [{("claude-b", "box"), ("claude-b", "pc"), ("codex-b", "pc")}]
+    assert kinds(actions) == [(RESTART, "signin-broker @ box")]
+    with closing(sqlite3.connect(db)) as connection:
+        assert account_doctor.signing_out(connection, NOW) == frozenset()
+
+
+def test_a_down_broker_restarts_while_a_pair_is_held(tmp_path: Path) -> None:
+    db = signout_db(tmp_path, NOW - 30)
+    actions, runs, _ = run_heal(tmp_path, report(component("signin-broker", bot="", state="down")),
+                                host=facts(db=db, signin_busy=True))
+    assert kinds(actions) == [(RESTART, "signin-broker @ box")]
+    assert len(runs.calls) == 1
+
+
+def test_a_stale_broker_waits_when_the_fence_cannot_be_written(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    db.write_bytes(b"not a database")
+    actions, runs, _ = run_heal(tmp_path, report(STALE_BROKER), host=facts(db=db))
+    assert kinds(actions) == [(DEFER, "signin-broker @ box")]
+    assert runs.calls == []
 
 
 def test_the_listener_is_busy_while_a_delivery_is_fresh(tmp_path: Path) -> None:

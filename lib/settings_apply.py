@@ -662,6 +662,11 @@ def claim_lock(db: Path) -> ClaimLock:
             def commit_version(machines: Path) -> int | None:
                 try:
                     live = live_settings.requested(connection, machines)
+                    updated, _ = load_machines_yml(machines)
+                    if updated is not None:
+                        account_doctor.extend_signin_fence(
+                            connection, account_doctor.declared_pairs(updated),
+                        )
                     connection.execute("COMMIT")
                 except sqlite3.Error:
                     return None
