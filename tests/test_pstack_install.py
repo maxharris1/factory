@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from lib.pstack_models import rules_text
 from lib.pstack_pin import (
     ROOT,
     bump_pin,
@@ -90,9 +91,9 @@ def test_clean_home_gets_both_routers_and_poteto_mode_matching_the_lock(tmp_path
 @pytest.mark.parametrize("mode", ["local", "cloud"])
 def test_rerunning_the_install_is_idempotent(tmp_path: Path, mode: str) -> None:
     home = tmp_path / "home"
-    assert install_skills(ROOT, home, mode) == []
+    assert install_skills(ROOT, home, mode, rules=rules_text(ROOT)) == []
     first = snapshot(home)
-    assert install_skills(ROOT, home, mode) == []
+    assert install_skills(ROOT, home, mode, rules=rules_text(ROOT)) == []
     assert snapshot(home) == first
     replies = tmp_path / "replies"
     write_replies(replies)
@@ -188,7 +189,7 @@ def test_canary_reads_the_factory_builder_path_and_skips_cursor() -> None:
 
 def test_doctor_passes_with_only_claude_and_codex_replies(tmp_path: Path) -> None:
     home = tmp_path / "home"
-    assert install_skills(ROOT, home, "local") == []
+    assert install_skills(ROOT, home, "local", rules=rules_text(ROOT)) == []
     replies = tmp_path / "replies"
     write_replies(replies)
     assert not (replies / "cursor").exists()
@@ -198,7 +199,7 @@ def test_doctor_passes_with_only_claude_and_codex_replies(tmp_path: Path) -> Non
 
 def test_doctor_with_no_replies_names_only_claude_and_codex(tmp_path: Path) -> None:
     home = tmp_path / "home"
-    assert install_skills(ROOT, home, "local") == []
+    assert install_skills(ROOT, home, "local", rules=rules_text(ROOT)) == []
     code, _prompt, errors = doctor(ROOT, home, "local", None, print_canary=False)
     assert code == 1
     assert errors == [
@@ -209,7 +210,7 @@ def test_doctor_with_no_replies_names_only_claude_and_codex(tmp_path: Path) -> N
 
 def test_doctor_fails_when_a_reply_names_poteto_mode_not_the_router(tmp_path: Path) -> None:
     home = tmp_path / "home"
-    assert install_skills(ROOT, home, "local") == []
+    assert install_skills(ROOT, home, "local", rules=rules_text(ROOT)) == []
     replies = tmp_path / "replies"
     write_replies(replies, skill="poteto-mode")
     code, _prompt, errors = doctor(ROOT, home, "local", replies, print_canary=False)
@@ -219,7 +220,7 @@ def test_doctor_fails_when_a_reply_names_poteto_mode_not_the_router(tmp_path: Pa
 
 def test_doctor_fails_when_a_codex_reply_is_missing(tmp_path: Path) -> None:
     home = tmp_path / "home"
-    assert install_skills(ROOT, home, "local") == []
+    assert install_skills(ROOT, home, "local", rules=rules_text(ROOT)) == []
     replies = tmp_path / "replies"
     write_replies(replies, skip="codex")
     code, _prompt, errors = doctor(ROOT, home, "local", replies, print_canary=False)

@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Callable, Literal, Mapping, NoReturn
 
 from lib.load import load_yaml
+from lib.pstack_models import rules_text
 
 ROOT = Path(__file__).resolve().parent.parent
 PSTACK_DIR = Path("skills") / "pstack"
@@ -457,10 +458,62 @@ def _check_installed(root: Path, anchor: Path, mode: Mode) -> list[str]:
             harness = _harness_for(dest, anchor, mode)
             errors.extend(_check_dest(anchor, src, dest, expected, prefix, harness, mode))
     if mode == "local":
-        for src, dest in _claude_extras(root, anchor, load_pin(root)):
-            if not dest.is_symlink() or _resolved(dest) != src.resolve():
-                errors.append(f"claude: did not load the pinned version ({dest} is not the pinned file)")
+        errors.extend(_extras_errors(root, anchor, loaded))
+        errors.extend(_rules_file_errors(root, anchor))
     return errors
+
+
+def _extras_errors(root: Path, anchor: Path, pin: Pin) -> list[str]:
+    claude = anchor / CLAUDE_HOME
+    extras = _claude_extras(root, anchor, pin)
+    errors: list[str] = []
+    for src, dest in extras:
+        if not dest.exists() and not dest.is_symlink():
+            errors.append(_claude_error(anchor, dest, "is missing", "run"))
+            continue
+        resolved = _resolved(dest)
+        if dest.is_symlink() and resolved == src.resolve():
+            continue
+        problem = "is a dangling link" if resolved is None else "is not the pinned file"
+        errors.append(_claude_error(anchor, dest, problem, "run" if _owned_extra(claude, dest) else "move"))
+    listed = {dest for _src, dest in extras}
+    for top in CLAUDE_EXTRAS:
+        base = claude / top
+        if base.is_symlink() or not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*")):
+            if path not in listed and _owned_extra(claude, path):
+                errors.append(_claude_error(anchor, path, "is not in the pin", "remove"))
+    return errors
+
+
+def _rules_file_errors(root: Path, anchor: Path) -> list[str]:
+    try:
+        rules = rules_text(root)
+    except (OSError, ValueError):
+        return []
+    dest = anchor / RULES_PATH
+    if dest.is_symlink():
+        problem, fix = "is a symlink", "move"
+    elif not dest.exists():
+        problem, fix = "is missing", "run"
+    elif not dest.is_file() or _first_line(dest) != rules.partition("\n")[0]:
+        problem, fix = "was not written by orch", "move"
+    elif dest.read_bytes() != rules.encode("utf-8"):
+        problem, fix = "is stale", "run"
+    else:
+        return []
+    return [_claude_error(anchor, dest, problem, fix)]
+
+
+def _claude_error(anchor: Path, dest: Path, problem: str, fix: Literal["run", "move", "remove"]) -> str:
+    install = f"bin/orch install-skills --home {anchor}"
+    fixes = {
+        "run": f"run {install}",
+        "move": f"move it aside, then run {install}",
+        "remove": f"run {install} --remove-claude-extras, then {install}",
+    }
+    return f"claude: did not load the pinned version ({dest} {problem}); {fixes[fix]}"
 
 
 def _resolved(dest: Path) -> Path | None:

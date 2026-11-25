@@ -107,7 +107,9 @@ def test_rerun_is_idempotent_and_doctor_checks_the_agents(tmp_path: Path) -> Non
     agent.unlink()
     code, _prompt, errors = doctor(ROOT, home, "local", replies, print_canary=False)
     assert code == 1
-    assert errors == [f"claude: did not load the pinned version ({agent} is not the pinned file)"]
+    assert errors == [
+        f"claude: did not load the pinned version ({agent} is missing); run bin/orch install-skills --home {home}"
+    ]
 
 
 def test_deslop_is_vendored_with_its_license_and_pinned_by_hash() -> None:
