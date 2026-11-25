@@ -20,6 +20,7 @@ from lib.device_pool import (
     memory_holds,
     orphan_slot,
     placement_blocks,
+    release_unstarted_claim,
     used_slots,
 )
 from lib.dispatch.constants import (
@@ -704,7 +705,7 @@ class JobsMixin:
             if changed != 1:
                 connection.commit()
                 return
-            connection.execute(f"DELETE FROM {SLOTS_TABLE} WHERE job_id = ?", (job.id,))
+            release_unstarted_claim(connection, job.id)
             reason = (
                 f"{job.request.recipient} claimed it {int((now - placed_at) // 60)} "
                 "minutes ago and never started it"

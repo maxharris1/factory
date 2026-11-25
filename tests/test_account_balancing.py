@@ -11,7 +11,9 @@ import pytest
 
 from lib import dashboard_usage, lane_limit, usage_readings
 from lib.device_pool import BALANCE_WINDOW_SECONDS, DevicePool, account_loads
-from lib.machines_yml import MachinesConfig, load_machines_yml
+from lib.dispatcher import Dispatcher
+from lib.job_state import USAGE_LIMIT, record_job_event
+from lib.machines_yml import Account, Device, MachinesConfig, load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from tests.test_pair_placement import local
 
@@ -211,3 +213,88 @@ def test_rolling_window_prunes_old_placements_and_dashboard_reports_balance_and_
     with queue.connect() as connection:
         loads = account_loads(connection, config, now[0])
     assert loads.recent_placements == {}
+
+
+def _dispatched(root: Path, accounts: str) -> tuple[list[float], SQLiteJobQueue, DevicePool, Dispatcher]:
+    clock = [NOW]
+    queue = SQLiteJobQueue(root / "orch.db", clock=lambda: clock[0])
+    config = MachinesConfig(
+        devices=(Device("box", 8, {"codex": "codex-bot"}, accounts={"codex": "a"}, home="/tmp/codex-bot"),),
+        accounts=tuple(
+            Account(x, "codex", signed_in_on=frozenset() if x == "a" else frozenset({"box"})) for x in accounts
+        ),
+    )
+    pool = DevicePool(queue, config)
+    dispatcher = Dispatcher(
+        queue.path, queue, trusted_logins={"github": {}}, review_actions=object(), grok_delivery=object()
+    )
+    queue.enqueue(JobRequest("owner/repo", "1", "build", "codex", "1", 3600), dedupe_key="one-job")
+    return clock, queue, pool, dispatcher
+
+
+def _recent(queue: SQLiteJobQueue, pool: DevicePool, now: float) -> dict[str, int]:
+    with queue.connect() as connection:
+        return dict(account_loads(connection, pool.config, now).recent_placements)
+
+
+def _start_and_hit_usage_limit(
+    clock: list[float], queue: SQLiteJobQueue, pool: DevicePool, dispatcher: Dispatcher
+) -> str:
+    job, placement = pool.claim("codex")
+    pool.attach_runner(job.id, owner="codex", pid=1234, start=None, alive=lambda *_: False)
+    pool.attach_worker(job.id, owner="codex", pid=4321, runner=1234)
+    failed = queue.finish(job.id, owner="codex", handoff_comment_id=None)
+    with queue.connect() as connection:
+        lane_limit.record(
+            connection,
+            job_id=job.id,
+            harness="codex",
+            bot="codex-bot",
+            account=placement.account,
+            limit=lane_limit.UsageLimit(int(clock[0]) + 10),
+            now=clock[0],
+        )
+        record_job_event(connection, job.id, USAGE_LIMIT, "usage limit", clock[0])
+    assert dispatcher._usage_limit_handled(failed)
+    clock[0] += 11
+    with queue.connect() as connection:
+        assert not lane_limit.account_limits(connection, clock[0])
+    return str(placement.account)
+
+
+def test_started_retries_of_one_job_keep_every_placement_and_rotate_three_accounts(tmp_path: Path) -> None:
+    clock, queue, pool, dispatcher = _dispatched(tmp_path, "abc")
+    picked = [_start_and_hit_usage_limit(clock, queue, pool, dispatcher) for _ in range(8)]
+    assert "".join(picked) == "abcabcab"
+    assert _recent(queue, pool, clock[0]) == {"a": 3, "b": 3, "c": 2}
+
+
+def _pool_requeue(pool: DevicePool, dispatcher: Dispatcher, job, placement, now: float) -> None:
+    pool.attach_runner(job.id, owner="codex", pid=77, start=None, alive=lambda *_: True)
+    assert pool.requeue_unstarted(job.id, owner="codex", runner=77, reason="start failed")
+
+
+def _dispatcher_release_claimed(pool: DevicePool, dispatcher: Dispatcher, job, placement, now: float) -> None:
+    dispatcher._release_claimed(job, placement.placed_at, now)
+
+
+def _dispatcher_release_unstarted(pool: DevicePool, dispatcher: Dispatcher, job, placement, now: float) -> None:
+    dispatcher._release_unstarted(job, placement.placed_at, None, now)
+
+
+@pytest.mark.parametrize(
+    "release", [_pool_requeue, _dispatcher_release_claimed, _dispatcher_release_unstarted]
+)
+def test_unstarted_release_forgets_only_that_claims_placement(tmp_path: Path, release) -> None:
+    clock, queue, pool, dispatcher = _dispatched(tmp_path, "ab")
+    assert _start_and_hit_usage_limit(clock, queue, pool, dispatcher) == "a"
+    job, placement = pool.claim("codex")
+    assert placement.account == "b"
+    clock[0] += 600
+    release(pool, dispatcher, job, placement, clock[0])
+    with queue.connect() as connection:
+        assert connection.execute("SELECT state FROM jobs").fetchone()[0] == "queued"
+        assert connection.execute("SELECT COUNT(*) FROM device_slots").fetchone()[0] == 0
+    assert _recent(queue, pool, clock[0]) == {"a": 1}
+    _, retried = pool.claim("codex")
+    assert retried.account == "b"

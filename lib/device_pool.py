@@ -530,7 +530,7 @@ class DevicePool:
             connection.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {PLACEMENTS_TABLE} (
-                    job_id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL,
                     account TEXT NOT NULL,
                     harness TEXT NOT NULL,
                     device TEXT NOT NULL,
@@ -715,7 +715,7 @@ class DevicePool:
             )
             connection.execute(
                 f"""
-                INSERT OR REPLACE INTO {PLACEMENTS_TABLE} (
+                INSERT INTO {PLACEMENTS_TABLE} (
                     job_id, account, harness, device, placed_at
                 )
                 VALUES (?, ?, ?, ?, ?)
@@ -806,9 +806,7 @@ class DevicePool:
             if changed != 1:
                 connection.commit()
                 return False
-            connection.execute(f"DELETE FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,))
-            if _has_table(connection, PLACEMENTS_TABLE):
-                connection.execute(f"DELETE FROM {PLACEMENTS_TABLE} WHERE job_id = ?", (job_id,))
+            release_unstarted_claim(connection, job_id)
             if retire_requeued(connection, job_id, reason, now=now) is None and _has_table(
                 connection, "job_events"
             ):
@@ -1333,6 +1331,18 @@ def orphan_slot(connection: sqlite3.Connection, job_id: str, now: float) -> None
         """,
         (now, job_id),
     )
+    connection.execute(f"DELETE FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,))
+
+
+def release_unstarted_claim(connection: sqlite3.Connection, job_id: str) -> None:
+    if _has_table(connection, PLACEMENTS_TABLE):
+        connection.execute(
+            f"""
+            DELETE FROM {PLACEMENTS_TABLE}
+            WHERE job_id = ? AND placed_at = (SELECT placed_at FROM {SLOTS_TABLE} WHERE job_id = ?)
+            """,
+            (job_id, job_id),
+        )
     connection.execute(f"DELETE FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,))
 
 

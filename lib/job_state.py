@@ -57,7 +57,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from lib import account_doctor
-from lib.device_pool import LINK_DROP_TAG, UNREACHABLE_BACKOFF_SECONDS, Placement, back_off
+from lib.device_pool import (
+    LINK_DROP_TAG,
+    UNREACHABLE_BACKOFF_SECONDS,
+    Placement,
+    back_off,
+    release_unstarted_claim,
+)
 from lib.device_sync import SYNC_GRACE_SECONDS
 from lib.queue import SLOTS_TABLE, retire_requeued
 from lib.remote_follow import LAUNCH_TTL_SECONDS
@@ -392,7 +398,7 @@ def _free_unstarted_slot(
     ).fetchone()
     if slot is None:
         return False
-    connection.execute(f"DELETE FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,))
+    release_unstarted_claim(connection, job_id)
     return True
 
 
