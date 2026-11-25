@@ -9,6 +9,7 @@ import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import unquote
 
 from lib import qa_evidence, qa_storage
 from lib.qa_runners import (
@@ -61,7 +62,8 @@ _SAFE_AGENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SAFE_REF = re.compile(r"^[A-Za-z0-9._/-]{1,128}$")
 _SAFE_REPO = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 _SHA = re.compile(r"^[0-9a-f]{40}$")
-_REMOTE_URL = re.compile(r"^(?!file:)(?:[A-Za-z][A-Za-z0-9+.-]*://|[^/]+:)")
+_URL = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*)://(.*)$", re.DOTALL)
+_REMOTE_SCHEMES = frozenset({"https", "http", "ssh", "git", "git+ssh", "ssh+git"})
 
 
 RunCommand = Callable[..., subprocess.CompletedProcess[str]]
@@ -113,8 +115,19 @@ def _assert_safe_host_path(path: Path, *, home: Path) -> Path:
 
 
 def _assert_safe_source(url: str, *, home: Path) -> str:
-    if not _REMOTE_URL.match(url):
-        _assert_safe_host_path(Path(url.removeprefix("file://")), home=home)
+    match = _URL.match(url)
+    if match and match.group(1).lower() in _REMOTE_SCHEMES:
+        return url
+    if match and match.group(1) == "file":
+        decoded = unquote(match.group(2))
+        if "/" not in decoded:
+            raise LaunchFailed(f"unsupported repository source: {url!r}")
+        _assert_safe_host_path(Path(decoded[decoded.index("/"):]), home=home)
+        return url
+    first = url.split("/", 1)[0]
+    if match or "::" in first or first.lower().startswith("file:"):
+        raise LaunchFailed(f"unsupported repository source: {url!r}")
+    _assert_safe_host_path(Path(url), home=home)
     return url
 
 

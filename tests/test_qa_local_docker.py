@@ -314,8 +314,20 @@ def test_launch_refuses_a_repo_cache_entry_symlinked_into_protected_state(tmp_pa
     assert sorted(str(p.relative_to(protected)) for p in protected.rglob("*")) == before
 
 
-@pytest.mark.parametrize("scheme", ["", "file://"])
-def test_launch_refuses_a_local_repo_source_inside_protected_state(tmp_path: Path, scheme: str) -> None:
+@pytest.mark.parametrize(
+    "source_form",
+    [
+        "{path}",
+        "file://{path}",
+        "file://localhost{path}",
+        "file://elsewhere{path}",
+        "file://{encoded}",
+        "file://localhost{encoded}",
+        "FILE://localhost{path}",
+        "file:{path}",
+    ],
+)
+def test_launch_refuses_a_local_repo_source_inside_protected_state(tmp_path: Path, source_form: str) -> None:
     home = tmp_path / "home"
     protected = home / ".config" / "factory" / "source.git"
     source, _ = source_repo(tmp_path)
@@ -324,14 +336,16 @@ def test_launch_refuses_a_local_repo_source_inside_protected_state(tmp_path: Pat
         LocalDockerConfig(
             work_root=tmp_path / "lanes",
             repo_cache_root=tmp_path / "repos",
-            repo_url_template=f"{scheme}{protected}",
+            repo_url_template=source_form.format(
+                path=protected, encoded=str(protected).replace("/.config/", "/%2Econfig%2F")
+            ),
         ),
         run=FakeDocker(),
         home=home,
         environ=CREDENTIAL,
     )
 
-    with pytest.raises(LaunchFailed, match="protected directory"):
+    with pytest.raises(LaunchFailed, match="protected directory|unsupported repository source"):
         runner.launch(_lane("protected-source"))
     assert not (tmp_path / "repos").exists()
 
