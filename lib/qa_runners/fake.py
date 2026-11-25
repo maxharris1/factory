@@ -13,6 +13,7 @@ class FakeRunner:
         self.stopped: list[str] = []
         self.launch_errors: list[LaunchError] = []
         self.stop_errors: list[Exception] = []
+        self.ping_error: LaunchError | None = None
         self._by_lane: dict[str, Launched] = {}
 
     def launch(self, lane: Lane) -> Launched:
@@ -41,6 +42,11 @@ class FakeRunner:
 
     def describe(self, agent_id: str) -> AgentInfo:
         return AgentInfo(machine="fake-4cpu-16gb", version="fake-1.0")
+
+    def ping(self) -> str:
+        if self.ping_error is not None:
+            raise self.ping_error
+        return "fake-1.0"
 
 
 register("fake", FakeRunner)

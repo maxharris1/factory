@@ -72,3 +72,172 @@ def test_spec_profile_row_claims_no_provisioning() -> None:
     row = next(line for line in spec.splitlines() if line.startswith("  | `qa.profile` |"))
     assert "loads" not in row
     assert "starts no service" in row
+
+
+SMOKE_ORCH = """\
+poll_seconds: 30
+projects:
+  - repo: owner/repo
+{storage}trusted_logins:
+  maxharris1: [grok-bot]
+"""
+
+SMOKE_STORAGE = """\
+    qa_storage:
+      bucket: factory-qa-owner
+      region: us-east-1
+      access_key_env: QA_S3_KEY_ID
+      secret_key_env: QA_S3_SECRET
+      evidence_root: {root}
+"""
+
+
+def smoke_orch(tmp_path: Path, root: Path | None) -> Path:
+    storage = "" if root is None else SMOKE_STORAGE.format(root=root)
+    orch = tmp_path / "orch.yml"
+    orch.write_text(SMOKE_ORCH.format(storage=storage), encoding="utf-8")
+    return orch
+
+
+def smoke(orch: Path, repo: str = "owner/repo", runner: str = "fake") -> int:
+    import lib.qa_runners.fake  # noqa: F401
+
+    return cli.main(["qa", "smoke", "--repo", repo, "--runner", runner, "--orch", str(orch)])
+
+
+def _tree(root: Path) -> list[tuple[str, int]]:
+    return sorted((str(p.relative_to(root)), p.stat().st_mode) for p in root.rglob("*"))
+
+
+def test_qa_smoke_passes_with_a_fake_runner_and_leaves_the_evidence_root_unchanged(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "evidence"
+    root.mkdir()
+    (root / "kept.txt").write_text("operator file\n")
+    before = (_tree(root), root.stat().st_mode)
+
+    status = smoke(smoke_orch(tmp_path, root))
+
+    out = capsys.readouterr().out.splitlines()
+    assert status == 0, out
+    assert [line.split(":")[0] for line in out] == [
+        "ok project", "ok runner", "ok evidence root", "ok evidence write",
+    ]
+    assert out[1] == "ok runner: fake fake-1.0"
+    assert (_tree(root), root.stat().st_mode) == before
+    assert (root / "kept.txt").read_text() == "operator file\n"
+
+
+def test_qa_smoke_writes_where_the_dashboard_reads_and_touches_no_github(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import subprocess
+    import urllib.request
+
+    from lib import github_actions, qa_storage
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("orch qa smoke reached GitHub or the network")
+
+    for owner, name in (
+        (subprocess, "run"), (subprocess, "Popen"), (urllib.request, "urlopen"), (qa_storage, "urlopen"),
+        (github_actions.GitHubReviewActions, "post_issue_comment"),
+        (github_actions.GitHubReviewActions, "post_issue_comment_once"),
+    ):
+        monkeypatch.setattr(owner, name, forbidden)
+    root = tmp_path / "evidence"
+    root.mkdir()
+
+    status = smoke(smoke_orch(tmp_path, root))
+
+    out = capsys.readouterr().out.splitlines()
+    assert status == 0, out
+    assert re.fullmatch(
+        rf"ok evidence write: {re.escape(str(root))}/owner/repo/smoke/smoke-\d{{14}}-\d+/lane-1/result\.json",
+        out[3],
+    )
+    assert list(root.iterdir()) == []
+    import ast
+
+    import lib.qa_smoke
+
+    tree = ast.parse(Path(lib.qa_smoke.__file__).read_text(encoding="utf-8"))
+    imported = [
+        f"{getattr(node, 'module', '')}.{alias.name}"
+        for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in node.names
+    ]
+    assert imported and not any("github" in name for name in imported)
+
+
+def test_qa_smoke_fails_cleanly_on_a_missing_evidence_root(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "missing"
+
+    status = smoke(smoke_orch(tmp_path, root))
+
+    output = capsys.readouterr()
+    assert status == 1
+    assert f"fail evidence root: {root} does not exist" in output.out.splitlines()
+    assert "fail evidence write: skipped (evidence root failed)" in output.out.splitlines()
+    assert not root.exists()
+    assert "Traceback" not in output.err
+
+
+def test_qa_smoke_without_qa_storage_fails_project_and_skips_the_rest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    status = smoke(smoke_orch(tmp_path, None))
+
+    out = capsys.readouterr().out.splitlines()
+    assert status == 1
+    assert out[0].startswith("fail project: ")
+    assert "qa_storage" in out[0]
+    assert out[1] == "ok runner: fake fake-1.0"
+    assert out[2:] == [
+        "fail evidence root: skipped (project failed)",
+        "fail evidence write: skipped (evidence root failed)",
+    ]
+
+
+def test_qa_smoke_reports_a_runner_outage_and_an_unknown_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from lib import qa_runners
+    from lib.qa_runners.fake import FakeRunner
+
+    down = FakeRunner()
+    down.ping_error = qa_runners.RunnerOutage("docker daemon unavailable")
+    monkeypatch.setitem(qa_runners._REGISTRY, "fake-down", lambda: down)
+    root = tmp_path / "evidence"
+    root.mkdir()
+    orch = smoke_orch(tmp_path, root)
+
+    assert smoke(orch, runner="fake-down") == 1
+    assert "fail runner: docker daemon unavailable" in capsys.readouterr().out.splitlines()
+
+    assert smoke(orch, runner="nope") == 1
+    assert "fail runner: no QA runner named 'nope'" in capsys.readouterr().out.splitlines()
+
+
+def test_qa_smoke_matches_the_repo_case_insensitively_and_refuses_an_unknown_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "evidence"
+    root.mkdir()
+    orch = smoke_orch(tmp_path, root)
+
+    assert smoke(orch, repo="Owner/Repo") == 0
+    capsys.readouterr()
+    assert smoke(orch, repo="owner/other") == 1
+    assert capsys.readouterr().out.startswith("fail project: owner/other is not in ")
+
+
+def test_qa_smoke_argument_errors_exit_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli.main(["qa", "smoke", "--runner", "fake"]) == 2
+    assert cli.main(["qa", "launch"]) == 2
+    assert cli.main(["qa", "smoke", "--repo", "owner/repo", "--runner", "fake",
+                     "--orch", str(tmp_path / "absent.yml")]) == 1
+    assert "orch qa smoke: " in capsys.readouterr().err

@@ -64,6 +64,9 @@ class Runner(Protocol):
 
     def describe(self, agent_id: str) -> AgentInfo: ...
 
+    def ping(self) -> str:
+        """Returns the runner's version; raises LaunchError when the runner cannot launch."""
+
 
 _REGISTRY: dict[str, Callable[[], Runner]] = {}
 

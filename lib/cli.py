@@ -65,7 +65,7 @@ from lib.eval_report import (
     render_metrics_json,
     render_qa,
 )
-from lib import qa_runners
+from lib import qa_runners, qa_smoke
 from lib.factory_md import EXAMPLE_PATHS, QA_RUNNERS, FactoryConfig, load_factory_md
 from lib.github_actions import GitHubAdapterError, _status as gh_status
 from lib.grok_delivery import GrokDeliveryError, wake_delivery
@@ -201,6 +201,7 @@ commands:
   log-message      log one manual bot-to-bot message to dispatcher.log
   poll             poll configured trackers and dispatch work
   qa-worker        claim qa jobs and run their cloud QA lanes
+  qa               qa smoke: health-check a QA runner and evidence root, no GitHub comment
   init-db          create and initialize the dispatcher database
   backup-db        back up the dispatcher database (orch poll does each cycle)
   db-backup        labelled backup to take before a manual write to orch.db
@@ -272,6 +273,14 @@ qa-worker [--db PATH] [--orch PATH] [--once] [--tick-seconds N]
   Holds no build slot and makes no model call. --once runs one tick.
   Only one worker may hold the database's qa-worker lock. With no QA runner
   registered it claims nothing.
+
+qa smoke --repo OWNER/NAME --runner NAME [--orch PATH]
+  Check a host is ready for Live App QA before any real run: the project
+  has a qa_storage entry, the runner answers a ping, the evidence root
+  exists, and a synthetic result.json can be written and read back where
+  the dashboard reads lane evidence. Removes everything it wrote, never
+  creates the evidence root, posts no GitHub comment, signs no link and
+  launches no lane. Prints one ok/fail line per check; exits 1 if any fail.
 
 poll [--db PATH] [--orch PATH] [--machines PATH] [--once] [--pidfile PATH]
   Poll GitHub and Linear, apply dispatcher transitions, and deliver work.
@@ -665,6 +674,8 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_poll, argv[1:])
     if argv[0] == "qa-worker":
         return _call(_qa_worker, argv[1:])
+    if argv[0] == "qa":
+        return _call(_qa, argv[1:])
     if argv[0] == "init-db":
         return _call(_init_db, argv[1:])
     if argv[0] == "backup-db":
@@ -1243,6 +1254,25 @@ def _qa_worker(argv: list[str]) -> int:
         return 1
     except KeyboardInterrupt:
         return 130
+
+
+def _qa(argv: list[str]) -> int:
+    parser = _Parser(prog="orch qa", add_help=True, allow_abbrev=False)
+    commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
+    smoke = commands.add_parser("smoke", allow_abbrev=False)
+    smoke.add_argument("--repo", required=True)
+    smoke.add_argument("--runner", required=True)
+    smoke.add_argument("--orch", type=Path)
+    args = parser.parse_args(argv)
+    try:
+        config = _runtime_config(args.orch)
+    except ValueError as exc:
+        print(f"orch qa smoke: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 1
+    checks = qa_smoke.run(config, args.repo, args.runner)
+    for check in checks:
+        print(check.line())
+    return 0 if all(check.ok for check in checks) else 1
 
 
 def _qa_runtime(path: Path, config: OrchConfig, orch_path: Path | None = None) -> QaWorker:
