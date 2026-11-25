@@ -106,6 +106,7 @@ AUTHENTICATION_FAILED = "authentication_failed"
 
 _BEGIN = b"ORCH-ACCOUNTS-BEGIN"
 _FRAME = re.compile(rb"ORCH-ACCOUNT (\d+) (\d+)")
+_STDERR = b"ORCH-ACCOUNT-STDERR"
 _SIGNED_OUT = {
     "claude": re.compile(r"OAuth session expired|not logged in|run /login", re.IGNORECASE),
     "codex": re.compile(r"not logged in|401 Unauthorized|Please (?:log out and )?sign in again", re.IGNORECASE),
@@ -131,7 +132,7 @@ _CURSOR_STATES: dict[str, tuple[bool, str]] = {
     "error": (False, EXIT_NONZERO),
 }
 GEMINI_SIGNED_OUT = "Please sign in to view available models"
-_GEMINI_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*")
+_GEMINI_MODEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._:/-]*[A-Za-z0-9])?")
 _GEMINI_UNSET = (*GEMINI_AUTH_OVERRIDES, "GEMINI_CLI_HOME")
 
 
@@ -302,31 +303,37 @@ def _gemini_model_list(text: str) -> bool:
     return bool(lines) and all(_GEMINI_MODEL.fullmatch(line) for line in lines)
 
 
-def parse_gemini(account: str, device: str, code: int, reply: bytes) -> Probe:
-    text = reply.decode("utf-8", errors="replace")
-    if code == 0 and _gemini_model_list(text):
+def parse_gemini(account: str, device: str, code: int, stdout: bytes, stderr: bytes) -> Probe:
+    out = stdout.decode("utf-8", errors="replace")
+    if code == 0 and _gemini_model_list(out):
         return Probe(account, device, "gemini", True, True, "login", None, None, "")
-    if code == 1 and GEMINI_SIGNED_OUT in text:
+    if code == 1 and GEMINI_SIGNED_OUT in out + stderr.decode("utf-8", errors="replace"):
         return Probe(account, device, "gemini", True, False, None, None, None, NOT_LOGGED_IN)
     return Probe(account, device, "gemini", True, False, None, None, None, NOT_UNDERSTOOD)
+
+
+def _ignoring_stderr(parse: Callable[[str, str, int, bytes], Probe]) -> Callable[[str, str, int, bytes, bytes], Probe]:
+    return lambda account, device, code, stdout, _stderr: parse(account, device, code, stdout)
 
 
 @dataclass(frozen=True)
 class _Status:
     command: str
-    merged_stderr: bool
+    stderr: Literal["drop", "merge", "split"]
     home_variable: str
     token_variables: tuple[str, ...]
-    parse: Callable[[str, str, int, bytes], Probe]
+    parse: Callable[[str, str, int, bytes, bytes], Probe]
 
 
 _STATUS: dict[Harness, _Status] = {
-    "claude": _Status("claude auth status", False, "CLAUDE_CONFIG_DIR",
-                      ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"), parse_claude),
-    "codex": _Status("codex login status", True, "CODEX_HOME", ("OPENAI_API_KEY", "CODEX_API_KEY"), parse_codex),
-    "cursor": _Status("cursor-agent status --format json", False, "CURSOR_CONFIG_DIR",
-                      ("CURSOR_API_KEY", "CURSOR_AUTH_TOKEN"), parse_cursor),
-    "gemini": _Status("env" + "".join(f" -u {name}" for name in _GEMINI_UNSET) + " agy models", True,
+    "claude": _Status("claude auth status", "drop", "CLAUDE_CONFIG_DIR",
+                      ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
+                      _ignoring_stderr(parse_claude)),
+    "codex": _Status("codex login status", "merge", "CODEX_HOME", ("OPENAI_API_KEY", "CODEX_API_KEY"),
+                     _ignoring_stderr(parse_codex)),
+    "cursor": _Status("cursor-agent status --format json", "drop", "CURSOR_CONFIG_DIR",
+                      ("CURSOR_API_KEY", "CURSOR_AUTH_TOKEN"), _ignoring_stderr(parse_cursor)),
+    "gemini": _Status("env" + "".join(f" -u {name}" for name in _GEMINI_UNSET) + " agy models", "split",
                       "GEMINI_CLI_HOME", GEMINI_AUTH_OVERRIDES, parse_gemini),
 }
 ACCOUNT_TOKEN_VARIABLES = tuple(name for status in _STATUS.values() for name in status.token_variables)
@@ -334,10 +341,14 @@ ACCOUNT_TOKEN_VARIABLES = tuple(name for status in _STATUS.values() for name in 
 
 def status_script(harness: Harness, homes: Sequence[str | None], *, drop_profile_login: bool = True) -> str:
     status = _STATUS[harness]
-    streams = "2>&1" if status.merged_stderr else "2>/dev/null"
+    streams = {"drop": "2>/dev/null", "merge": "2>&1", "split": '2>"$err"'}[status.stderr]
+    split = status.stderr == "split"
     calls = [
-        "code=0; (" + ("" if home is None else f"{status.home_variable}={shlex.quote(home)} ")
-        + f"{status.command} </dev/null {streams}) || code=$?; printf '\\nORCH-ACCOUNT %d %d\\n' {index} \"$code\";"
+        ('err=$(mktemp); ' if split else "")
+        + "code=0; (" + ("" if home is None else f"{status.home_variable}={shlex.quote(home)} ")
+        + f"{status.command} </dev/null {streams}) || code=$?; "
+        + (f"printf '\\n%s\\n' {_STDERR.decode()}; cat \"$err\"; rm -f \"$err\"; " if split else "")
+        + f"printf '\\nORCH-ACCOUNT %d %d\\n' {index} \"$code\";"
         for index, home in enumerate(homes)
     ]
     inner = " ".join([
@@ -349,18 +360,25 @@ def status_script(harness: Harness, homes: Sequence[str | None], *, drop_profile
     return _login(inner, "orch-accounts", ())
 
 
-def _replies(stdout: bytes, count: int) -> dict[int, tuple[int, bytes]]:
+def _streams(reply: list[bytes], split: bool) -> tuple[bytes, bytes]:
+    if not split or _STDERR not in reply:
+        return b"\n".join(reply), b""
+    at = reply.index(_STDERR)
+    return b"\n".join(reply[:at]), b"\n".join(reply[at + 1:])
+
+
+def _replies(stdout: bytes, count: int, *, split: bool = False) -> dict[int, tuple[int, bytes, bytes]]:
     lines = stdout.split(b"\n")
     if _BEGIN not in lines:
         return {}
-    replies: dict[int, tuple[int, bytes]] = {}
+    replies: dict[int, tuple[int, bytes, bytes]] = {}
     reply: list[bytes] = []
     for line in lines[lines.index(_BEGIN) + 1:]:
         if len(replies) == count:
             break
         frame = _FRAME.fullmatch(line)
         if frame and int(frame[1]) == len(replies):
-            replies[len(replies)] = (int(frame[2]), b"\n".join(reply))
+            replies[len(replies)] = (int(frame[2]), *_streams(reply, split))
             reply = []
         else:
             reply.append(line)
@@ -408,7 +426,7 @@ def _probe_accounts(
     exchanged = transport.exchange(ssh_argv(device, harness, script), timeout=PROBE_TIMEOUT_SECONDS)
     if exchanged.timed_out or exchanged.code == SSH_UNREACHABLE:
         return [_unreached(account, device.name, harness, SSH_DOWN) for account in accounts]
-    replies = _replies(exchanged.stdout, len(accounts))
+    replies = _replies(exchanged.stdout, len(accounts), split=_STATUS[harness].stderr == "split")
     return [
         _STATUS[harness].parse(account, device.name, *replies[index]) if index in replies
         else _unreached(account, device.name, harness, NO_REPLY)
@@ -436,13 +454,13 @@ def _probe_local(
             | harness_env(harness, home),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT if status.merged_stderr else subprocess.DEVNULL,
+            stderr={"drop": subprocess.DEVNULL, "merge": subprocess.STDOUT, "split": subprocess.PIPE}[status.stderr],
             timeout=PROBE_TIMEOUT_SECONDS,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return _unreached(account, device.name, harness, NO_REPLY)
-    return status.parse(account, device.name, done.returncode, done.stdout)
+    return status.parse(account, device.name, done.returncode, done.stdout, done.stderr or b"")
 
 
 def check_login(

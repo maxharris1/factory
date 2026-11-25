@@ -294,7 +294,8 @@ FAKE_AGY = """\
 #!/bin/sh
 printf '%s|%s\\n' "$(env | cut -d= -f1 | tr '\\n' ' ')" "$*" >> {log}
 reply={replies}/$(cat {state})
-if [ "$(cat "$reply.code")" = 0 ]; then cat "$reply.out"; else cat "$reply.out" >&2; fi
+if [ -f "$reply.out" ]; then cat "$reply.out"; fi
+if [ -f "$reply.err" ]; then cat "$reply.err" >&2; fi
 exit "$(cat "$reply.code")"
 """
 
@@ -318,34 +319,44 @@ class FakeAgy:
         return [(set(names.split()), args) for names, args in (line.split("|") for line in lines)]
 
 
-def gemini_status(name: str) -> tuple[int, bytes]:
-    return int((GEMINI_STATUS / f"{name}.code").read_text()), (GEMINI_STATUS / f"{name}.out").read_bytes()
+def gemini_status(name: str) -> tuple[int, bytes, bytes]:
+    stdout, stderr = (GEMINI_STATUS / f"{name}.out", GEMINI_STATUS / f"{name}.err")
+    return (
+        int((GEMINI_STATUS / f"{name}.code").read_text()),
+        stdout.read_bytes() if stdout.exists() else b"",
+        stderr.read_bytes() if stderr.exists() else b"",
+    )
 
 
 @pytest.mark.parametrize("name, logged_in, detail", [
     ("signed-in", True, ""),
+    ("models-with-warning", True, ""),
     ("signed-out", False, account_doctor.NOT_LOGGED_IN),
     ("no-models", False, account_doctor.NOT_UNDERSTOOD),
     ("cache-warning", False, account_doctor.NOT_UNDERSTOOD),
+    ("warning-word", False, account_doctor.NOT_UNDERSTOOD),
 ])
 def test_the_gemini_status_probe_reads_each_recorded_reply(name: str, logged_in: bool, detail: str) -> None:
     probe = account_doctor.parse_gemini("gemini-ultra", "pc", *gemini_status(name))
     assert (probe.reached, probe.logged_in, probe.detail) == (True, logged_in, detail)
 
 
-@pytest.mark.parametrize("code, reply", [
-    (1, b"Error: could not reach the model service\n"),
-    (0, gemini_status("signed-out")[1]),
-    (42, b"No input provided via stdin.\n"),
-    (41, b"Please set an Auth method in your settings.json\n"),
-    (127, b"sh: 1: agy: not found\n"),
-    (0, b"Warning: model cache is unavailable\ngemini-3.1-pro\n"),
+@pytest.mark.parametrize("code, stdout, stderr", [
+    (1, b"", b"Error: could not reach the model service\n"),
+    (0, gemini_status("signed-out")[2], b""),
+    (0, b"", gemini_status("signed-out")[2]),
+    (0, b"", gemini_status("signed-in")[1]),
+    (42, b"", b"No input provided via stdin.\n"),
+    (41, b"", b"Please set an Auth method in your settings.json\n"),
+    (127, b"", b"sh: 1: agy: not found\n"),
+    (0, b"Warning: model cache is unavailable\ngemini-3.1-pro\n", b""),
+    (0, b"WARNING:\n", b""),
 ], ids=[
-    "other-error", "sign-in-text-exit-0", "upstream-no-input", "upstream-no-auth", "missing-binary",
-    "warning-mixed-into-a-list",
+    "other-error", "sign-in-text-exit-0", "sign-in-text-on-stderr-exit-0", "model-list-on-stderr",
+    "upstream-no-input", "upstream-no-auth", "missing-binary", "warning-mixed-into-a-list", "warning-word-on-stdout",
 ])
-def test_a_gemini_model_reply_or_other_failure_never_reads_signed_in(code: int, reply: bytes) -> None:
-    probe = account_doctor.parse_gemini("gemini-ultra", "pc", code, reply)
+def test_a_gemini_model_reply_or_other_failure_never_reads_signed_in(code: int, stdout: bytes, stderr: bytes) -> None:
+    probe = account_doctor.parse_gemini("gemini-ultra", "pc", code, stdout, stderr)
     assert (probe.logged_in, probe.detail) == (False, account_doctor.NOT_UNDERSTOOD)
 
 
@@ -415,16 +426,25 @@ def test_the_doctor_probes_the_gemini_bot_login_with_agy_models_and_every_overri
     assert [names & set(PLANTED_LOGIN) for names, _ in calls] == [set(), set()]
 
 
-def test_an_exit_0_warning_from_agy_models_keeps_the_gemini_hold(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("name", ["cache-warning", "warning-word", "no-models"])
+def test_an_exit_0_reply_with_no_model_list_on_stdout_keeps_the_gemini_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
     devices = gemini_devices(tmp_path, monkeypatch)
     with sqlite3.connect(devices.db) as connection:
         account_doctor.hold(connection, "gemini-ultra", "pc", "runtime", account_doctor.AUTHENTICATION_FAILED, NOW)
-    devices.agy.answer("cache-warning")
+    devices.agy.answer(name)
     assert run_doctor(devices)[("gemini-ultra", "pc")] == ("signed-out", account_doctor.NOT_UNDERSTOOD)
     with sqlite3.connect(devices.db) as connection:
         assert list(connection.execute("SELECT account, device FROM signin_holds")) == [("gemini-ultra", "pc")]
+
+
+def test_an_exit_0_model_list_with_a_warning_on_stderr_reads_signed_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    devices = gemini_devices(tmp_path, monkeypatch)
+    devices.agy.answer("models-with-warning")
+    assert run_doctor(devices)[("gemini-ultra", "pc")] == ("ok", "")
 
 
 def test_running_the_doctor_on_a_gemini_device_login_prepares_no_account_folder(
