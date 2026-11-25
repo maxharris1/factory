@@ -1,4 +1,4 @@
-"""The Monday eval reports, collected for the dashboard as evals.json (#1608).
+"""The Monday eval reports, collected for the dashboard as evals.json.
 
 deploy/weekly-eval.sh writes `orch eval-report --json` each week as
 weekly-YYYY-MM-DD.json in the evals dir. `collect_weekly` reads the newest

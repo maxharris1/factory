@@ -83,7 +83,7 @@ SSH_OPTIONS = ("-o", "BatchMode=yes")
 SEND_TIMEOUT_SECONDS = 20
 RSYNC_IO_TIMEOUT_SECONDS = 10
 TEMP_SUFFIX = ".push-tmp"
-# Names of the files sent (status.json, the pages, tickets.json, evals.json): plain, no leading '-'.
+# Names of the files sent (status.json, the pages, tickets.json): plain, no leading '-'.
 FILE_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
 ROOT = Path(__file__).resolve().parent.parent
 

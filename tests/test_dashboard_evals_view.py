@@ -1,5 +1,3 @@
-"""The weekly eval reports collected into evals.json (#1608)."""
-
 from __future__ import annotations
 
 import json
