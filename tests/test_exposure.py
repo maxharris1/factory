@@ -31,7 +31,7 @@ FACTORY_ROOT = "/home/claude-bot/factory"
 SHA = "0123456789abcdef0123456789abcdef01234567"
 EXPECTED_COLUMNS = [
     "job_id", "model", "cli_version", "brief_sha256", "skill_paths", "host",
-    "factory_revision", "recorded_at",
+    "factory_revision", "recorded_at", "effort", "harness",
 ]
 
 
@@ -63,6 +63,8 @@ def _exposure(**changes: object) -> exposure.Exposure:
         "skill_paths": ("/f/a/SKILL.md", "/f/b/SKILL.md"),
         "host": "box",
         "factory_revision": SHA,
+        "effort": "high",
+        "harness": "codex",
     }
     fields.update(changes)
     return exposure.Exposure(**fields)  # type: ignore[arg-type]
@@ -153,6 +155,23 @@ def test_pinned_paths_stops_at_the_next_section() -> None:
 def test_the_model_comes_from_the_command_line(argv: list[str], harness: str, expected: str) -> None:
     shell = _shell({"config.toml": 'model = "from-config"\n'})
     assert exposure.model(argv, harness, shell) == expected
+
+
+@pytest.mark.parametrize(
+    ("argv", "harness", "expected"),
+    [
+        (["claude", "-p", "--effort", "high", "--verbose"], "claude", "high"),
+        (["claude", "-p", "--effort=low"], "claude", "low"),
+        (["claude", "-p", "--", "--effort", "high"], "claude", exposure.UNKNOWN),
+        (["claude", "-p"], "claude", exposure.UNKNOWN),
+        (["codex", "exec", "-c", "model_reasoning_effort=xhigh"], "codex", "xhigh"),
+        (["codex", "exec", "--config", 'model_reasoning_effort="medium"'], "codex", "medium"),
+        (["codex", "exec", "--effort", "high"], "codex", exposure.UNKNOWN),
+        (["claude", "-p", "--effort", "$(rm -rf /)"], "claude", exposure.UNKNOWN),
+    ],
+)
+def test_the_effort_comes_from_the_command_line(argv: list[str], harness: str, expected: str) -> None:
+    assert exposure.effort(argv, harness) == expected
 
 
 def test_options_after_a_double_dash_are_not_the_harnesses() -> None:
@@ -372,10 +391,12 @@ def test_gather_reads_the_version_and_the_project_config_in_the_launch_directory
                                host="box", factory_root=None, shell=shell, launch_dir=launch_dir)
 
     assert gather(str(job)) == exposure.Exposure(
-        exposure.UNKNOWN, "harness-cli 2.0.0", exposure.UNKNOWN, None, "box", exposure.UNKNOWN
+        exposure.UNKNOWN, "harness-cli 2.0.0", exposure.UNKNOWN, None, "box", exposure.UNKNOWN, exposure.UNKNOWN,
+        "codex",
     )
     assert gather(None) == exposure.Exposure(
-        "default-model", "harness-cli 1.0.0", exposure.UNKNOWN, None, "box", exposure.UNKNOWN
+        "default-model", "harness-cli 1.0.0", exposure.UNKNOWN, None, "box", exposure.UNKNOWN, exposure.UNKNOWN,
+        "codex",
     )
 
 
@@ -457,19 +478,19 @@ def test_gather_fills_every_field_and_says_unknown_where_it_cannot() -> None:
     brief = f"# Brief\n\n{section(router)}\n\n## Task\n".encode()
     shell = _shell({"--version": "codex-cli 1.2.3", "rev-parse": SHA})
     found = exposure.gather(
-        argv=["codex", "exec", "-m", "gpt-5.5"], binary="codex", harness="codex",
-        brief=brief, host="box", factory_root="/f", shell=shell, launch_dir=None,
+        argv=["codex", "exec", "-m", "gpt-5.5", "-c", "model_reasoning_effort=high"], binary="codex",
+        harness="codex", brief=brief, host="box", factory_root="/f", shell=shell, launch_dir=None,
     )
     assert found == exposure.Exposure(
-        "gpt-5.5", "codex-cli 1.2.3", hashlib.sha256(brief).hexdigest(), router.paths, "box", SHA
+        "gpt-5.5", "codex-cli 1.2.3", hashlib.sha256(brief).hexdigest(), router.paths, "box", SHA, "high", "codex"
     )
     nothing = exposure.gather(
-        argv=["claude", "-p"], binary="claude", harness="claude",
+        argv=["claude", "-p"], binary="claude", harness=None,
         brief=b"# Brief\n## Task\n", host="", factory_root=None, shell=_shell({}), launch_dir=None,
     )
     assert nothing == exposure.Exposure(
         exposure.UNKNOWN, exposure.UNKNOWN, hashlib.sha256(b"# Brief\n## Task\n").hexdigest(),
-        None, exposure.UNKNOWN, exposure.UNKNOWN,
+        None, exposure.UNKNOWN, exposure.UNKNOWN, exposure.UNKNOWN, exposure.UNKNOWN,
     )
 
 
@@ -547,7 +568,10 @@ def test_record_writes_a_row_and_logs_one_line(tmp_path: Path) -> None:
     lines: list[str] = []
     got = exposure.record(queue.connect, "job1", _exposure, lines.append, clock=lambda: 5.0)
     assert got == _exposure()
-    assert lines == [f"exposure: recorded (model gpt-5.5, cli codex-cli 1.2.3, host box, revision {SHA[:12]})"]
+    assert lines == [
+        "exposure: recorded (harness codex, model gpt-5.5, effort high, cli codex-cli 1.2.3, host box, "
+        f"revision {SHA[:12]})"
+    ]
     with queue.connect() as connection:
         assert exposure.read(connection, "job1") == _exposure()
     exposure.record(queue.connect, "job1", lambda: _exposure(host="pc"), lines.append)
@@ -654,6 +678,28 @@ def test_opening_an_existing_orch_db_adds_job_exposure_and_changes_nothing_else(
     SQLiteJobQueue(copy, clock=time.time)
     assert _schema(copy) == migrated
     assert _dump(copy) == rows
+
+
+def test_opening_an_orch_db_with_an_older_job_exposure_adds_effort_and_harness_as_unknown(tmp_path: Path) -> None:
+    path = tmp_path / "orch.db"
+    SQLiteJobQueue(path, clock=time.time)
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute("DROP TABLE job_exposure")
+        connection.execute(
+            "CREATE TABLE job_exposure (job_id TEXT PRIMARY KEY, model TEXT NOT NULL, cli_version TEXT NOT NULL, "
+            "brief_sha256 TEXT NOT NULL, skill_paths TEXT NOT NULL, host TEXT NOT NULL, "
+            "factory_revision TEXT NOT NULL, recorded_at REAL NOT NULL)"
+        )
+        connection.execute("INSERT INTO job_exposure VALUES ('old', 'opus', 'claude 2.0', 'b', 'unknown', 'pc', 'r', 1.0)")
+
+    queue = SQLiteJobQueue(path, clock=time.time)
+    SQLiteJobQueue(path, clock=time.time)
+
+    with queue.connect() as connection:
+        assert [row[1] for row in connection.execute("PRAGMA table_info(job_exposure)")] == EXPECTED_COLUMNS
+        assert exposure.read(connection, "old") == exposure.Exposure(
+            "opus", "claude 2.0", "b", None, "pc", "r", exposure.UNKNOWN, exposure.UNKNOWN
+        )
 
 
 def test_two_openers_migrating_at_once_both_succeed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

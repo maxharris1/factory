@@ -39,9 +39,12 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     skill_paths TEXT NOT NULL,
     host TEXT NOT NULL,
     factory_revision TEXT NOT NULL,
-    recorded_at REAL NOT NULL
+    recorded_at REAL NOT NULL,
+    effort TEXT NOT NULL DEFAULT 'unknown',
+    harness TEXT NOT NULL DEFAULT 'unknown'
 )
 """
+ADDED_COLUMNS = {"effort": "TEXT NOT NULL DEFAULT 'unknown'", "harness": "TEXT NOT NULL DEFAULT 'unknown'"}
 
 _REVISION = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 # A binary that ignores --version may print anything, a secret included.
@@ -57,26 +60,38 @@ class Exposure:
     skill_paths: tuple[str, ...] | None
     host: str
     factory_revision: str
+    effort: str
+    harness: str
 
 
 Shell = Callable[[str, Sequence[str]], str | None]
 
 
 def ensure_table(connection: sqlite3.Connection) -> None:
+    """Two openers can migrate one database at once: the loser's `duplicate column name` means the column is there."""
     connection.execute(DDL)
+    present = {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}
+    for name, kind in ADDED_COLUMNS.items():
+        if name in present:
+            continue
+        try:
+            connection.execute(f"ALTER TABLE {TABLE} ADD COLUMN {name} {kind}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc):
+                raise
 
 
 def write(connection: sqlite3.Connection, job_id: str, exposure: Exposure, at: float) -> None:
     skills = UNKNOWN if exposure.skill_paths is None else json.dumps(list(exposure.skill_paths))
     connection.execute(
         f"INSERT OR REPLACE INTO {TABLE} (job_id, model, cli_version, brief_sha256, skill_paths, "
-        "host, factory_revision, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "host, factory_revision, recorded_at, effort, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (job_id, exposure.model, exposure.cli_version, exposure.brief_sha256, skills,
-         exposure.host, exposure.factory_revision, at),
+         exposure.host, exposure.factory_revision, at, exposure.effort, exposure.harness),
     )
 
 
-_COLUMNS = "model, cli_version, brief_sha256, skill_paths, host, factory_revision"
+_COLUMNS = "model, cli_version, brief_sha256, skill_paths, host, factory_revision, effort, harness"
 
 
 def _rows(connection: sqlite3.Connection, where: str = "", args: tuple = ()) -> list:
@@ -89,9 +104,9 @@ def _rows(connection: sqlite3.Connection, where: str = "", args: tuple = ()) -> 
 
 
 def _parsed(row: Sequence[str]) -> Exposure:
-    model, cli, brief, skills, host, revision = row
+    model, cli, brief, skills, host, revision, effort, harness = row
     paths = None if skills == UNKNOWN else tuple(json.loads(skills))
-    return Exposure(model, cli, brief, paths, host, revision)
+    return Exposure(model, cli, brief, paths, host, revision, effort, harness)
 
 
 def reported_model(value: object) -> str | None:
@@ -162,7 +177,7 @@ def remote_shell(transport: Transport, target: RemoteTarget) -> Shell:
     return shell
 
 
-def _toml_model(value: str) -> str:
+def _toml_string(value: str) -> str:
     try:
         parsed = tomllib.loads(f"model = {value}")["model"]
     except tomllib.TOMLDecodeError:
@@ -173,6 +188,7 @@ def _toml_model(value: str) -> str:
 @dataclass(frozen=True)
 class _Selected:
     model: str | None = None
+    effort: str | None = None
     profile: str | None = None
     cd: str | None = None
     profile_overridden: bool = False
@@ -185,7 +201,8 @@ def _selected(argv: Sequence[str], harness: str | None) -> _Selected:
     codex = harness == "codex"
     short = {"-m": "--model"} | ({"-c": "--config", "-p": "--profile", "-C": "--cd"} if codex else {})
     names = {"--model"} | ({"--config", "--profile", "--cd"} if codex else set())
-    flag = config = profile = cd = None
+    names |= {"--effort"} if harness == "claude" else set()
+    flag = config = effort = config_effort = profile = cd = None
     overridden = False
     words = iter(options)
     for word in words:
@@ -201,6 +218,8 @@ def _selected(argv: Sequence[str], harness: str | None) -> _Selected:
         value = next(words, None) if value is None else value
         if name == "--model":
             flag = value or flag
+        elif name == "--effort":
+            effort = value or effort
         elif name == "--profile":
             profile = value
         elif name == "--cd":
@@ -209,10 +228,17 @@ def _selected(argv: Sequence[str], harness: str | None) -> _Selected:
             key, _, setting = value.partition("=")
             key = key.strip()
             if key == "model":
-                config = _toml_model(setting) or config
+                config = _toml_string(setting) or config
+            elif key == "model_reasoning_effort":
+                config_effort = _toml_string(setting) or config_effort
             # `profile` and `[profiles.<name>]` select a model only in some codex versions.
             overridden = overridden or key == "profile" or key.startswith("profiles.")
-    return _Selected(flag or config, profile, cd, overridden)
+    return _Selected(flag or config, effort or config_effort, profile, cd, overridden)
+
+
+def effort(argv: Sequence[str], harness: str | None) -> str:
+    found = _selected(argv, harness).effort
+    return found if found is not None and _MODEL.fullmatch(found) else UNKNOWN
 
 
 _PROFILE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*")
@@ -353,6 +379,8 @@ def gather(
         skill_paths=None if brief is None else pinned_paths(brief.decode("utf-8", "replace")),
         host=host or UNKNOWN,
         factory_revision=factory_revision(factory_root, shell),
+        effort=effort(argv, harness),
+        harness=harness or UNKNOWN,
     )
 
 
@@ -373,7 +401,8 @@ def record(
         log(f"exposure: not recorded ({' '.join(str(exc).split()) or type(exc).__name__})")
         return None
     log(
-        f"exposure: recorded (model {found.model}, cli {found.cli_version}, host {found.host}, "
+        f"exposure: recorded (harness {found.harness}, model {found.model}, effort {found.effort}, "
+        f"cli {found.cli_version}, host {found.host}, "
         f"revision {found.factory_revision[:12]})"
     )
     return found
