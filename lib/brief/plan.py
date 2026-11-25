@@ -25,7 +25,7 @@ def lead(job: Job, facts: dict) -> Lead:
         f"Plan {ticket_ref(facts)}: map every acceptance criterion to work and a proof.",
         (
             "Follow the router in Skills below.",
-            f"1. {read_ticket_line(facts)} Start with an architect scaffold.",
+            f"1. {read_ticket_line(facts)}",
             *_first_plan_lines(facts),
             "2. Map every acceptance criterion to the work that meets it, and name each criterion's "
             "proof: the test, command or observation that will show it is met. The plan lives in the "

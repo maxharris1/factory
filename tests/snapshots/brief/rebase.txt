@@ -17,8 +17,8 @@ Rebase PR #42 onto `origin/dev`, nothing else.
 If a conflict cannot be resolved without changing behavior, or the wall-clock budget runs short: list the files with `git diff --name-only --diff-filter=U`, run `git rebase --abort 2>/dev/null; git reset --hard 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6` (the abort ends a rebase still in progress, the reset undoes one that already finished), check that `git rev-parse HEAD` prints `3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6`, push nothing, and post a `questions` handoff that names each file. That questions handoff is the job's handoff.
 Title the PR with the source issue, then a Conventional Commits title: `#<issue>: type(scope): subject` (the issue's number, not the PR's), or `<KEY>: type(scope): subject` for a Linear ticket. Fix any other title with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh pr edit --title`.
 CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
-Never poll, watch or wait on GitHub Actions or any other CI from inside this job.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
+Never poll, watch or wait on GitHub Actions or any other CI from inside this job.
 Your router is `/srv/orch/factory/skills/factory/factory-builder/SKILL.md`. It gives a merge-only or rebase job no playbook and no helpers, so this Method is the whole job.
 
 ## Proof
@@ -130,8 +130,8 @@ Rebase PR #42 onto `origin/dev`, nothing else.
 If a conflict cannot be resolved without changing behavior, or the wall-clock budget runs short: list the files with `git diff --name-only --diff-filter=U`, run `git rebase --abort 2>/dev/null; git reset --hard 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6` (the abort ends a rebase still in progress, the reset undoes one that already finished), check that `git rev-parse HEAD` prints `3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6`, push nothing, and post a `questions` handoff that names each file. That questions handoff is the job's handoff.
 Title the PR with the source issue, then a Conventional Commits title: `#<issue>: type(scope): subject` (the issue's number, not the PR's), or `<KEY>: type(scope): subject` for a Linear ticket. Fix any other title with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh pr edit --title`.
 CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
-Never poll, watch or wait on GitHub Actions or any other CI from inside this job.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
+Never poll, watch or wait on GitHub Actions or any other CI from inside this job.
 Your router is `/home/claude-bot/factory/skills/factory/factory-builder/SKILL.md`. It gives a merge-only or rebase job no playbook and no helpers, so this Method is the whole job.
 
 ## Proof

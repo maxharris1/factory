@@ -8,13 +8,11 @@ Build ticket 42 on PR #42 so every acceptance criterion is met.
 ## Method
 Follow the router in Skills.
 1. Read the ticket's brief in the Ticket section below. No plan handoff comment is linked: build from the ticket.
-2. Work on PR #42's branch (`gitBranchName` in Job data). Write tests first, as the `tdd` skill says.
+2. Work on PR #42's branch (`gitBranchName` in Job data).
 3. Run only the tests for the files you touched plus a short smoke set, in the foreground; never the whole suite, in the background or in chunks. Before `ready`, run the router's "Before ready" steps.
-4. Before `ready`: `git fetch origin dev`, then `git rebase origin/dev` (`--force-with-lease`) or `git merge origin/dev` (`git push`). Rerun touched tests if base changed them.
-5. Push, then post the ready handoff below with the head you pushed.
+4. Push, then post the ready handoff below with the head you pushed.
 Title the PR with the source issue, then a Conventional Commits title: `#<issue>: type(scope): subject` (the issue's number, not the PR's), or `<KEY>: type(scope): subject` for a Linear ticket. Fix any other title with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh pr edit --title`.
 CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
-Never poll, watch or wait on GitHub Actions or any other CI from inside this job.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
 This is a retry. Attempt 1 ended without a valid handoff comment: it failed, was stopped, or ran past its wall-clock budget. The factory retries a failed job once on its own, and this is that retry; if it fails too, the ticket is marked stuck and waits for a person. The working directory, or the branch you push to, may hold the last attempt's work: check `git status` and `git log @{u}..` before you start, and build on it rather than redo it.
 
@@ -164,13 +162,11 @@ Build ticket 42 on PR #42 so every acceptance criterion is met.
 ## Method
 Follow the router in Skills.
 1. Read the ticket's brief in the Ticket section below. No plan handoff comment is linked: build from the ticket.
-2. Work on PR #42's branch (`gitBranchName` in Job data). Write tests first, as the `tdd` skill says.
+2. Work on PR #42's branch (`gitBranchName` in Job data).
 3. Run only the tests for the files you touched plus a short smoke set, in the foreground; never the whole suite, in the background or in chunks. Before `ready`, run the router's "Before ready" steps.
-4. Before `ready`: `git fetch origin dev`, then `git rebase origin/dev` (`--force-with-lease`) or `git merge origin/dev` (`git push`). Rerun touched tests if base changed them.
-5. Push, then post the ready handoff below with the head you pushed.
+4. Push, then post the ready handoff below with the head you pushed.
 Title the PR with the source issue, then a Conventional Commits title: `#<issue>: type(scope): subject` (the issue's number, not the PR's), or `<KEY>: type(scope): subject` for a Linear ticket. Fix any other title with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh pr edit --title`.
 CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
-Never poll, watch or wait on GitHub Actions or any other CI from inside this job.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
 This is a retry. Attempt 1 ended without a valid handoff comment: it failed, was stopped, or ran past its wall-clock budget. The factory retries a failed job once on its own, and this is that retry; if it fails too, the ticket is marked stuck and waits for a person. The working directory, or the branch you push to, may hold the last attempt's work: check `git status` and `git log @{u}..` before you start, and build on it rather than redo it.
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 import pytest
 
@@ -26,19 +27,19 @@ FENCE = re.compile(r"^(`{3,})")
 CRITERION_ID = re.compile(r"\bac-\d+\b")
 
 CEILINGS: dict[str, int] = {
-    "build": 11402,
-    "build-github": 11446,
-    "build-pre-ready": 11717,
-    "build-qa": 13112,
-    "ci-fix": 12818,
-    "ci-fix-log-unavailable": 13358,
-    "fix": 12974,
-    "fix-pre-ready": 12243,
+    "build": 10796,
+    "build-github": 10840,
+    "build-pre-ready": 11111,
+    "build-qa": 11766,
+    "ci-fix": 12302,
+    "ci-fix-log-unavailable": 12842,
+    "fix": 11716,
+    "fix-pre-ready": 11725,
     "merge-only": 10303,
-    "plan": 12964,
-    "plan-github": 12964,
-    "plan-qa": 13754,
-    "plan-round-2": 13260,
+    "plan": 12896,
+    "plan-github": 12896,
+    "plan-qa": 13686,
+    "plan-round-2": 13192,
     "qa:base-check": 7203,
     "qa:base-check-fallback": 6627,
     "qa:head": 7159,
@@ -46,8 +47,8 @@ CEILINGS: dict[str, int] = {
     "qa:regression": 7194,
     "qa:regression-fallback": 6618,
     "rebase": 12143,
-    "resume": 11866,
-    "retry": 12204,
+    "resume": 11260,
+    "retry": 11598,
     "review": 17174,
     "review-before-ci": 19066,
     "review-evidence": 17178,
@@ -83,6 +84,27 @@ DROPPED_SKILLS_PHRASES = (
     "start a general helper",
 )
 NO_ROUTER = frozenset({"merge-only", "rebase"})
+ROOT = Path(__file__).resolve().parent.parent
+MOVED_TO_ROUTER = (
+    ("Write tests first, as the `tdd` skill says", BUILDER_ROUTER, "writes each test first with"),
+    ("Never poll, watch or wait on GitHub Actions", BUILDER_ROUTER, "Never babysit, merge or wait on CI"),
+    ("Start with an architect scaffold", BUILDER_ROUTER, "A plan job also runs"),
+    (
+        "Before `ready`: `git fetch origin",
+        BUILDER_ROUTER,
+        "Rebase on the current base and push the ticket branch with `--force-with-lease`",
+    ),
+    (
+        "A `review` entry gives the command you ran",
+        BUILDER_ROUTER,
+        "A `review` entry gives the command you ran",
+    ),
+    (
+        "Run the verify skill's doctor before any qa entry",
+        BUILDER_ROUTER,
+        "Run the verify skill's doctor before any `qa` entry",
+    ),
+)
 OLD_CHANNEL_BULLET = "- Message no other bot. Everything you hand on goes in the one handoff comment.\n"
 
 REGROWTH = (
@@ -286,3 +308,36 @@ def test_the_old_channel_bullet_fails_the_once_check() -> None:
     assert restored != brief
     with pytest.raises(AssertionError):
         check_stated_once("build", restored)
+
+
+def router_of(kind: str) -> str | None:
+    if kind.startswith("qa:"):
+        return QA_ROUTER
+    if kind.startswith("review"):
+        return REVIEWER_ROUTER
+    return None if kind in NO_ROUTER else BUILDER_ROUTER
+
+
+def check_moved_prose(kind: str, brief: str) -> None:
+    for phrase, router, _anchor in MOVED_TO_ROUTER:
+        if router_of(kind) == router:
+            assert phrase not in brief, (kind, phrase)
+
+
+@pytest.mark.parametrize("phrase,router,anchor", MOVED_TO_ROUTER, ids=[row[0] for row in MOVED_TO_ROUTER])
+def test_each_moved_rule_still_lives_in_its_router(phrase: str, router: str, anchor: str) -> None:
+    assert anchor in (ROOT / router).read_text(encoding="utf-8"), (router, anchor)
+
+
+@pytest.mark.parametrize("kind", sorted(CASES))
+def test_moved_prose_lives_in_the_router_not_the_brief(kind: str) -> None:
+    for brief in render_devices(kind).values():
+        check_moved_prose(kind, brief)
+
+
+def test_a_moved_phrase_put_back_fails_the_moved_prose_check() -> None:
+    brief = render_devices("build")["box"]
+    regrown = brief.replace("## Proof\n", f"{MOVED_TO_ROUTER[0][0]}.\n\n## Proof\n", 1)
+    assert regrown != brief
+    with pytest.raises(AssertionError):
+        check_moved_prose("build", regrown)

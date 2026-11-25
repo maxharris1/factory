@@ -56,11 +56,10 @@ def lead(job: Job, facts: dict) -> Lead:
         (
             "Follow the router in Skills.",
             f"1. {read_ticket_line(facts)} {plan_line}",
-            f"2. Work on {branch}. Write tests first, as the `tdd` skill says.",
+            f"2. Work on {branch}.",
             f"3. Run only the tests for the files you touched plus a short smoke set, {TEST_SCOPE} "
             "Before `ready`, run the router's \"Before ready\" steps.",
-            base_step(4, facts),
-            "5. Push, then post the ready handoff below with the head you pushed.",
+            "4. Push, then post the ready handoff below with the head you pushed.",
             *(
                 journey_lines("ready", facts["qa_plan"])
                 if facts["qa_plan"]
@@ -73,15 +72,6 @@ def lead(job: Job, facts: dict) -> Lead:
             "The ready names the pushed head and each criterion's test or command with its output.",
             *proof_lines(detail_of(job)),
         ),
-    )
-
-
-def base_step(number: int, facts: dict) -> str:
-    base = facts["base"] or "<base branch>"
-    return (
-        f"{number}. Before `ready`: `git fetch origin {base}`, then `git rebase origin/{base}` "
-        f"(`--force-with-lease`) or `git merge origin/{base}` (`git push`). "
-        "Rerun touched tests if base changed them."
     )
 
 
@@ -104,7 +94,6 @@ def builder_notes(job: Job, facts: dict) -> list[str]:
     notes = [
         title_line(facts),
         gate + _PRINT_MODE.get(f"{job.request.recipient}-bot", ""),
-        "Never poll, watch or wait on GitHub Actions or any other CI from inside this job.",
         *QUESTIONS_LINES,
     ]
     if facts["pre_ready"] is not None:
@@ -131,9 +120,7 @@ def proof_lines(detail: dict[str, object]) -> list[str]:
     if not items:
         return []
     return [
-        "The ready's `## Proof` section has one entry for each criterion id below. A `review` entry "
-        "gives the command you ran, in backticks, and its output in a fenced block. A `qa` entry gives "
-        "the verify skill's command for the criterion's journeys and its output, and names each journey.",
+        "The ready's `## Proof` section has one entry for each criterion id below.",
         *(
             f"- {item.id} ({item.kind})"
             + (
@@ -145,8 +132,6 @@ def proof_lines(detail: dict[str, object]) -> list[str]:
         ),
         "Its shape, with placeholders:",
         fenced(PROOF_EXAMPLE),
-        "Run the verify skill's doctor before any qa entry. If it fails, write that entry as "
-        "`unverified` with the doctor command and its output. Never leave an entry out.",
     ]
 
 
