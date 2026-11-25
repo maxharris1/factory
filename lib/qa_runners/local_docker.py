@@ -588,5 +588,8 @@ class LocalDockerRunner:
         machine = f"local-docker-{self.config.cpus}cpu-{self.config.memory}"
         return AgentInfo(machine=machine, version=f"docker-{version}")
 
+    def ping(self) -> str:
+        return self._check_daemon()
+
 
 register(RUNNER_NAME, LocalDockerRunner)

@@ -635,3 +635,14 @@ def test_evidence_layout_matches_qa_evidence_stored_and_collect(tmp_path: Path) 
     assert (dest / qa_evidence.MANIFEST_NAME).is_file()
     manifest = json.loads((dest / qa_evidence.MANIFEST_NAME).read_text(encoding="utf-8"))
     assert manifest["mismatches"] == []
+
+
+def test_ping_returns_the_docker_server_version(tmp_path: Path) -> None:
+    stub = FakeDocker()
+    assert _runner(tmp_path, stub).ping() == "29.9.2"
+    assert stub.calls[-1][1] == "version"
+
+
+def test_ping_raises_runner_outage_when_the_daemon_is_down(tmp_path: Path) -> None:
+    with pytest.raises(RunnerOutage):
+        _runner(tmp_path, FakeDocker(daemon_down=True)).ping()
