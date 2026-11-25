@@ -106,6 +106,17 @@ skills:
   - aut0-review
   - verify-aut0
 human_reviewers: [olivermillard, KonstantineBiganashvili]
+qa:
+  enabled: false
+  gate: report
+  visual_hold: true
+  runners: [local-docker]
+  local_docker:
+    environment: qa-local
+  profile: supabase
+  lane:
+    boot: npm run dev
+    base_url: http://127.0.0.1:3000
 ---
 
 ## Review
@@ -113,6 +124,9 @@ One reviewer from a different model family than the builder gives the final fact
 
 ## Ship
 On factory APPROVE of the covered head: move the Linear ticket to Ready for Review and mark the PR ready. Do not merge. Max picks every merge. Never request `maxharris1` as a reviewer.
+
+## QA
+The QA lane runs on the `local-docker` runner in the `qa-local` environment and boots with `lane.boot` at `lane.base_url`. The `supabase` profile loads only the database that pgTAP tests, with no other backend service. `gate: report` posts the result and never gates a ship. `visual_hold: true` holds a passing UI-changing PR with screenshots or video in `awaiting-ok` until an approver posts `/ok <sha>`. To turn QA on, add the repo's `qa_storage` entry under its project in `orch.local.yml`, then set `enabled: true`.
 
 ## Context
 - Ticket first: if work has no AUT ticket, file one in the aut0-linear-board shape, then copy `gitBranchName` verbatim. Never invent a branch name from a pattern. Older `aut/AUT-n` branches stay as they are.
