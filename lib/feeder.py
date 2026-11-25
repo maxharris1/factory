@@ -257,8 +257,10 @@ from lib.main_fix import (
     marker,
 )
 from lib.machines_yml import MachinesConfig
+from lib.natural_intake import INTAKE_STATE_LABEL
 from lib.orch_yml import OrchConfig, Project, resolve_job_timeout
 from lib.pr_title import prefixed, read_sources
+from lib.schema import AUT0_REPO
 from lib.queue import (
     JobRequest,
     SQLiteJobQueue,
@@ -799,6 +801,7 @@ class FeedReport:
     blocked: int = 0
     errors: int = 0
     refused: int = 0
+    natural_queued: int = 0
 
 
 @dataclass(frozen=True)
@@ -1317,6 +1320,8 @@ class Feeder:
         self._set_states(writes)
         if gate_read:
             self._sync_idle(blocked_on, busy, read_repos, now)
+        natural_queued, natural_errors = self._feed_natural_intake(contexts)
+        errors += natural_errors
         return FeedReport(
             fed=tuple(fed),
             eligible=len(candidates),
@@ -1324,6 +1329,7 @@ class Feeder:
             blocked=blocked,
             errors=errors,
             refused=len(refused),
+            natural_queued=natural_queued,
         )
 
     def _retire_abandoned(self) -> bool:
@@ -1559,6 +1565,139 @@ class Feeder:
                     )
                 )
         return found, read, errors
+
+    def _feeder_started_keys(self) -> set[tuple[str, str]]:
+        """(repo, issue) already feeding, fed, done, closed or abandoned."""
+        keep = (*IN_FLIGHT, *FINAL)
+        with self.queue.connect() as connection:
+            rows = connection.execute(
+                f"SELECT repo, issue FROM {FEEDER_TABLE} "
+                f"WHERE state IN ({','.join('?' * len(keep))})",
+                keep,
+            ).fetchall()
+        return {(str(repo).lower(), str(issue)) for repo, issue in rows}
+
+    def _feed_natural_intake(
+        self, contexts: Sequence[tuple[Project, FactoryContext]]
+    ) -> tuple[int, int]:
+        """Route rough issues on natural_label / natural_linear_state to D31 intake.
+
+        Rough issues never fail with refused-intake. On GitHub they receive the
+        `orch:state/intake` label (never on Linear), and every eligible rough
+        issue enqueues a single deduplicated `intake-clarify` orchestrator wake.
+        """
+        natural_projects = [
+            (project, context)
+            for project, context in contexts
+            if project.intake is not None
+            and (
+                (
+                    bool(project.linear_project_ids)
+                    and self.linear is not None
+                    and project.intake.natural_linear_state is not None
+                )
+                or (
+                    not project.linear_project_ids
+                    and context.config.tickets == "github"
+                    and project.intake.natural_label is not None
+                )
+            )
+        ]
+        if not natural_projects:
+            return 0, 0
+        started = self._started() | self._feeder_started_keys()
+        queued = 0
+        errors = 0
+        for project, context in natural_projects:
+            intake = project.intake
+            assert intake is not None
+            try:
+                if project.linear_project_ids:
+                    assert self.linear is not None and intake.natural_linear_state is not None
+                    signal_name = intake.natural_linear_state
+                    issues = self.linear.linear_intake(
+                        project.linear_project_ids,
+                        intake.natural_linear_state,
+                        intake.linear_assignees,
+                    )
+                else:
+                    assert intake.natural_label is not None
+                    signal_name = intake.natural_label
+                    issues = self.github.github_intake(project.repo, intake.natural_label)
+            except Exception as exc:
+                errors += 1
+                self.log(
+                    f"feeder: cannot read natural intake for {project.repo}: "
+                    f"{safe_ship_error(exc)}"
+                )
+                continue
+            trusted = intake_trusted(self.config, project)
+            strict_label = intake.label.lower() if intake.label is not None else None
+            for issue in issues:
+                if issue.repo.lower() != project.repo.lower() or not _KEY.fullmatch(issue.key):
+                    continue
+                lower_labels = {label.lower() for label in issue.labels}
+                if issue.tracker == "github" and strict_label is not None and strict_label in lower_labels:
+                    continue
+                if (issue.repo.lower(), issue.key) in started:
+                    continue
+                if not assignee_allowed(project, issue):
+                    continue
+                if issue.applied_by is None:
+                    self.log(f"feeder: {issue.repo}#{issue.key} natural intake skipped: no applied_by")
+                    continue
+                if issue.applied_by not in trusted:
+                    continue
+                if (
+                    issue.tracker == "github"
+                    and context.config.tickets == "github"
+                    and issue.key.isdigit()
+                    and INTAKE_STATE_LABEL.lower() not in lower_labels
+                ):
+                    try:
+                        self.github.add_labels(project.repo, int(issue.key), (INTAKE_STATE_LABEL,))
+                    except Exception as exc:
+                        errors += 1
+                        self.log(
+                            f"feeder: cannot label natural intake {project.repo}#{issue.key}: "
+                            f"{safe_ship_error(exc)}"
+                        )
+                        continue
+                payload: dict[str, object] = {
+                    "project_bot": project.grok_bot,
+                    "detail": (
+                        f"{_ticket_name(issue)} entered natural intake ({signal_name}): "
+                        "run D31 clarifying questions before posting brief and go."
+                    ),
+                    "link": issue.url,
+                    "ticket_url": issue.url,
+                    "tracker": issue.tracker,
+                    "signal": signal_name,
+                    "natural_intake": True,
+                }
+                if project.repo.lower() != AUT0_REPO:
+                    payload["title"] = " ".join(issue.title.split())[:180]
+                request = JobRequest(
+                    repo=project.repo,
+                    ticket_id=issue.key,
+                    action="intake-clarify",
+                    recipient="grok",
+                    source_comment_id=f"feeder-natural-intake:{issue.key}",
+                    timeout_seconds=resolve_job_timeout(self.config, project.repo) * 60,
+                    detail=json.dumps(payload, sort_keys=True),
+                )
+                dedupe_key = f"intake-clarify:{project.repo.lower()}:{issue.key}"
+                with self.queue.connect() as connection:
+                    before = connection.total_changes
+                    self.queue.enqueue_in_transaction(connection, request, dedupe_key=dedupe_key)
+                    inserted = connection.total_changes > before
+                if inserted:
+                    queued += 1
+                    self.log(
+                        f"feeder: queued intake-clarify for {project.repo}#{issue.key} "
+                        f"({signal_name})"
+                    )
+        return queued, errors
 
     # -- intake template (#204) ------------------------------------------------------
 

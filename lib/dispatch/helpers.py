@@ -541,6 +541,7 @@ def _state_for_action(action: str) -> str:
         "fix": "fixing",
         "update-from-main": "updating",
         "clarify": "questions",
+        "intake-clarify": "intake",
         "qa": "review",
     }[action]
 

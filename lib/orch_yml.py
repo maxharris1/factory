@@ -129,7 +129,9 @@ _BUCKET = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 _REGION = re.compile(r"^[a-z0-9-]{1,32}$")
 _INTAKE_KEYS = {
     "label",
+    "natural_label",
     "linear_state",
+    "natural_linear_state",
     "trusted",
     "priority_labels",
     "priority_from_linear",
@@ -139,6 +141,7 @@ _INTAKE_KEYS = {
     "base_branches",
 }
 DEFAULT_INTAKE_LABEL = "factory:ready"
+DEFAULT_NATURAL_INTAKE_LABEL = "factory:idea"
 _LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._/ -]{0,49}$")
 _LINEAR_STATE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._/-]{0,59}$")
 _TRUSTED_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}(?:\[bot\])?$")
@@ -162,6 +165,8 @@ class Intake:
 
     label: str | None = None
     linear_state: str | None = None
+    natural_label: str | None = None
+    natural_linear_state: str | None = None
     trusted: frozenset[str] | None = None
     priority_labels: tuple[str, ...] = ()
     priority_from_linear: bool = False
@@ -1092,10 +1097,20 @@ def _intake(
             ok = False
     label = value.get("label")
     state = value.get("linear_state")
+    natural_label: str | None = None
+    natural_state: str | None = None
     if linear:
         if "label" in value:
             findings.append(
                 Finding("error", f"{where}.label is for GitHub projects; a Linear project names linear_state")
+            )
+            ok = False
+        if "natural_label" in value:
+            findings.append(
+                Finding(
+                    "error",
+                    f"{where}.natural_label is for GitHub projects; a Linear project names natural_linear_state",
+                )
             )
             ok = False
         if not isinstance(state, str) or _LINEAR_STATE.fullmatch(state) is None:
@@ -1103,15 +1118,56 @@ def _intake(
                 Finding("error", f"{where}.linear_state must name the Linear workflow state")
             )
             ok = False
+        if "natural_linear_state" in value:
+            raw_natural_state = value["natural_linear_state"]
+            if not isinstance(raw_natural_state, str) or _LINEAR_STATE.fullmatch(raw_natural_state) is None:
+                findings.append(
+                    Finding(
+                        "error",
+                        f"{where}.natural_linear_state must name a Linear workflow state",
+                    )
+                )
+                ok = False
+            elif isinstance(state, str) and raw_natural_state.casefold() == state.casefold():
+                findings.append(
+                    Finding(
+                        "error",
+                        f"{where}.natural_linear_state must differ from {where}.linear_state",
+                    )
+                )
+                ok = False
+            else:
+                natural_state = raw_natural_state
     else:
         if "linear_state" in value:
             findings.append(Finding("error", f"{where}.linear_state needs linear_project_id"))
+            ok = False
+        if "natural_linear_state" in value:
+            findings.append(
+                Finding("error", f"{where}.natural_linear_state needs linear_project_id")
+            )
             ok = False
         if label is None:
             label = DEFAULT_INTAKE_LABEL
         if not isinstance(label, str) or _LABEL.fullmatch(label) is None:
             findings.append(Finding("error", f"{where}.label must be a GitHub label name"))
             ok = False
+        if "natural_label" in value:
+            raw_natural_label = value["natural_label"]
+            if raw_natural_label is None:
+                raw_natural_label = DEFAULT_NATURAL_INTAKE_LABEL
+            if not isinstance(raw_natural_label, str) or _LABEL.fullmatch(raw_natural_label) is None:
+                findings.append(
+                    Finding("error", f"{where}.natural_label must be a GitHub label name")
+                )
+                ok = False
+            elif isinstance(label, str) and raw_natural_label.casefold() == label.casefold():
+                findings.append(
+                    Finding("error", f"{where}.natural_label must differ from {where}.label")
+                )
+                ok = False
+            else:
+                natural_label = raw_natural_label
     trusted: frozenset[str] | None = None
     if "trusted" in value:
         raw = value["trusted"]
@@ -1174,6 +1230,8 @@ def _intake(
     return Intake(
         label=None if linear else label,
         linear_state=state if linear else None,
+        natural_label=None if linear else natural_label,
+        natural_linear_state=natural_state if linear else None,
         trusted=trusted,
         priority_labels=priority_labels,
         priority_from_linear=from_linear,

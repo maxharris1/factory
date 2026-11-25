@@ -59,15 +59,15 @@ class InboxMixin:
         return "\n".join(
             (
                 f"**Wake: {request.action}** on {request.repo} {request.ticket_id}",
-                f"PR: {self._inbox_pr_link(request.repo, request.ticket_id)}",
+                f"PR: {self._inbox_pr_link(request.repo, request.ticket_id, is_issue=request.action == 'intake-clarify')}",
                 f"Cause: {cause}",
                 f"Detail: {detail}",
                 inbox_marker(job.id),
             )
         )
 
-    def _inbox_pr_link(self, repo: str, ticket_id: str) -> str:
-        number: str | None = ticket_id if ticket_id.isdigit() else None
+    def _inbox_pr_link(self, repo: str, ticket_id: str, *, is_issue: bool = False) -> str:
+        number: str | None = ticket_id if (not is_issue and ticket_id.isdigit()) else None
         if number is None:
             ticket = self._polled.get((repo.lower(), ticket_id))
             number = ticket.pr_number if ticket is not None else None

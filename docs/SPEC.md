@@ -793,7 +793,9 @@ projects:
     # Optional backlog feeder intake (issue #85). Absent: not fed.
     # intake:
     #   label: factory:ready          # GitHub projects; default shown
+    #   natural_label: factory:idea   # optional GitHub rough-ticket label -> intake-clarify (E3-2)
     #   linear_state: In Progress     # Linear projects (required there)
+    #   natural_linear_state: Triage  # optional Linear rough-ticket state -> intake-clarify (E3-2)
     #   trusted: [login-or-user-id]   # default: trusted_logins / trusted_linear_users keys
     #   priority_labels: [priority:p0, priority:p1]  # build order tiers (#258); default none
     #   priority_from_linear: false   # Linear projects: priority Urgent..Low as tiers 0-3
@@ -1090,7 +1092,20 @@ also moves an issue in one of these states, wherever it sits in the team's
 order.
 `intake` (issue #85) turns on the backlog feeder for a project (section 4).
 A GitHub project names `label` (default `factory:ready`); a Linear project
-must name `linear_state` and may not name a label. `trusted` lists the
+must name `linear_state` and may not name a label. An optional
+`natural_label` (GitHub projects, convention `factory:idea`, must differ from
+`label`) or `natural_linear_state` (Linear projects, e.g. `Backlog` or `Triage`,
+must differ from `linear_state`) enables natural D31 clarifying intake (E3-2):
+rough issues carrying that signal from a trusted login/user enter
+`orch:state/intake` on GitHub (never applying GitHub labels on Linear) and
+enqueue one deduplicated `intake-clarify` orchestrator wake instead of failing
+with `refused-intake`, while `label` / `linear_state` keeps enforcing the strict
+`#204` fast-path (an issue carrying both labels goes straight to strict intake).
+`lib/natural_intake.py` (`NaturalIntakeSession`) enforces D31 discipline:
+`observable` and `default-able` questions record decisions without pausing, only
+`product` questions enter `waiting-max` one call at a time, and promotion posts
+the structured brief (`Goal`, `Acceptance criteria`, `Likely files`, optional
+`Out of scope`, `Risk`, `Done-evidence`) plus `kind=go`. `trusted` lists the
 GitHub logins or Linear user IDs who may apply the signal; it defaults to
 the keys of `trusted_logins` or `trusted_linear_users`. The feeder reads who
 applied it (the actor of the latest `labeled` event, or of the latest move
