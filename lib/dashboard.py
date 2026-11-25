@@ -171,6 +171,7 @@ from collections.abc import Callable, Iterable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
+from urllib.parse import unquote
 
 import yaml
 
@@ -1357,12 +1358,37 @@ def _qa_run_parts(run_id: str) -> list[str] | None:
 def _chunk_qa_path(encoded_rel: str) -> list[str] | None:
     if not encoded_rel or ".." in encoded_rel or "//" in encoded_rel:
         return None
-    if any(
-        pattern.search(encoded_rel) is not None
-        for pattern in (_KNOWN_TOKEN, _SECRET_ASSIGNMENT, _EMAIL, _URL, _USERINFO)
-    ):
-        return None
+    for form in (encoded_rel, unquote(encoded_rel)):
+        segments = form.replace("/", " ")
+        if redact(segments) != segments:
+            return None
     return [encoded_rel[i : i + 16] for i in range(0, len(encoded_rel), 16)]
+
+
+def _held_qa_run(
+    connection: sqlite3.Connection, key: tuple[str, str], head: str
+) -> sqlite3.Row | None:
+    columns = "run_id, scope, result, reason, evidence_dir"
+    row = connection.execute(
+        f"""
+        SELECT {columns} FROM qa_runs
+        WHERE lower(repo) = ? AND ticket_id = ? AND head = ? AND arm = 'primary'
+          AND (state = 'reported' OR (state = 'cancelled' AND reason = 'rerun-qa'))
+        ORDER BY rowid DESC LIMIT 1
+        """,
+        (*key, head),
+    ).fetchone()
+    seen: set[str] = set()
+    while row is not None and row["scope"] == "none":
+        source = str(row["reason"] or "").removeprefix("carried:")
+        if source == (row["reason"] or "") or source in seen:
+            return None
+        seen.add(source)
+        row = connection.execute(
+            f"SELECT {columns} FROM qa_runs WHERE run_id = ? AND state IN ('reported', 'cancelled')",
+            (source,),
+        ).fetchone()
+    return row if row is not None and row["evidence_dir"] is not None else None
 
 
 def _visual_qa_for_holds(
@@ -1377,22 +1403,21 @@ def _visual_qa_for_holds(
     cols = {str(row["name"]) for row in connection.execute("PRAGMA table_info(qa_runs)")}
     if "evidence_dir" not in cols:
         return
-    visual_order = "COALESCE(visual, 0) DESC, " if "visual" in cols else ""
+    holds = (
+        {
+            (str(row["repo"]).casefold(), str(row["ticket_id"])): str(row["head"])
+            for row in connection.execute("SELECT repo, ticket_id, head FROM ship_holds")
+        }
+        if "ship_holds" in tables
+        else {}
+    )
     for item, key in ticket_rows:
-        if item.get("state") != "awaiting-ok":
+        if item.get("state") != "awaiting-ok" or key not in holds:
             continue
         hold_reasons = (wait_facts.get(key) or {}).get("hold_reasons") or ""
         if "visual-qa-review" not in {p.strip() for p in hold_reasons.split(",") if p.strip()}:
             continue
-        row = connection.execute(
-            f"""
-            SELECT run_id, result, evidence_dir FROM qa_runs
-            WHERE lower(repo) = ? AND ticket_id = ? AND arm = 'primary'
-              AND state = 'reported' AND evidence_dir IS NOT NULL
-            ORDER BY {visual_order}rowid DESC LIMIT 1
-            """,
-            key,
-        ).fetchone()
+        row = _held_qa_run(connection, key, holds[key])
         if row is None:
             continue
         run_id = str(row["run_id"])

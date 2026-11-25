@@ -230,8 +230,9 @@ def test_snapshot_carries_redact_proof_visual_qa_media_and_redacted_questions(tm
         )
         conn.execute(
             "INSERT INTO qa_runs (run_id, repo, ticket_id, head, round, attempt, scope, runner, arm, "
-            "state, result, started_at, finished_at, evidence_dir, visual) "
-            "VALUES (?, ?, '42', ?, 1, 1, 'none', 'local-docker', 'primary', 'reported', 'PASS', ?, ?, ?, 1)",
+            "job_id, state, result, started_at, finished_at, evidence_dir, visual) "
+            "VALUES (?, ?, '42', ?, 1, 1, 'full', 'local-docker', 'primary', 'j-qa', 'reported', 'PASS', "
+            "?, ?, ?, 1)",
             (RUN_ID, REPO.lower(), HEAD_A, NOW - 80, NOW - 60, str(evidence_dir)),
         )
         conn.commit()
@@ -471,3 +472,116 @@ def test_app_js_passes_node_syntax_check_and_has_no_unsafe_dom() -> None:
         check=False,
     )
     assert proc.returncode == 0, proc.stderr
+
+
+RUN_B = "fedcba9876543210fedcba9876543210"
+
+
+def _held_visual_db(tmp_path: Path, held_head: str, runs: list[tuple]) -> tuple[Path, Path]:
+    db = tmp_path / "orch.db"
+    log = tmp_path / "poller.log"
+    log.write_text("", encoding="utf-8")
+    queue = SQLiteJobQueue(db, clock=lambda: NOW)
+    Dispatcher(
+        db,
+        queue,
+        trusted_logins=MAX_TRUST,
+        review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+        approvals=Approvals(logins=frozenset({"maxharris1"})),
+    )
+    with queue.connect() as conn:
+        conn.execute(
+            "INSERT INTO tracked_tickets (repo, ticket_id, tracker, tracked_at) VALUES (?, '42', 'github', ?)",
+            (REPO, NOW - 100),
+        )
+        conn.execute(
+            "INSERT INTO ticket_state (repo, ticket_id, workflow_state) VALUES (?, '42', 'awaiting-ok')",
+            (REPO.lower(),),
+        )
+        conn.execute(
+            "INSERT INTO ship_holds (repo, ticket_id, head, approver, reasons, approve_comment_id, held_at) "
+            "VALUES (?, '42', ?, 'maxharris1', 'visual-qa-review', '55', ?)",
+            (REPO.lower(), held_head, NOW - 50),
+        )
+        for at, (run_id, head, scope, reason, evidence_dir, visual) in enumerate(runs):
+            conn.execute(
+                "INSERT INTO qa_runs (run_id, repo, ticket_id, head, round, attempt, scope, runner, arm, "
+                "job_id, state, result, reason, started_at, finished_at, evidence_dir, visual) "
+                "VALUES (?, ?, '42', ?, 1, 1, ?, 'local-docker', 'primary', ?, 'reported', 'PASS', ?, ?, ?, ?, ?)",
+                (run_id, REPO.lower(), head, scope, None if scope == "none" else f"j-{run_id[:8]}",
+                 reason, NOW - 80 + at, NOW - 70 + at,
+                 None if evidence_dir is None else str(evidence_dir), visual),
+            )
+        conn.commit()
+    return db, log
+
+
+@pytest.mark.parametrize(
+    "secret_name",
+    [
+        "Bearer secret123456789012345678901234567890.png",
+        "ghp_123456789012345678901234567890123456.png",
+        "password=hunter2hunter2hunter2.png",
+        "max@example.com.png",
+    ],
+)
+def test_chunked_qa_paths_never_publish_credential_shaped_names(tmp_path: Path, secret_name: str) -> None:
+    evidence_dir = _make_lane_evidence(tmp_path / "qa-evidence")
+    lane = evidence_dir / "lane-1"
+    (lane / "qa-1" / secret_name).write_bytes(b"\x89PNG\r\n\x1a\nfake-png")
+    manifest = json.loads((lane / "manifest.json").read_text(encoding="utf-8"))
+    manifest["files"].append({"path": f"qa-1/{secret_name}"})
+    (lane / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    db, log = _held_visual_db(tmp_path, HEAD_A, [(RUN_ID, HEAD_A, "full", None, evidence_dir, 1)])
+
+    snap = collect_snapshot(db, log, now=NOW)
+    [t42] = [row for row in snap["tickets"] if row["ticket_id"] == "42"]
+    index = render_pages(snap)["index.html"]
+
+    secret = secret_name.removesuffix(".png")
+    tail = secret[-12:]
+    assert tail not in json.dumps(snap)
+    assert tail not in index
+    assert tail not in "".join(
+        "".join(entry["path_parts"]) for entry in t42["visual_qa"]["media"]
+    )
+    assert [
+        "".join(entry["path_parts"]) for entry in t42["visual_qa"]["media"]
+    ] == ["qa-1/01-landing-desktop-1440x900.png", "qa-1/walkthrough.webm"]
+
+
+def test_gallery_shows_the_held_head_over_an_older_visual_run(tmp_path: Path) -> None:
+    old = _make_lane_evidence(tmp_path / "qa-a", RUN_ID)
+    new = _make_lane_evidence(tmp_path / "qa-b", RUN_B)
+    db, log = _held_visual_db(
+        tmp_path,
+        HEAD_B,
+        [(RUN_ID, HEAD_A, "full", None, old, 1), (RUN_B, HEAD_B, "full", None, new, 0)],
+    )
+
+    snap = collect_snapshot(db, log, now=NOW)
+    [t42] = [row for row in snap["tickets"] if row["ticket_id"] == "42"]
+
+    assert t42["visual_qa"]["run"] == [RUN_B[:16], RUN_B[16:]]
+    assert f"/qa/runs/{RUN_B}/lane-1/" in render_pages(snap)["index.html"]
+
+
+def test_gallery_follows_the_held_heads_carried_source(tmp_path: Path) -> None:
+    newer = _make_lane_evidence(tmp_path / "qa-newer", RUN_B)
+    source = _make_lane_evidence(tmp_path / "qa-src", RUN_ID)
+    other = "1111111111111111" * 2
+    db, log = _held_visual_db(
+        tmp_path,
+        HEAD_B,
+        [
+            (RUN_ID, HEAD_A, "full", None, source, 1),
+            (RUN_B, "c" * 40, "full", None, newer, 1),
+            (other, HEAD_B, "none", f"carried:{RUN_ID}", None, 0),
+        ],
+    )
+
+    snap = collect_snapshot(db, log, now=NOW)
+    [t42] = [row for row in snap["tickets"] if row["ticket_id"] == "42"]
+
+    assert t42["visual_qa"]["run"] == [RUN_ID[:16], RUN_ID[16:]]

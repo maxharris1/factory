@@ -644,3 +644,4 @@ def test_rerun_qa_keeps_visual_hold_and_never_merges_without_ok(tmp_path: Path) 
     assert run.actions.merges == []
     assert run.rows("SELECT workflow_state FROM ticket_state") == [("awaiting-ok",)]
     assert run.rows("SELECT reasons FROM ship_holds") == [(VISUAL_QA_REASON,)]
+
