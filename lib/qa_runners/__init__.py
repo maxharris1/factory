@@ -22,6 +22,7 @@ class Lane:
     base_ref: str
     environment_name: str
     model: str | None
+    commits: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -80,3 +81,6 @@ def create(name: str) -> Runner:
         return _REGISTRY[name]()
     except KeyError:
         raise KeyError(f"no QA runner named {name!r}") from None
+
+
+from lib.qa_runners import local_docker as _local_docker  # noqa: E402, F401

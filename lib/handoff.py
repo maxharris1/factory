@@ -51,7 +51,7 @@ QA_KEYS = {
     "scope": _one_of("full", "targeted", "smoke"),
     "lanes": re.compile(r"[1-3]"),
     "env": _one_of("full-stack", "supabase", "none"),
-    "runner": _one_of("claude-cloud", "cursor-cloud"),
+    "runner": _one_of("claude-cloud", "cursor-cloud", "local-docker"),
     "arm": _one_of("primary", "shootout"),
     "attempt": re.compile(r"[1-9][0-9]{0,8}"),
 }
