@@ -23,7 +23,6 @@ from lib.queue import RECIPIENTS, Job
 from lib.role_router import (
     KNOWN_HARNESSES,
     Candidate,
-    ResolvedSlot,
     RoutingError,
     build_role_for_ticket_type,
     central_routing,
@@ -294,8 +293,7 @@ _PICK_KEYS = ("builder_model", "builder_effort", "reviewer_model", "reviewer_eff
 def _detail_routing(
     detail: str | None,
 ) -> tuple[str, str, tuple[Candidate, Candidate] | None] | None:
-    """The (builder, reviewer) a job's detail JSON was routed to (#206), with
-    the routing.yml picks when it carries a model or effort (E2-4)."""
+    """The (builder, reviewer) a job's detail JSON was routed to (#206)."""
     if not detail:
         return None
     try:
@@ -329,7 +327,7 @@ def _route(ticket: TrackedTicket, builder: str, reviewer: str) -> TrackedTicket:
     return replace(
         ticket,
         factory_md=base,
-        routing=None,
+        router_picks=None,
         factory=replace(
             base,
             builder_harness=builder,
@@ -348,7 +346,7 @@ def _route_picks(ticket: TrackedTicket, picks: tuple[Candidate, Candidate]) -> T
     routed = _route(ticket, builder.harness, reviewer.harness)
     return replace(
         routed,
-        routing=picks,
+        router_picks=picks,
         factory=replace(
             routed.factory, builder_model=builder.model, reviewer_model=reviewer.model
         ),
@@ -361,17 +359,13 @@ def _router_picks(
     builder_only: str | None = None,
     reviewer_only: str | None = None,
 ) -> tuple[Candidate, Candidate] | None:
-    """routing.yml's (builder, reviewer) for a ticket whose factory.md opts in
-    with `routing:`, None otherwise. A side named in `*_only` (a go's pair)
-    keeps that harness and takes routing.yml's best pick for it, or factory.md's
-    model hint when routing.yml has none. Raises RoutingError when no queueable
-    pair is eligible."""
+    """routing.yml's (builder, reviewer), None unless factory.md sets `routing:`."""
     base = ticket.factory_md or ticket.factory
     if base.routing is None:
         return None
     central = central_routing()
     brief = ticket.brief_comment
-    role = build_role_for_ticket_type(None if brief is None else ticket_type_of(brief.body))
+    build_role = build_role_for_ticket_type(None if brief is None else ticket_type_of(brief.body))
 
     def pick(
         role: str,
@@ -384,7 +378,7 @@ def _router_picks(
         if only is not None:
             blocked |= set(KNOWN_HARNESSES) - {only}
         try:
-            slot: ResolvedSlot = resolve_slot(
+            slot = resolve_slot(
                 role,
                 routing=central,
                 factory=base,
@@ -398,7 +392,7 @@ def _router_picks(
             return Candidate(only, base_model if only == base_harness else None)
         return Candidate(slot.harness, slot.model, slot.effort)
 
-    builder = pick(role, builder_only, base.builder_harness, base.builder_model)
+    builder = pick(build_role, builder_only, base.builder_harness, base.builder_model)
     reviewer = pick(
         "review",
         reviewer_only,
@@ -414,8 +408,7 @@ def _route_go(
 ) -> TrackedTicket | None:
     """The ticket routed as a go names it (#206), or None when the pair
     fails factory.md's cross-family rule. A go naming neither harness
-    routes back to factory.md's, through routing.yml when factory.md opts in
-    (E2-4). Raises RoutingError when routing.yml has no eligible pair."""
+    routes back to factory.md's."""
     base = ticket.factory_md or ticket.factory
     named = "builder" in fields or "reviewer" in fields
     picks = _router_picks(
@@ -427,7 +420,7 @@ def _route_go(
     if picks is not None:
         routed = _route_picks(ticket, picks)
     elif not named:
-        return replace(ticket, factory=base, factory_md=None, routing=None)
+        return replace(ticket, factory=base, factory_md=None, router_picks=None)
     else:
         routed = _route(
             ticket,

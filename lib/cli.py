@@ -2453,7 +2453,6 @@ def _job_run_command(argv: list[str]) -> int:
         # Not sent to a remote device: it would be on the ssh command line.
         environment[job_token.PROOF_ENV] = proof
     factory_root = skill_preflight.checkout_root(placed.device, owner, ROOT)
-    # Before telemetry and exposure, so both record the argv the harness runs.
     try:
         command = routing_argv_for_detail(command, harness=owner, detail=detail)
     except RoutingError as exc:

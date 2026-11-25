@@ -473,9 +473,7 @@ class TrackedTicket:
     # Issue #206: factory.md's config when a go routed this ticket to other
     # harnesses; factory then holds the routed pair.
     factory_md: FactoryConfig | None = None
-    # E2-4: the (builder, reviewer) picks config/routing.yml made for factory,
-    # carried into job detail as their model and effort.
-    routing: tuple[Candidate, Candidate] | None = None
+    router_picks: tuple[Candidate, Candidate] | None = None
     # Issue #115: the source issue (`#115`, or a Linear key) and the open
     # PR's title, so the poller can prefix a title that lacks it.
     source_issue: str | None = None
