@@ -79,7 +79,7 @@ def test_role_slot_selection_across_ticket_types() -> None:
     orch = resolve_slot("orchestrate", routing=cfg)
     qa = resolve_slot("qa", routing=cfg)
 
-    assert (feat.harness, feat.family, feat.effort) == ("claude", "anthropic", "high")
+    assert (feat.harness, feat.family, feat.effort) == ("claude", "anthropic", "medium")
     assert (perf.harness, perf.family, perf.effort) == ("codex", "openai", "high")
     assert (orch.harness, orch.family) == ("claude", "anthropic")
     assert (qa.harness, qa.effort) == ("claude", "medium")
@@ -139,7 +139,7 @@ def test_budget_ladder_overrides_and_effort_clamping() -> None:
     assert unlim_rev.effort == "xhigh"
 
     small_build = resolve_slot("build", routing=cfg, budget="small")
-    assert small_build.model == "claude-sonnet-4-6"
+    assert small_build.model == "claude-sonnet-5-5"
     assert small_build.effort == "medium"
 
     # Clamping applies when a slot has no explicit budget_override at that tier.

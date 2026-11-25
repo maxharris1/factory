@@ -58,23 +58,23 @@ Read the router (the first path) and the pstack files it names, at these absolut
 Helper models, one `<role>: <value>` line per pstack role:
 
 ```
-feature, refactoring: opus high
-bug-fix: opus high
-perf-issue: opus high
-hillclimb: opus high
-judgment and prose: opus high
-hardest tasks: opus high
-how explorer: opus high
-how explainer: opus high
-why investigators: opus high
-why synthesizer: opus high
-reflect tooling: opus high
-reflect judgment, divergent, synthesizer: opus high
-arena runners: opus high, opus high
-arena cross-judge pool: opus high, opus high
-swarm workers: opus high
-architect runners: opus high, opus high
-interrogate reviewers: opus high, opus high
+feature, refactoring: opus medium
+bug-fix: opus medium
+perf-issue: opus medium
+hillclimb: opus medium
+judgment and prose: opus medium
+hardest tasks: opus medium
+how explorer: opus medium
+how explainer: opus medium
+why investigators: opus medium
+why synthesizer: opus medium
+reflect tooling: opus medium
+reflect judgment, divergent, synthesizer: opus medium
+arena runners: fable high, opus medium
+arena cross-judge pool: fable high, opus medium
+swarm workers: opus medium
+architect runners: fable high, opus medium
+interrogate reviewers: fable high, opus medium
 ```
 
 You may start helper agents as pstack recommends.
@@ -214,23 +214,23 @@ Read the router (the first path) and the pstack files it names, at these absolut
 Helper models, one `<role>: <value>` line per pstack role:
 
 ```
-feature, refactoring: opus high
-bug-fix: opus high
-perf-issue: opus high
-hillclimb: opus high
-judgment and prose: opus high
-hardest tasks: opus high
-how explorer: opus high
-how explainer: opus high
-why investigators: opus high
-why synthesizer: opus high
-reflect tooling: opus high
-reflect judgment, divergent, synthesizer: opus high
-arena runners: opus high, opus high
-arena cross-judge pool: opus high, opus high
-swarm workers: opus high
-architect runners: opus high, opus high
-interrogate reviewers: opus high, opus high
+feature, refactoring: opus medium
+bug-fix: opus medium
+perf-issue: opus medium
+hillclimb: opus medium
+judgment and prose: opus medium
+hardest tasks: opus medium
+how explorer: opus medium
+how explainer: opus medium
+why investigators: opus medium
+why synthesizer: opus medium
+reflect tooling: opus medium
+reflect judgment, divergent, synthesizer: opus medium
+arena runners: fable high, opus medium
+arena cross-judge pool: fable high, opus medium
+swarm workers: opus medium
+architect runners: fable high, opus medium
+interrogate reviewers: fable high, opus medium
 ```
 
 You may start helper agents as pstack recommends.

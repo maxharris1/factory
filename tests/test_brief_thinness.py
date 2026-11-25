@@ -191,7 +191,7 @@ def test_boilerplate_drops_data_sections_fences_and_skill_paths() -> None:
     static = boilerplate(brief)
     assert "## Method" in static and "## Rules" in static
     for gone in ("## Job data", "## Ticket", "## Plan", "Visitors leave the pricing page",
-                 "judgment and prose: opus high", "factory-builder/SKILL.md", "## Additional context"):
+                 "judgment and prose: opus medium", "factory-builder/SKILL.md", "## Additional context"):
         assert gone in brief and gone not in static, gone
 
 

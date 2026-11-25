@@ -129,7 +129,7 @@ def test_the_model_lines_and_the_helper_permission_are_there_with_no_cap(
 
 def test_codex_reviewer_helpers_run_on_sol() -> None:
     text = _brief("review", "codex", {"round": "2/3"})
-    assert "interrogate reviewers: gpt-6.1-sol high" in text
+    assert "interrogate reviewers: gpt-6.2-astra high" in text
 
 
 @pytest.mark.parametrize(("action", "recipient", "extra"), ALL_JOBS)
