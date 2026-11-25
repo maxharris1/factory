@@ -2075,7 +2075,7 @@ def test_the_first_render_keeps_a_keyboard_selection_in_the_find_box(tmp_path: P
     import http.server
     import threading
 
-    from tests.test_dashboard_system import CHROME, QuietHandler, _Chrome
+    from tests.test_dashboard_system import CHROME, QuietHandler, _Chrome, publish_assets
 
     if CHROME is None:
         pytest.skip("Chrome is not installed")
@@ -2083,6 +2083,7 @@ def test_the_first_render_keeps_a_keyboard_selection_in_the_find_box(tmp_path: P
     site.mkdir()
     (site / "job.html").write_text(render_pages(snapshot)["job.html"], encoding="utf-8")
     (site / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    publish_assets(site, snapshot)
     gate = threading.Event()
 
     class Held(QuietHandler):

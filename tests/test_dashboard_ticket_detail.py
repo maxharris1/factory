@@ -34,7 +34,7 @@ from tests import test_dashboard_tickets_board as board
 from tests.test_dashboard import NOW
 from tests.test_dashboard_activity import HARNESS as POLLING
 from tests.test_dashboard_layout import BAR, HARNESS, _no_script, _run_page, _section, _snapshot, needs_node, run_harness
-from tests.test_dashboard_system import CHROME, QuietHandler, _Chrome
+from tests.test_dashboard_system import CHROME, QuietHandler, _Chrome, publish_assets
 
 WHO = {"script", "claude", "codex", "cursor", "grok", "human"}
 
@@ -217,6 +217,7 @@ def _serve(tmp_path: Path, sites: dict[str, dict], status_delay: float = 0.0,
             (site / page).write_text(html, encoding="utf-8")
         (site / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
         (site / "tickets.json").write_text(tickets_json(snapshot), encoding="utf-8")
+    publish_assets(tmp_path / "site", *sites.values())
 
     class Handler(QuietHandler):
         def do_GET(self) -> None:

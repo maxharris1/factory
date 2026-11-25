@@ -18,7 +18,7 @@ import pytest
 from lib import health as component_health
 from lib.dashboard import collect_snapshot, rules_and_limits
 from lib.dashboard_flow import load_chart
-from lib.dashboard_page import CSS, render_pages, version_drift
+from lib.dashboard_page import CSS, render_pages, render_static_assets, version_drift
 from lib.factory_md import load_factory_md
 from tests.test_dashboard import NOW, seeded
 from tests import test_dashboard_tickets_board as board
@@ -831,6 +831,13 @@ class QuietHandler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
+def publish_assets(root: Path, *snapshots: dict) -> None:
+    assets, *others = (render_static_assets(snapshot) for snapshot in snapshots)
+    assert all(other == assets for other in others), "sites that share one root app.js need one statechart"
+    for name, text in assets.items():
+        (root / name).write_text(text, encoding="utf-8")
+
+
 class TargetNavigated(Exception):
     pass
 
@@ -929,6 +936,7 @@ def _browse(tmp_path: Path, snapshot: dict, *, phone: bool = False, script: bool
     for name, html in render_pages(snapshot).items():
         (site / name).write_text(html, encoding="utf-8")
     (site / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    publish_assets(site, snapshot)
     handler = functools.partial(QuietHandler, directory=str(site))
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
