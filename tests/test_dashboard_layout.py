@@ -103,7 +103,7 @@ def _pages(tmp_path: Path, **kwargs) -> dict[str, str]:
 
 
 def _no_script(html: str) -> str:
-    return re.sub(r"<script>.*?</script>", "", html, flags=re.S)
+    return re.sub(r"<script\b[^>]*>.*?</script>", "", html, flags=re.S)
 
 
 def _section(html: str, ident: str) -> str:
@@ -155,9 +155,14 @@ def test_snapshot_writes_status_json_and_every_page(tmp_path: Path) -> None:
     out = tmp_path / "out"
     paths = write_snapshot_pages(out, _snapshot(tmp_path))
     assert dashboard.PAGES == PAGES
-    assert paths == (out / "status.json", *(out / name for name in PAGES), out / "tickets.json")
+    assert paths == (
+        out / "status.json",
+        *(out / name for name in dashboard.STATIC_ASSETS),
+        *(out / name for name in PAGES),
+        out / "tickets.json",
+    )
     assert sorted(path.name for path in out.iterdir()) == sorted(
-        ("status.json", *PAGES, "tickets.json")
+        ("status.json", *dashboard.STATIC_ASSETS, *PAGES, "tickets.json")
     )
 
 
@@ -444,8 +449,8 @@ def test_changing_the_fixture_statechart_changes_the_diagram(tmp_path: Path) -> 
     assert "· 6 states," in _ticket_page(_snapshot(tmp_path / "b", chart_path=changed), "h-review")
 
 
-def _flowmap_names(html: str) -> set[str]:
-    layout = json.loads(re.search(r"var FLOWMAP = (.*);", html).group(1))
+def _flowmap_names(script: str) -> set[str]:
+    layout = json.loads(re.search(r"var FLOWMAP = (.*);", script).group(1))
     return {node["name"] for node in layout["nodes"]}
 
 
@@ -453,11 +458,11 @@ def test_the_flowmap_draws_the_snapshots_chart(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path / "mini", chart_path=MINI)
     expected = {state["name"] for state in snapshot["statechart"]["states"]}
     assert len(expected) == 5
-    assert _flowmap_names(render_pages(snapshot)["job.html"]) == expected
+    assert _flowmap_names(dashboard.render_static_assets(snapshot)["app.js"]) == expected
     default = _snapshot(tmp_path / "default")
-    assert len(_flowmap_names(render_pages(default)["job.html"])) == 23
+    assert len(_flowmap_names(dashboard.render_static_assets(default)["app.js"])) == 23
     broken = dict(snapshot, statechart=None)
-    assert "var FLOWMAP = null;" in render_pages(broken)["job.html"]
+    assert "var FLOWMAP = null;" in dashboard.render_static_assets(broken)["app.js"]
 
 
 def _wide_chart(path: Path, working: int, stops: int) -> Path:
@@ -498,7 +503,8 @@ def test_the_flowmap_places_every_state_of_a_chart_that_overflows_its_rail(
     assert len(names) == working + stops
     pages = render_pages(snapshot)
     assert sorted(pages) == sorted(PAGES)
-    layout = json.loads(re.search(r"var FLOWMAP = (.*);", pages["job.html"]).group(1))
+    script = dashboard.render_static_assets(snapshot)["app.js"]
+    layout = json.loads(re.search(r"var FLOWMAP = (.*);", script).group(1))
     _assert_drawable(layout, names)
     assert layout["grid"]["h"] > 104
 
@@ -628,12 +634,16 @@ def test_every_page_reads_without_script(tmp_path: Path) -> None:
 
 
 def test_pages_have_no_external_assets_or_markup_sinks(tmp_path: Path) -> None:
-    for name, html in _pages(tmp_path).items():
+    snap = _snapshot(tmp_path)
+    script = dashboard.render_static_assets(snap)["app.js"]
+    for name, html in render_pages(snap).items():
         # #563: the only https:// text is a link to github.com, never an asset.
         assert set(re.findall(r"https://[^/'\"]*/", html)) <= {"https://github.com/"}, name
-        for needle in ("<link", "src=", "http://", "@import", "url(", "//cdn"):
+        assert '<link rel="stylesheet" href="/app.css">' in html, name
+        assert '<script src="/app.js" defer></script>' in html, name
+        assert "<script>" not in html and "<style>" not in html, name
+        for needle in ("http://", "@import", "url(", "//cdn"):
             assert needle not in html, (name, needle)
-        (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
         for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
             assert sink not in script, (name, sink)
         assert re.findall(r"fetch\(([^,)]+)", script) == ["path", "'/api/session'", "'tickets.json'", "STATUS_URL"], name
@@ -835,7 +845,8 @@ def _run_page(
 ) -> dict:
     name = {"main": "index.html"}.get(page, f"{page}.html")
     html = render_pages(snapshot)[name]
-    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    assert '<script src="/app.js" defer></script>' in html
+    script = dashboard.render_static_assets(snapshot)["app.js"]
     assert f'data-page="{page}"' in html
     out = run_harness(tmp_path, HARNESS, script, snapshot, page, ids, actions or [], hash_, tickets_json(snapshot))
     assert out["fetches"] >= 1
@@ -982,7 +993,7 @@ def test_cli_full_push_publishes_every_page_in_one_rename(tmp_path: Path) -> Non
     )
     assert result.returncode == 0, result.stderr
     calls = [eval(line) for line in remote_log.read_text().splitlines()]  # noqa: S307
-    names = ("status.json", *PAGES, "tickets.json")
+    names = ("status.json", *dashboard.STATIC_ASSETS, *PAGES, "tickets.json")
     assert [call[0] for call in calls] == ["scp"] * len(names) + ["ssh"]
     assert calls[-1][-1] == "cd -- factory-dashboard && " + " && ".join(
         f"mv -f -- .{name}.push-tmp {name}" for name in names

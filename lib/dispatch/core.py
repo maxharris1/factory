@@ -18,15 +18,20 @@ from lib.dispatch.constants import (
 from lib.dispatch.helpers import (
     _REGISTERING_ACTIONS,
     _base_mismatch,
+    _comment_order,
     _detail_round,
     _detail_routing,
     _family_errors,
     _matching_head,
     _normalize_trusted_logins,
     _route,
+    _route_go,
+    _route_picks,
+    _router_picks,
     trusted_bots,
 )
 from lib.dispatch.transitions import write_workflow_state
+from lib.role_router import RoutingError
 from lib.dispatch.types import (
     BaseCheck,
     BaseMismatch,
@@ -422,16 +427,59 @@ class DispatcherBase:
             ).fetchone()
         routing = _detail_routing(None if row is None else row["detail"])
         if routing is None:
-            return ticket
-        routed = _route(ticket, *routing)
+            try:
+                picks = _router_picks(ticket, self.refused_harnesses)
+            except RoutingError as error:
+                named = self._routed_by_pending_go(ticket)
+                if named is not None:
+                    return named
+                raise RouteError(
+                    f"{ticket.repo}#{ticket.ticket_id} routing: {error}",
+                    ticket.comments[-1].id if ticket.comments else "",
+                ) from error
+            return ticket if picks is None else _route_picks(ticket, picks)
+        builder, reviewer, picks = routing
+        routed = (
+            _route(ticket, builder, reviewer)
+            if picks is None
+            else _route_picks(ticket, picks)
+        )
         errors = _family_errors(routed.factory)
         if errors:
             raise RouteError(
                 f"{ticket.repo}#{ticket.ticket_id} routing "
-                f"{routing[0]} / {routing[1]}: {'; '.join(errors)}",
+                f"{builder} / {reviewer}: {'; '.join(errors)}",
                 str(row["source_comment_id"]),
             )
         return routed
+
+    def _routed_by_pending_go(self, ticket: TrackedTicket) -> TrackedTicket | None:
+        for comment in sorted(ticket.comments, key=_comment_order, reverse=True):
+            if comment.edited_at is not None or self._is_handled(ticket, comment.id):
+                continue
+            try:
+                fields = parse_comment(comment.body).as_dict()
+            except HandoffError:
+                continue
+            if (
+                fields["kind"] != "go"
+                or fields.get("state") not in ("planning", "building")
+                or not {"builder", "reviewer"} & fields.keys()
+                or not self._trusted(
+                    ticket, comment, fields, ORCHESTRATOR, role="orchestrator"
+                )
+            ):
+                continue
+            try:
+                routed = _route_go(ticket, fields, self.refused_harnesses)
+            except RoutingError:
+                continue
+            if routed is not None and not {
+                routed.factory.builder_harness,
+                routed.factory.reviewer_harness,
+            } & self.refused_harnesses:
+                return routed
+        return None
 
     def _job_builder_harness(self, ticket: TrackedTicket) -> str | None:
         with self._connect() as connection:

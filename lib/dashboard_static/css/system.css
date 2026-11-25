@@ -1,0 +1,63 @@
+.sys-row{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:16px;min-width:0}
+.panel h2 .count.warn{color:var(--warn)}
+#health{flex:2 1 520px}#log{flex:3 1 560px}#versions,#rules{grid-column:1/-1}
+.sys-scroll{overflow-x:auto}
+.sys-table{min-width:560px;margin:0;font:12px/1.5 var(--mono);color:var(--text)}
+.sys-table.wide{min-width:860px}
+.sys-table tbody tr:last-child td{border-bottom:0}
+.sys-table td.sys-kind{font-weight:600}
+.sys-cell{display:inline-flex;align-items:center;gap:8px;font-variant-numeric:tabular-nums}
+a.sys-cell{text-decoration:none}
+.sys-blk{flex:none;width:10px;height:10px;background:var(--muted)}
+.sys-blk.ok{background:var(--ok)}.sys-blk.warn{background:var(--warn)}.sys-blk.bad{background:var(--bad)}
+.sys-sq{display:inline-block;width:10px;height:10px;vertical-align:-1px;background:var(--muted)}
+.sys-sq.ok{background:var(--ok)}
+#broken h2>span:first-child::before{background:var(--bad)}
+.panel h2 .count.bad{color:var(--bad)}
+.sys-table.sys-broken{min-width:820px}
+.sys-what{display:inline-flex;align-items:center;gap:10px}
+.sys-px{display:block;width:12px}
+.sys-name{font-size:13px;font-weight:600;white-space:nowrap}
+.sys-broken td.sys-for{font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--bad)}
+.sys-broken td.sys-seen{white-space:nowrap;color:var(--text-2)}
+.sys-broken td.sys-why{font-family:var(--sans);font-size:13px;color:var(--text-2)}
+.sys-broken td.muted{white-space:nowrap}
+.sys-note{margin:0 0 8px;font:12px/1.5 var(--mono);color:var(--muted)}
+.sys-legend{margin:12px 0 0}
+.sys-details{margin-top:10px}
+.sys-details .sys-scroll{margin-top:6px}
+.sys-drift{display:flex;flex-direction:column}
+.sys-ver{display:flex;flex-direction:column;gap:6px;padding:10px 0;border-bottom:1px solid var(--line)}
+.sys-ver:first-child{padding-top:8px}.sys-ver:last-child{padding-bottom:0;border-bottom:0}
+.sys-ver .name{font:600 13px var(--mono);color:var(--text)}
+.sys-ver .name.warn{color:var(--warn)}.sys-ver .name.bad{color:var(--bad)}
+.sys-ver .blocks{display:flex;flex-wrap:wrap;gap:3px}
+.sys-ver .meta{font:12px var(--mono);color:var(--text-2)}
+#health .row{margin:0 0 8px;font-size:13px;color:var(--text-2)}
+#health .stats{grid-template-columns:repeat(auto-fit,minmax(min(140px,100%),1fr));margin:12px 0 10px}
+#health>p.muted{margin:0 0 4px;font:12px var(--mono)}
+#health .row>.muted{font:12px var(--mono)}
+.sys-log{max-height:300px;overflow:auto;padding:10px 12px;background:var(--field);box-shadow:var(--elev);
+font:12px/1.5 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere}
+.sys-log .start{color:var(--text-2)}
+.sys-rules{margin:0;padding:0;list-style:none}
+.sys-rules li{display:flex;align-items:baseline;gap:4px 8px;padding:7px 6px;border-bottom:1px solid var(--line)}
+.sys-rules li:last-child{border-bottom:0}
+.sys-rules .key{flex:none;width:84px;font:500 12px var(--mono);color:var(--muted)}
+.sys-rules .text{min-width:0;font-size:13px;color:var(--text-2)}
+.sys-sub{margin:16px 0 4px;font:11px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.feed .sys-proj{flex-basis:100%;font:12px var(--mono);color:var(--muted)}
+.sys-devices{display:none}
+.sys-dev{padding:8px 0;border-bottom:1px solid var(--line)}.sys-dev:last-child{border-bottom:0}
+.sys-dev-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:2px}
+.sys-dev-head .sys-name{min-width:0;white-space:normal;overflow-wrap:anywhere}
+.sys-dev-head .muted{flex:none;font:12px var(--mono)}
+.sys-dev-row{display:flex;flex-wrap:wrap;align-items:center;gap:2px 10px;padding:3px 0;font:12px/1.5 var(--mono);color:var(--text)}
+.sys-dev-row .sys-kind{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
+.sys-dev-row.two .sys-kind{flex-basis:100%;font-weight:600}
+.sys-dev-row .sys-seen{color:var(--text-2)}
+@media (max-width:699.98px){.sys-matrix{display:none}.sys-devices{display:block}
+.sys-table.sys-broken{min-width:0}.sys-broken thead{display:none}
+.sys-broken,.sys-broken tbody,.sys-broken tr,.sys-broken td{display:block}
+.sys-broken tr{padding:8px 0;border-bottom:1px solid var(--line)}.sys-broken tbody tr:last-child{border-bottom:0}
+.sys-broken td{padding:1px 0;border-bottom:0}}

@@ -8,6 +8,7 @@ from lib.dispatch.helpers import _route_go, _scope
 from lib.dispatch.retry import _harness_job_active
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.queue import JobRequest
+from lib.role_router import RoutingError
 
 
 class T1Mixin:
@@ -26,7 +27,10 @@ class T1Mixin:
         state = fields.get("state")
         action = {"planning": "plan", "building": "build"}.get(state)
         if action is not None:
-            routed = _route_go(ticket, fields)
+            try:
+                routed = _route_go(ticket, fields, self.refused_harnesses)
+            except RoutingError:
+                return True, "rejected-go-routing"
             if routed is None:
                 return True, "rejected-go-same-family"
             if (

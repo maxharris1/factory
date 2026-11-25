@@ -145,10 +145,12 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
+from types import MappingProxyType
+from typing import Literal
 
 import yaml
 
@@ -207,6 +209,7 @@ _TOP_KEYS = {
     "ci",
     "qa",
     "rule_engine",
+    "routing",
 }
 _CI_KEYS = {"branches", "local_checks", "required_checks", "force_rerun_paths", "local_gate"}
 DEFAULT_CI_FORCE_RERUN_PATHS = (".github/workflows/**",)
@@ -215,7 +218,7 @@ DEFAULT_PLAN_MAX_LINES = 400
 PLAN_ESTIMATE_FACTOR = Fraction(27, 20)
 DEFAULT_PLAN_MAX_CRITERIA = 5
 _HOLD_KEYS = {"label", "approver", "paths"}
-TRUST_KEYS = ("hold", "ship", "finish_line", "builder", "reviewer", "ci", "qa", "rule_engine", "human_reviewers")
+TRUST_KEYS = ("hold", "ship", "finish_line", "builder", "reviewer", "ci", "qa", "rule_engine", "human_reviewers", "routing")
 _FEEDER_KEYS = {"max_holders_per_path", "exclusive_paths", "required_checks"}
 DEFAULT_MAX_HOLDERS_PER_PATH = 2
 QA_RUNNERS = ("claude-cloud", "cursor-cloud", "local-docker")
@@ -226,6 +229,7 @@ QA_TRACE = ("on-failure", "always", "never")
 _QA_KEYS = {
     "enabled",
     "gate",
+    "visual_hold",
     "runners",
     "shootout",
     "profile",
@@ -290,6 +294,7 @@ class QaConfig:
     lane: QaLane
     profile: str
     gate: str = "report"
+    visual_hold: bool = True
     shootout: bool = False
     lanes: int = 1
     paths: tuple[str, ...] = ()
@@ -301,6 +306,14 @@ class QaConfig:
     verify: str | None = None
     timeout_minutes: int = 60
     evidence: QaEvidence = QaEvidence()
+
+
+@dataclass(frozen=True)
+class FactoryRouting:
+    budget: str | None = None
+    slots: Mapping[
+        str, tuple[tuple[str, str | None, str | None], ...] | Literal["inherit"]
+    ] = MappingProxyType({})
 
 
 @dataclass(frozen=True)
@@ -344,14 +357,31 @@ class FactoryConfig:
     ci_local_gate: CheckCommand | None = None
     qa: QaConfig | None = None
     rule_engine: str = "off"
+    routing: FactoryRouting | None = None
 
     def __post_init__(self) -> None:
         if self.finish_line is None:
             object.__setattr__(self, "finish_line", default_finish_line(self.ship))
 
     @property
-    def hold_applies(self) -> bool:
+    def configured_hold_applies(self) -> bool:
         return self.hold is not None and self.ship in ("merge", "handoff")
+
+    @property
+    def visual_hold_applies(self) -> bool:
+        return self.qa is not None and self.qa.visual_hold and self.ship in ("merge", "handoff")
+
+    @property
+    def hold_applies(self) -> bool:
+        return self.configured_hold_applies or self.visual_hold_applies
+
+    @property
+    def effective_hold(self) -> HoldConfig | None:
+        if self.configured_hold_applies:
+            return self.hold
+        if self.visual_hold_applies:
+            return HoldConfig(label=DEFAULT_HOLD_LABEL, approver=DEFAULT_HOLD_APPROVER, paths=())
+        return None
 
 
 def no_ci_base(factory: FactoryConfig, pr_base: str | None) -> str | None:
@@ -479,6 +509,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
     qa, qa_findings = _qa(data, strict)
     findings.extend(qa_findings)
     rule_engine = _rule_engine(data, findings, unknown)
+    routing = _routing(data, findings, unknown)
 
     if builder_harness is not None and reviewer_harness is not None:
         findings.extend(
@@ -564,6 +595,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
         ci_local_gate=ci_local_gate,
         qa=qa,
         rule_engine=rule_engine,
+        routing=routing,
     )
     return config, findings
 
@@ -753,6 +785,38 @@ def _rule_engine(data: dict, findings: list[Finding], unknown: str) -> str:
         findings.append(Finding(unknown, "rule_engine must be on or off"))
         return "off"
     return value
+
+
+def _routing(data: dict, findings: list[Finding], unknown: str) -> FactoryRouting | None:
+    if "routing" not in data:
+        return None
+    value = data["routing"]
+    if value is None or value == "inherit":
+        return None
+    if not isinstance(value, dict):
+        findings.append(Finding("error", "routing must be 'inherit' or a mapping"))
+        return None
+    from lib.role_router import BUDGETS, _validate_slots_map
+
+    findings.extend(_unknown(value, {"budget", "slots"}, "routing", unknown))
+    budget = value.get("budget")
+    if budget is not None and (not isinstance(budget, str) or budget not in BUDGETS):
+        findings.append(
+            Finding("error", f"routing.budget must be one of {', '.join(BUDGETS)}")
+        )
+        budget = None
+    slot_findings: list[Finding] = []
+    parsed_slots = _validate_slots_map(value.get("slots"), "routing.slots", slot_findings)
+    findings.extend(slot_findings)
+    if any(item.severity == "error" for item in slot_findings):
+        return None
+    encoded: dict[str, tuple[tuple[str, str | None, str | None], ...] | Literal["inherit"]] = {}
+    for role, entry in parsed_slots.items():
+        if entry == "inherit":
+            encoded[role] = "inherit"
+        else:
+            encoded[role] = tuple((c.harness, c.model, c.effort) for c in entry)
+    return FactoryRouting(budget=budget, slots=MappingProxyType(encoded))
 
 
 def _verify_unavailable(review: dict, findings: list[Finding], unknown: str) -> bool:
@@ -1101,6 +1165,10 @@ def _qa_config(value: object, problems: list[Finding], unknown: str = "error") -
         problems.append(Finding("error", "qa.enabled must be true or false"))
     required = enabled is True
     gate = _qa_choice(value.get("gate"), "qa.gate", QA_GATES, problems) or "report"
+    visual_hold = value.get("visual_hold", True)
+    if not isinstance(visual_hold, bool):
+        problems.append(Finding("error", "qa.visual_hold must be true or false"))
+        visual_hold = True
     runners = _qa_runners(value, required, problems, unknown)
     shootout = value.get("shootout", False)
     if not isinstance(shootout, bool):
@@ -1141,6 +1209,7 @@ def _qa_config(value: object, problems: list[Finding], unknown: str = "error") -
         lane=lane,
         profile=profile,
         gate=gate,
+        visual_hold=visual_hold,
         shootout=shootout,
         lanes=lanes,
         paths=paths,

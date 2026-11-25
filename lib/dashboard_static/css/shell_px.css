@@ -1,0 +1,15 @@
+.px{display:block;width:100%;height:16px;background-color:var(--field);
+background-image:repeating-linear-gradient(90deg,transparent 0 4px,var(--field) 4px 8px),
+repeating-linear-gradient(0deg,color-mix(in srgb,var(--px,var(--ok)) 30%,var(--field)) 0 4px,transparent 4px 8px)}
+.px[data-px=off],.px[data-px=twinkle]{background-image:none}
+.px[data-load]{background-image:repeating-linear-gradient(90deg,transparent 0 4px,var(--field) 4px 8px),
+repeating-linear-gradient(0deg,color-mix(in srgb,var(--px,var(--ok)) calc(6% + var(--l,1)*24%),var(--field)) 0 4px,transparent 4px 8px)}
+.px[data-px=fill]{background-image:linear-gradient(90deg,color-mix(in srgb,var(--px,var(--ok)) 62%,var(--field)) 0 calc(var(--p,0)*100%),transparent 0)}
+.px-held{position:relative}
+.px-held::after{content:"";position:absolute;inset:-1px;pointer-events:none;
+background-image:repeating-linear-gradient(90deg,var(--warn) 0 8px,transparent 8px 16px),
+repeating-linear-gradient(90deg,var(--warn) 0 8px,transparent 8px 16px),
+repeating-linear-gradient(180deg,var(--warn) 0 8px,transparent 8px 16px),
+repeating-linear-gradient(180deg,var(--warn) 0 8px,transparent 8px 16px);
+background-size:100% 2px,100% 2px,2px 100%,2px 100%;background-repeat:repeat-x,repeat-x,repeat-y,repeat-y;
+background-position:0 0,0 100%,100% 0,0 0}

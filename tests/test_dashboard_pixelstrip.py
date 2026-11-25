@@ -673,9 +673,9 @@ def test_one_animation_frame_call_site_with_the_fps_cap_and_hidden_check() -> No
     assert "new Map()" in script
 
 
-def test_csp_header_is_unchanged() -> None:
+def test_csp_header_is_strict() -> None:
     source = (ROOT / "deploy" / "factory-dashboard-http.py").read_text(encoding="utf-8")
     assert (
-        '"default-src \'none\'; style-src \'unsafe-inline\'; script-src \'unsafe-inline\'; "\n'
+        '"default-src \'none\'; style-src \'self\' \'unsafe-inline\'; script-src \'self\'; "\n'
         '        "connect-src \'self\'; base-uri \'none\'; form-action \'none\'; frame-ancestors \'none\'"'
     ) in source

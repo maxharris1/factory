@@ -294,8 +294,10 @@ def test_the_script_draws_a_rerun_as_the_server_does(tmp_path: Path) -> None:
         add_ci(connection, "12", HEAD_A, "pytest", "queued", created_at=None)
 
     snapshot = snapshot_with(tmp_path, seed)
+    from lib.dashboard_page import page_script
     html = render_pages(snapshot)["index.html"]
-    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    assert '<script src="/app.js" defer></script>' in html
+    script = page_script(snapshot.get("statechart"))
     out = run_harness(tmp_path, activity.HARNESS, script, snapshot, "main", IDS, [["snap", ["lanes"]]])
     assert _ci_lane(out["steps"][0]["snap"]["lanes"]) == _lane(snapshot)
 
@@ -326,8 +328,10 @@ def test_the_script_redraws_the_lane_live_as_the_server_draws_it(tmp_path: Path)
     first = ci_snapshot(tmp_path)
     running = _moved(first, 3, "in_progress")
     passed = _moved(first, 5, "completed", "success")
+    from lib.dashboard_page import page_script
     html = render_pages(first)["index.html"]
-    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    assert '<script src="/app.js" defer></script>' in html
+    script = page_script(first.get("statechart"))
     snap = ["snap", ["lanes"]]
     actions = [snap, ["advance", 3], snap, ["poll", running], snap, ["advance", 2], ["poll", passed], snap]
     out = run_harness(tmp_path, activity.HARNESS, script, first, "main", IDS, actions)
@@ -354,8 +358,10 @@ def test_the_ticket_page_script_draws_the_ci_popup_as_the_server_does(tmp_path: 
     dialog = server[server.index("<dialog"):server.index("</dialog>") + 9]
     assert 'id="ci-pop"' in dialog and dialog.count('<li class="ci-job') == 5
     assert "actions/runs/8800/job/8802" in dialog and "test_waiting_on_capacity" in dialog
+    from lib.dashboard_page import page_script
     html = render_pages(snapshot)["ticket.html"]
-    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    assert '<script src="/app.js" defer></script>' in html
+    script = page_script(snapshot.get("statechart"))
     out = run_harness(tmp_path, activity.HARNESS, script, snapshot, "ticket", BAR + ["hud", "ticketview"],
                       [["snap", ["ticketview"]]], "#t=maxharris1%2Fcleffy%2313&ci=1", tickets_json(snapshot))
     drawn = out["steps"][0]["snap"]["ticketview"]
@@ -493,8 +499,12 @@ CI_SIZES = """(function () {
 
 
 def _open_server_page(browser: Browser, html: str, width: int) -> None:
+    from lib.dashboard_page import app_css
     page = Path(browser.tmp.name) / "page.html"
-    page.write_text(html, encoding="utf-8")
+    page.write_text(
+        html.replace('<link rel="stylesheet" href="/app.css">', f"<style>{app_css()}</style>", 1),
+        encoding="utf-8",
+    )
     browser.call("Emulation.setDeviceMetricsOverride", width=width, height=900, deviceScaleFactor=1, mobile=False)
     browser.call("Page.navigate", url=page.as_uri())
     browser.eval("""new Promise(function (done) { (function wait() {
@@ -525,9 +535,11 @@ def test_ci_cards_draw_smaller_than_build_cards(tmp_path: Path, width: int) -> N
 @needs_node
 @pytest.mark.parametrize("name", list(SIZED))
 def test_the_script_draws_a_compact_card_as_the_server_does(tmp_path: Path, name: str) -> None:
+    from lib.dashboard_page import page_script
     snapshot = SIZED[name](tmp_path)
     html = render_pages(snapshot)["index.html"]
-    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    assert '<script src="/app.js" defer></script>' in html
+    script = page_script(snapshot.get("statechart"))
     out = run_harness(tmp_path, activity.HARNESS, script, snapshot, "main", IDS, [["snap", ["lanes"]]])
     assert _ci_lane(out["steps"][0]["snap"]["lanes"]) == _lane(snapshot)
 
@@ -589,8 +601,10 @@ def test_a_quiet_lane_shows_no_ci_attention_counts(tmp_path: Path) -> None:
 
 @needs_node
 def test_the_script_draws_the_ci_attention_counts_as_the_server_does(tmp_path: Path) -> None:
+    from lib.dashboard_page import page_script
     snapshot = snapshot_with(tmp_path, ci_attention_fixture)
     html = render_pages(snapshot)["index.html"]
-    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    assert '<script src="/app.js" defer></script>' in html
+    script = page_script(snapshot.get("statechart"))
     out = run_harness(tmp_path, activity.HARNESS, script, snapshot, "main", IDS, [["snap", ["lanes"]]])
     assert _ci_lane(out["steps"][0]["snap"]["lanes"]) == _lane(snapshot)

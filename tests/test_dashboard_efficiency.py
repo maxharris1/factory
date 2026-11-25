@@ -690,8 +690,12 @@ def _load(browser: Browser, snapshot: dict, width: int, script: bool) -> None:
     if script:
         browser.open(_page_with_status_stub(snapshot, "efficiency.html"), width)
         return
+    from lib.dashboard_page import app_css
     bare = Path(browser.tmp.name) / f"bare-{width}.html"
-    bare.write_text(_page(snapshot), encoding="utf-8")
+    bare.write_text(
+        _page(snapshot).replace('<link rel="stylesheet" href="/app.css">', f"<style>{app_css()}</style>", 1),
+        encoding="utf-8",
+    )
     browser.call("Emulation.setDeviceMetricsOverride", width=width, height=900, deviceScaleFactor=1, mobile=False)
     browser.call("Page.navigate", url=bare.as_uri())
     deadline = time.monotonic() + 30

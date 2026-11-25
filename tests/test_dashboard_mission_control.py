@@ -280,13 +280,15 @@ def _html(tmp_path: Path) -> str:
 
 
 def _script(html: str) -> str:
-    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
-    return script
+    assert '<script src="/app.js" defer></script>' in html
+    assert "<script>" not in html
+    return page.page_script(None)
 
 
 def _css(html: str) -> str:
-    (css,) = re.findall(r"<style>(.*?)</style>", html, flags=re.S)
-    return css
+    assert '<link rel="stylesheet" href="/app.css">' in html
+    assert "<style>" not in html
+    return page.app_css()
 
 
 def test_page_polls_status_json_every_one_to_two_seconds(tmp_path: Path) -> None:
@@ -327,7 +329,10 @@ def test_pages_have_every_mission_control_panel(tmp_path: Path) -> None:
 def test_page_has_no_external_assets_or_markup_sinks(tmp_path: Path) -> None:
     html = _html(tmp_path)
     assert set(re.findall(r"https://[^/'\"]*/", html)) <= {"https://github.com/"}
-    for needle in ("<link", "src=", "http://", "@import", "url(", "//cdn"):
+    assert '<link rel="stylesheet" href="/app.css">' in html
+    assert '<script src="/app.js" defer></script>' in html
+    assert "<script>" not in html and "<style>" not in html
+    for needle in ("http://", "@import", "url(", "//cdn"):
         assert needle not in html, needle
     script = _script(html)
     for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
