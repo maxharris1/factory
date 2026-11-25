@@ -137,6 +137,8 @@ def record_evidence_dir(connection: sqlite3.Connection, run_id: str, folder: Pat
         "UPDATE qa_runs SET evidence_dir = ? WHERE run_id = ? AND evidence_dir IS NULL",
         (str(folder), run_id),
     )
+    if has_visual_evidence(folder):
+        connection.execute("UPDATE qa_runs SET visual = 1 WHERE run_id = ?", (run_id,))
 
 
 def collect(
@@ -480,7 +482,7 @@ def recycle(
             WHEN EXISTS (
                 SELECT 1 FROM qa_runs n
                 WHERE n.repo = r.repo AND n.ticket_id = r.ticket_id AND n.arm = r.arm
-                    AND n.state = 'reported' AND n.started_at > r.started_at
+                    AND n.state = 'reported' AND n.scope != 'none' AND n.started_at > r.started_at
             ) THEN 'superseded'
             ELSE 'latest'
         END

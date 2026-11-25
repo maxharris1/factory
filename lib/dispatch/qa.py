@@ -905,45 +905,30 @@ class QaMixin:
                 current_reason = source["reason"] or ""
         return last_source
 
-    def _has_visual_qa_evidence(self, ticket: TrackedTicket, head: str) -> bool:
+    def _visual_qa_hold(self, ticket: TrackedTicket) -> bool:
         qa = ticket.factory.qa
         if qa is None or not qa.visual_hold:
             return False
         self._record_unhandled_qa(ticket)
         with self._connect() as connection:
-            row = connection.execute(
+            rows = connection.execute(
                 """
-                SELECT run_id, state, result, reason, evidence_dir
-                FROM qa_runs
-                WHERE repo = ? AND ticket_id = ? AND head = ? AND arm = 'primary'
-                ORDER BY rowid DESC LIMIT 1
+                SELECT run_id, visual, evidence_dir FROM qa_runs
+                WHERE repo = ? AND ticket_id = ? AND arm = 'primary'
+                  AND state = 'reported' AND result = 'PASS' AND evidence_dir IS NOT NULL
                 """,
-                (ticket.repo.lower(), ticket.ticket_id, head),
-            ).fetchone()
-            if row is None or row["state"] != "reported" or row["result"] != "PASS":
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchall()
+            if any(row["visual"] for row in rows):
+                return True
+            found = [row["run_id"] for row in rows if has_visual_evidence(Path(row["evidence_dir"]))]
+            if not found:
                 return False
-            evidence_dir = row["evidence_dir"]
-            reason = row["reason"] or ""
-            seen = {row["run_id"]}
-            while evidence_dir is None and reason.startswith("carried:"):
-                source_id = reason.removeprefix("carried:")
-                if not source_id or source_id in seen:
-                    break
-                seen.add(source_id)
-                source = connection.execute(
-                    """
-                    SELECT run_id, state, result, reason, evidence_dir
-                    FROM qa_runs WHERE run_id = ?
-                    """,
-                    (source_id,),
-                ).fetchone()
-                if source is None or source["state"] != "reported" or source["result"] != "PASS":
-                    return False
-                evidence_dir = source["evidence_dir"]
-                reason = source["reason"] or ""
-        if not evidence_dir:
-            return False
-        return has_visual_evidence(Path(evidence_dir))
+            connection.executemany(
+                "UPDATE qa_runs SET visual = 1 WHERE run_id = ?", [(run_id,) for run_id in found]
+            )
+            connection.commit()
+        return True
 
     def _held_qa(self, ticket: TrackedTicket, head: str) -> dict[str, object] | None:
         qa = ticket.factory.qa

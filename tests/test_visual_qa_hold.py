@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
@@ -16,12 +17,16 @@ from lib.qa_evidence import (
     VISUAL_SUFFIXES,
     has_visual_evidence,
     record_evidence_dir,
+    recycle,
+    run_dir,
     visual_evidence_files,
 )
-from lib.update_check import HeadDiff
+from lib.update_check import HeadDiff, merge_update
 from tests.qa_support import (
     HEAD_A,
     HEAD_B,
+    REPO,
+    TICKET,
     Harness,
     qa_config,
     qa_report,
@@ -436,3 +441,139 @@ def test_aut0_handoff_repo_holds_on_visual_qa_and_hands_off_never_merges(tmp_pat
     assert run.actions.merges == []
     assert run.actions.handoffs == [HEAD_A]
     assert run.rows("SELECT workflow_state FROM ticket_state") == [("handed-off",)]
+
+
+def _same_patch_rebase_held(tmp_path: Path, gate: str) -> tuple[Harness, Path]:
+    patch_ids = {HEAD_A: "1" * 40, HEAD_B: "1" * 40}
+    run = _setup_approved(
+        tmp_path,
+        gate=gate,
+        qa_diff=lambda *_args: HeadDiff("1" * 40, (("src/page.tsx", 5),)),
+        patch_ids=patch_ids,
+    )
+    [(run_id,)] = run.rows("SELECT run_id FROM qa_runs")
+    folder = run_dir(tmp_path / "evidence", REPO, TICKET, run_id)
+    lane = folder / "lane-1"
+    _make_evidence(lane, "qa-1/screen.png")
+    (lane / "result.json").write_text(json.dumps({"scenarios": [{"id": "qa-1", "result": "verified"}]}))
+    (lane / "manifest.json").write_text("{}")
+    _record_primary_evidence(run, HEAD_A, folder)
+    run.post("q1", qa_report(HEAD_A, "PASS", body=EVIDENCED))
+    run.poll(3)
+    assert run.rows("SELECT workflow_state FROM ticket_state") == [("awaiting-ok",)]
+    run.thread.head = HEAD_B
+    run.poll()
+    return run, lane / "qa-1" / "screen.png"
+
+
+@pytest.mark.parametrize("gate", ["report", "block"])
+def test_same_patch_rebase_stays_held_under_either_qa_gate(tmp_path: Path, gate: str) -> None:
+    run, _screen = _same_patch_rebase_held(tmp_path, gate)
+    run.poll(3)
+
+    assert run.rows("SELECT workflow_state FROM ticket_state") == [("awaiting-ok",)]
+    assert run.actions.merges == []
+
+
+def test_recycling_keeps_the_carried_source_visuals_and_the_hold(tmp_path: Path) -> None:
+    run, screen = _same_patch_rebase_held(tmp_path, "block")
+
+    with run.queue.connect() as connection:
+        recycled = recycle(connection, root=tmp_path / "evidence", repo=REPO, now=run.now[0])
+    run.poll(3)
+
+    assert recycled.deleted == ()
+    assert screen.exists()
+    assert run.rows("SELECT workflow_state FROM ticket_state") == [("awaiting-ok",)]
+    assert run.actions.merges == []
+
+
+def test_visual_hold_outlives_its_deleted_evidence(tmp_path: Path) -> None:
+    run, screen = _same_patch_rebase_held(tmp_path, "block")
+
+    screen.unlink()
+    run.poll(3)
+
+    assert run.rows("SELECT workflow_state FROM ticket_state") == [("awaiting-ok",)]
+    assert run.actions.merges == []
+    run.post("ok-b", f"/ok {HEAD_B}", author="maxharris1")
+    run.poll(3)
+    assert run.actions.merges == [(True, HEAD_B)]
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def _hand_edited_base_merge(root: Path) -> tuple[Path, str, str, dict[str, str]]:
+    repo = root / "history"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    (repo / "src").mkdir()
+    (repo / "src/page.tsx").write_text("original UI\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "base")
+    _git(repo, "checkout", "-q", "-b", "feature")
+    (repo / "src/page.tsx").write_text("approved UI\n")
+    _git(repo, "commit", "-q", "-am", "approved visual")
+    approved = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "main")
+    (repo / "README.md").write_text("upstream\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "upstream")
+    _git(repo, "checkout", "-q", "feature")
+    _git(repo, "merge", "-q", "--no-ff", "--no-commit", "main")
+    (repo / "src/page.tsx").write_text("new unapproved UI\n")
+    _git(repo, "commit", "-q", "-am", "merge main plus new UI")
+    head = _git(repo, "rev-parse", "HEAD")
+    patch_ids = {
+        sha: subprocess.run(
+            ["git", "patch-id", "--stable"],
+            input=_git(repo, "diff", f"main...{sha}") + "\n",
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.split()[0]
+        for sha in (approved, head)
+    }
+    return repo, approved, head, patch_ids
+
+
+@pytest.mark.parametrize("ship", ["merge", "handoff"])
+def test_hand_edited_base_merge_needs_a_fresh_visual_ok(tmp_path: Path, ship: str) -> None:
+    repo, approved, head, patch_ids = _hand_edited_base_merge(tmp_path)
+    assert merge_update(repo / ".git", approved, head, "main").steps[0].hand_merged == {"src/page.tsx"}
+    run = Harness(
+        tmp_path,
+        replace(qa_config(), gate="block"),
+        ship=ship,
+        qa_diff=lambda _repo, _base, _since, sha: HeadDiff(patch_ids[sha], (("src/page.tsx", 500),)),
+    )
+    run.actions.patch_ids.update(patch_ids)
+    run.dispatcher.hold_carry = lambda _repo, _base, old, new: merge_update(repo / ".git", old, new, "main")
+    run.post("r1", ready(approved, body=scenarios("qa-1")), head=approved)
+    run.poll()
+    run.finish("codex", "v1")
+    run.post("v1", verdict(approved, "APPROVE"))
+    _record_primary_evidence(run, approved, _make_evidence(tmp_path / "ev_a", "lane-1/shot.png"))
+    run.post("q1", qa_report(approved, "PASS", body=TABLE))
+    run.poll(3)
+    assert run.rows("SELECT workflow_state FROM ticket_state") == [("awaiting-ok",)]
+
+    run.post("ok-a", f"/ok {approved}", author="maxharris1")
+    run.thread.head = head
+    run.poll(2)
+    run.finish("codex", "v2")
+    run.post("v2", verdict(head, "APPROVE", "1/3"))
+    run.poll(2)
+    _record_primary_evidence(run, head, _make_evidence(tmp_path / "ev_b", "lane-1/shot.png"))
+    run.post("q2", qa_report(head, "PASS", body=TABLE))
+    run.poll(3)
+
+    assert run.actions.merges == []
+    assert run.actions.handoffs == []
+    assert run.rows("SELECT workflow_state FROM ticket_state") == [("awaiting-ok",)]

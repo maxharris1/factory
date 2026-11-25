@@ -243,6 +243,8 @@ class HoldsMixin:
     ) -> tuple[HoldDecision, bool, bool]:
         hold, approvers = self._effective_hold_and_approvers(ticket)
         allowed_approvers = tuple(login for login in approvers if self._may_approve(login))
+        visual = self._visual_qa_hold(ticket)
+        carry_paths = (*hold.paths, "**") if visual else hold.paths
         waited = False
         coverage_unread = False
 
@@ -251,7 +253,7 @@ class HoldsMixin:
             if ticket.factory.rule_engine != "on":
                 if self._approval_covers(ticket, ok_head, head):
                     return True
-                carries = self._ok_carries(ticket, ok_head, head)
+                carries = self._ok_carries(ticket, ok_head, head, carry_paths)
                 coverage_unread = coverage_unread or carries is None
                 return carries is True
             if _matching_head(ok_head, head) is not None:
@@ -275,7 +277,7 @@ class HoldsMixin:
             approver_allowed=bool(allowed_approvers),
             covers=covers,
             check_configured_hold=ticket.factory.configured_hold_applies,
-            visual_qa_hold=self._has_visual_qa_evidence(ticket, head),
+            visual_qa_hold=visual,
             approvers=allowed_approvers,
         )
         if waited and decision.blocks and decision.unread is None:
@@ -286,18 +288,18 @@ class HoldsMixin:
         covered = covers(ok_head)
         return decision, coverage_unread or waited, covered
 
-    def _ok_carries(self, ticket: TrackedTicket, ok_head: str, head: str) -> bool | None:
-        hold = ticket.factory.effective_hold
-        assert hold is not None
+    def _ok_carries(
+        self, ticket: TrackedTicket, ok_head: str, head: str, paths: tuple[str, ...]
+    ) -> bool | None:
         if self.hold_carry is None:
             return False
         base = ticket.factory.base_branch
-        key = (ticket.repo.lower(), base, ok_head, head, hold.paths)
+        key = (ticket.repo.lower(), base, ok_head, head, paths)
         if key in self._hold_carries:
             return self._hold_carries[key]
         try:
             update = self.hold_carry(ticket.repo, base, ok_head, head)
-            carries = ok_carries(update, hold.paths)
+            carries = ok_carries(update, paths)
         except Exception as exc:
             if self.log is not None:
                 self.log(
