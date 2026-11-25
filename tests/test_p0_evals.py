@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
+import re
+import shutil
 import sqlite3
+import subprocess
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -200,3 +205,57 @@ def test_monday_eval_systemd_units_exist() -> None:
     assert "OnCalendar=Mon *-*-* 08:00:00 America/New_York" in timer
     assert "weekly-eval.sh" in service
     assert "eval-report --db" in script and "--json" in script
+
+
+STUB_ORCH = """#!/usr/bin/env bash
+printf '%s\\n' "$*" >>"$STUB_LOG"
+if [[ "$1" == eval-report ]]; then echo '{}'; fi
+if [[ "$1" == dashboard ]]; then exit "${STUB_PUSH_EXIT:-0}"; fi
+"""
+
+
+def test_weekly_eval_script_runs(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "deploy").mkdir(parents=True)
+    (repo / "bin").mkdir()
+    script = shutil.copy(ROOT / "deploy" / "weekly-eval.sh", repo / "deploy" / "weekly-eval.sh")
+    stub = repo / "bin" / "orch"
+    stub.write_text(STUB_ORCH, encoding="utf-8")
+    stub.chmod(0o755)
+    state = tmp_path / "state"
+    evals = state / "evals"
+    evals.mkdir(parents=True)
+    seeded = [(date(2000, 1, 3) + timedelta(weeks=n)).isoformat() for n in range(14)]
+    for day in seeded:
+        (evals / f"weekly-{day}.json").write_text("{}", encoding="utf-8")
+        (evals / f"weekly-{day}.txt").write_text("", encoding="utf-8")
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}", encoding="utf-8")
+    (evals / "weekly-2000-01-01.json").symlink_to(outside)
+    (evals / "notes.json").write_text("{}", encoding="utf-8")
+    log = tmp_path / "orch.log"
+    env = {
+        key: value for key, value in os.environ.items() if not key.startswith("ORCH_")
+    }
+    env.update(HOME=str(tmp_path / "home"), ORCH_STATE_DIR=str(state), STUB_LOG=str(log))
+
+    result = subprocess.run(["bash", script], env=env, capture_output=True, text=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    stamp = re.fullmatch(r"weekly-(\d{4}-\d{2}-\d{2})\.json", os.readlink(evals / "latest.json"))
+    assert stamp is not None and stamp.group(1) not in seeded
+    kept = sorted([stamp.group(1), *seeded], reverse=True)[:12]
+    for ext in ("json", "txt"):
+        regular = [p.name for p in evals.glob(f"weekly-*.{ext}") if not p.is_symlink()]
+        assert sorted(regular) == sorted(f"weekly-{day}.{ext}" for day in kept)
+    assert os.readlink(evals / "latest.txt") == f"weekly-{stamp.group(1)}.txt"
+    assert (evals / "weekly-2000-01-01.json").is_symlink() and outside.exists()
+    assert (evals / "notes.json").exists()
+    assert not [p.name for p in evals.iterdir() if p.name.endswith(".tmp")]
+    assert log.read_text(encoding="utf-8").splitlines()[-1] == (
+        f"dashboard push --once --db {state / 'orch.db'} --evals-dir {evals}"
+    )
+
+    env["STUB_PUSH_EXIT"] = "1"
+    again = subprocess.run(["bash", script], env=env, capture_output=True, text=True, check=False)
+    assert again.returncode == 0, again.stderr

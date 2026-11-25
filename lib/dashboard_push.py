@@ -9,7 +9,7 @@ with BatchMode, so it never prompts, and it relies entirely on the SSH login
 Max provisioned: optionally `-F <ssh_config>` names his ssh_config file. No
 key path, password or token is read, passed or configured here.
 
-Both methods publish the files (status.json, the pages and tickets.json) as one step. Every file is first uploaded to
+Both methods publish the files (status.json, the pages, tickets.json and evals.json) as one step. Every file is first uploaded to
 a dot-prefixed temp name in the served directory; only after all uploads
 succeed does one `ssh host 'cd -- dir && mv -f -- .a.push-tmp a && mv -f --
 .b.push-tmp b && ...'` rename them over the live names, back to back on the
@@ -342,6 +342,7 @@ CHILD_ENV = (
     "ORCH_DB",
     "ORCH_POLL_LOG",
     "ORCH_DASHBOARD_DIR",
+    "ORCH_STATE_DIR",
 )
 STILL_RUNNING = "dashboard push: previous push still running; skipped this cycle"
 BACKOFF_FIRST_SECONDS = 30.0

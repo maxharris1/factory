@@ -3,9 +3,10 @@ set -euo pipefail
 
 # Weekly Monday eval report runner: reads the read-only backup (or live DB)
 # for the preceding 7 UTC days and writes both plain text and JSON reports
-# under ~/.local/state/factory/evals/.
+# under ${ORCH_STATE_DIR:-~/.local/state/factory}/evals/.
 STATE="${ORCH_STATE_DIR:-${HOME}/.local/state/factory}"
 OUT_DIR="${STATE}/evals"
+KEEP=12
 BACKUP="${ORCH_BACKUP_DB:-${HOME}/.local/share/factory/backup/orch.db}"
 DB="${ORCH_DB:-${STATE}/orch.db}"
 SOURCE="$BACKUP"
@@ -21,8 +22,17 @@ mkdir -p "$OUT_DIR"
 STAMP="$(date -u +%Y-%m-%d)"
 UNTIL="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SINCE="$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-7d +%Y-%m-%dT%H:%M:%SZ)"
+TMP="${OUT_DIR}/.weekly-${STAMP}"
+trap 'rm -f -- "${TMP}.txt.tmp" "${TMP}.json.tmp" "${OUT_DIR}/.latest.txt.tmp" "${OUT_DIR}/.latest.json.tmp"' EXIT
 
-"$ORCH" eval-report --db "$SOURCE" --since "$SINCE" --until "$UNTIL" >"${OUT_DIR}/weekly-${STAMP}.txt"
-"$ORCH" eval-report --db "$SOURCE" --since "$SINCE" --until "$UNTIL" --json >"${OUT_DIR}/weekly-${STAMP}.json"
-ln -sfn "weekly-${STAMP}.txt" "${OUT_DIR}/latest.txt"
-ln -sfn "weekly-${STAMP}.json" "${OUT_DIR}/latest.json"
+"$ORCH" eval-report --db "$SOURCE" --since "$SINCE" --until "$UNTIL" >"${TMP}.txt.tmp"
+"$ORCH" eval-report --db "$SOURCE" --since "$SINCE" --until "$UNTIL" --json >"${TMP}.json.tmp"
+for ext in txt json; do
+    mv -f -- "${TMP}.${ext}.tmp" "${OUT_DIR}/weekly-${STAMP}.${ext}"
+    ln -sfn "weekly-${STAMP}.${ext}" "${OUT_DIR}/.latest.${ext}.tmp"
+    mv -Tf -- "${OUT_DIR}/.latest.${ext}.tmp" "${OUT_DIR}/latest.${ext}"
+    find "$OUT_DIR" -maxdepth 1 -type f -name "weekly-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].${ext}" \
+        | sort -r | tail -n +$((KEEP + 1)) | xargs -r -d '\n' rm -f --
+done
+
+"$ORCH" dashboard push --once --db "$DB" --evals-dir "$OUT_DIR" || true

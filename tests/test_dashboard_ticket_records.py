@@ -468,7 +468,7 @@ def test_the_writer_publishes_tickets_json_after_status_and_the_pages(tmp_path: 
     out = tmp_path / "out"
     paths = write_snapshot_pages(out, collect_snapshot(db, log, now=NOW))
     from lib.dashboard import STATIC_ASSETS
-    names = ("status.json", *STATIC_ASSETS, *PAGES, "tickets.json")
+    names = ("status.json", *STATIC_ASSETS, *PAGES, "tickets.json", "evals.json")
     assert paths == tuple(out / name for name in names)
     assert sorted(path.name for path in out.iterdir()) == sorted(names)
 
@@ -494,7 +494,7 @@ def test_the_push_renames_tickets_json_with_the_rest_in_one_step(tmp_path: Path)
     paths = write_snapshot_pages(tmp_path / "out", collect_snapshot(db, log, now=NOW))
     commands = SshTransport("pc-wsl-bots", "factory-dashboard").commands(paths)
     from lib.dashboard import STATIC_ASSETS
-    names = ("status.json", *STATIC_ASSETS, *PAGES, "tickets.json")
+    names = ("status.json", *STATIC_ASSETS, *PAGES, "tickets.json", "evals.json")
     assert commands[-1][-1] == "cd -- factory-dashboard && " + " && ".join(
         f"mv -f -- .{name}.push-tmp {name}" for name in names
     )
