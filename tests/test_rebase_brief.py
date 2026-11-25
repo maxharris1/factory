@@ -112,6 +112,7 @@ def test_unresolvable_conflict_aborts_and_asks(text: str, method: str) -> None:
     positions = [paragraph.index(step) for step in steps]
     assert positions == sorted(positions)
     assert "Post only this job's handoff, or a `questions` handoff." in text
+    assert "and message no other bot" in text
 
 
 def test_wall_clock_line_pushes_nothing(text: str) -> None:

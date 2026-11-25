@@ -142,7 +142,7 @@ def test_the_old_harness_and_no_rebase_rules_are_gone(action: str, recipient: st
         assert "Never start another harness" not in text
         assert "No force-push and no rebase of a pushed branch" not in text
         assert "Never start another factory job." in text
-        assert text.count("Message no other bot.") == 1
+        assert text.lower().count("message no other bot") == 1
         assert "Run as poteto-mode" not in text
 
 

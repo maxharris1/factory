@@ -26,47 +26,64 @@ FENCE = re.compile(r"^(`{3,})")
 CRITERION_ID = re.compile(r"\bac-\d+\b")
 
 CEILINGS: dict[str, int] = {
-    "build": 11510,
-    "build-github": 11554,
-    "build-pre-ready": 11825,
-    "build-qa": 13220,
-    "ci-fix": 12926,
-    "ci-fix-log-unavailable": 13466,
-    "fix": 13082,
-    "fix-pre-ready": 12351,
-    "merge-only": 10411,
-    "plan": 13072,
-    "plan-github": 13072,
-    "plan-qa": 13862,
-    "plan-round-2": 13368,
+    "build": 11402,
+    "build-github": 11446,
+    "build-pre-ready": 11717,
+    "build-qa": 13112,
+    "ci-fix": 12818,
+    "ci-fix-log-unavailable": 13358,
+    "fix": 12974,
+    "fix-pre-ready": 12243,
+    "merge-only": 10303,
+    "plan": 12964,
+    "plan-github": 12964,
+    "plan-qa": 13754,
+    "plan-round-2": 13260,
     "qa:base-check": 7203,
     "qa:base-check-fallback": 6627,
     "qa:head": 7159,
     "qa:head-fallback": 6583,
     "qa:regression": 7194,
     "qa:regression-fallback": 6618,
-    "rebase": 12251,
-    "resume": 11974,
-    "retry": 12312,
-    "review": 17282,
-    "review-before-ci": 19174,
-    "review-evidence": 17286,
-    "review-followups": 19524,
-    "review-qa-block": 17748,
-    "review-qa-report": 17529,
-    "review-rebased": 19570,
-    "review-round-2-evidence": 19232,
-    "review-round-3": 19032,
-    "review-update": 18220,
-    "review-update-commits": 18744,
-    "review-user-impact": 18218,
-    "review-user-impact-round-2": 20690,
+    "rebase": 12143,
+    "resume": 11866,
+    "retry": 12204,
+    "review": 17174,
+    "review-before-ci": 19066,
+    "review-evidence": 17178,
+    "review-followups": 19416,
+    "review-qa-block": 17640,
+    "review-qa-report": 17421,
+    "review-rebased": 19462,
+    "review-round-2-evidence": 19124,
+    "review-round-3": 18924,
+    "review-update": 18112,
+    "review-update-commits": 18636,
+    "review-user-impact": 18110,
+    "review-user-impact-round-2": 20582,
 }
 
 DEVICES = ("box", "remote (mac)")
 BUILDER_ROUTER = "skills/factory/factory-builder/SKILL.md"
 REVIEWER_ROUTER = "skills/factory/factory-reviewer/SKILL.md"
 QA_ROUTER = "skills/factory/factory-qa/SKILL.md"
+
+HANDOFF_PHRASES = (
+    "message no other bot",
+    "post only this job's handoff",
+    "post exactly one handoff comment",
+)
+HELPER_PHRASES = (
+    "helper models, one `<role>: <value>` line per pstack role",
+    "you may start helper agents as pstack recommends.",
+)
+DROPPED_SKILLS_PHRASES = (
+    "They win over any other model config",
+    "They do research only; you write the verdict.",
+    "start a general helper",
+)
+NO_ROUTER = frozenset({"merge-only", "rebase"})
+OLD_CHANNEL_BULLET = "- Message no other bot. Everything you hand on goes in the one handoff comment.\n"
 
 REGROWTH = (
     "Strip slop with deslop over the diff, run the comments pass with no-comments, "
@@ -241,3 +258,31 @@ def test_qa_brief_names_commit_criteria_evidence_and_router(case: str) -> None:
     assert facts.links.result.fields["key"] in brief
     assert facts.links.bundle.fields["key"] in brief
     assert f"router `{QA_ROUTER}`" in brief
+
+
+def check_stated_once(kind: str, brief: str) -> None:
+    lowered = brief.lower()
+    for phrase in HANDOFF_PHRASES + HELPER_PHRASES:
+        if kind.startswith("qa:") or (kind in NO_ROUTER and phrase in HELPER_PHRASES):
+            expected = 0
+        else:
+            expected = 1
+        assert lowered.count(phrase) == expected, (kind, phrase, lowered.count(phrase))
+    for phrase in DROPPED_SKILLS_PHRASES:
+        assert phrase not in brief, (kind, phrase)
+
+
+@pytest.mark.parametrize("kind", sorted(CEILINGS))
+def test_each_shared_fact_is_stated_once(kind: str) -> None:
+    briefs = [render(kind)] if kind.startswith("qa:") else list(render_devices(kind).values())
+    for brief in briefs:
+        check_stated_once(kind, brief)
+
+
+def test_the_old_channel_bullet_fails_the_once_check() -> None:
+    brief = render_devices("build")["box"]
+    post_only = "- Post only this job's handoff"
+    restored = brief.replace(post_only, OLD_CHANNEL_BULLET + post_only, 1)
+    assert restored != brief
+    with pytest.raises(AssertionError):
+        check_stated_once("build", restored)
