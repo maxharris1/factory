@@ -294,6 +294,49 @@ def test_an_account_folder_is_read_without_the_profile_folder_or_tokens(
         account_doctor.check_login(transport, config, device, harness, account, signed_out)
 
 
+GEMINI_MACHINES = """\
+accounts:
+  - {{id: gemini-ultra, harness: gemini, plan: ultra}}
+devices:
+  - name: box
+    local: true
+    slot_max: 1
+    harnesses: {{gemini: {{bot: gemini-bot, account: gemini-ultra}}}}
+    home: {home}
+  - name: pc
+    tailscale_name: pc.example.ts.net
+    slot_max: 1
+    harnesses: {{gemini: {{bot: gemini-bot, account: gemini-ultra}}}}
+    workdir_root: {home}/work
+    ssh_alias: pc-{{bot}}
+    factory_root: /srv/factory
+    home: {home}
+"""
+
+
+@pytest.mark.parametrize("where", ["local", "remote"])
+def test_the_gemini_preflight_runs_agy_models_with_every_profile_override_unset(tmp_path: Path, where: str) -> None:
+    from tests.test_gemini_driver import PLANTED_LOGIN, FakeAgy
+
+    path = tmp_path / "machines.yml"
+    path.write_text(GEMINI_MACHINES.format(home=tmp_path / "home"), encoding="utf-8")
+    config, findings = load_machines_yml(path)
+    assert config is not None, findings
+    device = config.device("box" if where == "local" else "pc")
+    agy = FakeAgy(tmp_path)
+    environment = {"PATH": f"{agy.bin}:/usr/bin:/bin", "HOME": str(tmp_path / "home"), **PLANTED_LOGIN}
+    transport = remote_transport(tmp_path, environment) if where == "remote" else LoginTransport(b"")
+
+    account_doctor.check_login(transport, config, device, "gemini", "gemini-ultra", environment)
+    agy.answer("signed-out")
+    with pytest.raises(account_doctor.SignedOut):
+        account_doctor.check_login(transport, config, device, "gemini", "gemini-ultra", environment)
+
+    calls = agy.calls()
+    assert [args for _, args in calls] == ["models", "models"]
+    assert [names & set(PLANTED_LOGIN) for names, _ in calls] == [set(), set()]
+
+
 def box_waiter(tmp_path: Path, signed_in: str | None):
     spawn = FakeSpawn()
     bin_dir = fake_harnesses(tmp_path / "bin", signed_in)
