@@ -1,16 +1,10 @@
-"""What the Activity page and the Mission Control cockpit post to /api/act.
-
-Both pages run the real app.js against the layout harness's tiny DOM, with
-/api/session, /api/head and /api/act answered in Node. Each /api/act body the
-page builds then goes to the real deploy/factory-dashboard-http.py, so a body
-the page sends is one the server accepts or refuses for the intended reason.
-"""
-
 from __future__ import annotations
 
 import copy
 import json
+from collections.abc import Callable
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -113,11 +107,19 @@ def _with(snap: dict, rows: list[dict]) -> dict:
         {**row, "kind": "paused", "detail": f"{row['state']} detail"} for row in rows]}}
 
 
+class Surface(NamedTuple):
+    page: str
+    ids: list[str]
+    open: str
+    send: str
+    row: Callable[[dict], dict[str, str]]
+
+
 PAGES = {
-    "activity": {"page": "activity", "ids": ["attention"], "open": "data-act", "send": "at-form",
-                 "row": lambda row: {"data-attn": f"paused:{row['repo']}#{row['ticket_id']}"}},
-    "cockpit": {"page": "main", "ids": ["needs-max"], "open": "data-ck-act", "send": "ck-form-row",
-                "row": lambda row: {"data-cockpit-ticket": f"{row['repo']}#{row['ticket_id']}"}},
+    "activity": Surface("activity", ["attention"], "data-act", "at-form",
+                        lambda row: {"data-attn": f"paused:{row['repo']}#{row['ticket_id']}"}),
+    "cockpit": Surface("main", ["needs-max"], "data-ck-act", "ck-form-row",
+                       lambda row: {"data-cockpit-ticket": f"{row['repo']}#{row['ticket_id']}"}),
 }
 
 
@@ -125,7 +127,7 @@ def _drive(tmp_path: Path, surface: str, snap: dict, steps: list, replies: dict)
     page = PAGES[surface]
     script = render_static_assets(snap)["app.js"]
     scenario = {"steps": steps, "replies": replies}
-    return layout.run_harness(tmp_path, HARNESS, script, snap, page["page"], page["ids"], scenario,  # type: ignore[arg-type]
+    return layout.run_harness(tmp_path, HARNESS, script, snap, page.page, page.ids, scenario,
                               tickets="null")["posts"]
 
 
@@ -142,11 +144,11 @@ def test_every_head_bound_action_posts_the_head_it_read_and_the_server_takes_it(
 ) -> None:
     page = PAGES[surface]
     snap = _snapshot(tmp_path, [VISUAL])
-    row = page["row"](VISUAL)
+    row = page.row(VISUAL)
     posts = _drive(tmp_path / "run", surface, snap, [
-        ["open", row, {page["open"]: action}],
+        ["open", row, {page.open: action}],
         ["type", row, "Looks right on this head."],
-        ["send", row, page["send"]],
+        ["send", row, page.send],
     ], {"/api/head": [200, {"head": HEAD}], "/api/act": [201, {"url": f"https://github.com/{REPO}/pull/42"}]})
     assert [post["url"] for post in posts] == ["/api/head", "/api/act"]
     body = posts[1]["body"]
@@ -168,12 +170,12 @@ def test_an_answer_stays_bound_to_the_question_it_was_opened_for(
     page = PAGES[surface]
     snap = _snapshot(tmp_path, [QUESTION])
     later = {**QUESTION, "wait": {**QUESTION["wait"], "comment_id": "78"}}
-    row = page["row"](QUESTION)
+    row = page.row(QUESTION)
     posts = _drive(tmp_path / "run", surface, snap, [
-        ["open", row, {page["open"]: "answer"}],
+        ["open", row, {page.open: "answer"}],
         ["type", row, "Yes, use OAuth"],
         ["poll", _with(snap, [later])],
-        ["send", row, page["send"]],
+        ["send", row, page.send],
     ], {"/api/act": [409, {"error": "already-answered"}]})
     assert [post["url"] for post in posts] == ["/api/act"]
     body = posts[0]["body"]
