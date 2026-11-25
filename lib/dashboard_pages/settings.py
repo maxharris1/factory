@@ -222,7 +222,8 @@ CSS = """\
 .st-facts{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:0;font:12px/1.5 var(--mono)}
 .st-facts div{display:contents}
 .st-facts dt{color:var(--muted)}.st-facts dd{margin:0;color:var(--text)}
-.st-facts dd.warn{color:var(--warn)}.st-facts dd.muted{color:var(--muted)}.st-facts dd.ok{color:var(--ok)}.st-facts dd.bad{color:var(--bad)}
+.st-facts dd.warn{color:var(--warn)}.st-facts dd.ok{color:var(--ok)}.st-facts dd.bad{color:var(--bad)}
+.st-facts dd.muted{color:var(--muted)}
 .st-results{display:flex;flex-direction:column;gap:4px;margin:0;padding:0;list-style:none;font:12px/1.5 var(--mono);color:var(--text-2)}
 .st-res{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}
 .st-err,.st-out.bad{color:var(--bad)}.st-out.ok{color:var(--ok)}

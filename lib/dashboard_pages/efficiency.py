@@ -462,7 +462,7 @@ def _untracked_who(entry: dict) -> str:
 
 def _untracked_row(entry: dict) -> str:
     return (
-        f"<tr class=\"ef-un\"><td>{_untracked_who(entry)}</td>"
+        f'<tr class="ef-un"><td>{_untracked_who(entry)}</td>'
         f'<td class="ef-v muted" colspan="4">{_e("not tracked: " + entry["not_tracked"])}</td>'
         + _cell(_jobs(entry), "muted") + _cell(_devices(entry), "muted") + "</tr>"
     )
@@ -470,8 +470,9 @@ def _untracked_row(entry: dict) -> str:
 
 def _untracked_block(entry: dict) -> str:
     return (
-        f'<div class="ef-un">{_untracked_who(entry)}{_cell("not tracked: " + entry["not_tracked"], "muted", "div")}'
-        f'<div class="ef-dev">{_e(_jobs(entry) + " · " + _devices(entry))}</div></div>'
+        f'<div class="ef-un">{_untracked_who(entry)}'
+        + _cell("not tracked: " + entry["not_tracked"], "muted", "div")
+        + f'<div class="ef-dev">{_e(_jobs(entry) + " · " + _devices(entry))}</div></div>'
     )
 
 

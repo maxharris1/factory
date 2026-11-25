@@ -41,8 +41,7 @@ device's own login account's readings go there too. `stored` reads both
 tables; a `usage_readings` row wins only when written later. Its
 `account` is the subscription the placed device's login uses, and readers
 and the not-on-plan streak key on it; a NULL account, written by older
-code, is `<harness>-default`. A harness in NOT_TRACKED is never read, and
-the dashboard shows its reason.
+code, is `<harness>-default`.
 
 Nothing here opens a file or runs a process: readings come from parsed
 CLI output and orch.db rows only. The one exception is `migrate`, which has
@@ -71,8 +70,8 @@ if TYPE_CHECKING:
 TABLE = "usage_readings"
 WINDOWS = ("five_hour", "seven_day")
 SOURCES = {"claude": "get_usage", "codex": "rollout", "external": "external"}
-# Checked on Cursor CLI 2026.11.22: it reports no usage unless something
-# reads its stored login token, and nothing here may read a credential.
+# Checked on Cursor CLI 2026.11.22. The factory never reads a credential
+# (docs/ACCOUNTS.md), so a harness listed here stays unread.
 NOT_TRACKED: Mapping[str, str] = MappingProxyType({
     "cursor": "the Cursor CLI reports no usage without reading its login token, "
               "and the usage of the shared Ultra pool is on the external account",

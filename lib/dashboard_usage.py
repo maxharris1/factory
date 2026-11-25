@@ -17,8 +17,7 @@ window holds the newest reading across the account's rows and is `ok`,
 `stale` (the window has reset or the reading is older than STALE_SECONDS,
 and `used` is then null), `not on plan` (Codex only: left out of
 NOT_ON_PLAN_READINGS fresh readings in a row that report other limits) or
-`no reading`. An account is `not tracked` (its harness is in NOT_TRACKED,
-and `not_tracked` carries the reason), `no reading` (no row yet), `no
+`no reading`. An account is `not tracked`, `no reading` (no row yet), `no
 telemetry` (no table: an older database, or telemetry never on), `stale` or
 `ok`. Its limit is its own lane pause, else an older recipient-wide pause
 on its harness. No value is guessed: a missing utilization stays null. Each

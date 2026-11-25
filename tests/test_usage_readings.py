@@ -24,6 +24,7 @@ import threading
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -2092,5 +2093,4 @@ def test_live_get_usage_probe_parses() -> None:
 def test_not_tracked_maps_each_harness_to_a_reason() -> None:
     assert set(usage_readings.NOT_TRACKED) == {"cursor"}
     assert all(isinstance(reason, str) and reason.strip() for reason in usage_readings.NOT_TRACKED.values())
-    with pytest.raises(TypeError):
-        usage_readings.NOT_TRACKED["claude"] = "a reason"  # type: ignore[index]
+    assert isinstance(usage_readings.NOT_TRACKED, MappingProxyType)
