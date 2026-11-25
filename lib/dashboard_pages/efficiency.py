@@ -66,8 +66,7 @@ CSS = """\
 border-top:1px solid var(--line)}
 .ef-wins>div{min-width:0}
 .ef-wk{font:11px/1.5 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
-.ef-accts .ef-un{display:flex;align-items:baseline;gap:8px}
-.ef-acct+.ef-un{padding:2px 0 0}
+.ef-accts .ef-un{padding:2px 12px 0}
 .ef-hnote-ph{display:none;margin:10px 0 0;font-size:12px;color:var(--muted)}
 @media (max-width:699.98px){
 body[data-page="efficiency"] main{padding:12px 12px 24px;gap:12px}
@@ -220,16 +219,26 @@ SCRIPT = r"""
     for (var i = 0; i < METER_CELLS; i++) add(meter, el('span', i < v.lit ? v.tone : null));
     if (!phone && v.tag) add(room, el('span', 'ef-tag', v.tag));
   }
-  function untrackedLine(parent, h, row) {
+  function untrackedWho(parent, e) {
+    var line = add(parent, el('div', 'ef-who'));
+    add(line, el('span', 'bot ' + e.harness, e.harness));
+    add(line, el('span', 'ef-name', e.account));
+    if (e.plan !== null) add(parent, el('div', 'ef-dev', e.plan));
+  }
+  function untrackedLine(parent, e, row) {
+    var reason = 'not tracked: ' + e.not_tracked;
     if (row) {
       var tr = add(parent, el('tr', 'ef-un'));
-      add(add(tr, el('td')), el('span', 'bot ' + h, h));
-      add(tr, el('td', 'ef-v muted', 'not tracked')).setAttribute('colspan', '6');
+      untrackedWho(add(tr, el('td')), e);
+      add(tr, el('td', 'ef-v muted', reason)).setAttribute('colspan', '4');
+      usageCell(tr, [accountJobs(e), 'muted'], 'td');
+      usageCell(tr, [accountDevices(e), 'muted'], 'td');
       return;
     }
     var line = add(parent, el('div', 'ef-un'));
-    add(line, el('span', 'bot ' + h, h));
-    add(line, el('span', 'ef-v muted', 'not tracked'));
+    untrackedWho(line, e);
+    usageCell(line, [reason, 'muted'], 'div');
+    add(line, el('div', 'ef-dev', accountJobs(e) + ' · ' + accountDevices(e)));
   }
   function renderHeadroom(d) {
     var root = panel('headroom', 'Subscription headroom', 'per account');
@@ -237,9 +246,7 @@ SCRIPT = r"""
     var accounts = d.usage.accounts;
     var views = accounts.filter(function (e) { return e.state !== 'not tracked'; })
       .map(function (e) { return accountView(e, d.generated_at_epoch); });
-    var untracked = [];
-    accounts.filter(function (e) { return e.state === 'not tracked'; })
-      .forEach(function (e) { if (untracked.indexOf(e.harness) < 0) untracked.push(e.harness); });
+    var untracked = accounts.filter(function (e) { return e.state === 'not tracked'; });
     var table = add(add(root, el('div', 'ef-scroll')), el('table', 'ef-usage'));
     var head = add(add(table, el('thead')), el('tr'));
     ['account', '5-hour window', '7-day window', 'resets', 'headroom', 'jobs', 'devices']
@@ -253,7 +260,7 @@ SCRIPT = r"""
       usageCell(tr, [accountJobs(v.entry), null], 'td');
       usageCell(tr, [accountDevices(v.entry), null], 'td');
     });
-    untracked.forEach(function (h) { untrackedLine(body, h, true); });
+    untracked.forEach(function (e) { untrackedLine(body, e, true); });
     add(root, el('p', 'ef-hnote', HEADROOM_NOTE));
     var list = add(root, el('div', 'ef-accts'));
     views.forEach(function (v) {
@@ -269,7 +276,7 @@ SCRIPT = r"""
       });
       add(block, el('div', 'ef-dev', accountJobs(v.entry) + ' · ' + accountDevices(v.entry)));
     });
-    untracked.forEach(function (h) { untrackedLine(list, h, false); });
+    untracked.forEach(function (e) { untrackedLine(list, e, false); });
     add(root, el('p', 'ef-hnote-ph', HEADROOM_NOTE));
   }
 """
@@ -445,6 +452,29 @@ def _who(entry: dict) -> str:
     )
 
 
+def _untracked_who(entry: dict) -> str:
+    harness, plan = entry["harness"], entry["plan"]
+    return (
+        f'<div class="ef-who">{_span("bot " + harness, harness)}{_span("ef-name", entry["account"])}</div>'
+        + ("" if plan is None else f'<div class="ef-dev">{_e(plan)}</div>')
+    )
+
+
+def _untracked_row(entry: dict) -> str:
+    return (
+        f"<tr class=\"ef-un\"><td>{_untracked_who(entry)}</td>"
+        f'<td class="ef-v muted" colspan="4">{_e("not tracked: " + entry["not_tracked"])}</td>'
+        + _cell(_jobs(entry), "muted") + _cell(_devices(entry), "muted") + "</tr>"
+    )
+
+
+def _untracked_block(entry: dict) -> str:
+    return (
+        f'<div class="ef-un">{_untracked_who(entry)}{_cell("not tracked: " + entry["not_tracked"], "muted", "div")}'
+        f'<div class="ef-dev">{_e(_jobs(entry) + " · " + _devices(entry))}</div></div>'
+    )
+
+
 def _number(view: dict, *, phone: bool) -> str:
     if view["limit"]:
         return _span("ef-lim bad", view["limit"])
@@ -488,18 +518,11 @@ def _account_block(view: dict) -> str:
 def _headroom(snapshot: dict) -> str:
     accounts = snapshot["usage"]["accounts"]
     views = [_view(e, snapshot["generated_at_epoch"]) for e in accounts if e["state"] != "not tracked"]
-    untracked = list(dict.fromkeys(e["harness"] for e in accounts if e["state"] == "not tracked"))
+    untracked = [e for e in accounts if e["state"] == "not tracked"]
     head = "".join(f"<th>{name}</th>" for name in
                    ("account", "5-hour window", "7-day window", "resets", "headroom", "jobs", "devices"))
-    rows = "".join(_account_row(view) for view in views) + "".join(
-        f'<tr class="ef-un"><td>{_span("bot " + h, h)}</td>'
-        '<td class="ef-v muted" colspan="6">not tracked</td></tr>'
-        for h in untracked
-    )
-    blocks = "".join(_account_block(view) for view in views) + "".join(
-        f'<div class="ef-un">{_span("bot " + h, h)}{_span("ef-v muted", "not tracked")}</div>'
-        for h in untracked
-    )
+    rows = "".join(_account_row(view) for view in views) + "".join(_untracked_row(e) for e in untracked)
+    blocks = "".join(_account_block(view) for view in views) + "".join(_untracked_block(e) for e in untracked)
     inner = (
         f'<div class="ef-scroll"><table class="ef-usage"><thead><tr>{head}</tr></thead>'
         f"<tbody>{rows}</tbody></table></div>"

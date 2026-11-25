@@ -41,7 +41,8 @@ device's own login account's readings go there too. `stored` reads both
 tables; a `usage_readings` row wins only when written later. Its
 `account` is the subscription the placed device's login uses, and readers
 and the not-on-plan streak key on it; a NULL account, written by older
-code, is `<harness>-default`. Cursor is not tracked.
+code, is `<harness>-default`. A harness in NOT_TRACKED is never read, and
+the dashboard shows its reason.
 
 Nothing here opens a file or runs a process: readings come from parsed
 CLI output and orch.db rows only. The one exception is `migrate`, which has
@@ -54,10 +55,11 @@ import json
 import math
 import sqlite3
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from lib import lane_limit, state_backup
@@ -69,7 +71,12 @@ if TYPE_CHECKING:
 TABLE = "usage_readings"
 WINDOWS = ("five_hour", "seven_day")
 SOURCES = {"claude": "get_usage", "codex": "rollout", "external": "external"}
-NOT_TRACKED = frozenset({"cursor"})
+# Checked on Cursor CLI 2026.11.22: it reports no usage unless something
+# reads its stored login token, and nothing here may read a credential.
+NOT_TRACKED: Mapping[str, str] = MappingProxyType({
+    "cursor": "the Cursor CLI reports no usage without reading its login token, "
+              "and the usage of the shared Ultra pool is on the external account",
+})
 CODEX_WINDOW_MINUTES = {300: "five_hour", 10080: "seven_day"}
 GET_USAGE_ID = "orch-usage"
 RESET_HORIZON_SECONDS = 30 * 24 * 3600

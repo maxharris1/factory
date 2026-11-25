@@ -228,12 +228,15 @@ CLAUDE_UNREAD = "claude claude-default via get_usage · never read"
 CODEX_UNREAD = "codex codex-default via rollout · never read"
 CLAUDE_LOAD = ["0 running · no max", "signed in on box, pc"]
 CODEX_LOAD = ["0 running · no max", "signed in on box"]
+NOT_TRACKED = f"not tracked: {usage_readings.NOT_TRACKED['cursor']}"
+CURSOR = "cursor cursor-default"
+CURSOR_CELLS = [NOT_TRACKED, "0 running · no max", "signed in on box"]
 
 
 @pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
 def test_headroom_has_one_row_per_account(tmp_path: Path, render: str) -> None:
     rows = _rows(_render(tmp_path, _snapshot(tmp_path), render, "headroom"))
-    assert list(rows) == [CLAUDE, CODEX, "cursor"]
+    assert list(rows) == [CLAUDE, CODEX, CURSOR]
     assert rows[CLAUDE] == ["41% used", "26% used", "in 2h 05m", "59%", *CLAUDE_LOAD]
     assert rows[CODEX] == ["10% used", "stale", "in 1h 00m", "90% (5-hour only)", *CODEX_LOAD]
 
@@ -363,14 +366,26 @@ def test_a_lane_limit_replaces_the_number_and_leaves_the_meter_unlit(tmp_path: P
 
 
 @pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
-def test_untracked_harness_is_one_muted_line(tmp_path: Path, render: str) -> None:
-    headroom = _render(tmp_path, _snapshot(tmp_path), render, "headroom")
+def test_each_untracked_account_is_one_muted_row_with_its_reason(tmp_path: Path, render: str) -> None:
+    headroom = _render(tmp_path, _accounts_snapshot(tmp_path, CURSOR_ULTRA), render, "headroom")
     table = headroom.split("</table>")[0]
+    muted = f'<td class="ef-v muted" colspan="4">{html.escape(NOT_TRACKED)}</td>'
     assert re.findall(r'<tr class="ef-un">(.*?)</tr>', table) == [
-        f'<td><span class="bot {h}">{h}</span></td><td class="ef-v muted" colspan="6">not tracked</td>'
-        for h in ("cursor",)
+        '<td><div class="ef-who"><span class="bot cursor">cursor</span><span class="ef-name">cursor-default</span>'
+        f'</div></td>{muted}<td class="ef-v muted">0 running · no max</td>'
+        '<td class="ef-v muted">signed in on box</td>',
+        '<td><div class="ef-who"><span class="bot cursor">cursor</span><span class="ef-name">cursor-ultra</span>'
+        f'</div><div class="ef-dev">ultra</div></td>{muted}<td class="ef-v muted">0 running · no max</td>'
+        '<td class="ef-v muted">signed in on pc</td>',
     ]
-    assert table.count("bot cursor") == 1 and "cursor-bot" not in headroom
+    blocks = [_text(block) for block in _blocks(headroom) if block.startswith('<div class="ef-un">')]
+    assert blocks == [
+        f"cursor cursor-default {NOT_TRACKED} 0 running · no max · signed in on box",
+        f"cursor cursor-ultra ultra {NOT_TRACKED} 0 running · no max · signed in on pc",
+    ]
+    assert "never read" not in " ".join(blocks) and "never read" not in "".join(
+        re.findall(r'<tr class="ef-un">.*?</tr>', table))
+    assert "cursor-bot" not in headroom
 
 
 @pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
@@ -390,7 +405,7 @@ def test_headroom_phone_block_per_account(tmp_path: Path, render: str) -> None:
         " 0 running · no max · signed in on box, pc",
         f"{CODEX} 90% headroom (5-hour only) 5-hour 10% used 7-day stale resets in 1h 00m"
         " 0 running · no max · signed in on box",
-        "cursor not tracked",
+        f"{CURSOR} {NOT_TRACKED} 0 running · no max · signed in on box",
     ]
     assert [block[: block.index(">") + 1] for block in blocks] == ['<div class="ef-acct">'] * 2 + [
         '<div class="ef-un">']
@@ -406,7 +421,7 @@ def test_headroom_without_the_table_says_no_telemetry(tmp_path: Path, render: st
     rows = _rows(headroom)
     assert rows[CLAUDE_UNREAD] == ["no telemetry"] * 3 + ["", *CLAUDE_LOAD]
     assert rows[CODEX_UNREAD] == ["no telemetry"] * 3 + ["", *CODEX_LOAD]
-    assert rows["cursor"] == ["not tracked"]
+    assert rows[CURSOR] == CURSOR_CELLS
     assert _meters(headroom.split("</table>")[0]) == [
         (f"{h}-default headroom: no telemetry", [None] * 20) for h in ("claude", "codex")
     ]
@@ -430,6 +445,11 @@ CODEX_B_RESET = int(NOW + 9000)
 CODEX_A = "codex codex-a pro · via rollout · read 2m 00s ago"
 CODEX_B = "codex codex-b via rollout · read 5m 00s ago"
 GROK = "external Cursor Grok Ultra ultra · via external · never read"
+CURSOR_ULTRA = (
+    ACCOUNTS.replace("accounts:\n", "accounts:\n  - {id: cursor-ultra, harness: cursor, plan: ultra}\n")
+    .replace("    ssh_alias: pc-{bot}\n    harnesses:\n",
+             "    ssh_alias: pc-{bot}\n    harnesses:\n      cursor: {bot: cursor-bot, account: cursor-ultra}\n")
+)
 
 
 def _accounts_snapshot(tmp_path: Path, machines: str = ACCOUNTS, limit: str | None = None) -> dict:
@@ -497,21 +517,24 @@ def test_headroom_has_one_row_per_account_with_plan_source_age_and_devices(tmp_p
     headroom = _render(tmp_path, _accounts_snapshot(tmp_path), render, "headroom")
     rows = _rows(headroom)
     assert list(rows) == ["claude claude-default via get_usage · never read",
-                          CODEX_A, CODEX_B, GROK, "cursor"]
+                          CODEX_A, CODEX_B, GROK, CURSOR]
     assert rows[GROK] == ["no reading"] * 3 + ["", "0 running · no max", "none"]
-    assert rows["cursor"] == ["not tracked"]
+    assert rows[CURSOR] == CURSOR_CELLS
     assert "One account is shared" not in headroom and "bot grok" not in headroom
     blocks = _blocks(headroom)
     assert len(blocks) == len(rows) and all(_text(block).startswith(key) for block, key in zip(blocks, rows))
 
 
 @pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
-def test_a_declared_cursor_account_is_tracked(tmp_path: Path, render: str) -> None:
-    machines = ACCOUNTS.replace("accounts:\n", "accounts:\n  - {id: cursor-pro, harness: cursor}\n").replace(
-        "cursor: cursor-bot", "cursor: {bot: cursor-bot, account: cursor-pro}")
-    rows = _rows(_render(tmp_path, _accounts_snapshot(tmp_path, machines), render, "headroom"))
-    assert rows["cursor cursor-pro never read"] == ["no reading"] * 3 + ["", "0 running · no max", "signed in on box"]
-    assert "cursor" not in rows
+def test_a_declared_cursor_account_is_not_tracked_with_its_reason(tmp_path: Path, render: str) -> None:
+    snapshot = _accounts_snapshot(tmp_path, CURSOR_ULTRA)
+    entries = {e["account"]: e for e in snapshot["usage"]["accounts"]}
+    reason = usage_readings.NOT_TRACKED["cursor"]
+    for account in ("cursor-default", "cursor-ultra"):
+        assert (entries[account]["state"], entries[account]["not_tracked"]) == ("not tracked", reason)
+    assert {entries[a]["not_tracked"] for a in ("claude-default", "codex-a", "cursor-grok-ultra")} == {None}
+    rows = _rows(_render(tmp_path, snapshot, render, "headroom"))
+    assert rows["cursor cursor-ultra ultra"] == [NOT_TRACKED, "0 running · no max", "signed in on pc"]
 
 
 @pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])

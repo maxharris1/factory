@@ -47,7 +47,7 @@ and writes the request to the settings spool. The card then shows
 
 | Op | Keys | Control | What it does |
 | --- | --- | --- | --- |
-| `add` | `harness`, `max_jobs`, `signed_in_on` | Add account | Appends the account to `accounts:`. `harness` is `claude`, `codex` or `cursor`. `max_jobs` is 1 to 64. `signed_in_on` lists devices that list the harness. |
+| `add` | `harness`, `max_jobs`, `signed_in_on` | Add account | Appends the account to `accounts:`. `harness` is `claude` or `codex`. Choosing `cursor` shows the machines.yml step and disables Add, and the applier refuses a `cursor` add with that step. `max_jobs` is 1 to 64. `signed_in_on` lists devices that list the harness. |
 | `set` | `field`, `expect`, `value` | Apply max_jobs, Apply devices, Pause or Resume | Sets one `field`, which is `max_jobs` (1 to 64), `signed_in_on` (a list of devices) or `paused` (true or false). `expect` is the value the card showed. Pause writes `paused: true`. Resume deletes the line. |
 | `remove` | `expect` | Remove | Deletes the account's block and keeps its comments. `expect` is the account as the card showed it, with `harness`, `max_jobs`, `paused` and `signed_in_on`. |
 | `prepare` | `device` | Prepare | Makes the account's folder on `device`, then runs the doctor. It edits nothing. |
@@ -95,6 +95,7 @@ shows `refused` with the reason on the card.
 | `read-only` | A `<harness>-default` or `external` account. |
 | `unknown-account` | The account is not in `accounts:`. |
 | `exists` | An `add` names an account that exists. |
+| `a cursor account is a device's cursor login: set harnesses.cursor: {bot: cursor-bot, account: <id>} on each device in machines.yml` | An `add` with harness `cursor`. A Cursor account is a device's cursor login, which the panel cannot set, so edit `machines.yml` by hand. |
 | `bad-id`, `unknown-harness`, `bad-field`, `bad-value` | The applier's own shape checks, which repeat the server's. |
 | `unknown-device`, `harness-not-on-device` | A device in `signed_in_on` is not in `machines.yml`, or does not list the account's harness. |
 | `<field> is set in machines.local.yml`, `<account> is set in machines.local.yml` | The overlay sets that key, or names that account, so the edit would not take effect. |
@@ -105,7 +106,7 @@ shows `refused` with the reason on the card.
 | `<account> holds a running job on <device>` | A `signed_in_on` change that drops a device where the account runs a job. |
 | `cannot read running jobs` | The running-job check could not read `orch.db`. |
 | `cannot edit the account's block` | The line edit cannot find or change the account's block. |
-| `invalid after the edit: <reason>` | The edited file does not load. A Claude or Codex account needs at least one device in `signed_in_on`. A Cursor account must be a device's cursor login, which the panel cannot set, so an `add` with harness `cursor` ends here. |
+| `invalid after the edit: <reason>` | The edited file does not load. A Claude or Codex account needs at least one device in `signed_in_on`. |
 | `the edit changed more than that field`, `the edit changed more than that account` | The edit changed something besides the request. |
 | `the edit changed a comment` | The edit changed a comment line. |
 
@@ -382,6 +383,13 @@ env -u CURSOR_API_KEY -u CURSOR_AUTH_TOKEN -u CURSOR_CONFIG_DIR cursor-agent log
 
 On macOS the Cursor CLI keeps that login in the Keychain, so no variable
 moves it to a folder and a Cursor account has no `signed_in_on`.
+
+A Cursor card shows the account's plan and `not tracked: <reason>` in place
+of 5h used, 7d used and headroom. The Efficiency page shows the same reason
+on the account's own muted row. The reason comes from `NOT_TRACKED` in
+`lib/usage_readings.py`: the Cursor CLI reports no usage without reading its
+login token, and nothing in the factory reads a credential. The shared Ultra
+pool's usage is on the `external` account.
 
 ### Cursor is checked, not run
 

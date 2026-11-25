@@ -11,6 +11,7 @@ import json
 import math
 import time
 
+from lib.account_requests import ADD_REFUSED
 from lib.dashboard_pages.common import _chip, _e, _panel, _span
 
 RESULT_TONE = {"applied": "ok", "pending": "warn", "ok": "ok", "signed-out": "muted", "mismatch": "warn",
@@ -80,14 +81,23 @@ def running_line(account: dict) -> str:
     ) or "none"
 
 
-def account_facts(account: dict) -> list[tuple[str, str, str]]:
+def usage_facts(account: dict) -> list[tuple[str, str, str]]:
+    if account.get("not_tracked"):
+        return [("usage", f"not tracked: {account['not_tracked']}", "muted")]
     return [
-        ("harness", account["harness"], ""),
-        ("max_jobs", "—" if account.get("max_jobs") is None else str(account["max_jobs"]), ""),
-        ("paused", "yes" if account.get("paused") else "no", "warn" if account.get("paused") else ""),
         ("5h used", percent(account.get("five_hour_used")), ""),
         ("7d used", percent(account.get("seven_day_used")), ""),
         ("headroom", *headroom_fact(account)),
+    ]
+
+
+def account_facts(account: dict) -> list[tuple[str, str, str]]:
+    return [
+        ("harness", account["harness"], ""),
+        *([("plan", account["plan"], "")] if account.get("plan") else []),
+        ("max_jobs", "—" if account.get("max_jobs") is None else str(account["max_jobs"]), ""),
+        ("paused", "yes" if account.get("paused") else "no", "warn" if account.get("paused") else ""),
+        *usage_facts(account),
         ("running", running_line(account), ""),
     ]
 
@@ -212,7 +222,7 @@ CSS = """\
 .st-facts{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:0;font:12px/1.5 var(--mono)}
 .st-facts div{display:contents}
 .st-facts dt{color:var(--muted)}.st-facts dd{margin:0;color:var(--text)}
-.st-facts dd.warn{color:var(--warn)}.st-facts dd.ok{color:var(--ok)}.st-facts dd.bad{color:var(--bad)}
+.st-facts dd.warn{color:var(--warn)}.st-facts dd.muted{color:var(--muted)}.st-facts dd.ok{color:var(--ok)}.st-facts dd.bad{color:var(--bad)}
 .st-results{display:flex;flex-direction:column;gap:4px;margin:0;padding:0;list-style:none;font:12px/1.5 var(--mono);color:var(--text-2)}
 .st-res{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}
 .st-err,.st-out.bad{color:var(--bad)}.st-out.ok{color:var(--ok)}
@@ -400,11 +410,15 @@ _SCRIPT = r"""
       return (j.ticket ? j.ticket + ' ' : '') + j.kind + ' on ' + j.device;
     }).join(', ') || 'none';
   }
+  function acUsage(a) {
+    if (a.not_tracked) return [['usage', 'not tracked: ' + a.not_tracked, 'muted']];
+    return [['5h used', acPct(a.five_hour_used), ''], ['7d used', acPct(a.seven_day_used), ''],
+            ['headroom'].concat(acHeadroom(a))];
+  }
   function acFacts(a) {
-    return [['harness', a.harness, ''], ['max_jobs', stValue(a.max_jobs), ''],
-            ['paused', a.paused ? 'yes' : 'no', a.paused ? 'warn' : ''],
-            ['5h used', acPct(a.five_hour_used), ''], ['7d used', acPct(a.seven_day_used), ''],
-            ['headroom'].concat(acHeadroom(a)), ['running', acRunning(a), '']];
+    return [['harness', a.harness, '']].concat(a.plan ? [['plan', a.plan, '']] : [],
+      [['max_jobs', stValue(a.max_jobs), ''], ['paused', a.paused ? 'yes' : 'no', a.paused ? 'warn' : '']],
+      acUsage(a), [['running', acRunning(a), '']]);
   }
   function acSignIn(ul, x) {
     var li = add(ul, el('li', 'ac-dev'));
@@ -455,7 +469,8 @@ _SCRIPT = r"""
   function acLive(c) { return !!c.signin && !c.signin.done; }
   function acDisable(c) {
     c.buttons.concat(c.pairButtons, c.panelButtons).forEach(function (b) {
-      b.disabled = c.busy || (b.getAttribute('data-op') === 'signin' && acLive(c));
+      b.disabled = c.busy || (b.getAttribute('data-op') === 'signin' && acLive(c)) ||
+        (b.getAttribute('data-op') === 'add' && !!c.refused);
     });
   }
   function acPost(c, send, ok) {
@@ -623,6 +638,12 @@ _SCRIPT = r"""
   function acAddSync(c) {
     var names = acCandidates(c.d, c.harness.value);
     acBoxes(c, JSON.stringify(names), names, acChecked(c));
+    var refused = ST.addRefused[c.harness.value] || null;
+    if (refused || c.refused) {
+      c.out.className = refused ? 'st-out bad' : 'st-out';
+      c.out.textContent = refused || '';
+    }
+    c.refused = refused;
     acDisable(c);
   }
   function acAddBuild() {
@@ -716,5 +737,6 @@ SCRIPT = _SCRIPT.replace("__ST__", json.dumps(
     {"tone": RESULT_TONE, "perCard": RESULTS_PER_CARD, "queued": QUEUED, "readOnly": READ_ONLY,
      "waiting": WAITING, "noChanges": NO_CHANGES, "signIn": SIGN_IN_TONE, "unchecked": UNCHECKED,
      "accountReadOnly": ACCOUNT_READ_ONLY, "notSignedIn": NOT_SIGNED_IN, "noAccounts": NO_ACCOUNTS,
-     "harnesses": ADD_HARNESSES, "signinHarnesses": SIGNIN_HARNESSES, "remind": SIGNIN_REMIND}
+     "harnesses": ADD_HARNESSES, "signinHarnesses": SIGNIN_HARNESSES, "remind": SIGNIN_REMIND,
+     "addRefused": dict(ADD_REFUSED)}
 ))

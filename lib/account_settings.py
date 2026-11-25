@@ -30,7 +30,7 @@ from types import MappingProxyType
 from typing import ClassVar, NamedTuple
 
 from lib import account_requests
-from lib.account_requests import COMMON_KEYS
+from lib.account_requests import ADD_REFUSED, COMMON_KEYS
 from lib.device_pool import RunningPair
 from lib.load import is_strict_int
 from lib.machines_yml import ACCOUNT_ID, EXTERNAL, Account, MachinesConfig, default_account
@@ -287,6 +287,8 @@ def _plan_add(request: AccountRequest, old: MachinesConfig, machines: Path) -> P
     harness, max_jobs, devices = (request.value[key] for key in ADD_KEYS)
     if harness not in HARNESSES:
         raise Refused("unknown-harness")
+    if harness in ADD_REFUSED:
+        raise Refused(ADD_REFUSED[harness])
     if (max_jobs is not None and not _is_max_jobs(max_jobs)) or not _is_devices(devices):
         raise Refused("bad-value")
     _check_devices(old, harness, devices, None)

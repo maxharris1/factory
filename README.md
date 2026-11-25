@@ -1868,8 +1868,10 @@ with a Codex plan that reports only its 7-day window. Its `used` stays null,
 and the other window alone is then the account's headroom.
 
 A newer `no reading` replaces older numbers. A window that has reset, or a
-reading older than 24 hours, is `stale` and its `used` is null. Cursor shows `not tracked` while no Cursor account is declared, and a database without the
-table shows `no telemetry`.
+reading older than 24 hours, is `stale` and its `used` is null. Every Cursor
+account shows `not tracked: <reason>` on its own muted row with its plan,
+jobs and devices: the Cursor CLI reports no usage without reading its login
+token. A database without the table shows `no telemetry`.
 
 Each row also shows the account's jobs (`2 running · max 3`, or `no max`)
 and its devices (`signed in on pc, box · running on pc`), from the same read

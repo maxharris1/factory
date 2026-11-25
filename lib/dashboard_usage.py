@@ -17,14 +17,14 @@ window holds the newest reading across the account's rows and is `ok`,
 `stale` (the window has reset or the reading is older than STALE_SECONDS,
 and `used` is then null), `not on plan` (Codex only: left out of
 NOT_ON_PLAN_READINGS fresh readings in a row that report other limits) or
-`no reading`. An account is `not tracked` (Cursor, while machines.yml
-declares no Cursor account), `no reading` (no row yet), `no telemetry` (no
-table: an older database, or telemetry never on), `stale` or `ok`. Its
-limit is its own lane pause, else an older recipient-wide pause on its
-harness. No value is guessed: a missing utilization stays null. Each entry
-also carries what placement reads (lib/device_pool.py account_loads): its
-`running` jobs, `max_jobs`, the devices it is `signed_in` on and those it is
-`running_on` now.
+`no reading`. An account is `not tracked` (its harness is in NOT_TRACKED,
+and `not_tracked` carries the reason), `no reading` (no row yet), `no
+telemetry` (no table: an older database, or telemetry never on), `stale` or
+`ok`. Its limit is its own lane pause, else an older recipient-wide pause
+on its harness. No value is guessed: a missing utilization stays null. Each
+entry also carries what placement reads (lib/device_pool.py account_loads):
+its `running` jobs, `max_jobs`, the devices it is `signed_in` on and those it
+is `running_on` now.
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ def _names(*values: object) -> bool:
     return all(isinstance(value, str) and _NAME.fullmatch(value) for value in values)
 
 
-def _text(value: object) -> str | None:
+def safe_text(value: object) -> str | None:
     return value if isinstance(value, str) and 0 < len(value) <= TEXT_MAX and value.isprintable() else None
 
 
@@ -141,9 +141,10 @@ def _entry(
     declared = None if machines is None else machines.account(account_id)
     entry = {
         "account": account_id,
-        "plan": None if declared is None else _text(declared.plan),
-        "label": None if declared is None else _text(declared.label),
+        "plan": None if declared is None else safe_text(declared.plan),
+        "label": None if declared is None else safe_text(declared.label),
         "source": SOURCES.get(harness),
+        "not_tracked": NOT_TRACKED.get(harness),
         "bot": account.bots[0] if account.bots else None,
         "bots": account.bots,
         "harness": harness,
@@ -158,8 +159,7 @@ def _entry(
         "running_on": [device for device in loads.running_on.get(account_id, ()) if _names(device)],
     }
     states = {entry[window]["state"] for window in WINDOWS}
-    tracked = machines is not None and any(item.harness == harness for item in machines.accounts)
-    if harness in NOT_TRACKED and not tracked:
+    if harness in NOT_TRACKED:
         state = "not tracked"
     elif readings is None:
         state = "no telemetry"
