@@ -120,6 +120,10 @@ BACKOFF_TABLE = "device_backoff"
 MEMORY_HOLDS_TABLE = "device_memory_holds"
 ORPHANS_TABLE = "device_orphans"
 QA_SLOTS_TABLE = "qa_device_slots"
+PLACEMENTS_TABLE = "account_placements"
+BALANCE_WINDOW_SECONDS = 6 * 3600
+SKEW_THRESHOLD = 0.20
+SKEW_MIN_PLACEMENTS = 4
 UNREACHABLE_BACKOFF_SECONDS = 5 * 60
 # Columns F2-02 added to the F2-01 slot table, added in place on an old database.
 _SLOT_COLUMNS = (
@@ -225,6 +229,8 @@ class AccountLoads:
     signed_in: frozenset[tuple[str, str]] | None
     signed_out: frozenset[tuple[str, str]]
     running_on: Mapping[str, tuple[str, ...]]
+    recent_placements: Mapping[str, int] = field(default_factory=dict)
+    last_placed_at: Mapping[str, tuple[float, int]] = field(default_factory=dict)
 
     def signed_in_on(self, config: MachinesConfig, device: str, harness: str) -> list[str]:
         own = config.device(device)
@@ -334,7 +340,32 @@ def account_loads(
     signed_out = account_doctor.held(connection) if _has_table(connection, account_doctor.HOLDS) else frozenset()
     if _has_table(connection, account_doctor.SIGNOUTS):
         signed_out |= account_doctor.signing_out(connection, now)
-    return AccountLoads(running, frozenset(held), frozenset(closed), score, signed_in, signed_out, running_on)
+    recent_placements: dict[str, int] = {}
+    last_placed_at: dict[str, tuple[float, int]] = {}
+    if _has_table(connection, PLACEMENTS_TABLE):
+        cutoff = now - BALANCE_WINDOW_SECONDS
+        for acct, count, newest_at, max_rowid in connection.execute(
+            f"""
+            SELECT account, COUNT(*), MAX(placed_at), MAX(rowid)
+            FROM {PLACEMENTS_TABLE}
+            WHERE placed_at >= ?
+            GROUP BY account
+            """,
+            (cutoff,),
+        ):
+            recent_placements[str(acct)] = int(count)
+            last_placed_at[str(acct)] = (float(newest_at), int(max_rowid))
+    return AccountLoads(
+        running,
+        frozenset(held),
+        frozenset(closed),
+        score,
+        signed_in,
+        signed_out,
+        running_on,
+        recent_placements,
+        last_placed_at,
+    )
 
 
 def _ranked_free(
@@ -381,7 +412,15 @@ def choose_pair(
     def order(account: str) -> tuple:
         rank, _ = best[account]
         avoided = rank[0]
-        return avoided, -loads.score_of(account), loads.running.get(account, 0), rank, account
+        return (
+            avoided,
+            -loads.score_of(account),
+            loads.running.get(account, 0),
+            loads.recent_placements.get(account, 0),
+            loads.last_placed_at.get(account, (0.0, 0)),
+            rank,
+            account,
+        )
 
     account = min(best, key=order)
     return account, best[account][1]
@@ -488,10 +527,24 @@ class DevicePool:
                 )
                 """
             )
+            connection.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {PLACEMENTS_TABLE} (
+                    job_id TEXT PRIMARY KEY,
+                    account TEXT NOT NULL,
+                    harness TEXT NOT NULL,
+                    device TEXT NOT NULL,
+                    placed_at REAL NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                f"CREATE INDEX IF NOT EXISTS {PLACEMENTS_TABLE}_window ON {PLACEMENTS_TABLE} (placed_at)"
+            )
             connection.commit()
 
     def _needs_schema(self) -> bool:
-        """True unless both tables and every F2-02 column already exist.
+        """True unless required tables and every F2-02 column already exist.
 
         Checked without a write lock, so a waiter starting while the poller
         writes does not queue behind it just to find nothing to do.
@@ -501,11 +554,18 @@ class DevicePool:
                 str(row["name"])
                 for row in connection.execute(f"PRAGMA table_info({SLOTS_TABLE})")
             }
-            health = connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-                (HEALTH_TABLE,),
-            ).fetchone()
-        return health is None or not {name for name, _ in _SLOT_COLUMNS} <= columns
+            tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (?, ?)",
+                    (HEALTH_TABLE, PLACEMENTS_TABLE),
+                )
+            }
+        return (
+            HEALTH_TABLE not in tables
+            or PLACEMENTS_TABLE not in tables
+            or not {name for name, _ in _SLOT_COLUMNS} <= columns
+        )
 
     def _placement(
         self, connection: sqlite3.Connection
@@ -653,6 +713,19 @@ class DevicePool:
                 """,
                 (row["id"], device.name, harness, os_user, now, claimer_pid, claimer_start, account),
             )
+            connection.execute(
+                f"""
+                INSERT OR REPLACE INTO {PLACEMENTS_TABLE} (
+                    job_id, account, harness, device, placed_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (row["id"], account, harness, device.name, now),
+            )
+            connection.execute(
+                f"DELETE FROM {PLACEMENTS_TABLE} WHERE placed_at < ?",
+                (now - BALANCE_WINDOW_SECONDS,),
+            )
             updated = connection.execute(
                 "SELECT * FROM jobs WHERE id = ?",
                 (row["id"],),
@@ -734,6 +807,8 @@ class DevicePool:
                 connection.commit()
                 return False
             connection.execute(f"DELETE FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,))
+            if _has_table(connection, PLACEMENTS_TABLE):
+                connection.execute(f"DELETE FROM {PLACEMENTS_TABLE} WHERE job_id = ?", (job_id,))
             if retire_requeued(connection, job_id, reason, now=now) is None and _has_table(
                 connection, "job_events"
             ):

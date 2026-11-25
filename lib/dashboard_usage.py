@@ -201,7 +201,43 @@ def read_usage(
         )
         for account_id, account in accounts.items()
     ]
+    entries = _with_balance(entries, loads)
     return {"state": "no telemetry" if stored is None else "ok", "accounts": entries}
+
+
+def _with_balance(entries: list[dict], loads: device_pool.AccountLoads) -> list[dict]:
+    """Attach intra-harness rolling placement counts, effective headroom score,
+    placement share, and skew indicator to each account entry (E2-5)."""
+    by_harness: dict[str, list[dict]] = {}
+    for entry in entries:
+        by_harness.setdefault(str(entry["harness"]), []).append(entry)
+    out: list[dict] = []
+    for entry in entries:
+        account_id = str(entry["account"])
+        peers = by_harness.get(str(entry["harness"]), [])
+        count = loads.recent_placements.get(account_id, 0)
+        total = sum(loads.recent_placements.get(str(peer["account"]), 0) for peer in peers)
+        share = round(count / total, 4) if total > 0 else None
+        if len(peers) < 2 or total < device_pool.SKEW_MIN_PLACEMENTS or share is None:
+            skew = "none"
+        else:
+            even = 1.0 / len(peers)
+            if share - even > device_pool.SKEW_THRESHOLD:
+                skew = "high"
+            elif even - share > device_pool.SKEW_THRESHOLD:
+                skew = "low"
+            else:
+                skew = "balanced"
+        out.append(
+            {
+                **entry,
+                "recent_placements": count,
+                "effective_score": loads.score_of(account_id),
+                "placement_share": share,
+                "skew": skew,
+            }
+        )
+    return out
 
 
 def _limited(entry: dict, limit: lane_limit.LaneLimit | None) -> dict:

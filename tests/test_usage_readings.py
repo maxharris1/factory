@@ -1287,6 +1287,10 @@ def test_snapshot_usage_has_one_entry_per_account(tmp_path: Path) -> None:
         "running_on": [],
         "limited_until": None,
         "limit_label": None,
+        "recent_placements": 0,
+        "effective_score": 0.655,
+        "placement_share": None,
+        "skew": "none",
     }
     assert accounts["codex"]["state"] == "no reading"
     assert accounts["codex"]["headroom"] is None
@@ -1406,7 +1410,8 @@ def test_a_window_left_out_of_three_fresh_readings_is_not_on_the_plan(tmp_path: 
     assert codex["headroom"] == 0.32 and codex["state"] == "ok"
     assert set(codex) == {"account", "plan", "label", "source", "bot", "bots", "harness", "devices", "state",
                           "five_hour", "seven_day", "headroom", "observed_at", "age_seconds", "running",
-                          "max_jobs", "signed_in", "running_on", "limited_until", "limit_label"}
+                          "max_jobs", "signed_in", "running_on", "limited_until", "limit_label",
+                          "recent_placements", "effective_score", "placement_share", "skew"}
     assert set(codex["five_hour"]) == set(codex["seven_day"]) == {"used", "resets_at", "observed_at", "state"}
 
 
