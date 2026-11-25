@@ -45,11 +45,13 @@ SKILL_DIRS = (
     ".claude/skills",
     ".agents/skills",
     ".cursor/skills",
+    ".gemini/skills",
 )
 DIR_HARNESS = {
     ".claude/skills": "claude",
     ".agents/skills": "codex",
     ".cursor/skills": "cursor",
+    ".gemini/skills": "gemini",
 }
 CLAUDE_HOME = Path(".claude")
 CLAUDE_EXTRAS = ("agents", "docs")

@@ -75,6 +75,7 @@ SOURCES = {"claude": "get_usage", "codex": "rollout", "external": "external"}
 NOT_TRACKED: Mapping[str, str] = MappingProxyType({
     "cursor": "the Cursor CLI reports no usage without reading its login token, "
               "and the usage of the shared Ultra pool is on the external account",
+    "gemini": "the Gemini CLI has no non-interactive quota command",
 })
 CODEX_WINDOW_MINUTES = {300: "five_hour", 10080: "seven_day"}
 GET_USAGE_ID = "orch-usage"

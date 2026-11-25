@@ -31,7 +31,12 @@ QUESTIONS_LINES = [
 ]
 NO_CI_WAIT = "Never poll, watch or wait on GitHub Actions or any other CI from inside this job."
 TEST_SCOPE = "in the foreground; never the whole suite, in the background or in chunks."
-BOTS = {"claude-bot": "Claude Bot", "codex-bot": "Codex Bot", "cursor-bot": "Cursor Bot"}
+BOTS = {
+    "claude-bot": "Claude Bot",
+    "codex-bot": "Codex Bot",
+    "cursor-bot": "Cursor Bot",
+    "gemini-bot": "Gemini Bot",
+}
 # SPEC section 8: one round for low risk, up to three for high.
 DEFAULT_CAPS = {"low": 1, "high": 3}
 # The most of one free-text value (a CI log) a brief carries.
@@ -42,7 +47,7 @@ _OID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _ROUND = re.compile(r"^([1-9][0-9]*)/([1-9][0-9]*)$")
 _BRANCH = re.compile(r"^[A-Za-z0-9._/-]+$")
 _SKILL = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-_HARNESS = re.compile(r"^(claude|codex|cursor)$")
+_HARNESS = re.compile(r"^(claude|codex|cursor|gemini)$")
 _UNMAPPED = re.compile(r"^(?:ac-[1-9][0-9]*|expected size|not named)$")
 _AC = re.compile(r"ac-[1-9][0-9]*")
 _URL = re.compile(r"^https://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+$")

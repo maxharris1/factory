@@ -160,6 +160,14 @@ def error_text(harness: str, event: dict) -> str | None:
             message = event.get("message")
         else:
             return None
+    elif harness == "gemini":
+        if kind == "error":
+            message = event.get("message")
+        elif kind == "result" and (event.get("is_error") or event.get("status") == "error"):
+            err = event.get("error")
+            message = err.get("message") if isinstance(err, dict) else event.get("result")
+        else:
+            return None
     else:
         return None
     return message if isinstance(message, str) else None

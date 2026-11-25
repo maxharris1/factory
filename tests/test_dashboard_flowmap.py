@@ -231,7 +231,7 @@ def test_script_is_safe_to_splice():
 
 
 def test_tint_is_keyed_by_who():
-    assert set(flow.FLOWMAP_TINT) == {"script", "claude", "codex", "cursor", "grok", "human"}
+    assert set(flow.FLOWMAP_TINT) == {"script", "claude", "codex", "cursor", "gemini", "grok", "human"}
 
 
 HUMAN_WAITS = {"waiting-max", "questions", "awaiting-ok", "waiting-external"}

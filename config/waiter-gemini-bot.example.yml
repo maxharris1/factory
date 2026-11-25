@@ -1,0 +1,8 @@
+# Example waiter config for gemini-bot (~/.config/factory/waiter-gemini-bot.yml).
+# The waiter passes the brief on stdin and injects `--output-format stream-json`
+# automatically when `-p` / `--prompt` is present without an explicit format.
+command:
+  - gemini
+  - -p
+  - ""
+  - --yolo

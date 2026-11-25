@@ -28,7 +28,7 @@ UNCHECKED = "unchecked"
 ACCOUNT_READ_ONLY = {"default": "read-only: default account", "external": "read-only: external account"}
 NOT_SIGNED_IN = "not signed in on any device"
 NO_ACCOUNTS = "no accounts: machines.yml lists none"
-ADD_HARNESSES = ("claude", "codex", "cursor")
+ADD_HARNESSES = ("claude", "codex", "cursor", "gemini")
 SIGNIN_HARNESSES = ("claude", "codex")
 SIGNIN_REMIND = "Paste a code only from a sign-in you just started here. Never paste a code someone sent you."
 

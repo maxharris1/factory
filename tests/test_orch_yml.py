@@ -585,7 +585,7 @@ def test_refused_harnesses_defaults_empty_and_the_shipped_file_refuses_none(
 
 
 @pytest.mark.parametrize("value, message", [
-    ("[gemini]", "refused_harnesses has unknown harness 'gemini'"),
+    ("[unknown]", "refused_harnesses has unknown harness 'unknown'"),
     ("[cursor, cursor]", "refused_harnesses lists a harness twice"),
     ("cursor", "refused_harnesses must be a list of harness names"),
     ("[1]", "refused_harnesses must be a list of harness names"),
@@ -803,7 +803,7 @@ def test_qa_shares_usage_with_refuses_an_unknown_runner(tmp_path: Path, block: s
 def test_qa_shares_usage_with_refuses_an_unknown_recipient(tmp_path: Path) -> None:
     config, findings = _driver_config(tmp_path, "qa:\n  shares_usage_with:\n    claude-cloud: grok\n")
     assert config is None
-    assert "qa.shares_usage_with.claude-cloud has unknown harness 'grok'; expected one of claude, codex, cursor" in [
+    assert "qa.shares_usage_with.claude-cloud has unknown harness 'grok'; expected one of claude, codex, cursor, gemini" in [
         finding.message for finding in findings if finding.severity == "error"
     ]
 

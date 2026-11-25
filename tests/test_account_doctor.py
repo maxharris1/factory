@@ -1054,7 +1054,7 @@ def test_one_cursor_account_as_two_users_reads_mismatch(tmp_path: Path) -> None:
 
 def test_doctor_tables_name_the_same_harnesses() -> None:
     harnesses = set(get_args(account_doctor.Harness))
-    assert harnesses == {"claude", "codex", "cursor"}
+    assert harnesses == {"claude", "codex", "cursor", "gemini"}
     for table in (account_doctor._STATUS, account_doctor._RULES, account_doctor._LOGIN, account_doctor.AUTH_METHODS):
         assert set(table) == harnesses
 

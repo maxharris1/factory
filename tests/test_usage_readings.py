@@ -2093,6 +2093,6 @@ def test_live_get_usage_probe_parses() -> None:
 
 
 def test_not_tracked_maps_each_harness_to_a_reason() -> None:
-    assert set(usage_readings.NOT_TRACKED) == {"cursor"}
+    assert set(usage_readings.NOT_TRACKED) == {"cursor", "gemini"}
     assert all(isinstance(reason, str) and reason.strip() for reason in usage_readings.NOT_TRACKED.values())
     assert isinstance(usage_readings.NOT_TRACKED, MappingProxyType)

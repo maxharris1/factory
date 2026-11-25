@@ -94,7 +94,7 @@ _GITHUB_APP_KEYS = {"enabled", "apps"}
 _APP_KEYS = {"bot_login", "app_id", "installations", "private_key_file"}
 _MOVED_APP_KEYS = ("bot_login", "app_id", "installations", "private_key_file")
 Driver = Literal["grok", "claude", "pull"]
-APP_BOTS = ("grok-bot", "claude-bot", "codex-bot", "cursor-bot")
+APP_BOTS = ("grok-bot", "claude-bot", "codex-bot", "cursor-bot", "gemini-bot")
 _USER_LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
 _BOT_LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*\[bot\]$")
 _JOB_STATES_KEYS = {
@@ -424,7 +424,7 @@ def _harness_bot_logins(config: OrchConfig) -> dict[str, tuple[str, ...]]:
     }
 
 
-_HARNESS_APP_BOTS = frozenset({"claude-bot", "codex-bot", "cursor-bot"})
+_HARNESS_APP_BOTS = frozenset({"claude-bot", "codex-bot", "cursor-bot", "gemini-bot"})
 
 
 def _overlap_severity(config: OrchConfig, bots: Sequence[str]) -> Severity:
