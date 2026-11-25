@@ -581,7 +581,7 @@ factory:
   factory-qa/SKILL.md: b54bc93fb0307685c1a28bef2b2c47c2e907c56210ce22370183aac2a262da29
   factory-reviewer/SKILL.md: cd3a59259abcc0bbb5dacc439eb670a4be1caa4436f59626b629678b429ae590
   harness/codex.md: 7990a6deb21566e3036d8c2e2c12486cd78f1760bdd0fc450c354fe3c786be26
-  orchestrator/SKILL.md: 6598efeb435cc7cbe62e3f458039ee5ac561da08cdacba3e30a8de2f54b7249b
+  orchestrator/SKILL.md: c6833605215e515539a42a16ab140e14f065dce8b07c3f280ce733e3ad5ba55f
 kit:
   LICENSE: 702f5f331b56aff0e33d8c7826df5202559f894145eb70355c6477b55b5bb8a0
   deslop/SKILL.md: 2f7b7def74af7ed11f5b44b4d32f0f91fca8c5d1f92bf2171e8d12fd33a0f810

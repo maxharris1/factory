@@ -621,6 +621,17 @@ wait orchestrator [--db PATH] [--claimer ID] [--lease-seconds N] [--poll-seconds
   Block at zero token cost until a pull wake is available in driver_inbox,
   atomically claim it with a lease token, print one JSON object and exit 0.
   With --once, exits 0 without output when no wake is queued.
+wait orchestrator --autostart [--harness-config PATH] [--db PATH] [--claimer ID]
+                              [--lease-seconds N] [--poll-seconds N] [--once]
+  Loops: claims and acks the next wake, then runs COMMAND, the argv in
+  --harness-config (default ~/.config/factory/waiter-orchestrator.yml, same
+  rules as a bot's), with no shell. The prompt on stdin names
+  skills/factory/orchestrator/SKILL.md; the env carries ORCH_DB,
+  ORCH_WAKE_JOB_ID, ORCH_WAKE_LEASE_TOKEN and ORCH_WAKE_FILE (the claimed
+  wake's JSON). Renews the lease while COMMAND runs. A wake COMMAND did not
+  finish is finished on exit 0 and released for retry otherwise. --once
+  handles at most one wake. SIGTERM ends a running COMMAND's session,
+  releases its wake for the next runner, and exits 0.
 
 orchestrator (ack | heartbeat | finish) <job-id> --token TOKEN [--db PATH] ...
   Acknowledge, renew the lease on, release (--release), or finish a claimed
@@ -964,9 +975,26 @@ def _wait_orchestrator(argv: list[str]) -> int:
     )
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--autostart", action="store_true")
+    parser.add_argument("--harness-config", type=Path)
     args = parser.parse_args(argv)
     if args.poll_seconds <= 0:
         print("orch wait orchestrator: --poll-seconds must be positive", file=sys.stderr)
+        return 2
+    if args.harness_config is not None and not args.autostart:
+        print("orch wait orchestrator: --harness-config needs --autostart", file=sys.stderr)
+        return 2
+    try:
+        harness = (
+            waiter.load_harness_command(
+                args.harness_config or waiter.default_harness_config("orchestrator"),
+                "orchestrator",
+            )
+            if args.autostart
+            else None
+        )
+    except waiter.WaiterError as exc:
+        print(f"orch wait orchestrator: {exc}", file=sys.stderr)
         return 2
     if (retired := _retired()) is not None:
         print(
@@ -975,6 +1003,8 @@ def _wait_orchestrator(argv: list[str]) -> int:
         )
         return 79
     database = _db_path(args.db)
+    if harness is not None:
+        return _run_orchestrator(args, database, harness)
     signal.signal(signal.SIGTERM, _exit_on_term)
     try:
         orchestrator_pull.wait_for_wake(
@@ -995,6 +1025,38 @@ def _wait_orchestrator(argv: list[str]) -> int:
         return 1
     except KeyboardInterrupt:
         return 130
+    return 0
+
+
+def _run_orchestrator(
+    args: argparse.Namespace, database: Path, harness: waiter.HarnessCommand
+) -> int:
+    from lib import orchestrator_pull, orchestrator_runner
+
+    def log(message: str) -> None:
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        print(f"{stamp} orch wait orchestrator: {message}", file=sys.stderr, flush=True)
+
+    stop = waiter.StopFlag()
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(signum, stop.set)
+    try:
+        orchestrator_runner.run_wakes(
+            database,
+            harness.command,
+            claimer=args.claimer or orchestrator_pull.default_claimer(),
+            lease_seconds=args.lease_seconds,
+            poll_seconds=args.poll_seconds,
+            once=args.once,
+            stop=stop,
+            log=log,
+        )
+    except ValueError as exc:
+        print(f"orch wait orchestrator: {exc}", file=sys.stderr)
+        return 2
+    except (orchestrator_runner.RunnerError, WaitError, sqlite3.Error) as exc:
+        log(str(exc))
+        return 1
     return 0
 
 

@@ -1,27 +1,28 @@
 # Factory pull-based universal orchestrator loop (E3-1).
 #
-# Runs `orch wait orchestrator` in a user unit so any configured AI harness
-# (Claude, Codex, Gemini, Grok, or Cursor) can claim wakes from driver_inbox
-# at zero idle token cost without vendor webhooks or 30/hr routine limits.
+# `orch wait orchestrator --autostart` claims each wake from driver_inbox at
+# zero idle token cost, then hands it to the configured AI harness (Claude,
+# Codex, Gemini, Grok, or Cursor) with the orchestrator skill, renews the
+# lease while it runs, and waits again. The harness command is in
+# ~/.config/factory/waiter-orchestrator.yml (config/orchestrator-runner.example.yml).
 #
-# Configure ORCH_DB and your runner wrapper in ~/.config/factory/orchestrator.env.
-# Restart=always brings a crashed orchestrator runner back automatically; any
-# active wake lease expires and is reclaimed cleanly on restart.
+# Set ORCH_DB in ~/.config/factory/orchestrator.env.
+# On stop or restart the runner ends the harness it started and releases that
+# wake, so the next runner delivers it again at once.
 #
 # Nothing in this repository installs, enables or starts this unit.
 [Unit]
-Description=Factory pull-based universal orchestrator (orch wait orchestrator)
+Description=Factory pull-based universal orchestrator (orch wait orchestrator --autostart)
 
 [Service]
 Type=simple
 WorkingDirectory=%h/factory
 EnvironmentFile=-%h/.config/factory/orchestrator.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=%h/.local/bin/orch wait orchestrator --lease-seconds 300
+ExecStart=%h/.local/bin/orch wait orchestrator --autostart --lease-seconds 300
 Restart=always
 RestartSec=5
 RestartPreventExitStatus=79
-KillMode=process
 
 [Install]
 WantedBy=default.target

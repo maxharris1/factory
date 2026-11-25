@@ -28,6 +28,7 @@ from typing import TextIO
 from lib import telemetry
 from lib.grok_delivery import wake_body
 from lib.orch_yml import DriverInbox
+from lib.pricing import effective_cost_usd
 from lib.queue import Job
 from lib.wait import (
     BUSY_TIMEOUT_SECONDS,
@@ -70,12 +71,6 @@ CREATE TABLE IF NOT EXISTS driver_inbox (
     created_at REAL NOT NULL,
     posted_at REAL
 )
-"""
-
-_LOGICAL_KEY_INDEX = """
-CREATE UNIQUE INDEX IF NOT EXISTS driver_inbox_logical_key
-ON driver_inbox (logical_key)
-WHERE logical_key IS NOT NULL
 """
 
 _PULL_STATE_INDEX = """
@@ -158,7 +153,6 @@ def ensure_inbox_columns(connection: sqlite3.Connection) -> None:
         except sqlite3.OperationalError as exc:
             if "duplicate column name" not in str(exc).lower():
                 raise
-    connection.execute(_LOGICAL_KEY_INDEX)
     connection.execute(_PULL_STATE_INDEX)
 
 
@@ -170,24 +164,24 @@ def enqueue_pull_wake(
     now: float,
     inbox: DriverInbox | None = None,
     body: str = "",
-) -> bool:
-    """Insert a pull-claimable wake into driver_inbox, deduplicated by logical_key.
-
-    Returns True when a new row was inserted, False when a row for job.id or
-    logical_key already existed.
-    """
+) -> None:
     ensure_inbox_columns(connection)
     payload_json = wake_body(job, logical_key).decode("utf-8")
     inbox_repo = inbox.repo if inbox is not None else ""
     inbox_number = inbox.number if inbox is not None else 0
     status = "pending" if inbox is not None else "posted"
     posted_at = None if inbox is not None else now
-    cursor = connection.execute(
+    connection.execute(
         """
-        INSERT OR IGNORE INTO driver_inbox (
+        INSERT INTO driver_inbox (
             job_id, inbox_repo, inbox_number, body, status, created_at, posted_at,
             logical_key, payload, pull_state
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued')
+        ON CONFLICT(job_id) DO UPDATE SET
+            logical_key = excluded.logical_key,
+            payload = excluded.payload,
+            pull_state = 'queued'
+        WHERE driver_inbox.pull_state IS NULL
         """,
         (
             job.id,
@@ -201,7 +195,6 @@ def enqueue_pull_wake(
             payload_json,
         ),
     )
-    return cursor.rowcount == 1
 
 
 def reclaim_expired(connection: sqlite3.Connection, *, now: float) -> int:
@@ -497,14 +490,13 @@ def _record_orchestrator_telemetry(
     tokens_in = max(0, int(usage.tokens_in or 0))
     tokens_cached = max(0, min(tokens_in, int(usage.tokens_cached or 0)))
     tokens_out = max(0, int(usage.tokens_out or 0))
-    cost_usd = usage.cost_usd
-    if cost_usd is not None and (
-        not isinstance(cost_usd, (int, float))
-        or isinstance(cost_usd, bool)
-        or not math.isfinite(cost_usd)
-        or cost_usd < 0
-    ):
-        cost_usd = None
+    cost_usd = effective_cost_usd(
+        usage.harness,
+        usage.cost_usd,
+        tokens_in=tokens_in,
+        tokens_cached=tokens_cached,
+        tokens_out=tokens_out,
+    )
     connection.execute(
         f"""
         INSERT INTO {telemetry.TABLE} (
@@ -521,15 +513,20 @@ def _record_orchestrator_telemetry(
             updated_at = excluded.updated_at,
             last_event_at = excluded.last_event_at,
             finished_at = excluded.finished_at,
-            elapsed_seconds = excluded.elapsed_seconds,
-            turns = excluded.turns,
-            tokens_in = excluded.tokens_in,
-            tokens_cached = excluded.tokens_cached,
-            tokens_out = excluded.tokens_out,
-            cost_usd = excluded.cost_usd,
+            elapsed_seconds = elapsed_seconds + excluded.elapsed_seconds,
+            events = events + excluded.events,
+            turns = turns + excluded.turns,
+            tokens_in = tokens_in + excluded.tokens_in,
+            tokens_cached = tokens_cached + excluded.tokens_cached,
+            tokens_out = tokens_out + excluded.tokens_out,
+            cost_usd = CASE
+                WHEN cost_usd IS NULL THEN excluded.cost_usd
+                WHEN excluded.cost_usd IS NULL THEN cost_usd
+                ELSE cost_usd + excluded.cost_usd
+            END,
             exit_code = excluded.exit_code,
             exit_reason = excluded.exit_reason,
-            tokens_unknown = excluded.tokens_unknown
+            tokens_unknown = MIN(tokens_unknown, excluded.tokens_unknown)
         """,
         (
             job_id,

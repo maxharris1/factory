@@ -27,9 +27,13 @@ from lib.orchestrator_pull import (
     release_wake,
     wait_for_wake,
 )
+from lib.pricing import effective_cost_usd
 from lib.pstack_pin import ROOT, verify_pin
 from lib.queue import Job, JobRequest, SQLiteJobQueue
-from tests.test_dispatcher import FakeReviewActions, factory
+from tests.test_dispatcher import QUESTIONS, FakeReviewActions, factory
+from tests.test_driver_inbox import FlakyGrok, make, wake
+from tests.test_driver_wake import flags, poll
+from tests.test_resume_plan import ResumeFlow
 
 REPO = "maxharris1/factory"
 
@@ -134,21 +138,63 @@ def test_dispatcher_delivers_wakes_into_driver_inbox_under_pull_driver(tmp_path:
     assert claim_next(db, claimer="other-orch", lease_seconds=60, now=lambda: clock[0]) is None
 
 
-def test_deduplication_by_logical_key(tmp_path: Path) -> None:
+def test_redelivering_the_same_job_queues_one_wake(tmp_path: Path) -> None:
     db, queue, clock = _make_db(tmp_path)
-    j1 = _make_job(queue, source_comment_id="c-1", dedupe_key="k1")
-    j2 = _make_job(queue, source_comment_id="c-2", dedupe_key="k2")
+    job = _make_job(queue)
     with queue.connect() as conn:
-        first = enqueue_pull_wake(conn, j1, "same-logical-key", now=clock[0])
-        second = enqueue_pull_wake(conn, j2, "same-logical-key", now=clock[0])
+        enqueue_pull_wake(conn, job, "lk", now=clock[0])
         conn.commit()
-    assert first is True
-    assert second is False
+    first = claim_next(db, claimer="orch-a", now=lambda: clock[0])
+    assert first is not None
+    assert finish_wake(db, job.id, lease_token=first.lease_token, now=lambda: clock[0])
+    with queue.connect() as conn:
+        enqueue_pull_wake(conn, job, "lk", now=clock[0])
+        conn.commit()
+    assert claim_next(db, claimer="orch-b", now=lambda: clock[0]) is None
 
-    w1 = claim_next(db, claimer="orch-a", now=lambda: clock[0])
-    w2 = claim_next(db, claimer="orch-b", now=lambda: clock[0])
-    assert w1 is not None and w1.job_id == j1.id
-    assert w2 is None
+
+def test_a_legacy_inbox_row_becomes_claimable_after_switching_to_pull(tmp_path: Path) -> None:
+    d, issue, _ = make(tmp_path, grok=FlakyGrok(failures=1))
+    wake(d)
+    d._deliver_grok_jobs(set())
+    with sqlite3.connect(d.state_path) as conn:
+        [(legacy_job,)] = conn.execute(
+            "SELECT job_id FROM driver_inbox WHERE status = 'pending'"
+        ).fetchall()
+    restarted = Dispatcher(
+        d.state_path,
+        d.queue,
+        trusted_logins=d.trusted_logins,
+        review_actions=issue,
+        grok_delivery=PullDriverDelivery(),
+        projects=tuple(d.wake_routes.values()),
+    )
+    restarted.reconcile_jobs()
+    claimed = claim_next(d.state_path, claimer="new-driver")
+    assert claimed is not None
+    assert claimed.job_id == legacy_job
+
+
+def test_pull_backstop_rewake_is_claimable_then_flags(tmp_path: Path) -> None:
+    flow = ResumeFlow(tmp_path, enabled=True)
+    flow.dispatcher.grok_delivery = PullDriverDelivery()
+    flow.start_build(planned=False)
+    flow.finish_with("10")
+    assert flow.say("10", QUESTIONS, "claude-login") == "waiting-max"
+    flow.dispatcher.reconcile_jobs()
+    start = flow.now[0]
+    first = claim_next(flow.queue.path, claimer="orch", now=lambda: start)
+    assert first is not None
+    assert finish_wake(flow.queue.path, first.job_id, lease_token=first.lease_token, now=lambda: start)
+    poll(flow, start + 1200)
+    second = claim_next(flow.queue.path, claimer="orch", now=lambda: flow.now[0])
+    assert second is not None
+    assert second.job_id != first.job_id
+    assert second.logical_key == first.logical_key
+    assert second.wake["attempt"] == 2
+    for minutes in (40, 60, 120):
+        poll(flow, start + minutes * 60)
+    assert len(flags(flow)) == 1
 
 
 def test_lease_expiry_requeues_and_rejects_stale_token(tmp_path: Path) -> None:
@@ -297,6 +343,39 @@ def test_finish_records_orchestrator_telemetry_and_weekly_eval_spend(tmp_path: P
         productive, wasted = eval_report._spend_split(conn, tables, eval_report.MetricWindow())
     assert productive == pytest.approx(0.42)
     assert wasted == pytest.approx(0.0)
+
+
+def test_spend_counts_every_released_and_finished_attempt(tmp_path: Path) -> None:
+    db, queue, clock = _make_db(tmp_path, now_val=1_800_000_000.0)
+    job = _make_job(queue, action="clarify")
+    assert queue.claim("grok") is not None
+    queue.finish(job.id, owner="grok", handoff_comment_id="pull:lk-retry")
+    with queue.connect() as conn:
+        enqueue_pull_wake(conn, job, "lk-retry", now=clock[0])
+        conn.commit()
+    attempts = [
+        (OrchestratorUsage(harness="codex", tokens_in=100, tokens_out=10, cost_usd=1.0), True),
+        (OrchestratorUsage(harness="codex", tokens_in=50_000, tokens_out=5_000), True),
+        (OrchestratorUsage(harness="codex", tokens_in=200, tokens_out=20, cost_usd=2.0), False),
+    ]
+    for usage, release in attempts:
+        wake = claim_next(db, claimer="orch", now=lambda: clock[0])
+        assert wake is not None
+        clock[0] += 1
+        assert finish_wake(
+            db, job.id, lease_token=wake.lease_token, release=release, usage=usage, now=lambda: clock[0]
+        )
+    unreported = effective_cost_usd("codex", None, tokens_in=50_000, tokens_cached=0, tokens_out=5_000)
+    assert unreported is not None and unreported > 0
+
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM job_telemetry WHERE job_id = ?", (job.id,)).fetchone()
+        tables = {str(r[0]) for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        productive, wasted = eval_report._spend_split(conn, tables, eval_report.MetricWindow())
+    assert (row["tokens_in"], row["tokens_out"], row["turns"]) == (50_300, 5_030, 3)
+    assert productive == pytest.approx(round(3.0 + unreported, 4))
+    assert wasted == 0.0
 
 
 def test_cli_wait_orchestrator_and_lifecycle_commands(

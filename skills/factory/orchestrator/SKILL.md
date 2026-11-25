@@ -9,6 +9,8 @@ You are the factory's central orchestrator. Any model or harness (Claude, Codex,
 
 ## Pull Loop
 
+When `orch wait orchestrator --autostart` (`deploy/orch-orchestrator.service`) started you, the wake is already claimed and acked. Read it from `$ORCH_WAKE_FILE`, skip steps 1, 2 and 4 (the runner renews the lease), and finish with `orch orchestrator finish "$ORCH_WAKE_JOB_ID" --token "$ORCH_WAKE_LEASE_TOKEN" --db "$ORCH_DB" ...` as in step 5.
+
 1. Block at zero token cost until a wake arrives:
    ```sh
    orch wait orchestrator --db "$ORCH_DB" --lease-seconds 300
@@ -18,7 +20,7 @@ You are the factory's central orchestrator. Any model or harness (Claude, Codex,
    ```sh
    orch orchestrator ack <job_id> --token <lease_token> --db "$ORCH_DB"
    ```
-3. Ignore a wake whose `logical_key` you already handled (a lease expiry or crash can redeliver one).
+3. A lease expiry or crash can redeliver a `job_id` you already started. Check the ticket for the handoff you posted before acting, so you never post it twice. A wake with a new `job_id` and `attempt` 2 for a `logical_key` you handled is the backstop re-wake for a question still unanswered. Handle it.
 4. For long reasoning passes, renew the lease before `lease_until`:
    ```sh
    orch orchestrator heartbeat <job_id> --token <lease_token> --db "$ORCH_DB"

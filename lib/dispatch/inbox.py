@@ -43,11 +43,11 @@ class InboxMixin:
 
     def _queue_pull_wake(
         self, job: Job, logical_key: str, inbox: DriverInbox | None = None
-    ) -> bool:
+    ) -> None:
         body = self._inbox_body(job, inbox) if inbox is not None else ""
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            inserted = enqueue_pull_wake(
+            enqueue_pull_wake(
                 connection,
                 job,
                 logical_key,
@@ -56,7 +56,6 @@ class InboxMixin:
                 body=body,
             )
             connection.commit()
-        return inserted
 
     def _inbox_body(self, job: Job, inbox: DriverInbox) -> str:
         request = job.request
