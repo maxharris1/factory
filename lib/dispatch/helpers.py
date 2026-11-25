@@ -301,6 +301,7 @@ _PICK_KEYS = (
     "builder_effort",
     "reviewer_model",
     "reviewer_effort",
+    "planner",
     "plan_model",
     "plan_effort",
 )
@@ -329,14 +330,14 @@ def _detail_routing(
         value = routing.get(key)
         return value if isinstance(value, str) else None
 
-    plan_model, plan_effort = text("plan_model"), text("plan_effort")
+    planner = routing.get("planner")
     picks = RouterPicks(
         builder=Candidate(builder, text("builder_model"), text("builder_effort")),
         reviewer=Candidate(reviewer, text("reviewer_model"), text("reviewer_effort")),
         planner=(
-            None
-            if plan_model is None and plan_effort is None
-            else Candidate(builder, plan_model, plan_effort)
+            Candidate(planner, text("plan_model"), text("plan_effort"))
+            if planner in HARNESSES
+            else None
         ),
     )
     return builder, reviewer, picks

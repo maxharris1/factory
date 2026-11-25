@@ -622,14 +622,9 @@ def routing_argv_for_detail(
     side_harness = routing.get(side)
     if side_harness is not None and side_harness != harness:
         return list(command)
-    model = routing.get(f"{side}_model")
-    effort = routing.get(f"{side}_effort")
-    if action == "plan":
-        plan_model, plan_effort = routing.get("plan_model"), routing.get("plan_effort")
-        if isinstance(plan_model, str):
-            model = plan_model
-        if isinstance(plan_effort, str):
-            effort = plan_effort
+    pick = "plan" if action == "plan" and isinstance(routing.get("planner"), str) else side
+    model = routing.get(f"{pick}_model")
+    effort = routing.get(f"{pick}_effort")
     if model is None and effort is None:
         return list(command)
     return apply_argv_flags(

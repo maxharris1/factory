@@ -597,6 +597,7 @@ def test_factory_routing_override_picks_the_recipient_and_its_model(
         "reviewer": "claude",
         "reviewer_model": "claude-opus-4-6",
         "reviewer_effort": "high",
+        "planner": "codex",
         "plan_model": plan.model,
         "plan_effort": plan.effort,
     }
@@ -863,6 +864,32 @@ def test_a_dispatched_plan_runs_on_the_plan_slot_and_the_build_keeps_the_build_s
     assert (restored.factory.builder_harness, restored.factory.builder_model) == (build.harness, build.model)
     assert restored.router_picks is not None
     assert restored.router_picks.planner == Candidate("claude", plan.model, plan.effort)
+
+
+def test_an_effort_only_plan_slot_keeps_the_waiter_model_on_a_dispatched_plan(
+    tmp_path: Path,
+) -> None:
+    from lib.factory_md import load_factory_md
+    from lib.role_router import Candidate, routing_argv_for_detail
+
+    shipped, _ = load_factory_md(Path(__file__).resolve().parents[1] / "factory.md")
+    assert shipped.routing is not None
+    config = replace(
+        shipped,
+        routing=replace(shipped.routing, slots={"plan": (("claude", None, "high"),)}),
+    )
+
+    dispatcher, queue = setup(tmp_path)
+    go = comment("go-1", _go("").replace("state=building", "state=planning"), author="grok-login")
+    dispatcher.process(ticket(go, factory_config=config))
+    job = queue.claim("claude")
+    assert job is not None and job.request.action == "plan"
+    waiter = ["claude", "-p", "--model", "claude-fable-5-2", "--effort", "high"]
+    assert routing_argv_for_detail(waiter, harness="claude", detail=job.request.detail) == waiter
+
+    restored = dispatcher._routed(ticket(go, factory_config=config))
+    assert restored.router_picks is not None
+    assert restored.router_picks.planner == Candidate("claude", None, "high")
 
 
 def test_a_plan_routed_to_another_harness_takes_that_harness_plan_candidate(tmp_path: Path) -> None:

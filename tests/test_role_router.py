@@ -353,9 +353,15 @@ def _build_detail(harness: str, model: str, effort: str | None = None) -> str:
     return json.dumps({"action": "build", "routing": routing})
 
 
-def _plan_detail(harness: str, model: str, effort: str, plan_model: str, plan_effort: str) -> str:
+def _plan_detail(
+    harness: str, model: str, effort: str, plan_model: str | None, plan_effort: str | None
+) -> str:
     routing = json.loads(_build_detail(harness, model, effort))["routing"]
-    routing.update(plan_model=plan_model, plan_effort=plan_effort)
+    routing["planner"] = harness
+    if plan_model is not None:
+        routing["plan_model"] = plan_model
+    if plan_effort is not None:
+        routing["plan_effort"] = plan_effort
     return json.dumps({"action": "plan", "routing": routing})
 
 
@@ -477,6 +483,36 @@ def test_a_plan_job_with_no_plan_pick_runs_on_the_build_pick() -> None:
     assert routing_argv_for_detail(["claude", "-p"], harness="claude", detail=detail) == [
         "claude", "-p", "--model", "claude-opus-5-5", "--effort", "medium",
     ]
+
+
+@pytest.mark.parametrize(
+    ("plan_model", "plan_effort", "build_effort", "waiter", "expected"),
+    [
+        (
+            None,
+            "high",
+            "medium",
+            ["claude", "-p", "--model", "claude-fable-5-2", "--effort", "high"],
+            ["claude", "-p", "--model", "claude-fable-5-2", "--effort", "high"],
+        ),
+        (
+            "claude-fable-5-2",
+            None,
+            "low",
+            ["claude", "-p", "--effort", "medium"],
+            ["claude", "-p", "--effort", "medium", "--model", "claude-fable-5-2"],
+        ),
+    ],
+)
+def test_a_plan_pick_leaves_the_fields_it_omits_to_the_waiter_not_the_build_pick(
+    plan_model: str | None,
+    plan_effort: str | None,
+    build_effort: str,
+    waiter: list[str],
+    expected: list[str],
+) -> None:
+    detail = _plan_detail("claude", "claude-opus-5-5", build_effort, plan_model, plan_effort)
+    assert routing_argv_for_detail(waiter, harness="claude", detail=detail) == expected
 
 
 def test_non_harness_command_is_left_unchanged() -> None:
