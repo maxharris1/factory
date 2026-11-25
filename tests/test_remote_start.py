@@ -52,17 +52,6 @@ BOTS = ("claude-bot", "codex-bot", "cursor-bot")
 # --- fixtures ---------------------------------------------------------------
 
 
-@pytest.fixture(autouse=True)
-def _restore_signals():
-    """wait_for_job ignores SIGINT/SIGTERM once it delivers; children inherit that."""
-    saved = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
-    mask = signal.pthread_sigmask(signal.SIG_BLOCK, [])
-    yield
-    for signum, handler in saved.items():
-        signal.signal(signum, handler)
-    signal.pthread_sigmask(signal.SIG_SETMASK, mask)
-
-
 def machines_file(
     tmp_path: Path, *, box_enabled: bool = True, box_slots: int = 3, pc: bool = True
 ) -> Path:

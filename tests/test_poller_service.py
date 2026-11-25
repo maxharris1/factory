@@ -15,7 +15,6 @@ import pytest
 from lib import cli
 from tests.procs import alive
 from tests.test_oom import at_300, linux, score
-from tests.test_wait import restore_signals  # noqa: F401  (fixture)
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVICE = ROOT / "deploy" / "poller-service.sh"
@@ -551,7 +550,7 @@ def _loop_until_exit(dispatcher, stopper) -> int:
     return stopped.value.code
 
 
-def test_a_sigterm_mid_cycle_lets_the_cycle_finish(restore_signals) -> None:
+def test_a_sigterm_mid_cycle_lets_the_cycle_finish() -> None:
     from lib.cli import StopAtBoundary
 
     stopper = StopAtBoundary(sleep=lambda seconds: None)
@@ -562,7 +561,7 @@ def test_a_sigterm_mid_cycle_lets_the_cycle_finish(restore_signals) -> None:
     assert dispatcher.finished == 1
 
 
-def test_a_second_sigterm_mid_cycle_exits_at_once(restore_signals) -> None:
+def test_a_second_sigterm_mid_cycle_exits_at_once() -> None:
     from lib.cli import StopAtBoundary
 
     stopper = StopAtBoundary(sleep=lambda seconds: None)
@@ -577,7 +576,7 @@ def test_a_second_sigterm_mid_cycle_exits_at_once(restore_signals) -> None:
     assert dispatcher.finished == 0
 
 
-def test_a_sigterm_between_cycles_exits_at_once(restore_signals) -> None:
+def test_a_sigterm_between_cycles_exits_at_once() -> None:
     from lib.cli import StopAtBoundary
 
     stopper = StopAtBoundary(sleep=lambda seconds: os.kill(os.getpid(), signal.SIGTERM))

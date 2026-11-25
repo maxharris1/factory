@@ -352,9 +352,7 @@ class Broken(io.StringIO):
         raise BrokenPipeError("bot went away")
 
 
-def test_a_job_that_cannot_be_printed_is_failed_for_t6(
-    tmp_path: Path, restore_signals: None
-) -> None:
+def test_a_job_that_cannot_be_printed_is_failed_for_t6(tmp_path: Path) -> None:
     db, queue = make_db(tmp_path)
     job = queue.enqueue(request(), dedupe_key="a")
     with pytest.raises(WaitError, match="failed it for T6"):
@@ -423,9 +421,7 @@ def test_a_malformed_row_for_one_bot_does_not_block_another(tmp_path: Path) -> N
 # F1.6: a bounded poll, one claim per tick.
 
 
-def test_wait_polls_once_per_second_with_one_claim_per_tick(
-    tmp_path: Path, restore_signals: None
-) -> None:
+def test_wait_polls_once_per_second_with_one_claim_per_tick(tmp_path: Path) -> None:
     assert POLL_SECONDS == 1.0
     _, real = make_db(tmp_path)
     real.enqueue(request(recipient="codex"), dedupe_key="a")
@@ -686,16 +682,6 @@ def test_open_queue_is_f1_04s_sqlite_queue(tmp_path: Path) -> None:
     assert not (ROOT / "lib" / "dispatcher_queue.py").exists()
 
 
-@pytest.fixture
-def restore_signals():
-    saved = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
-    mask = signal.pthread_sigmask(signal.SIG_BLOCK, [])
-    yield
-    for signum, handler in saved.items():
-        signal.signal(signum, handler)
-    signal.pthread_sigmask(signal.SIG_SETMASK, mask)
-
-
 class SignalOnClaim:
     """Raises a signal at this process right after a real claim."""
 
@@ -729,7 +715,7 @@ GUARDED = (signal.SIGINT, signal.SIGTERM)
 @pytest.mark.serial
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
 def test_a_signal_between_claim_and_print_still_delivers_the_job(
-    tmp_path: Path, restore_signals: None, signum: int
+    tmp_path: Path, signum: int
 ) -> None:
     db, queue = make_db(tmp_path)
     job = queue.enqueue(request(), dedupe_key="a")
@@ -744,9 +730,7 @@ def test_a_signal_between_claim_and_print_still_delivers_the_job(
 
 
 @pytest.mark.serial
-def test_ctrl_c_while_printing_does_not_fail_a_delivered_job(
-    tmp_path: Path, restore_signals: None
-) -> None:
+def test_ctrl_c_while_printing_does_not_fail_a_delivered_job(tmp_path: Path) -> None:
     db, queue = make_db(tmp_path)
     job = queue.enqueue(request(), dedupe_key="a")
 
@@ -762,7 +746,7 @@ def test_ctrl_c_while_printing_does_not_fail_a_delivered_job(
     assert state_of(db, job.id)["state"] == "running"
 
 
-def test_signals_are_unblocked_while_sleeping(tmp_path: Path, restore_signals: None) -> None:
+def test_signals_are_unblocked_while_sleeping(tmp_path: Path) -> None:
     _, queue = make_db(tmp_path)
     masks: list[set[int]] = []
 
@@ -899,7 +883,6 @@ def test_a_finish_failure_after_a_failed_delivery_is_one_line(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    restore_signals: None,
 ) -> None:
     db, queue = make_db(tmp_path)
     job = queue.enqueue(request(), dedupe_key="a")
@@ -987,9 +970,7 @@ def test_a_jobs_table_with_the_wrong_schema_is_refused(tmp_path: Path) -> None:
     assert "recipient" in result.stderr
 
 
-def test_a_database_removed_while_waiting_is_not_recreated(
-    tmp_path: Path, restore_signals: None
-) -> None:
+def test_a_database_removed_while_waiting_is_not_recreated(tmp_path: Path) -> None:
     db, _ = make_db(tmp_path)
     queue = open_queue(db)
     for path in tmp_path.glob("orch.db*"):
@@ -1150,7 +1131,6 @@ def hold_write_lock(db: Path) -> sqlite3.Connection:
 def test_wait_survives_a_held_write_lock_and_claims_after_release(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    restore_signals: None,
 ) -> None:
     monkeypatch.setattr(wait_module, "BUSY_TIMEOUT_SECONDS", 0.05)
     db, queue = make_db(tmp_path)
@@ -1183,7 +1163,6 @@ def test_wait_survives_a_held_write_lock_and_claims_after_release(
 def test_wait_lock_backoff_is_bounded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    restore_signals: None,
 ) -> None:
     monkeypatch.setattr(wait_module, "BUSY_TIMEOUT_SECONDS", 0.01)
     db, queue = make_db(tmp_path)
@@ -1208,7 +1187,6 @@ def test_wait_lock_backoff_is_bounded(
 
 def test_wait_still_fails_on_a_real_database_error(
     tmp_path: Path,
-    restore_signals: None,
 ) -> None:
     db, _ = make_db(tmp_path)
     waiter = open_queue(db)
@@ -1308,7 +1286,6 @@ def test_lock_backoff_never_exceeds_the_cap(attempt: int) -> None:
 
 def test_wait_survives_more_locked_claims_than_float_backoff_can_hold(
     tmp_path: Path,
-    restore_signals: None,
 ) -> None:
     db, queue = make_db(tmp_path)
     queue.enqueue(request(), dedupe_key="a")

@@ -10,7 +10,6 @@ show one slot count per device. Fakes only: nothing reaches a host.
 from __future__ import annotations
 
 import io
-import signal
 import sqlite3
 import time
 from pathlib import Path
@@ -64,18 +63,7 @@ def states(db: Path) -> dict[str, str]:
         return dict(connection.execute("SELECT id, state FROM jobs"))
 
 
-@pytest.fixture
-def restore_signals():
-    """wait_for_job ignores SIGINT/SIGTERM once it leaves; put them back."""
-    saved = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
-    yield
-    for signum, handler in saved.items():
-        signal.signal(signum, handler)
-
-
-def test_with_the_box_full_a_non_device_claim_does_not_start_a_fourth_job(
-    tmp_path: Path, restore_signals: None
-) -> None:
+def test_with_the_box_full_a_non_device_claim_does_not_start_a_fourth_job(tmp_path: Path) -> None:
     queue, pool, db = setup(tmp_path)
     ids = [enqueue(queue, key) for key in "abcd"]
     for _ in range(3):

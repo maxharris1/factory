@@ -4,7 +4,6 @@ import contextlib
 import io
 import json
 import shlex
-import signal
 import sqlite3
 import sys
 import threading
@@ -49,14 +48,6 @@ if finish:
     ]))
 sys.exit(code)
 """
-
-
-@pytest.fixture(autouse=True)
-def _restore_signals():
-    saved = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
-    yield
-    for signum, handler in saved.items():
-        signal.signal(signum, handler)
 
 
 def paid_wake(tmp_path):
