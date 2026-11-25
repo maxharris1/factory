@@ -310,6 +310,19 @@ class HoldsMixin:
                     """,
                     (now, qa_row["run_id"]),
                 )
+            write_workflow_state(
+                connection,
+                ticket.repo,
+                ticket.ticket_id,
+                "building",
+                source="hold-changes",
+                at=now,
+                also={
+                    "approved_head": None,
+                    "approved_at": None,
+                    "approve_comment_id": None,
+                },
+            )
             self._enqueue_step(
                 connection,
                 ticket,
@@ -335,19 +348,6 @@ class HoldsMixin:
                     ),
                 ),
                 dedupe_key=dedupe_key,
-            )
-            write_workflow_state(
-                connection,
-                ticket.repo,
-                ticket.ticket_id,
-                "building",
-                source="hold-changes",
-                at=now,
-                also={
-                    "approved_head": None,
-                    "approved_at": None,
-                    "approve_comment_id": None,
-                },
             )
             connection.commit()
         self._write_state_label(ticket, "building")

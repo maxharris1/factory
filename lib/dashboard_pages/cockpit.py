@@ -193,14 +193,27 @@ def _needs_max(snapshot: dict) -> str:
     return _panel("needs-max", "Needs Max · Product Inbox", inner, count=count)
 
 
-def ticket_cockpit_html(ticket: dict | None) -> str:
-    """Inline Needs Max / Visual QA Gate panel for `ticket.html` when waiting on Max."""
+def has_ticket_cockpit(ticket: dict | None) -> bool:
+    """Whether `ticket.html` should render the inline Needs Max / Visual QA cockpit panel."""
     if not isinstance(ticket, dict) or ticket.get("state") not in ("waiting-max", "awaiting-ok"):
+        return False
+    wait = ticket.get("wait") if isinstance(ticket.get("wait"), dict) else {}
+    return bool(
+        ticket.get("visual_qa")
+        or ticket.get("questions")
+        or wait.get("why") == "visual-qa-review"
+    )
+
+
+def ticket_cockpit_html(ticket: dict | None) -> str:
+    """Inline Needs Max / Visual QA Gate panel for `ticket.html`."""
+    if not has_ticket_cockpit(ticket):
         return ""
+    assert ticket is not None
     wait = ticket.get("wait") if isinstance(ticket.get("wait"), dict) else {}
     sub = str(wait.get("why") or ticket.get("state") or "")
     return (
-        '<section class="jd-panel ck-ticket" id="ticket-cockpit" data-sec="cockpit">'
+        '<section class="jd-panel ck-ticket" id="ticket-cockpit">'
         f'<h2>{_span("t", "Needs Max · Product & Visual QA Gate")}{_span("count", sub)}</h2>'
         f"{_cockpit_card(ticket, show_ticket_link=False)}</section>"
     )

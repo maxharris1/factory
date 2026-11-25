@@ -977,7 +977,6 @@ def _ticket_article(found: dict, snapshot: dict) -> str:
         f'<article class="jobpage ticketpage" data-ticket="{_e(address)}">'
         + _crumb(_tile_label(row), HERO_LINES[spec.get("line", "state")]["crumb"](model))
         + _ticket_hero(found, model, spec)
-        + ticket_cockpit_html(found.get("ticket"))
         + "".join(SECTIONS[name](part) for name in spec.get("lead", ()))
         + _cols(part, spec["sections"])
         + "</article>"
@@ -1005,8 +1004,9 @@ def ticket_view(snapshot: dict, address: str | None, open_ci: bool = False) -> s
     found = None if address is None else resolve_ticket(snapshot, address, records)
     if not found:
         return f'<div id="ticketview">{_no_ticket(address, records is not None)}</div>'
+    cockpit = ticket_cockpit_html(found.get("ticket"))
     extras = ci_extras(snapshot, found["address"], found["row"], open_ci)
-    return f'<div id="ticketview">{_ticket_article(found, snapshot)}{extras}</div>'
+    return f'<div id="ticketview">{_ticket_article(found, snapshot)}{cockpit}{extras}</div>'
 
 
 def _ticketview(snapshot: dict) -> str:
