@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import math
 
+from lib import device_pool
 from lib.dashboard_pages.common import _b, _e, _num, _panel, _span, duration
+from lib.dashboard_pages.routing import _routing
 from lib.dashboard_telemetry import rollup_panel
 from lib.dashboard_static import read_asset
 
@@ -17,6 +19,17 @@ ROUND_BUCKETS = ("0 rounds", "1 round", "2 rounds", "3 rounds", "4 or more")
 METER_CELLS = 20
 WINDOWS = ("five_hour", "seven_day")
 WINDOW_NAMES = {"five_hour": "5-hour", "seven_day": "7-day"}
+SKEW = {
+    "high": ("chip warn", "skew high"),
+    "low": ("chip warn", "skew low"),
+    "balanced": ("muted", "balanced"),
+    "none": ("muted", "—"),
+}
+BALANCE_NOTE = (
+    "Share is this account's part of its pool's recent placements. Skew flags a share more than "
+    f"{round(device_pool.SKEW_THRESHOLD * 100)} points off an even split once the pool has "
+    f"{device_pool.SKEW_MIN_PLACEMENTS} or more placements."
+)
 
 
 def _half_up(value: float) -> int:
@@ -269,3 +282,51 @@ def top_row(snapshot: dict) -> str:
 
 def middle_row(snapshot: dict) -> str:
     return _row(_rounds(snapshot), _savings(snapshot))
+
+
+def _room(window: dict) -> str:
+    if window["used"] is None:
+        return f'<td class="bl-v muted">{_e(window["state"])}</td>'
+    return f'<td class="bl-v">{100 - _half_up(window["used"] * 100)}%</td>'
+
+
+def _balance_row(entry: dict) -> str:
+    share = entry["placement_share"]
+    harness = entry["harness"]
+    return (
+        f'<tr><th scope="row">{_span("bot " + harness, harness)}{_span("bl-name", _name(entry))}</th>'
+        + "".join(_room(entry[w]) for w in WINDOWS)
+        + f'<td class="bl-v">{_num(entry["recent_placements"])}</td>'
+        + f'<td class="bl-v">{"—" if share is None else f"{_half_up(share * 100)}%"}</td>'
+        + f'<td class="bl-v">{_span(*SKEW[entry["skew"]])}</td></tr>'
+    )
+
+
+def _balance_pool(harness: str, entries: list[dict]) -> str:
+    size = f"{len(entries)} account" + ("" if len(entries) == 1 else "s")
+    return (
+        f'<tbody><tr class="bl-pool"><th colspan="6" scope="rowgroup">{_e(f"{harness} · {size}")}</th></tr>'
+        + "".join(_balance_row(entry) for entry in entries)
+        + "</tbody>"
+    )
+
+
+def _balance(snapshot: dict) -> str:
+    pools: dict[str, list[dict]] = {}
+    for entry in snapshot["usage"]["accounts"]:
+        pools.setdefault(entry["harness"], []).append(entry)
+    if not pools:
+        inner = '<p class="empty">no accounts</p>'
+    else:
+        head = "".join(f"<th>{name}</th>" for name in (
+            "account", "5-hour headroom", "7-day headroom", "recent placements", "share", "skew"))
+        inner = (
+            f'<div class="bl-scroll"><table class="bl-table"><thead><tr>{head}</tr></thead>'
+            + "".join(_balance_pool(harness, entries) for harness, entries in pools.items())
+            + f'</table></div><p class="bl-note">{_e(BALANCE_NOTE)}</p>'
+        )
+    return _panel("balance", "Account balance", inner, count="recent placements per harness pool")
+
+
+def routing_row(snapshot: dict) -> str:
+    return _row(_routing(snapshot), _balance(snapshot))
