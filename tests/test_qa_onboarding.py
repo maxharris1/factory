@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import ast
+import json
+import os
 import re
+import shutil
 import subprocess
 import urllib.request
 from pathlib import Path
@@ -11,9 +14,10 @@ import yaml
 
 import lib.qa_runners.fake
 import lib.qa_smoke
-from lib import cli, github_actions, qa_runners, qa_storage
+from lib import cli, github_actions, qa_evidence, qa_runners, qa_storage
 from lib.factory_md import EXAMPLE_PATHS, QaRunner, parse_factory_md
 from lib.load import split_front_matter
+from tests.qa_support import FakeStorage, bundle
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_FACTORY_MDS = [path for path in EXAMPLE_PATHS if path.startswith("examples/")]
@@ -163,6 +167,51 @@ def test_qa_smoke_writes_where_the_dashboard_reads_and_touches_no_github(
         for alias in node.names
     ]
     assert imported and not any("github" in name for name in imported)
+
+
+def test_qa_smoke_keeps_evidence_that_intake_stores_while_it_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "evidence"
+    root.mkdir()
+    result = json.dumps({"run_id": "r-1", "lane": 1, "artifacts": []}).encode()
+    prefix = qa_storage.lane_prefix("owner/repo", "r-1", 1)
+    upload = FakeStorage({prefix + qa_storage.RESULT_NAME: result, prefix + qa_storage.BUNDLE_NAME: bundle()})
+    ordinary = qa_evidence.lane_dir(root, "owner/repo", "7", "r-1", 1)
+    real_rmtree = shutil.rmtree
+
+    def intake_then_rmtree(path: Path, *args: object, **kwargs: object) -> None:
+        if not ordinary.exists() and Path(path).is_relative_to(root / "owner"):
+            assert qa_evidence.collect("r-1", 1, storage=upload, repo="owner/repo", ticket="7", root=root)
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", intake_then_rmtree)
+
+    status = smoke(smoke_orch(tmp_path, root))
+
+    assert status == 0, capsys.readouterr().out
+    assert (ordinary / qa_storage.RESULT_NAME).read_bytes() == result
+    assert not (root / "owner" / "repo" / "smoke").exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_qa_smoke_fails_when_intake_cannot_stage_under_a_read_only_root(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "evidence"
+    (root / "owner" / "repo").mkdir(parents=True)
+    root.chmod(0o555)
+    try:
+        status = smoke(smoke_orch(tmp_path, root))
+        tree = _tree(root)
+    finally:
+        root.chmod(0o755)
+
+    output = capsys.readouterr()
+    assert status == 1
+    assert f"fail evidence write: Permission denied: {root}/.staging" in output.out.splitlines()
+    assert [path for path, _mode in tree] == ["owner", "owner/repo"]
+    assert "Traceback" not in output.err
 
 
 def test_qa_smoke_fails_cleanly_on_a_missing_evidence_root(

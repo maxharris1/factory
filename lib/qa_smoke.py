@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
+import tarfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -10,7 +13,7 @@ from pathlib import Path
 
 from lib import qa_evidence, qa_runners
 from lib.orch_yml import OrchConfig, QaStorage
-from lib.qa_storage import RESULT_NAME
+from lib.qa_storage import BUNDLE_NAME, RESULT_NAME, lane_prefix
 
 
 @dataclass(frozen=True)
@@ -59,32 +62,50 @@ def _evidence_root(target: _Target) -> str:
     return str(root)
 
 
+@dataclass(frozen=True)
+class _Upload:
+    objects: dict[str, bytes]
+
+    def fetch(self, key: str, dest: Path, max_bytes: int) -> bool:
+        data = self.objects.get(key)
+        if data is None:
+            return False
+        dest.write_bytes(data)
+        return True
+
+
+def _upload(repo: str, run_id: str) -> tuple[_Upload, bytes]:
+    result = json.dumps({"smoke": True, "run_id": run_id, "lane": 1, "artifacts": []}).encode()
+    bundle = io.BytesIO()
+    tarfile.open(fileobj=bundle, mode="w:gz").close()
+    prefix = lane_prefix(repo, run_id, 1)
+    return _Upload({prefix + RESULT_NAME: result, prefix + BUNDLE_NAME: bundle.getvalue()}), result
+
+
 def _evidence_write(target: _Target) -> str:
     repo, storage = target.project()
     root = storage.evidence_root
     run_id = f"smoke-{datetime.now(timezone.utc):%Y%m%d%H%M%S}-{os.getpid()}"
     lane = qa_evidence.lane_dir(root, repo, "smoke", run_id, 1)
-    top = _first_missing(root, lane)
-    payload = json.dumps({"smoke": True, "run_id": run_id}).encode()
-    result = lane / RESULT_NAME
+    run = lane.parent
+    if run.exists():
+        raise ValueError(f"{run} already exists")
+    created = [path for path in (root / ".staging", *reversed(run.parents[:3])) if not path.exists()]
+    upload, payload = _upload(repo, run_id)
     try:
-        lane.mkdir(parents=True)
-        result.write_bytes(payload)
-        if result.read_bytes() != payload:
-            raise ValueError(f"{result} read back different bytes")
+        try:
+            qa_evidence.collect(run_id, 1, storage=upload, repo=repo, ticket="smoke", root=root)
+        except qa_evidence.EvidenceRefused as exc:
+            raise ValueError(str(exc)) from None
+        if (lane / RESULT_NAME).read_bytes() != payload:
+            raise ValueError(f"{lane / RESULT_NAME} read back different bytes")
     finally:
-        if top.exists():
-            shutil.rmtree(top)
-    return str(result)
-
-
-def _first_missing(root: Path, lane: Path) -> Path:
-    path = root
-    for part in lane.relative_to(root).parts:
-        path = path / part
-        if not path.exists():
-            return path
-    raise ValueError(f"{lane} already exists")
+        if run.exists():
+            shutil.rmtree(run)
+        for path in reversed(created):
+            with contextlib.suppress(OSError):
+                path.rmdir()
+    return str(lane / RESULT_NAME)
 
 
 _CHECKS: tuple[tuple[str, str | None, Callable[[_Target], str]], ...] = (
