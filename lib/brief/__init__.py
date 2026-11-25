@@ -45,6 +45,7 @@ hand.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from lib.brief import build, fix, merge_only, plan, rebase, review, skills
@@ -154,6 +155,8 @@ def render_brief(
         middle = [questions_handoff_section(bot, role, facts)]
     else:
         lead = _lead(job, kind, facts)
+        if kind in _NO_ROUTER:
+            lead = replace(lead, method=(*lead.method, skills.method_only_note(factory_root)))
         middle = [
             *([skills.section(router)] if router is not None else []),
             *(review.evidence_sections(detail, facts) if kind == "review" else []),

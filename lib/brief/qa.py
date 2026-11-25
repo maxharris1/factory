@@ -8,6 +8,7 @@ from typing import Literal
 
 from lib.brief.common import _REPO, _SKILL, _URL, BriefError, code_span, fenced
 from lib.factory_md import QA_RUNNERS, QaEvidence, QaLane
+from lib.pstack_pin import FACTORY_DIR
 from lib.qa_storage import LaneLinks, UploadLink, pack_key
 
 LaneKind = Literal["head", "regression", "base-check"]
@@ -19,6 +20,7 @@ RECEIPTS = (AFTER_SCREENSHOT, PASS_OUTPUT)
 WORKTREE = "/tmp/lane-worktree"
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
+QA_ROUTER = (FACTORY_DIR / "factory-qa" / "SKILL.md").as_posix()
 _SCENARIO_ID = re.compile(r"^s-[1-9][0-9]*$")
 _CRITERION = re.compile(r"^ac-[1-9][0-9]*$")
 _RUN_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -200,6 +202,7 @@ def _opening(facts: LaneFacts) -> str:
         f"# QA lane {facts.lane} brief\n\n"
         f"You are QA lane {facts.lane} for pull request #{facts.pr}. This brief is the whole hand-off. "
         "Nobody will message you while you run, and no skill needs to be installed. "
+        f"The factory's router `{QA_ROUTER}` documents this procedure, and this brief carries it in full. "
         "Work through the sections in order."
     )
 

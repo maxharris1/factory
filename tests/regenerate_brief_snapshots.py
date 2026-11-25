@@ -494,7 +494,7 @@ def _job(action: str, recipient: str, attempt: int, head: str | None, extra: dic
     )
 
 
-def render_snapshot(kind: str) -> str:
+def render_devices(kind: str) -> dict[str, str]:
     action, recipient, attempt, head, extra = CASES[kind]
     job = _job(action, recipient, attempt, head, extra)
     context, findings = parse_factory_context(FACTORY_MDS.get(kind, FACTORY_MD))
@@ -510,7 +510,11 @@ def render_snapshot(kind: str) -> str:
         remote_device=REMOTE_DEVICE,
         factory_root=f"/home/{recipient}-bot/factory",
     )
-    return f"===== box =====\n{box}===== remote ({REMOTE_DEVICE}) =====\n{remote}"
+    return {"box": box, f"remote ({REMOTE_DEVICE})": remote}
+
+
+def render_snapshot(kind: str) -> str:
+    return "".join(f"===== {device} =====\n{brief}" for device, brief in render_devices(kind).items())
 
 
 def render_qa_snapshot(case: str) -> str:
