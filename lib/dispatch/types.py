@@ -704,7 +704,8 @@ class RetryableShipError(RetryableStateError):
 
 
 class RouteError(RuntimeError):
-    """A ticket's restored routing fails factory.md's cross-family rule."""
+    """A ticket's restored routing fails factory.md's cross-family rule, or
+    factory.md's routing cannot pick a pair."""
 
     def __init__(self, message: str, source_comment_id: str):
         super().__init__(message)

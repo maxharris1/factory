@@ -681,7 +681,7 @@ def test_brief_ticket_types_pick_their_build_role() -> None:
     ]
 
 
-def test_routing_pool_with_no_queueable_harness_rejects_the_go(tmp_path: Path) -> None:
+def test_routing_pool_with_no_queueable_harness_holds_the_go(tmp_path: Path) -> None:
     from lib.factory_md import FactoryRouting
 
     config = replace(
@@ -692,5 +692,33 @@ def test_routing_pool_with_no_queueable_harness_rejects_the_go(tmp_path: Path) -
     go = comment("go-1", _go(""), author="grok-login")
     dispatcher.process(ticket(go, factory_config=config))
 
-    assert _outcome(queue, "go-1") == "rejected-go-routing"
+    assert _is_stuck(queue)
     assert queue.claim("claude") is None and queue.claim("codex") is None
+
+
+def test_ready_cannot_bypass_an_exhausted_routing_pool(tmp_path: Path) -> None:
+    from lib.factory_md import FactoryRouting
+
+    config = replace(
+        factory(),
+        routing=FactoryRouting(
+            slots={
+                "build": (("claude", "claude-opus-4-6", "high"),),
+                "review": (("claude", "claude-opus-4-6", "high"),),
+            }
+        ),
+    )
+    dispatcher, queue = setup(tmp_path)
+    ready = comment("ready-1", _ready("claude"), author="claude-login")
+    snapshot = replace(
+        ticket(ready, head=HEAD, ci={HEAD: CIResult("success")}, factory_config=config),
+        ready_starts_review=True,
+    )
+    dispatcher.process(snapshot)
+
+    with queue.connect() as connection:
+        queued = connection.execute(
+            "SELECT action, recipient FROM jobs WHERE recipient != 'grok'"
+        ).fetchall()
+    assert [tuple(row) for row in queued] == []
+    assert _is_stuck(queue)

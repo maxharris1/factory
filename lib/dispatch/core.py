@@ -409,7 +409,8 @@ class DispatcherBase:
         """The ticket with the builder and reviewer its latest plan, build or
         fix step was routed to (issue #206), or as read when that step names
         no routing. A T6 retry is not a step: it repeats an older one. Raises RouteError when the restored pair, with today's
-        factory.md model hints, fails the cross-family rule."""
+        factory.md model hints, fails the cross-family rule, or when factory.md's
+        routing cannot pick a pair."""
         if ticket.factory_md is not None:
             return ticket
         with self._connect() as connection:
@@ -427,8 +428,11 @@ class DispatcherBase:
         if routing is None:
             try:
                 picks = _router_picks(ticket, self.refused_harnesses)
-            except RoutingError:
-                return ticket
+            except RoutingError as error:
+                raise RouteError(
+                    f"{ticket.repo}#{ticket.ticket_id} routing: {error}",
+                    ticket.comments[-1].id if ticket.comments else "",
+                ) from error
             return ticket if picks is None else _route_picks(ticket, picks)
         builder, reviewer, picks = routing
         routed = (
