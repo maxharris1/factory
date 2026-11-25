@@ -23,6 +23,7 @@ BROKER_OPS: Mapping[str, frozenset[str]] = MappingProxyType({"signin": frozenset
 SET_FIELDS = frozenset({"max_jobs", "signed_in_on", "paused"})
 REMOVE_EXPECT_KEYS = frozenset({"harness", "max_jobs", "paused", "signed_in_on"})
 ADD_REFUSED: Mapping[str, str] = MappingProxyType({
-    "cursor": "a cursor account is a device's cursor login: set "
-              "harnesses.cursor: {bot: cursor-bot, account: <id>} on each device in machines.yml",
+    harness: f"a {harness} account is a device's {harness} login: set "
+             f"harnesses.{harness}: {{bot: {harness}-bot, account: <id>}} on each device in machines.yml"
+    for harness in ("cursor", "gemini")
 })

@@ -27,6 +27,7 @@ from lib import (
     wait,
     waiter,
 )
+from lib.account_requests import ADD_REFUSED
 from lib.brief import render_brief
 from lib.harnesses import HarnessDriver, StreamFlags
 from lib.harnesses.gemini import AUTH_OVERRIDES, GeminiDriver
@@ -471,6 +472,11 @@ def test_a_gemini_account_is_each_devices_gemini_bot_login_with_no_folder(tmp_pa
     assert config.account_home("pc", "gemini", "gemini-ultra") is None
     assert account_home.prepare(config, "pc", "gemini-bot", bot_home) == []
     assert not (bot_home / ".factory-accounts").exists()
+
+
+def test_settings_refuses_to_add_every_device_login_harness_with_the_machines_yml_step() -> None:
+    assert set(ADD_REFUSED) == DEVICE_LOGIN_ONLY
+    assert "harnesses.gemini" in ADD_REFUSED["gemini"] and "machines.yml" in ADD_REFUSED["gemini"]
 
 
 def test_a_gemini_account_signed_in_from_a_folder_is_refused(tmp_path: Path) -> None:

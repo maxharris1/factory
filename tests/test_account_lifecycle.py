@@ -489,12 +489,13 @@ def test_an_adopted_add_remove_or_signed_in_on_reads_applied(tmp_path: Path, sen
     assert _audit_result(box, slots.db) == "applied"
 
 
-def test_add_with_harness_cursor_is_refused_with_the_machines_yml_step(tmp_path: Path) -> None:
+@pytest.mark.parametrize("harness", ["cursor", "gemini"])
+def test_add_with_a_device_login_harness_is_refused_with_the_machines_yml_step(tmp_path: Path, harness: str) -> None:
     box = Box(tmp_path)
-    _add(box, account="cursor-ultra", harness="cursor", max_jobs=None, signed_in_on=())
+    _add(box, account=f"{harness}-ultra", harness=harness, max_jobs=None, signed_in_on=())
 
     (entry,) = box.run()
 
-    assert (entry.result, entry.error) == ("refused", ADD_REFUSED["cursor"]), entry
-    assert "harnesses.cursor" in entry.error and "machines.yml" in entry.error
+    assert (entry.result, entry.error) == ("refused", ADD_REFUSED[harness]), entry
+    assert f"harnesses.{harness}" in entry.error and "machines.yml" in entry.error
     box.unchanged()

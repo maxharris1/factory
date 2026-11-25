@@ -440,13 +440,14 @@ def _add_form_after(tmp_path: Path, harness: list[str]) -> str:
 
 
 @needs_node
-def test_choosing_cursor_in_the_add_form_shows_the_refusal(tmp_path: Path) -> None:
-    refusal = ADD_REFUSED["cursor"]
-    assert "harnesses.cursor" in refusal and "machines.yml" in refusal
-    form = _add_form_after(tmp_path / "cursor", ["cursor"])
+@pytest.mark.parametrize("harness", ["cursor", "gemini"])
+def test_choosing_a_device_login_harness_in_the_add_form_shows_the_refusal(tmp_path: Path, harness: str) -> None:
+    refusal = ADD_REFUSED[harness]
+    assert f"harnesses.{harness}" in refusal and "machines.yml" in refusal
+    form = _add_form_after(tmp_path / harness, [harness])
     assert re.search(ADD_BUTTON, form).group(1) == ' disabled=""', form
     assert form.endswith(f'role="status">{html.escape(refusal)}'), form
-    form = _add_form_after(tmp_path / "back", ["cursor", "codex"])
+    form = _add_form_after(tmp_path / "back", [harness, "codex"])
     assert re.search(ADD_BUTTON, form).group(1) is None, form
     assert form.endswith('role="status">'), form
 
