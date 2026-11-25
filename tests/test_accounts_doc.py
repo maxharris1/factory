@@ -124,10 +124,14 @@ def test_the_device_login_runs_the_documented_command_without_a_folder(harness: 
 
 
 def test_the_doc_says_cursor_builds_and_reviews_as_orch_yml_allows() -> None:
-    orch = (ROOT / "orch.yml").read_text(encoding="utf-8")
+    from lib.orch_yml import load_orch_yml
+
+    shipped, _ = load_orch_yml(ROOT / "orch.yml", allow_placeholders=True)
     section = " ".join(doc().partition("### Cursor builds and reviews")[2].split("\n#", 1)[0].split())
 
-    assert not re.search(r"^refused_harnesses:", orch, flags=re.MULTILINE)
+    assert shipped is not None
+    assert "cursor" not in shipped.refused_harnesses
+    assert "gemini" in shipped.refused_harnesses
     assert "`orch.yml` no longer lists it in `refused_harnesses`" in section
     assert "docs/decisions/1411-cursor-accounts.md" in section
 
