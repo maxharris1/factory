@@ -73,10 +73,6 @@ _READ_WITH = {
     "claude-bot": "Read each file with `Read`, not the Skill tool (`{adapter}`, Tools).",
     "codex-bot": "Read each file with the shell (`{adapter}`, Tools).",
 }
-_GENERAL_HELPER = {
-    "claude-bot": '`subagent_type: "general-purpose"`',
-    "codex-bot": '`agent_type: "default"`',
-}
 
 
 BUILDER_ROUTER = _factory("factory-builder/SKILL.md")
@@ -175,24 +171,14 @@ def section(router: Router) -> str:
         "",
         *(f"- `{path}`" for path in router.paths),
         "",
-        "Helper models, one `<role>: <value>` line per pstack role. They win over any other model config:",
+        "Helper models, one `<role>: <value>` line per pstack role:",
         "",
         "```",
         router.models.rstrip("\n"),
         "```",
         "",
+        "You may start helper agents as pstack recommends.",
     ]
-    if router.role == "builder":
-        lines.append("You may start helper agents as pstack recommends.")
-        lines.append(
-            "If your harness does not know an agent name the router uses (`comment-sicko`, "
-            f"`poteto-agent`), start a general helper ({_GENERAL_HELPER[router.bot]}) and "
-            "tell it first to read and follow the agent file listed above."
-        )
-    else:
-        lines.append(
-            "You may start helper agents as pstack recommends. They do research only; you write the verdict."
-        )
     return "\n".join(lines)
 
 
