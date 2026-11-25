@@ -37,7 +37,6 @@ from tests.pool_helpers import LOCAL_BOX_MACHINES, poller_adopts, write_target_m
 from tests.test_linear_webhook_service import _port_of, _same_host, _service
 from tests.test_linear_webhook_service import home  # noqa: F401  (fixture)
 from tests.test_linear_webhook_service import pytestmark as needs_flock_and_proc
-from tests.test_wait import restore_signals  # noqa: F401  (fixture)
 
 NOW = 1_794_000_000.0  # Nov 6, 2026, 4:20 PM EST
 PAGE_NOW = 1_800_000_000.0  # the page harness's clock is 3 s past this
@@ -980,7 +979,7 @@ def test_the_beat_thread_blocks_the_signals_orch_wait_guards(tmp_path: Path) -> 
 
 
 def test_plain_orch_wait_beats_as_a_waiter_while_it_blocks(
-    tmp_path: Path, monkeypatch, capsys, restore_signals
+    tmp_path: Path, monkeypatch, capsys
 ) -> None:
     db, queue = make_db(tmp_path)
     machines = machines_file(tmp_path)

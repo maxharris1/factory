@@ -212,6 +212,19 @@ def _end_fake_runners():
 
 
 @pytest.fixture(autouse=True)
+def _restore_signals():
+    """`orch wait` leaves SIGINT and SIGTERM ignored once it claims, and a
+    process the worker starts later inherits that: a bash supervisor that
+    starts with SIGTERM ignored cannot trap it, so its stop times out."""
+    saved = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+    yield
+    for signum, handler in saved.items():
+        signal.signal(signum, handler)
+    signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+
+
+@pytest.fixture(autouse=True)
 def _fake_gh_store(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch):
     """Each test's fake gh answers from its own store, empty until a test
     serves a comment (tests/handoff_store.py); a fake harness posts one with
