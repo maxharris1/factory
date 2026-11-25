@@ -1581,7 +1581,7 @@ check, whichever process made it. Once any heartbeat exists, every expected comp
 with no row is shown down (`never seen`, or `never reached` for a probe):
 the poller; each bot's waiter on some device `machines.yml` makes eligible
 for its harness, unless `orch.yml` lists that harness in
-`refused_harnesses` (`[cursor]` here, issue #107), and each probed device;
+`refused_harnesses` (issue #107; none here), and each probed device;
 the Linear listener when `orch.yml` has `linear_webhook`, and its tunnel
 when that sets `public_url`; and the dashboard writer when
 `dashboard.push.transport` is `ssh`. A row nothing expects (a retired bot or

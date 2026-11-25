@@ -23,6 +23,7 @@ from lib.brief import render_brief
 from lib.harnesses import HarnessDriver, StreamFlags
 from lib.harnesses.cursor import CursorDriver
 from lib.machines_yml import Account, load_machines_yml
+from lib.orch_yml import load_orch_yml
 from lib.remote import SSH_UNREACHABLE, Exchanged
 from lib.pstack_pin import ROOT, verify_pin
 from tests.test_brief import job
@@ -383,3 +384,13 @@ def test_the_example_declares_the_cursor_login_beside_the_shared_pool() -> None:
     for device in ("box", "pc"):
         assert config.accounts_on(device, "cursor") == ("cursor-ultra",)
     assert config.account("cursor-grok-ultra").harness == "external"
+
+
+def test_the_decision_record_holds_maxs_yes_and_orch_yml_runs_cursor() -> None:
+    record = (ROOT / "docs" / "decisions" / "1411-cursor-accounts.md").read_text(encoding="utf-8")
+    decision = " ".join(record.partition("## Build/review harness decision")[2].split())
+    assert '"Yes: allow Cursor to build and review, and drop it from refused_harnesses"' in decision
+    assert "https://github.com/maxharris1/factory/pull/1556#issuecomment-7165146292" in decision
+    shipped, findings = load_orch_yml(ROOT / "orch.yml", allow_placeholders=True)
+    assert shipped is not None and not [item for item in findings if item.severity == "error"]
+    assert "cursor" not in shipped.refused_harnesses

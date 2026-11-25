@@ -25,19 +25,21 @@ One device runs one Cursor account.
 
 ## Doctor
 
-`orch accounts doctor` runs `cursor-agent status` as `cursor-bot` with
-`CURSOR_API_KEY`, `CURSOR_AUTH_TOKEN` and `CURSOR_CONFIG_DIR` unset, and
-reads the text reply of that CLI version's status renderer:
+`orch accounts doctor` runs `cursor-agent status --format json` as
+`cursor-bot` with `CURSOR_API_KEY`, `CURSOR_AUTH_TOKEN` and
+`CURSOR_CONFIG_DIR` unset. CLI 2026.11.22-e9042b2 renders the same status
+object as text or, with `--format json`, as JSON, so the doctor reads the
+JSON and never the text renderer's wording:
 
-| Reply | Status | Fingerprint |
+| `status` | Status | Fingerprint |
 | --- | --- | --- |
-| `✓ Logged in as <email>` | `ok` | hash of the email |
-| `✓ Logged in as user id <id>`, then `Logged in (user details not available)` | `ok` | hash of the user id |
-| `✓ Login successful!`, then `Logged in (user details not available)` or `Logged in (unable to fetch user details)` | `ok` | none |
-| `Not logged in`, `Partially authenticated (missing refresh token)` | `signed-out` | none |
-| `Status check error: ...` or anything else | `signed-out`, not understood | none |
+| `authenticated`, with or without `userInfo` | `ok` | hash of `userInfo.userId`, else none |
+| `unauthenticated` | `signed-out`, not logged in | none |
+| `partially-authenticated` | `signed-out`, partly signed in | none |
+| `error` (exits 1) or anything else | `signed-out`, inconclusive | none |
 
-It never opens a credential file and never stores the email or user id.
+Two different user ids are two sign-ins. It never opens a credential file
+and never stores the email or user id.
 
 ## Usage: not tracked
 
@@ -45,7 +47,7 @@ The CLI shows its included-usage meters only in the interactive `/usage`
 view. No documented non-interactive command or API reports used and reset
 without reading the login's credentials, so Cursor stays in
 `usage_readings.NOT_TRACKED`, and Efficiency and Settings show the reason
-from `usage_readings.NOT_TRACKED_REASONS`. The Ultra plan's included usage is
+it maps Cursor to. The Ultra plan's included usage is
 one weekly pool shared with Grok. The `external` account `cursor-grok-ultra`
 keeps recording that pool from `orch usage record`; `cursor-ultra` is the
 CLI login that draws on it.
@@ -106,7 +108,14 @@ file and loads it.
 
 ## Build/review harness decision
 
-Max has not yet decided whether Cursor becomes a build or review harness.
-Until his own words say otherwise, Cursor stays in `orch.yml`
-`refused_harnesses`, and no Cursor build or review job runs. The account,
-doctor, usage and UI work above does not depend on that decision.
+Max decided yes on 2026-11-25: "Yes: allow Cursor to build and review, and
+drop it from refused_harnesses" (his words via the Factory Internal card,
+relayed in
+https://github.com/maxharris1/factory/pull/1556#issuecomment-7165146292).
+This PR removes `cursor` from `refused_harnesses` in the tracked `orch.yml`;
+the live host `orch.yml` changes only when this PR ships. A Cursor job runs
+on the device's `cursor-bot` login, so it draws on the Cursor account above.
+The cross-family rule is unchanged: a Cursor harness takes its family only
+from its model hint (`lib/factory_md.py`), and a route whose builder and
+reviewer share a family, or whose Cursor family is not established, is
+refused (`orchestrate.assert_cross_family`).

@@ -571,7 +571,7 @@ def test_linear_webhook_requires_a_linear_project(tmp_path: Path) -> None:
     ]
 
 
-def test_refused_harnesses_defaults_empty_and_the_shipped_file_refuses_cursor(
+def test_refused_harnesses_defaults_empty_and_the_shipped_file_refuses_none(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "orch.yml"
@@ -581,7 +581,7 @@ def test_refused_harnesses_defaults_empty_and_the_shipped_file_refuses_cursor(
     assert config.refused_harnesses == ()
     shipped, _ = load_orch_yml(ROOT / "orch.yml", allow_placeholders=True)
     assert shipped is not None
-    assert shipped.refused_harnesses == ("cursor",)
+    assert shipped.refused_harnesses == ()
 
 
 @pytest.mark.parametrize("value, message", [

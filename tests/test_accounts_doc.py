@@ -123,13 +123,13 @@ def test_the_device_login_runs_the_documented_command_without_a_folder(harness: 
     assert f"`{expected}`" in doc()
 
 
-def test_the_doc_says_cursor_stays_refused_as_orch_yml_does() -> None:
+def test_the_doc_says_cursor_builds_and_reviews_as_orch_yml_allows() -> None:
     orch = (ROOT / "orch.yml").read_text(encoding="utf-8")
-    section = doc().partition("### Cursor is checked, not run")[2].split("\n#", 1)[0]
+    section = " ".join(doc().partition("### Cursor builds and reviews")[2].split("\n#", 1)[0].split())
 
-    assert re.search(r"^refused_harnesses:\n  - cursor$", orch, flags=re.MULTILINE)
-    assert "`refused_harnesses: [cursor]`" in section
-    assert "runs no build\nor review job on Cursor" in section
+    assert not re.search(r"^refused_harnesses:", orch, flags=re.MULTILINE)
+    assert "`orch.yml` no longer lists it in `refused_harnesses`" in section
+    assert "docs/decisions/1411-cursor-accounts.md" in section
 
 
 def settings_section() -> str:
