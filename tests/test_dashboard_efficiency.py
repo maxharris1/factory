@@ -19,7 +19,7 @@ from tests.test_dashboard_lanes import Browser, _page_with_status_stub, needs_ch
 from tests.test_dashboard_layout import _run_page, _section, _text, needs_node
 from tests.test_dashboard_telemetry import add_telemetry
 
-PANELS = ["headroom", "tokens", "rounds", "savings", "jobs-lifetime"]
+PANELS = ["headroom", "tokens", "rounds", "savings", "routing", "jobs-lifetime"]
 
 
 MACHINES = (
