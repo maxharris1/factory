@@ -306,6 +306,8 @@ STREAM_REASONS = (
     "claude wrapper",
     "codex",
     "codex wrapper",
+    "gemini",
+    "gemini wrapper",
     "empty command",
     "not print mode",
     "output format already set",
@@ -1244,8 +1246,12 @@ class Summary:
         kind = event.get("type")
         if not isinstance(kind, str):
             return
+        own = harnesses.find(self.harness)
+        if own is not None and own.handles_event(kind):
+            own.parse_event(self, kind, event, now)
+            return
         for driver in harnesses.all_drivers():
-            if driver.handles_event(kind):
+            if driver is not own and driver.handles_event(kind):
                 driver.parse_event(self, kind, event, now)
                 return
 
@@ -1415,6 +1421,65 @@ class Summary:
         self.cli_reason = reason
         if reason != "success":
             self._step(now, "error", reason, "error")
+
+    # -- Gemini CLI: gemini -p --output-format stream-json --
+
+    def _gemini(self, kind: str, event: dict, now: float) -> None:
+        if kind == "init":
+            if self.model is None:
+                self.model = exposure.reported_model(event.get("model"))
+            return
+        if kind == "message":
+            if event.get("role") == "assistant" and not self._totals:
+                self.turns += 1
+            return
+        if kind == "tool_use":
+            name = str(event.get("tool_name") or event.get("name") or "unknown")
+            call_id = str(event.get("tool_id") or event.get("id") or f"gemini-call-{self.events}")
+            params = event.get("parameters") if isinstance(event.get("parameters"), dict) else {}
+            lower = name.lower()
+            command: str | None = None
+            if any(word in lower for word in ("shell", "bash", "terminal", "run_command")):
+                command = _command_text(params.get("command") or params.get("cmd"))
+                self._tool(name)
+                self.commands += 1
+                step = self._step(now, "command", "command", "running")
+            else:
+                label = self._tool(name)
+                if any(word in lower for word in ("write", "edit", "replace", "patch")):
+                    self._touch(params.get("file_path") or params.get("path"))
+                step = self._step(now, "tool", label, "running")
+            self._open[call_id] = (step, command)
+            return
+        if kind == "tool_result":
+            call_id = str(event.get("tool_id") or event.get("id") or "")
+            status = str(event.get("status") or "").lower()
+            error = status == "error" or bool(event.get("is_error"))
+            output = _text_of(event.get("output") or event.get("content") or "")
+            self._finished(call_id, error, output)
+            return
+        if kind == "error":
+            self._error(now, "error")
+            return
+        if kind == "result":
+            self._totals = True
+            stats = event.get("stats") if isinstance(event.get("stats"), dict) else {}
+            usage = event.get("usage") if isinstance(event.get("usage"), dict) else stats
+            if usage:
+                cached = _int(usage.get("cached") or usage.get("cached_tokens") or usage.get("cache_read_input_tokens"))
+                inp = _int(usage.get("input_tokens") or usage.get("prompt_tokens"))
+                out = _int(usage.get("output_tokens") or usage.get("candidates_tokens"))
+                if inp or out or cached:
+                    self.usage_seen = True
+                    self.tokens_in = inp
+                    self.tokens_cached = cached
+                    self.tokens_out = out
+            status = str(event.get("status") or event.get("subtype") or "success").lower()
+            if event.get("is_error") or status == "error":
+                self.cli_reason = "error"
+                self._step(now, "error", "error", "error")
+            else:
+                self.cli_reason = "success"
 
     # -- Codex: codex exec --json --
 

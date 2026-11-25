@@ -345,7 +345,15 @@ def test_canaries_reach_neither_rows_details_nor_database(tmp_path: Path) -> Non
 
 ORG_B = "4b0c6c5e-0000-4000-8000-00000000b002"
 EMAIL_B = "bot-two@example.com"
-TOKENS = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY")
+TOKENS = (
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "CODEX_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+)
 
 WORLD_MACHINES = """\
 orch_host: box

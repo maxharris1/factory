@@ -37,6 +37,7 @@ from lib import device_pool, lane_limit
 from lib.machines_yml import EXTERNAL, MachinesConfig
 from lib.usage_readings import (
     NOT_TRACKED,
+    NOT_TRACKED_REASONS,
     SOURCES,
     WINDOWS,
     Reading,
@@ -45,7 +46,7 @@ from lib.usage_readings import (
     window_state,
 )
 
-HARNESSES = ("claude", "codex", "cursor")
+HARNESSES = ("claude", "codex", "cursor", "gemini")
 ROW_HARNESSES = (*HARNESSES, EXTERNAL)
 ROW_LIMIT = 500
 TEXT_MAX = 100
@@ -159,7 +160,10 @@ def _entry(
     }
     states = {entry[window]["state"] for window in WINDOWS}
     tracked = machines is not None and any(item.harness == harness for item in machines.accounts)
-    if harness in NOT_TRACKED and not tracked:
+    if harness == "gemini" and not windows:
+        state = "not tracked"
+        entry["reason"] = NOT_TRACKED_REASONS["gemini"]
+    elif harness in NOT_TRACKED and not tracked:
         state = "not tracked"
     elif readings is None:
         state = "no telemetry"

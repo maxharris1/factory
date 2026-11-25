@@ -198,8 +198,8 @@ def test_a_worker_bot_with_no_app_on_an_approver_login_is_still_reported(
 
 
 def test_an_unknown_app_is_refused(tmp_path: Path) -> None:
-    text = orch_text() + app_block("grok-bot", 9).replace("    grok-bot:", "    gemini-bot:")
-    assert "unknown field 'github_app.apps.gemini-bot'" in errors(tmp_path, text)
+    text = orch_text() + app_block("grok-bot", 9).replace("    grok-bot:", "    unknown-bot:")
+    assert "unknown field 'github_app.apps.unknown-bot'" in errors(tmp_path, text)
 
 
 def test_the_single_app_shape_from_122_names_its_new_place(tmp_path: Path) -> None:
@@ -545,8 +545,8 @@ def test_poller_reads_app_accepts_a_listed_bot(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("value", "message"),
     [
-        ("nobody", "poller_reads_app nobody is not a bot (grok-bot, claude-bot, codex-bot, cursor-bot)"),
-        ("Claude-Bot", "poller_reads_app Claude-Bot is not a bot (grok-bot, claude-bot, codex-bot, cursor-bot)"),
+        ("nobody", "poller_reads_app nobody is not a bot (grok-bot, claude-bot, codex-bot, cursor-bot, gemini-bot)"),
+        ("Claude-Bot", "poller_reads_app Claude-Bot is not a bot (grok-bot, claude-bot, codex-bot, cursor-bot, gemini-bot)"),
         ("42", "poller_reads_app must be a bot name"),
         ("[claude-bot]", "poller_reads_app must be a bot name"),
         ("codex-bot", "poller_reads_app codex-bot has no github_app.apps.codex-bot"),

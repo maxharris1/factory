@@ -1506,7 +1506,7 @@ REFUSED = [
     ("add", "..", {"harness": "claude", "max_jobs": 3, "signed_in_on": []}, 400, "bad-value"),
     ("add", "has space", {"harness": "claude", "max_jobs": 3, "signed_in_on": []}, 400, "bad-value"),
     ("add", "x" * 65, {"harness": "claude", "max_jobs": 3, "signed_in_on": []}, 400, "bad-value"),
-    ("add", "claude-team", {"harness": "gemini", "max_jobs": 3, "signed_in_on": []}, 400, "bad-value"),
+    ("add", "claude-team", {"harness": "unknown", "max_jobs": 3, "signed_in_on": []}, 400, "bad-value"),
     ("add", "claude-team", {"harness": "claude", "max_jobs": 0, "signed_in_on": []}, 400, "bad-value"),
     ("add", "claude-team", {"harness": "claude", "max_jobs": 65, "signed_in_on": []}, 400, "bad-value"),
     ("add", "claude-team", {"harness": "claude", "max_jobs": True, "signed_in_on": []}, 400, "bad-value"),

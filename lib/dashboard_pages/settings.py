@@ -26,7 +26,7 @@ UNCHECKED = "unchecked"
 ACCOUNT_READ_ONLY = {"default": "read-only: default account", "external": "read-only: external account"}
 NOT_SIGNED_IN = "not signed in on any device"
 NO_ACCOUNTS = "no accounts: machines.yml lists none"
-ADD_HARNESSES = ("claude", "codex", "cursor")
+ADD_HARNESSES = ("claude", "codex", "cursor", "gemini")
 SIGNIN_HARNESSES = ("claude", "codex")
 SIGNIN_REMIND = "Paste a code only from a sign-in you just started here. Never paste a code someone sent you."
 
@@ -81,7 +81,7 @@ def running_line(account: dict) -> str:
 
 
 def account_facts(account: dict) -> list[tuple[str, str, str]]:
-    return [
+    facts = [
         ("harness", account["harness"], ""),
         ("max_jobs", "—" if account.get("max_jobs") is None else str(account["max_jobs"]), ""),
         ("paused", "yes" if account.get("paused") else "no", "warn" if account.get("paused") else ""),
@@ -90,6 +90,11 @@ def account_facts(account: dict) -> list[tuple[str, str, str]]:
         ("headroom", *headroom_fact(account)),
         ("running", running_line(account), ""),
     ]
+    if account.get("plan"):
+        facts.insert(1, ("plan", str(account["plan"]), ""))
+    if account.get("usage_note"):
+        facts.append(("usage", f"not tracked — {account['usage_note']}", ""))
+    return facts
 
 
 def sign_in_label(entry: dict) -> str:
@@ -401,10 +406,14 @@ _SCRIPT = r"""
     }).join(', ') || 'none';
   }
   function acFacts(a) {
-    return [['harness', a.harness, ''], ['max_jobs', stValue(a.max_jobs), ''],
-            ['paused', a.paused ? 'yes' : 'no', a.paused ? 'warn' : ''],
-            ['5h used', acPct(a.five_hour_used), ''], ['7d used', acPct(a.seven_day_used), ''],
-            ['headroom'].concat(acHeadroom(a)), ['running', acRunning(a), '']];
+    var out = [['harness', a.harness, '']];
+    if (a.plan) out.push(['plan', a.plan, '']);
+    out.push(['max_jobs', stValue(a.max_jobs), ''],
+             ['paused', a.paused ? 'yes' : 'no', a.paused ? 'warn' : ''],
+             ['5h used', acPct(a.five_hour_used), ''], ['7d used', acPct(a.seven_day_used), ''],
+             ['headroom'].concat(acHeadroom(a)), ['running', acRunning(a), '']);
+    if (a.usage_note) out.push(['usage', 'not tracked — ' + a.usage_note, '']);
+    return out;
   }
   function acSignIn(ul, x) {
     var li = add(ul, el('li', 'ac-dev'));

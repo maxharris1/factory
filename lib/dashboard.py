@@ -279,8 +279,8 @@ HEALTH_OK_SECONDS, HEALTH_LATE_SECONDS = health_thresholds(POLL_SECONDS)
 _OUTCOME = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
 _ROUND = re.compile(r"[0-9]{1,3}/[0-9]{1,3}")
 MACHINES_MAX_BYTES = 256 * 1024
-WAIT_RECIPIENTS = ("claude", "codex", "cursor")
-HARNESSES = ("claude", "codex", "cursor")
+WAIT_RECIPIENTS = ("claude", "codex", "cursor", "gemini")
+HARNESSES = ("claude", "codex", "cursor", "gemini")
 TRACKERS = ("github", "linear")
 ATTENTION_REASONS = (
     "ship-failed", "dedupe-dropped", "edited-comment", "base-mismatch", "stack-retarget-failed",

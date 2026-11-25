@@ -67,7 +67,7 @@ _DASHBOARD_KEYS = {"refresh_seconds", "push", "settings"}
 _SETTINGS_KEYS = {"spool", "spool_owner", "approver", "relay"}
 OS_USER = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 GITHUB_LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
-BOT_LOGINS = frozenset({"claude-bot", "codex-bot", "cursor-bot", "grok", "grok-bot"})
+BOT_LOGINS = frozenset({"claude-bot", "codex-bot", "cursor-bot", "gemini-bot", "grok", "grok-bot"})
 _PUSH_KEYS = {
     "transport",
     "host",

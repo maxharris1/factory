@@ -220,16 +220,18 @@ SCRIPT = r"""
     for (var i = 0; i < METER_CELLS; i++) add(meter, el('span', i < v.lit ? v.tone : null));
     if (!phone && v.tag) add(room, el('span', 'ef-tag', v.tag));
   }
-  function untrackedLine(parent, h, row) {
+  function untrackedLine(parent, item, row) {
+    var h = typeof item === 'string' ? item : item.harness;
+    var label = (typeof item === 'object' && item && item.reason) ? 'not tracked — ' + item.reason : 'not tracked';
     if (row) {
       var tr = add(parent, el('tr', 'ef-un'));
       add(add(tr, el('td')), el('span', 'bot ' + h, h));
-      add(tr, el('td', 'ef-v muted', 'not tracked')).setAttribute('colspan', '6');
+      add(tr, el('td', 'ef-v muted', label)).setAttribute('colspan', '6');
       return;
     }
     var line = add(parent, el('div', 'ef-un'));
     add(line, el('span', 'bot ' + h, h));
-    add(line, el('span', 'ef-v muted', 'not tracked'));
+    add(line, el('span', 'ef-v muted', label));
   }
   function renderHeadroom(d) {
     var root = panel('headroom', 'Subscription headroom', 'per account');
@@ -238,8 +240,14 @@ SCRIPT = r"""
     var views = accounts.filter(function (e) { return e.state !== 'not tracked'; })
       .map(function (e) { return accountView(e, d.generated_at_epoch); });
     var untracked = [];
+    var seenUntracked = {};
     accounts.filter(function (e) { return e.state === 'not tracked'; })
-      .forEach(function (e) { if (untracked.indexOf(e.harness) < 0) untracked.push(e.harness); });
+      .forEach(function (e) {
+        if (!seenUntracked[e.harness]) {
+          seenUntracked[e.harness] = true;
+          untracked.push({harness: e.harness, reason: e.reason || null});
+        }
+      });
     var table = add(add(root, el('div', 'ef-scroll')), el('table', 'ef-usage'));
     var head = add(add(table, el('thead')), el('tr'));
     ['account', '5-hour window', '7-day window', 'resets', 'headroom', 'jobs', 'devices']
@@ -488,17 +496,21 @@ def _account_block(view: dict) -> str:
 def _headroom(snapshot: dict) -> str:
     accounts = snapshot["usage"]["accounts"]
     views = [_view(e, snapshot["generated_at_epoch"]) for e in accounts if e["state"] != "not tracked"]
-    untracked = list(dict.fromkeys(e["harness"] for e in accounts if e["state"] == "not tracked"))
+    untracked: dict[str, str | None] = {}
+    for e in accounts:
+        if e["state"] == "not tracked" and e["harness"] not in untracked:
+            untracked[e["harness"]] = e.get("reason")
     head = "".join(f"<th>{name}</th>" for name in
                    ("account", "5-hour window", "7-day window", "resets", "headroom", "jobs", "devices"))
     rows = "".join(_account_row(view) for view in views) + "".join(
         f'<tr class="ef-un"><td>{_span("bot " + h, h)}</td>'
-        '<td class="ef-v muted" colspan="6">not tracked</td></tr>'
-        for h in untracked
+        f'<td class="ef-v muted" colspan="6">{_e(f"not tracked — {reason}" if reason else "not tracked")}</td></tr>'
+        for h, reason in untracked.items()
     )
     blocks = "".join(_account_block(view) for view in views) + "".join(
-        f'<div class="ef-un">{_span("bot " + h, h)}{_span("ef-v muted", "not tracked")}</div>'
-        for h in untracked
+        f'<div class="ef-un">{_span("bot " + h, h)}'
+        f'{_span("ef-v muted", f"not tracked — {reason}" if reason else "not tracked")}</div>'
+        for h, reason in untracked.items()
     )
     inner = (
         f'<div class="ef-scroll"><table class="ef-usage"><thead><tr>{head}</tr></thead>'

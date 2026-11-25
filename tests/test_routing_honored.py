@@ -39,8 +39,10 @@ def _ready(builder: str, head: str = HEAD) -> str:
 def test_go_header_parses_builder_and_reviewer() -> None:
     fields = parse_comment(_go("builder=codex reviewer=claude ")).as_dict()
     assert (fields["builder"], fields["reviewer"]) == ("codex", "claude")
+    gemini = parse_comment(_go("builder=claude reviewer=gemini ")).as_dict()
+    assert (gemini["builder"], gemini["reviewer"]) == ("claude", "gemini")
     with pytest.raises(HandoffError, match="bad reviewer"):
-        parse_comment(_go("reviewer=gemini "))
+        parse_comment(_go("reviewer=unknown "))
 
 
 def test_go_naming_builder_and_reviewer_queues_those(tmp_path: Path) -> None:

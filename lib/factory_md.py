@@ -163,11 +163,12 @@ EXAMPLE_PATHS = (
 )
 
 # Prefixes drawn from names the spec uses. This is not an allow-list.
-ADVISORY_MODEL_PREFIXES = ("claude", "codex", "cursor", "fable", "gpt", "grok")
+ADVISORY_MODEL_PREFIXES = ("claude", "codex", "cursor", "fable", "gemini", "gpt", "grok")
 
 _ANTHROPIC_WORD = re.compile(r"^(?:claude|sonnet|opus|haiku|fable)(?=$|[-._:0-9])")
 _OPENAI_WORD = re.compile(r"^(?:gpt|codex)(?=$|[-._:0-9])")
 _OPENAI_O_SERIES = re.compile(r"^o[0-9]+(?=$|[-._:])")
+_GOOGLE_WORD = re.compile(r"^gemini(?=$|[-._:0-9])")
 _OTHER_MODEL_LINES = ("opus-mt", "gpt-j", "gpt-neo")
 _SKILL = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _BRANCH = re.compile(r"^[A-Za-z0-9._/-]+$")
@@ -624,7 +625,7 @@ def _actor(
         findings.append(Finding("error", f"missing required field '{key}.harness'"))
     elif value["harness"] not in HARNESSES:
         findings.append(
-            Finding("error", f"{key}.harness must be claude, codex or cursor")
+            Finding("error", f"{key}.harness must be claude, codex, cursor or gemini")
         )
     else:
         harness = str(value["harness"])
@@ -855,7 +856,7 @@ def family_findings(
 def _unresolved(side: str) -> str:
     return (
         f"same-family reviewer: {side} family not established: "
-        "give a claude*/sonnet*/opus*/haiku*/gpt*/codex*/o<n> model hint"
+        "give a claude*/sonnet*/opus*/haiku*/gpt*/codex*/o<n>/gemini* model hint"
     )
 
 
@@ -893,6 +894,8 @@ def resolved_family(harness: str, model: str | None) -> tuple[str | None, str | 
         return "anthropic", hint_family
     if harness == "codex":
         return "openai", hint_family
+    if harness == "gemini":
+        return "google", hint_family
     if harness == "cursor":
         return hint_family, hint_family
     return None, hint_family
@@ -909,6 +912,8 @@ def _family_name(name: str) -> str | None:
         or _OPENAI_O_SERIES.match(lowered) is not None
     ):
         return "openai"
+    if _GOOGLE_WORD.match(lowered) is not None:
+        return "google"
     return None
 
 

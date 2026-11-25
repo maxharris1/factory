@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from lib.queue import SQLiteJobQueue
 
 Status = Literal["ok", "signed-out", "mismatch", "unreachable"]
-Harness = Literal["claude", "codex"]
+Harness = Literal["claude", "codex", "gemini"]
 Source = Literal["preflight", "runtime", "doctor"]
 
 TABLE = "account_signins"
@@ -92,6 +92,7 @@ _INCONCLUSIVE = frozenset({NOT_UNDERSTOOD, EXIT_NONZERO})
 NO_IDENTITY = "sign-in names no org and email"
 TOKEN_AUTH = "auth from a token variable, not the account folder"
 CODEX_API_KEY = "api key, not a ChatGPT sign-in"
+GEMINI_API_KEY_DETAIL = "api key, not a Google sign-in"
 METHOD_NOT_UNDERSTOOD = "auth method not understood"
 SHARED_IDENTITY = "same sign-in as account {}"
 SPLIT_IDENTITY = "another sign-in on device {}"
@@ -107,6 +108,10 @@ _FRAME = re.compile(rb"ORCH-ACCOUNT (\d+) (\d+)")
 _SIGNED_OUT = {
     "claude": re.compile(r"OAuth session expired|not logged in|run /login", re.IGNORECASE),
     "codex": re.compile(r"not logged in|401 Unauthorized|Please (?:log out and )?sign in again", re.IGNORECASE),
+    "gemini": re.compile(
+        r"not logged in|not authenticated|run gemini auth login|401 Unauthorized|invalid api key|reauthenticate",
+        re.IGNORECASE,
+    ),
 }
 
 SUBSCRIPTION = re.compile(r"[a-z][a-z0-9_]{0,23}")
@@ -115,6 +120,16 @@ _CODEX_LINES = (
     ("Logged in using an API key", "api_key", True),
     ("Not logged in", None, False),
 )
+_ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|.)", re.DOTALL)
+_GEMINI_API_KEY = re.compile(
+    r"(?:logged in|authenticated)\s+(?:using|via|with)\s+(?:an?\s+)?api\s*key|\b(?:GEMINI|GOOGLE)_API_KEY\b",
+    re.IGNORECASE,
+)
+_GEMINI_LOGGED_IN = re.compile(
+    r"^(?:logged in|authenticated)(?:\s+(?:with\s+google\s+)?as\s+(.+)|\s+with\s+google)?\s*$",
+    re.IGNORECASE,
+)
+_GEMINI_LOGGED_OUT = re.compile(r"^not\s+(?:logged in|authenticated)\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -173,6 +188,10 @@ _RULES: dict[Harness, dict[str | None, _Rule]] = {
         "chatgpt": _Rule("ok"),
         "api_key": _Rule("signed-out", CODEX_API_KEY),
     },
+    "gemini": {
+        "google": _Rule("ok"),
+        "api_key": _Rule("signed-out", GEMINI_API_KEY_DETAIL),
+    },
 }
 
 
@@ -180,6 +199,7 @@ _CLAUDE_METHODS = frozenset(_RULES["claude"]) | {"none"}
 AUTH_METHODS: dict[Harness, frozenset[str]] = {
     "claude": _CLAUDE_METHODS | {"unknown"},
     "codex": frozenset(method for _, method, _ in _CODEX_LINES if method is not None),
+    "gemini": frozenset(_RULES["gemini"]),
 }
 
 
@@ -248,6 +268,44 @@ def parse_codex(account: str, device: str, code: int, reply: bytes) -> Probe:
     return Probe(account, device, "codex", True, False, None, None, None, NOT_UNDERSTOOD)
 
 
+def parse_gemini(account: str, device: str, code: int, reply: bytes) -> Probe:
+    cleaned = _ANSI.sub("", reply.decode("utf-8", errors="replace"))
+    data = _json_object(cleaned.encode("utf-8"))
+    if data is not None:
+        raw_logged = data.get("loggedIn")
+        if not isinstance(raw_logged, bool):
+            raw_logged = data.get("authenticated")
+        if isinstance(raw_logged, bool):
+            raw_method = str(data.get("authMethod") or data.get("auth_method") or "").strip().lower()
+            if raw_method in ("api_key", "apikey", "gemini-api-key", "token", "env"):
+                method: str | None = "api_key"
+            elif raw_logged:
+                method = "google"
+            else:
+                method = None
+            signed_in, detail = _signed_in(code, raw_logged)
+            email = _text(data, "email") or _text(data, "account")
+            fp = _fingerprint("gemini", email.lower()) if email and method == "google" else None
+            sub = _subscription(data.get("subscriptionType") or data.get("plan"))
+            return Probe(account, device, "gemini", True, signed_in, method, sub, fp, detail)
+    lines = [line.strip().lstrip("✓✔✗✘•- ").strip() for line in cleaned.splitlines()]
+    first = next((line for line in lines if line), "")
+    if not first:
+        return Probe(account, device, "gemini", True, False, None, None, None, NOT_UNDERSTOOD)
+    if _GEMINI_API_KEY.search(first):
+        signed_in, detail = _signed_in(code, True)
+        return Probe(account, device, "gemini", True, signed_in, "api_key", None, None, detail)
+    if _GEMINI_LOGGED_OUT.match(first):
+        return Probe(account, device, "gemini", True, False, None, None, None, NOT_LOGGED_IN)
+    match = _GEMINI_LOGGED_IN.match(first)
+    if match is not None:
+        signed_in, detail = _signed_in(code, True)
+        ident = match.group(1).rstrip(".,;:)") if match.group(1) else None
+        fp = _fingerprint("gemini", ident.lower()) if ident else None
+        return Probe(account, device, "gemini", True, signed_in, "google", None, fp, detail)
+    return Probe(account, device, "gemini", True, False, None, None, None, NOT_UNDERSTOOD)
+
+
 @dataclass(frozen=True)
 class _Status:
     command: str
@@ -261,6 +319,8 @@ _STATUS: dict[Harness, _Status] = {
     "claude": _Status("claude auth status", False, "CLAUDE_CONFIG_DIR",
                       ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"), parse_claude),
     "codex": _Status("codex login status", True, "CODEX_HOME", ("OPENAI_API_KEY", "CODEX_API_KEY"), parse_codex),
+    "gemini": _Status("gemini auth status", True, "GEMINI_CLI_HOME",
+                      ("GEMINI_API_KEY", "GOOGLE_API_KEY"), parse_gemini),
 }
 _TOKEN_VARIABLES = tuple(name for status in _STATUS.values() for name in status.token_variables)
 
@@ -416,7 +476,7 @@ def _first_pass(probe: Probe, now: float) -> SignIn:
         status=rule.status,
         auth_method=probe.auth_method,
         subscription_type=probe.subscription_type,
-        fingerprint=probe.fingerprint if rule.needs_fingerprint and rule.status == "ok" else None,
+        fingerprint=probe.fingerprint if rule.status == "ok" else None,
         checked_at=now,
         detail=rule.detail,
     )
@@ -453,6 +513,7 @@ def judge(probes: Sequence[Probe], now: float) -> list[SignIn]:
 _LOGIN: dict[Harness, tuple[tuple[str, ...], str]] = {
     "claude": (("CLAUDE_CODE_OAUTH_TOKEN",), "claude auth login"),
     "codex": ((), "codex login --device-auth"),
+    "gemini": (("GEMINI_API_KEY", "GOOGLE_API_KEY"), "gemini auth login"),
 }
 _THEN = ", then orch accounts doctor"
 _STEP: dict[Status, str] = {

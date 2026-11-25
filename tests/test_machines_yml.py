@@ -694,7 +694,7 @@ def test_draining_device_account_does_not_serve(tmp_path: Path) -> None:
         ),
         (
             "accounts:\n  - {id: codex-a, harness: grok}\ndevices:\n" + remote(),
-            "accounts[0].harness must be one of claude, codex, cursor, external",
+            "accounts[0].harness must be one of claude, codex, cursor, gemini, external",
         ),
         (
             "accounts:\n  - {id: codex-a, harness: codex, token: x}\ndevices:\n" + remote(),

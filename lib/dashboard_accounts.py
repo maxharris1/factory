@@ -160,7 +160,7 @@ def read_accounts(
             read_only = "default"
         else:
             read_only = None
-        entries.append({
+        entry = {
             "id": account.id,
             "harness": account.harness,
             "max_jobs": account.max_jobs,
@@ -171,5 +171,10 @@ def read_accounts(
             "headroom": usage_readings.headroom(list(readings.values()), now),
             "floor": device_pool.FLOOR,
             "running": running.get(account.id, []),
-        })
+        }
+        if account.plan:
+            entry["plan"] = account.plan
+        if account.harness == "gemini" and account.harness in usage_readings.NOT_TRACKED_REASONS:
+            entry["usage_note"] = usage_readings.NOT_TRACKED_REASONS[account.harness]
+        entries.append(entry)
     return entries

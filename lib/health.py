@@ -314,7 +314,7 @@ def _check(component: str, device: str, bot: str, pid: int, version: str,
     if not isinstance(device, str) or not TOKEN.fullmatch(device) or device not in devices:
         raise HealthError("device must be a device machines.yml lists")
     if bot != "" and bot not in OWNING_BOTS:
-        raise HealthError("bot must be claude-bot, codex-bot or cursor-bot")
+        raise HealthError("bot must be claude-bot, codex-bot, cursor-bot or gemini-bot")
     if isinstance(pid, bool) or not isinstance(pid, int) or pid < 1:
         raise HealthError("pid must be a positive integer")
     if not isinstance(version, str) or not VERSION.fullmatch(version):

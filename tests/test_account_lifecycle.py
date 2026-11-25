@@ -172,7 +172,7 @@ def test_device_names_yaml_would_read_as_another_type_stay_names(
         ({"account": "work"}, "exists"),
         ({"account": "api"}, "exists"),
         ({"account": "codex-default"}, "read-only"),
-        ({"harness": "gemini"}, "unknown-harness"),
+        ({"harness": "unknown"}, "unknown-harness"),
         ({"harness": "external", "signed_in_on": ()}, "unknown-harness"),
         ({"harness": None}, "unknown-harness"),
         ({"signed_in_on": ("laptop",)}, "unknown-device"),

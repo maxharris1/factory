@@ -438,6 +438,17 @@ CODEX_HOME=~/.factory-accounts/<id> codex login --device-auth
 
 Sign in with ChatGPT. The doctor counts an API-key login as `signed-out`.
 
+For a Gemini account, run:
+
+```sh
+env -u GEMINI_API_KEY -u GOOGLE_API_KEY GEMINI_CLI_HOME=~/.factory-accounts/<id> gemini auth login
+```
+
+Sign in with Google. The doctor counts an API-key login (`GEMINI_API_KEY` or
+`GOOGLE_API_KEY`) as `signed-out`, and Gemini quota stays `not tracked` because
+Gemini CLI has no non-interactive quota command that avoids reading credential
+files.
+
 ## 3. Check every sign-in
 
 On the orch host, run:

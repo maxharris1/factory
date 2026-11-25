@@ -28,11 +28,13 @@ _VALUE_FORMS = {
     "claude": re.compile(rf"^(opus|sonnet|haiku|fable) {_EFFORT}$"),
     "codex": re.compile(rf"^gpt-[a-z0-9][a-z0-9.\-]* {_EFFORT}$"),
     "cursor": re.compile(r"^[a-z0-9][a-z0-9.\-]*$"),
+    "gemini": re.compile(rf"^gemini-[a-z0-9][a-z0-9.\-]*(?: {_EFFORT})?$"),
 }
 _FOREIGN = {
     "claude": ("grok-",),
     "codex": ("grok-", "claude-"),
     "cursor": (),
+    "gemini": ("grok-", "claude-", "gpt-"),
 }
 _HARNESS_KEYS = frozenset({"budget", "default", "panel"})
 

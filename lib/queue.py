@@ -76,7 +76,7 @@ ACTIONS = (
 )
 FINISHING_ACTIONS = ("review", "fix", "update-from-main", "qa")
 QA_RECIPIENT = "qa"
-RECIPIENTS = ("claude", "codex", "cursor", "grok", QA_RECIPIENT)
+RECIPIENTS = ("claude", "codex", "cursor", "gemini", "grok", QA_RECIPIENT)
 STATES = ("queued", "running", "done", "failed", "cancelled")
 BUSY_TIMEOUT_SECONDS = 30
 # Device-pool placements (lib/device_pool.py). The table exists once a
