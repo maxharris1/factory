@@ -153,11 +153,12 @@ SECURITY_HEADERS = {
     "Referrer-Policy": "no-referrer",
     "X-Frame-Options": "DENY",
     # External static assets under /static/ with strict script-src 'self' (no
-    # 'unsafe-inline' for scripts). style-src keeps 'unsafe-inline' only for
-    # inline style attributes on PixelStrip canvases and QA evidence pages.
+    # 'unsafe-inline' for scripts). img-src/media-src 'self' allows inline QA
+    # screenshots and videos served via /qa/runs/<run_id>/... on Mission Control.
     "Content-Security-Policy": (
         "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; "
-        "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+        "connect-src 'self'; img-src 'self'; media-src 'self'; "
+        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     ),
 }
 QA_RUNS = "/qa/runs/"
@@ -167,10 +168,7 @@ QA_TYPES = {
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
     ".webm": "video/webm", ".mp4": "video/mp4", ".json": "application/json",
 }
-QA_HEADERS = {
-    **SECURITY_HEADERS,
-    "Content-Security-Policy": SECURITY_HEADERS["Content-Security-Policy"] + "; img-src 'self'; media-src 'self'",
-}
+QA_HEADERS = dict(SECURITY_HEADERS)
 QA_DOWNLOAD = ("text/plain; charset=utf-8", {**QA_HEADERS, "Content-Disposition": "attachment"})
 QA_CHUNK = 1024 * 1024
 _AUTH_JS = (
@@ -977,6 +975,20 @@ def _another_round_body(facts: ActFacts) -> str:
     )
 
 
+def _request_changes_body(facts: ActFacts) -> str:
+    return (
+        f"{GO_HEADER}\n\n**Visual QA changes requested** (head `{facts.head}`)\n\n"
+        f"{facts.words}"
+    )
+
+
+def _rerun_qa_body(facts: ActFacts) -> str:
+    return (
+        f"{RETRY_HEADER}\n\n**Re-run QA** (head `{facts.head}`)\n\n"
+        f"{facts.words}"
+    )
+
+
 class ActionSpec(NamedTuple):
     head_bound: bool
     body: Callable[[ActFacts], str]
@@ -987,6 +999,8 @@ ACTIONS: dict[str, ActionSpec] = {
     "ok": ActionSpec(
         True, lambda facts: f"<!-- orch:v1 kind=ok head={facts.head} -->\n\n{facts.words}"
     ),
+    "request-changes": ActionSpec(True, _request_changes_body),
+    "rerun-qa": ActionSpec(True, _rerun_qa_body),
     "approve-plan": ActionSpec(False, lambda facts: f"{GO_HEADER}\n\n{facts.words}"),
     "split": ActionSpec(False, _split_body),
     "another-round": ActionSpec(False, _another_round_body),
@@ -1453,6 +1467,12 @@ class SnapshotHandler(BaseHTTPRequestHandler):
             "expect_why"
         ):
             raise ApiError(409, "changed")
+        if "expect_comment_id" in payload:
+            expected_cid = payload.get("expect_comment_id")
+            if expected_cid is not None and not isinstance(expected_cid, str):
+                raise ApiError(400, "bad-comment-id")
+            if wait.get("comment_id") != expected_cid:
+                raise ApiError(409, "already-answered")
         listed = row.get("actions")
         if not isinstance(listed, list) or name not in listed:
             raise ApiError(409, "not-applicable")

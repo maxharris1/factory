@@ -290,6 +290,7 @@ def _attention_key(row: dict) -> str:
 
 _WHY: dict[Why, str] = {
     "awaiting-ok": "waits for your merge OK",
+    "visual-qa-review": "waits for your visual QA review",
     "plan-size": "plan is over the size limit",
     "question": "asks you a question",
     "repeat-stop": "review repeated an earlier finding",

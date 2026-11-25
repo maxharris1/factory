@@ -202,6 +202,14 @@ class RetryMixin:
                 return self._record_retry(
                     connection, ticket, comment, None, job, "queued-retry-plan"
                 ), "planning"
+            if (
+                row is not None
+                and row["workflow_state"] == "awaiting-ok"
+                and "**Re-run QA**" in parse_comment(comment.body).body
+                and ticket.factory.qa is not None
+                and ticket.current_head is not None
+            ):
+                return self._rerun_hold_qa_in_transaction(connection, ticket, comment, row)
             return self._record_retry(
                 connection, ticket, comment, reason, None, "rejected-retry-not-stuck"
             ), None

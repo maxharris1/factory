@@ -9,7 +9,7 @@ import pytest
 import lib.dashboard_page as page
 from lib.dashboard_flow import load_chart
 from lib.dashboard_pages import (
-    activity, ci, common, efficiency, lanes, settings, shell, system, ticket_detail, tickets,
+    activity, ci, cockpit, common, efficiency, lanes, settings, shell, system, ticket_detail, tickets,
 )
 from tests.golden.pages import (
     PAGE_FILES, record, render, sha, snapshots, split, substitutions,
@@ -21,13 +21,13 @@ CSS_ORDER = (
     (common, "CSS_BASE"), (shell, "CSS"), (common, "CSS_PANEL"), (lanes, "CSS"),
     (common, "CSS_PARTS"), (shell, "CSS_NAV"), (system, "CSS"), (ticket_detail, "CSS"),
     (tickets, "CSS"), (common, "CSS_MISC"), (efficiency, "CSS"), (activity, "CSS"),
-    (ci, "CSS"), (settings, "CSS"), (shell, "CSS_PX"), (common, "CSS_TAIL"),
+    (ci, "CSS"), (cockpit, "CSS"), (settings, "CSS"), (shell, "CSS_PX"), (common, "CSS_TAIL"),
 )
 SCRIPT_ORDER = (
     (common, "SCRIPT_HEAD"), (shell, "SCRIPT"), (lanes, "SCRIPT"), (ci, "SCRIPT"), (activity, "SCRIPT"),
     (tickets, "SCRIPT_TICKETS"), (system, "SCRIPT_LOG"), (system, "SCRIPT_HEALTH"),
-    (efficiency, "SCRIPT"), (common, "SCRIPT_GITHUB"), (ticket_detail, "SCRIPT"), (settings, "SCRIPT"),
-    (common, "SCRIPT_TELEMETRY"),
+    (efficiency, "SCRIPT"), (common, "SCRIPT_GITHUB"), (cockpit, "SCRIPT"), (ticket_detail, "SCRIPT"),
+    (settings, "SCRIPT"), (common, "SCRIPT_TELEMETRY"),
     (system, "SCRIPT_COMPONENTS"), (common, "SCRIPT_TAIL"),
 )
 SHELL_SUBSTITUTIONS = ("__PIXELSTRIP__", "__SHELL__", "__POLL_MS__", "__FONTS__")
@@ -45,7 +45,7 @@ GOLDEN = {
     "shell.SCRIPT": "efb4170fdde2f3d4fe762ed57ea6465c6539ceee9beefba62aff48d455943407",
     "common.SCRIPT_GITHUB": "edc87172edd1e0dc13ac7fa537cca320bf04274753f4120709c8b286fc7e2713",
     "common.SCRIPT_TELEMETRY": "7d2a9166e208474d94a535dbbd9fbe8f2d78ad33591f287685a38bb0814bd34f",
-    "common.SCRIPT_TAIL": "bf7a6104f5f65c6f98412f498665f067cab15608a139f5e24d2671f367a79deb",
+    "common.SCRIPT_TAIL": "51b145111f49d6f42950ff06359130c09c88385ce4298aa1649a05ec6b409844",
     "PX_SCRIPT": "777ae1a8b65aa0d735a696c3e6ba885f3e5e086f61c26784d9e5efcb5bc5bef5",
     "__PIXELSTRIP__": "5eec0f40428daccb97fb1763e5316bd900c435f1f6535d3f7cf0b814847cd065",
     "__SHELL__": "c7afcd2bb9b13281221e4788582e90bc3447a057669a44fc7ae27b64d1289e84",

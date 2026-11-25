@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from lib.dashboard_flow import FLOWMAP_SCRIPT, flowmap_layout, ticket_phases
 from lib.dashboard_telemetry import NO_DATA
+from lib.dashboard_pages.cockpit import ticket_cockpit_html
 from lib.dashboard_pages.common import (
     anchor, _bot, _chip, duration, _e, _span, _state_chip,
     _thread_key, ticket_address, _tile_label,
@@ -976,6 +977,7 @@ def _ticket_article(found: dict, snapshot: dict) -> str:
         f'<article class="jobpage ticketpage" data-ticket="{_e(address)}">'
         + _crumb(_tile_label(row), HERO_LINES[spec.get("line", "state")]["crumb"](model))
         + _ticket_hero(found, model, spec)
+        + ticket_cockpit_html(found.get("ticket"))
         + "".join(SECTIONS[name](part) for name in spec.get("lead", ()))
         + _cols(part, spec["sections"])
         + "</article>"

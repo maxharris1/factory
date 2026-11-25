@@ -21,6 +21,7 @@ from lib.dispatch.helpers import (
     _is_full_sha,
     _matching_head,
     _round_number,
+    _scope,
     ship_mode,
 )
 from lib.dispatch.ok_note import HeldStop, LatestVerdict, no_hold_body, ok_marker, other_head_body
@@ -29,6 +30,7 @@ from lib.dispatch.types import Comment, ShipError, TrackedTicket
 from lib.factory_md import DEFAULT_HOLD_APPROVER, DEFAULT_HOLD_LABEL, HoldConfig
 from lib.handoff import parse_comment
 from lib.hold import VISUAL_QA_REASON, HoldDecision, decide, ok_carries
+from lib.queue import JobRequest, cancel_queued
 from lib.rule_engine import Escalate, Land, Wait
 
 _HELD_BASE_UPDATE = "held-base-update"
@@ -234,6 +236,122 @@ class HoldsMixin:
             return None
         self._write_state_label(ticket, self._review_context(ticket)[0])
         return True, _HELD_BASE_UPDATE
+
+    def _resume_after_hold(
+        self, ticket: TrackedTicket, comment: Comment
+    ) -> tuple[bool, str] | None:
+        """An approver's `kind=go state=building` on a held PR (`awaiting-ok`)
+        clears the hold, supersedes the held APPROVE, and sends the PR back to
+        the builder with the approver's feedback (E4-1 Request Changes)."""
+        if not self._may_approve_go(comment.author):
+            return None
+        scope = (ticket.repo.lower(), ticket.ticket_id)
+        dedupe_key = f"hold-changes:{_scope(ticket.repo, ticket.ticket_id)}:{comment.id}"
+        ticket = self._fresh_issue(ticket)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT 1 FROM jobs WHERE dedupe_key = ?", (dedupe_key,)
+            ).fetchone()
+            row = connection.execute(
+                """
+                SELECT workflow_state, review_round, generation
+                FROM ticket_state WHERE repo = ? AND ticket_id = ?
+                """,
+                scope,
+            ).fetchone()
+            if existing is not None:
+                state = str(row["workflow_state"]) if row is not None and row["workflow_state"] else "building"
+                connection.commit()
+                self._write_state_label(ticket, state)
+                return True, "queued-hold-changes"
+            if row is None or row["workflow_state"] != "awaiting-ok":
+                connection.commit()
+                return None
+            hold = connection.execute(
+                "SELECT approve_comment_id FROM ship_holds WHERE repo = ? AND ticket_id = ?",
+                scope,
+            ).fetchone()
+            now = self.queue.now()
+            if hold is not None and hold["approve_comment_id"]:
+                approve_id = str(hold["approve_comment_id"])
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO handled_comments (
+                        repo, ticket_id, comment_id, outcome
+                    ) VALUES (?, ?, ?, 'superseded-hold-changes')
+                    """,
+                    (*scope, approve_id),
+                )
+                connection.execute(
+                    "INSERT OR IGNORE INTO handled_times VALUES (?, ?, ?, ?)",
+                    (*scope, approve_id, now),
+                )
+            connection.execute(
+                "DELETE FROM ship_holds WHERE repo = ? AND ticket_id = ?",
+                scope,
+            )
+            open_qa = connection.execute(
+                """
+                SELECT qa_runs.run_id, jobs.id AS job_id, jobs.state AS job_state
+                FROM qa_runs LEFT JOIN jobs ON jobs.id = qa_runs.job_id
+                WHERE qa_runs.repo = ? AND qa_runs.ticket_id = ?
+                  AND qa_runs.state IN ('queued', 'running')
+                """,
+                scope,
+            ).fetchall()
+            for qa_row in open_qa:
+                if qa_row["job_state"] == "queued" and qa_row["job_id"] is not None:
+                    cancel_queued(connection, str(qa_row["job_id"]), "qa-hold-changes", now)
+                connection.execute(
+                    """
+                    UPDATE qa_runs SET state = 'cancelled', reason = 'hold-changes', finished_at = ?
+                    WHERE run_id = ?
+                    """,
+                    (now, qa_row["run_id"]),
+                )
+            self._enqueue_step(
+                connection,
+                ticket,
+                comment,
+                JobRequest(
+                    repo=ticket.repo,
+                    ticket_id=ticket.ticket_id,
+                    action="build",
+                    recipient=ticket.factory.builder_harness,
+                    source_comment_id=comment.id,
+                    timeout_seconds=ticket.job_timeout_minutes * 60,
+                    generation=int(row["generation"]),
+                    head=ticket.current_head,
+                    detail=self._job_detail(
+                        ticket,
+                        action="build",
+                        head=ticket.current_head,
+                        round_number=int(row["review_round"]) + 1,
+                        instruction=_comment_link(comment),
+                        resume=True,
+                        cap=self._effective_cap(ticket, connection),
+                        connection=connection,
+                    ),
+                ),
+                dedupe_key=dedupe_key,
+            )
+            write_workflow_state(
+                connection,
+                ticket.repo,
+                ticket.ticket_id,
+                "building",
+                source="hold-changes",
+                at=now,
+                also={
+                    "approved_head": None,
+                    "approved_at": None,
+                    "approve_comment_id": None,
+                },
+            )
+            connection.commit()
+        self._write_state_label(ticket, "building")
+        return True, "queued-hold-changes"
 
     def _hold_decision(self, ticket: TrackedTicket, head: str) -> HoldDecision:
         return self._read_hold(ticket, head)[0]

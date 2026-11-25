@@ -207,6 +207,8 @@ from lib.ci_lane import ci_lane
 from lib.dispatch.types import CHECK_FAILED
 from lib.dashboard_page import PAGES, STATIC_ASSETS, render_pages, render_static_assets
 from lib.dashboard_page import duration as _duration
+from lib.dashboard_pages import qa_evidence
+from lib.dispatch.questions import extract_open_questions
 from lib.factory_md import QA_RUNNERS
 from lib.feeder import STATES as FEEDER_STATES
 from lib.dispatch.cycle_clock import LOCK_ERRORS, SLOW_CYCLE
@@ -1344,6 +1346,128 @@ def _qa(
     return {"runs": runs, "runners": runners, "queued": queued}
 
 
+def _qa_run_parts(run_id: str) -> list[str] | None:
+    if _QA_RUN_ID.fullmatch(run_id):
+        return [run_id[:16], run_id[16:]]
+    if re.fullmatch(r"[A-Za-z0-9._-]{1,31}", run_id):
+        return [run_id]
+    return None
+
+
+def _chunk_qa_path(encoded_rel: str) -> list[str] | None:
+    if not encoded_rel or ".." in encoded_rel or "//" in encoded_rel:
+        return None
+    if any(
+        pattern.search(encoded_rel) is not None
+        for pattern in (_KNOWN_TOKEN, _SECRET_ASSIGNMENT, _EMAIL, _URL, _USERINFO)
+    ):
+        return None
+    return [encoded_rel[i : i + 16] for i in range(0, len(encoded_rel), 16)]
+
+
+def _visual_qa_for_holds(
+    connection: sqlite3.Connection,
+    tables: set[str],
+    ticket_rows: list[tuple[dict, tuple[str, str]]],
+    wait_facts: dict[tuple[str, str], dict[str, str | None]],
+) -> None:
+    """Attach redact-proof inline visual QA media metadata onto `visual-qa-review` held tickets."""
+    if "qa_runs" not in tables:
+        return
+    cols = {str(row["name"]) for row in connection.execute("PRAGMA table_info(qa_runs)")}
+    if "evidence_dir" not in cols:
+        return
+    visual_order = "COALESCE(visual, 0) DESC, " if "visual" in cols else ""
+    for item, key in ticket_rows:
+        if item.get("state") != "awaiting-ok":
+            continue
+        hold_reasons = (wait_facts.get(key) or {}).get("hold_reasons") or ""
+        if "visual-qa-review" not in {p.strip() for p in hold_reasons.split(",") if p.strip()}:
+            continue
+        row = connection.execute(
+            f"""
+            SELECT run_id, result, evidence_dir FROM qa_runs
+            WHERE lower(repo) = ? AND ticket_id = ? AND arm = 'primary'
+              AND state = 'reported' AND evidence_dir IS NOT NULL
+            ORDER BY {visual_order}rowid DESC LIMIT 1
+            """,
+            key,
+        ).fetchone()
+        if row is None:
+            continue
+        run_id = str(row["run_id"])
+        run_parts = _qa_run_parts(run_id)
+        if run_parts is None:
+            continue
+        media_out: list[dict[str, object]] = []
+        try:
+            raw_media = qa_evidence.visual_media(Path(str(row["evidence_dir"])), run_id)
+        except OSError:
+            raw_media = []
+        for entry in raw_media:
+            url = str(entry.get("url") or "")
+            lane = entry.get("lane")
+            marker = f"/lane-{lane}/"
+            if not isinstance(lane, int) or lane < 1 or marker not in url:
+                continue
+            encoded_rel = url.split(marker, 1)[1]
+            path_parts = _chunk_qa_path(encoded_rel)
+            if path_parts is None:
+                continue
+            media_out.append({
+                "kind": "video" if entry.get("kind") == "video" else "image",
+                "lane": lane,
+                "path_parts": path_parts,
+                "scenario": _clean(entry["scenario"], 64) if entry.get("scenario") else None,
+                "result": _clean(entry["result"], 32) if entry.get("result") else None,
+            })
+        item["visual_qa"] = {
+            "run": run_parts,
+            "result": _enum(row["result"], QA_RESULTS) if row["result"] is not None else None,
+            "media": media_out,
+        }
+
+
+def _open_questions_for_tickets(
+    connection: sqlite3.Connection,
+    tables: set[str],
+    ticket_rows: list[tuple[dict, tuple[str, str]]],
+) -> None:
+    """Attach redacted open product questions onto `waiting-max` tickets (E4-1)."""
+    if "ticket_state" not in tables:
+        return
+    cols = {str(row["name"]) for row in connection.execute("PRAGMA table_info(ticket_state)")}
+    if "paused_question_text" not in cols:
+        return
+    texts: dict[tuple[str, str], str] = {}
+    for row in connection.execute(
+        """
+        SELECT repo, ticket_id, paused_question_text FROM ticket_state
+        WHERE workflow_state = 'waiting-max' AND paused_question_text IS NOT NULL
+        """
+    ):
+        texts[(str(row["repo"]).casefold(), str(row["ticket_id"]))] = str(row["paused_question_text"])
+    for item, key in ticket_rows:
+        if item.get("state") != "waiting-max":
+            continue
+        raw = texts.get(key)
+        if not raw:
+            continue
+        parsed = extract_open_questions(raw)
+        if not parsed:
+            continue
+        cleaned = [
+            {
+                "text": _clean(entry["text"], 240),
+                "options": [_clean(opt, 160) for opt in (entry.get("options") or ())[:8]],
+            }
+            for entry in parsed
+            if entry.get("text")
+        ]
+        if cleaned:
+            item["questions"] = cleaned
+
+
 def _ticket_ref(
     sources: dict[tuple[str, str], tuple[str | None, str | None]],
     repo: object,
@@ -1955,6 +2079,7 @@ def _read_db(
                 question_id=_comment_id(facts.get("question_id")),
                 parked_outcome=facts.get("parked"),
                 approve_comment_id=_comment_id(facts.get("approve_comment_id")),
+                hold_reasons=facts.get("hold_reasons"),
                 stop_comment_id=_comment_id(facts.get("stop_comment_id")),
             )
             acting = {
@@ -2006,6 +2131,8 @@ def _read_db(
                         **waiting,
                     }
                 )
+        _visual_qa_for_holds(connection, tables, ticket_rows, wait_facts)
+        _open_questions_for_tickets(connection, tables, ticket_rows)
     flows, retries, tracked_at = _ticket_flows(
         connection,
         {*ticket_info, *((repo.casefold(), ticket_id) for _, repo, ticket_id in active)},

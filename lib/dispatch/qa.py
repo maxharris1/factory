@@ -327,7 +327,7 @@ class QaMixin:
         *,
         attempt: int = 1,
         dedupe_key: str | None = None,
-    ) -> None:
+    ) -> Job:
         run_id = uuid.uuid4().hex
         retry = "" if attempt == 1 else f":attempt-{attempt}"
         chosen = [scenario for scenario in (live.scenarios if live else ()) if scenario.id in run.scenario_ids]
@@ -389,6 +389,7 @@ class QaMixin:
                 attempt, run.scope, runner, arm, job.id, self.queue.now(),
             ),
         )
+        return job
 
     def _qa_unpassed(self, ticket: TrackedTicket, live_ids: tuple[str, ...]) -> tuple[str, ...]:
         with self._connect() as connection:
@@ -718,6 +719,99 @@ class QaMixin:
             attempt=1,
             dedupe_key=dedupe_key,
         )
+
+    def _rerun_hold_qa_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        ticket: TrackedTicket,
+        comment: Comment,
+        row: sqlite3.Row,
+    ) -> tuple[str, str | None]:
+        """Re-run primary live QA at the held PR's current head (E4-1 Re-run QA)."""
+        from lib.evidence.scenarios import LiveScenarios, Scenario
+
+        qa = ticket.factory.qa
+        head = ticket.current_head
+        assert qa is not None and head is not None
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        active = connection.execute(
+            """
+            SELECT 1 FROM qa_runs
+            WHERE repo = ? AND ticket_id = ? AND head = ? AND arm = 'primary'
+              AND state IN ('queued', 'running')
+            LIMIT 1
+            """,
+            (*key, head),
+        ).fetchone()
+        if active is not None:
+            return self._record_retry(
+                connection, ticket, comment, None, None, "rejected-retry-job-active"
+            ), None
+        last = connection.execute(
+            """
+            SELECT qa_runs.run_id, qa_runs.head, qa_runs.patch_id, qa_runs.round,
+                   qa_runs.attempt, qa_runs.scope, qa_runs.runner, jobs.detail
+            FROM qa_runs JOIN jobs ON jobs.id = qa_runs.job_id
+            WHERE qa_runs.repo = ? AND qa_runs.ticket_id = ? AND qa_runs.arm = 'primary'
+            ORDER BY CASE WHEN qa_runs.head = ? THEN 0 ELSE 1 END, qa_runs.rowid DESC
+            LIMIT 1
+            """,
+            (*key, head),
+        ).fetchone()
+        connection.execute(
+            """
+            UPDATE qa_runs SET state = 'cancelled', reason = 'rerun-qa'
+            WHERE repo = ? AND ticket_id = ? AND head = ? AND arm = 'primary'
+              AND state = 'reported'
+            """,
+            (*key, head),
+        )
+        if last is not None:
+            detail = json.loads(last["detail"])
+            scenarios = tuple(detail.get("scenarios") or ())
+            live: LiveScenarios | None = LiveScenarios(
+                scenarios=tuple(
+                    Scenario(
+                        item["id"], item["criterion"], item["steps"], item["passes"], item["pack"],
+                        tuple(item["saves"]),
+                    )
+                    for item in detail.get("live") or ()
+                ),
+                regression=tuple(detail.get("regression") or ()),
+                new=tuple(detail.get("new") or ()),
+            )
+            run = Run(last["scope"], scenarios)
+            runner = str(last["runner"])
+            patch_id = last["patch_id"]
+            review_round = int(last["round"])
+            attempt = int(last["attempt"]) + 1 if last["head"] == head else 1
+        else:
+            live = self._qa_live(ticket)
+            live_ids = () if live is None else tuple(scenario.id for scenario in live.scenarios)
+            run = Run("full", live_ids) if live_ids else Run("smoke", ())
+            runner = qa.runners[0].name
+            patch_id = None
+            review_round = int(row["review_round"])
+            attempt = 1
+        job = self._queue_qa_run(
+            connection,
+            ticket,
+            qa,
+            comment,
+            head,
+            patch_id,
+            review_round,
+            int(row["generation"]),
+            run,
+            runner,
+            "primary",
+            live,
+            attempt=attempt,
+            dedupe_key=f"qa-rerun:{_scope(ticket.repo, ticket.ticket_id)}:{comment.id}",
+        )
+        return self._record_retry(
+            connection, ticket, comment, None, job, "queued-rerun-qa"
+        ), "awaiting-ok"
 
     def _park_qa(self, ticket: TrackedTicket, comment: Comment, head: str) -> None:
         self._pause_for_qa(ticket, comment, head)
