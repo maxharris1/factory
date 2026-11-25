@@ -1,0 +1,94 @@
+"""orch doctor --live: start each planned harness with the pinned canary and score its reply.
+
+skill_probe.plan_canary picks the harnesses and devices and builds each launch
+from the bot's own waiter argv, so the doctor starts a harness the way the
+waiter does. The reply is read from the harness's stdout and scored by
+pstack_pin.score_reply, the scorer the offline --responses path uses.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Callable, Collection, Mapping, Sequence
+from pathlib import Path
+
+from lib.harnesses import all_drivers
+from lib.machines_yml import MachinesConfig
+from lib.pstack_pin import canary_prompt_for, score_reply
+from lib.skill_probe import Spawn, _text, plan_canary, spawn, start_launch
+from lib.waiter import WaiterError, default_harness_config, load_harness_command
+
+
+def waiter_command(bot: str) -> Sequence[str]:
+    return load_harness_command(default_harness_config(bot), bot).command
+
+
+def reply_text(stdout: str) -> str:
+    """The reply in plain or JSON-event stdout: the lines from the last `started-by:` on.
+
+    A harness can echo the prompt, which carries its own `started-by:` line,
+    and print its reply more than once, so only the last copy is scored.
+    """
+    lines: list[str] = []
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            event = None
+        lines += _text(event).splitlines() if isinstance(event, Mapping) else [line]
+    starts = [i for i, line in enumerate(lines) if line.strip().startswith("started-by:")]
+    return "\n".join(lines[starts[-1]:] if starts else lines)
+
+
+def live_canary(
+    machines: MachinesConfig,
+    refused: Collection[str],
+    token: str,
+    *,
+    harnesses: Collection[str] | None,
+    timeout: float,
+    work: Path,
+    run_id: str,
+    load: Callable[[str], Sequence[str]] = waiter_command,
+    run: Spawn = spawn,
+    out: Callable[[str], None] = print,
+) -> list[str]:
+    """Run every planned row, report each passing or skipped one through out, return the failures."""
+    drivers = {d.name: d for d in all_drivers() if harnesses is None or d.name in harnesses}
+    commands: dict[str, Sequence[str]] = {}
+    unreadable: dict[str, str] = {}
+    for name, driver in drivers.items():
+        if name in refused:
+            continue
+        try:
+            commands[name] = load(driver.bot_user)
+        except WaiterError as exc:
+            unreadable[name] = str(exc)
+    rows = plan_canary(machines, refused, commands, run_id=run_id, local_root=str(work),
+                       drivers=list(drivers.values()))
+    if not rows:
+        return [f"machines.yml enables no {' or '.join(drivers)} device"]
+    work.mkdir(parents=True, exist_ok=True)
+    errors: list[str] = []
+    for row in rows:
+        target = f"{row.harness}@{row.device}"
+        if row.harness in unreadable:
+            errors.append(f"{target}: {unreadable[row.harness]}; "
+                          f"run bin/orch doctor --live --harness {row.harness} as {row.bot}")
+            continue
+        if row.launch is None:
+            out(f"{target}: skipped ({row.skip})")
+            continue
+        log = work / f"{run_id}-{row.launch.name}.log"
+        code = start_launch(row.launch, canary_prompt_for(drivers[row.harness]),
+                            timeout=timeout, log_path=log, run=run)
+        if code is None:
+            error = f"{target}: did not load the pinned version (timed out after {timeout:g}s)"
+        else:
+            reply = reply_text(log.read_text(encoding="utf-8", errors="replace"))
+            error = score_reply(target, row.bot, reply, token)
+        if error is None:
+            out(f"{target}: ok")
+        else:
+            errors.append(error)
+    return errors

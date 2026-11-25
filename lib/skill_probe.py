@@ -676,6 +676,22 @@ def call(argv: Sequence[str], *, timeout: float = FETCH_TIMEOUT) -> subprocess.C
     )
 
 
+def start_launch(
+    launch: Launch, prompt: str, *, timeout: float, log_path: Path, run: Spawn = spawn
+) -> int | None:
+    """Run the launch with prompt on stdin, its output in log_path. None on timeout."""
+    if launch.remote is None:
+        Path(launch.run_dir).mkdir(parents=True, exist_ok=False)
+    return run(
+        launch_argv(launch),
+        stdin=prompt.encode("utf-8"),
+        log=log_path,
+        cwd=launch.run_dir if launch.remote is None else None,
+        env={**account_environ(os.environ, launch.harness, launch.account_home), **launch.env},
+        timeout=timeout,
+    )
+
+
 def run_launch(
     launch: Launch,
     prompt: str,
@@ -690,16 +706,7 @@ def run_launch(
 ) -> tuple[str, str]:
     """Start the harness once, then return (transcript JSONL text, note)."""
     started = clock()
-    if launch.remote is None:
-        Path(launch.run_dir).mkdir(parents=True, exist_ok=False)
-    code = run(
-        launch_argv(launch),
-        stdin=prompt.encode("utf-8"),
-        log=log_path,
-        cwd=launch.run_dir if launch.remote is None else None,
-        env={**account_environ(os.environ, launch.harness, launch.account_home), **launch.env},
-        timeout=timeout,
-    )
+    code = start_launch(launch, prompt, timeout=timeout, log_path=log_path, run=run)
     note = f"timed out after {timeout:g}s" if code is None else (f"exit {code}" if code else "")
     if launch.remote is not None:
         try:

@@ -1,9 +1,14 @@
 import ast
+import json
+import os
 import shlex
+import subprocess
 from pathlib import Path
 
 import pytest
 
+from lib import cli
+from lib.doctor_live import live_canary, reply_text
 from lib.harnesses import all_drivers
 from lib.machines_yml import load_machines_yml
 from lib.orch_yml import load_orch_yml
@@ -20,6 +25,7 @@ from lib.pstack_pin import (
     score_reply,
 )
 from lib.skill_probe import launch_argv, plan_canary
+from lib.waiter import WaiterError
 from tests.test_pstack_install import snapshot
 
 PSTACK = ROOT / "skills" / "pstack"
@@ -285,3 +291,213 @@ def test_score_reply_needs_the_exact_pinned_passage() -> None:
         assert score_reply(name, bot, reply(started_by="someone-else"), token) == (
             f"{name}: did not load the pinned version (not started by {bot})"
         )
+
+
+def canary_machines(tmp_path: Path, text: str = CANARY_MACHINES):
+    path = tmp_path / "machines.yml"
+    path.write_text(text, encoding="utf-8")
+    machines, findings = load_machines_yml(path)
+    assert machines is not None, findings
+    return machines
+
+
+def asked_bot(stdin: bytes) -> str:
+    [line] = [line for line in stdin.decode().splitlines() if line.startswith("started-by: ")]
+    return line.removeprefix("started-by: ")
+
+
+def plain_reply(bot: str, token: str) -> str:
+    return f"started-by: {bot}\nskill: factory-builder\ntoken: {token}\n"
+
+
+def echoed_prompt_then_reply(prompt: str, bot: str, token: str) -> str:
+    return f"user\n{prompt}\ncodex\n{plain_reply(bot, token)}tokens used\n1234\n{plain_reply(bot, token)}"
+
+
+def stream_json_reply(bot: str, token: str) -> str:
+    text = plain_reply(bot, token)
+    events = [
+        {"type": "system", "subtype": "init", "session_id": "s1"},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}},
+        {"type": "result", "subtype": "success", "result": text, "session_id": "s1"},
+    ]
+    return "".join(json.dumps(event) + "\n" for event in events)
+
+
+TIMEOUT = object()
+
+
+class FakeSpawn:
+    def __init__(self, token: str, replies=None) -> None:
+        self.token = token
+        self.replies = replies or {}
+        self.calls: list[tuple[list[str], str]] = []
+
+    def __call__(self, argv, *, stdin, log, cwd, env, timeout):
+        bot = asked_bot(stdin)
+        harness = next(d.name for d in all_drivers() if d.bot_user == bot)
+        device = "mac" if argv[0] == "ssh" else "box"
+        self.calls.append((list(argv), f"{harness}@{device}"))
+        reply = self.replies.get(f"{harness}@{device}")
+        if reply is TIMEOUT:
+            return None
+        if reply is None:
+            reply = {
+                "claude": stream_json_reply,
+                "codex": lambda b, t: echoed_prompt_then_reply(stdin.decode(), b, t),
+            }.get(harness, plain_reply)(bot, self.token)
+        log.write_text(reply, encoding="utf-8")
+        return 0
+
+
+def waiter_for(bot: str):
+    return WAITERS[next(d.name for d in all_drivers() if d.bot_user == bot)]
+
+
+def live(tmp_path: Path, run, *, refused=(), harnesses=None, load=waiter_for):
+    lines: list[str] = []
+    errors = live_canary(
+        canary_machines(tmp_path), refused, pinned_token(ROOT), harnesses=harnesses, timeout=5,
+        work=tmp_path / "work", run_id="doctor-0000", load=load, run=run, out=lines.append,
+    )
+    return lines, errors
+
+
+EVERY_TARGET = [f"{d.name}@{device}" for device in ("box", "mac") for d in all_drivers()]
+
+
+def test_live_doctor_passes_for_every_enabled_harness(tmp_path: Path) -> None:
+    spawn = FakeSpawn(pinned_token(ROOT))
+    lines, errors = live(tmp_path, spawn)
+    assert errors == []
+    assert lines == [f"{target}: ok" for target in EVERY_TARGET]
+    assert [target for _argv, target in spawn.calls] == EVERY_TARGET
+    for argv, target in spawn.calls:
+        if target.endswith("@mac"):
+            assert argv[argv.index("--") + 1].startswith("mac-")
+
+
+def test_live_doctor_names_the_harness_with_a_wrong_token(tmp_path: Path) -> None:
+    token = pinned_token(ROOT)
+    spawn = FakeSpawn(token, {"codex@mac": plain_reply("codex-bot", token[:-1])})
+    lines, errors = live(tmp_path, spawn)
+    assert errors == ["codex@mac: did not load the pinned version (token does not match the pin)"]
+    assert "codex@mac: ok" not in lines
+    assert len(lines) == len(EVERY_TARGET) - 1
+
+
+def test_live_doctor_reports_a_timeout(tmp_path: Path) -> None:
+    spawn = FakeSpawn(pinned_token(ROOT), {"gemini@box": TIMEOUT})
+    _lines, errors = live(tmp_path, spawn)
+    assert errors == ["gemini@box: did not load the pinned version (timed out after 5s)"]
+
+
+def test_live_doctor_skips_refused_harnesses(tmp_path: Path) -> None:
+    spawn = FakeSpawn(pinned_token(ROOT))
+    lines, errors = live(tmp_path, spawn, refused=("cursor",))
+    assert errors == []
+    assert "cursor@box: skipped (refused in orch.yml)" in lines
+    assert "cursor@mac: skipped (refused in orch.yml)" in lines
+    assert not any(target.startswith("cursor@") for _argv, target in spawn.calls)
+
+
+def test_live_doctor_runs_only_the_named_harness(tmp_path: Path) -> None:
+    spawn = FakeSpawn(pinned_token(ROOT))
+    lines, errors = live(tmp_path, spawn, harnesses=("claude",))
+    assert errors == []
+    assert lines == ["claude@box: ok", "claude@mac: ok"]
+
+
+def test_an_unreadable_waiter_config_names_the_per_bot_command(tmp_path: Path) -> None:
+    def load(bot: str):
+        if bot == "codex-bot":
+            raise WaiterError("harness config /x/waiter-codex-bot.yml is not owned by this user")
+        return waiter_for(bot)
+
+    spawn = FakeSpawn(pinned_token(ROOT))
+    _lines, errors = live(tmp_path, spawn, load=load)
+    fix = "run bin/orch doctor --live --harness codex as codex-bot"
+    assert errors == [
+        f"codex@{device}: harness config /x/waiter-codex-bot.yml is not owned by this user; {fix}"
+        for device in ("box", "mac")
+    ]
+    assert not any(target.startswith("codex@") for _argv, target in spawn.calls)
+
+
+def test_reply_text_reads_plain_and_json_event_stdout() -> None:
+    token = pinned_token(ROOT)
+    for stdout in (
+        plain_reply("claude-bot", token),
+        stream_json_reply("claude-bot", token),
+        echoed_prompt_then_reply("started-by: claude-bot\ntoken: <that passage>", "claude-bot", token),
+    ):
+        assert score_reply("claude", "claude-bot", reply_text(stdout), token) is None
+
+
+LOCAL_CLAUDE = """\
+devices:
+  - name: box
+    local: true
+    slot_max: 1
+    harnesses: {claude: claude-bot}
+"""
+
+
+def doctor_cli(tmp_path: Path, home: Path, monkeypatch, capsys, command: list[str], *extra: str):
+    folder = home / ".config" / "factory"
+    folder.mkdir(parents=True, mode=0o700)
+    config = folder / "waiter-claude-bot.yml"
+    config.write_text(json.dumps({"bot": "claude-bot", "command": command}), encoding="utf-8")
+    config.chmod(0o600)
+    machines = tmp_path / "machines.yml"
+    machines.write_text(LOCAL_CLAUDE, encoding="utf-8")
+    orch = tmp_path / "orch.yml"
+    orch.write_text("poll_seconds: 30\nprojects:\n  - repo: acme/widgets\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    code = cli.main([
+        "doctor", "--live", "--home", str(home), "--machines", str(machines), "--orch", str(orch),
+        "--work", str(tmp_path / "work"), *extra,
+    ])
+    out, err = capsys.readouterr()
+    return code, out, err
+
+
+def test_orch_doctor_live_runs_the_waiter_command(home: Path, tmp_path: Path, monkeypatch, capsys) -> None:
+    lines = plain_reply("claude-bot", pinned_token(ROOT)).splitlines()
+    script = f"cat > /dev/null; printf '%s\\n' {shlex.join(lines)}"
+    code, out, err = doctor_cli(tmp_path, home, monkeypatch, capsys, ["sh", "-c", script])
+    assert (code, err) == (0, "")
+    assert out == "claude@box: ok\nok\n"
+
+
+def test_orch_doctor_live_stops_a_harness_past_its_timeout(
+    home: Path, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    marker = tmp_path / "child-alive"
+    script = f"sleep 30 & echo $! > {shlex.quote(str(marker))}; wait"
+    code, _out, err = doctor_cli(
+        tmp_path, home, monkeypatch, capsys, ["sh", "-c", script], "--timeout", "1"
+    )
+    assert code == 1
+    assert err == "claude@box: did not load the pinned version (timed out after 1s)\n"
+    pid = int(marker.read_text())
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        subprocess.run(["sleep", "0.1"], check=False)
+    else:
+        pytest.fail("the harness's background child survived the timeout")
+
+
+@pytest.mark.parametrize("flag", (["--responses", "replies"], ["--print-canary"]))
+def test_live_refuses_the_offline_flags(flag: list[str], capsys) -> None:
+    assert cli.main(["doctor", "--live", *flag]) == 2
+    assert "--live" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("flag", (["--machines", "m.yml"], ["--harness", "claude"], ["--timeout", "5"]))
+def test_live_flags_need_live(flag: list[str], capsys) -> None:
+    assert cli.main(["doctor", *flag]) == 2
+    assert "--live" in capsys.readouterr().err
