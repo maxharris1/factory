@@ -136,7 +136,7 @@ def test_the_cli_sees_the_account_home_and_none_of_the_profile_tokens(
 ) -> None:
     profile = (world.device_home / ".bash_profile").read_text(encoding="utf-8")
     assert all(f"export {name}=" in profile for name in TOKENS) and f"{SECURE}=/planted/secure" in profile
-    assert len(TOKENS) == 7
+    assert len(TOKENS) == 5
     dump = world.tmp / f"{harness}-{action}.env"
     fake = world.bin / harness
     fake.write_text(FAKE_CLI.format(dump=dump, name=harness), encoding="utf-8")

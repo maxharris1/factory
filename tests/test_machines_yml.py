@@ -908,6 +908,11 @@ def signed_in(account: str, **device: str) -> str:
             "an external account is not signed in on a device",
         ),
         (
+            "orch_host: pc\naccounts:\n  - {id: cursor-a, harness: cursor, signed_in_on: [pc]}\n"
+            "devices:\n" + remote(harnesses="{cursor: cursor-bot}", home="/home/{bot}"),
+            "accounts[0].signed_in_on is not supported for a cursor account",
+        ),
+        (
             signed_in(
                 "signed_in_on: [pc]",
                 harnesses="{claude: {bot: claude-bot, account: claude-a}}",
@@ -930,7 +935,7 @@ def signed_in(account: str, **device: str) -> str:
         (
             "accounts:\n  - {id: cursor-pro, harness: cursor}\ndevices:\n" + remote(),
             "account 'cursor-pro' is not signed in on any device; "
-            "list it in signed_in_on",
+            "name it as a device's cursor login",
         ),
         (
             signed_in("signed_in_on: [pc]", ssh_user="box"),

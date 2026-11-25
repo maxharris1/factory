@@ -1868,7 +1868,7 @@ with a Codex plan that reports only its 7-day window. Its `used` stays null,
 and the other window alone is then the account's headroom.
 
 A newer `no reading` replaces older numbers. A window that has reset, or a
-reading older than 24 hours, is `stale` and its `used` is null. Cursor shows `not tracked` while no Cursor account is declared, and a database without the
+reading older than 24 hours, is `stale` and its `used` is null. Cursor shows `not tracked` with the reason (see "Cursor accounts" below), and a database without the
 table shows `no telemetry`.
 
 Each row also shows the account's jobs (`2 running · max 3`, or `no max`)
@@ -1912,7 +1912,7 @@ be a listed device that lists the account's harness, and must name a
 `{bot}` is the bot user (refused with `ssh_user`, since every bot then logs
 in as that one user). The account's folder on that device is
 `<home>/.factory-accounts/<id>`. `machines.yml` refuses a declared Claude or
-Codex or Cursor account no device lists, `signed_in_on` on an `external`
+Codex account no device lists, `signed_in_on` on an `external` or Cursor
 account, and a device named twice for one account (twice in `signed_in_on`,
 or there and as the device's own login). `max_jobs`, a positive
 integer, caps the account's running jobs across every device. Placement
@@ -1921,15 +1921,33 @@ integer, caps the account's running jobs across every device. Placement
 its running jobs finish. A pause or a lower `max_jobs` reaches placement at
 once, and a resume or a higher `max_jobs` once the poller adopts the file.
 
+Cursor accounts (issue #1411). Cursor has no folder setting for its login. `CURSOR_CONFIG_DIR` moves only `cli-config.json`; the login stays in `~/.config/cursor/auth.json` on Linux and in the `cursor-user`, `cursor-access-token` and `cursor-refresh-token` keychain items on macOS. So a Cursor account
+never runs from a folder: each device's `cursor-bot` login is the account,
+named inline on every device that runs it, as in
+`cursor: {bot: cursor-bot, account: cursor-ultra-1}`. That inline form is not
+deprecated for Cursor. `machines.yml` refuses `signed_in_on` on a Cursor
+account and a declared Cursor account that no device names as its login.
+`orch accounts doctor` runs `cursor-agent status` as `cursor-bot` on each of
+those devices with `CURSOR_API_KEY`, `CURSOR_AUTH_TOKEN` and
+`CURSOR_CONFIG_DIR` unset, and keeps only the status and a 12-character hash
+of the email or user id the reply names. An API-key login is `signed-out`.
+Settings cannot sign a device login out. Cursor usage stays `not tracked`:
+the CLI shows its usage meters only in the interactive `/usage` view, and no
+documented non-interactive command or API reports used and reset without
+reading the login's credentials. Efficiency and Settings show that reason on
+the account. The Ultra plan's included usage is one weekly pool shared with
+Grok, so the `external` account `cursor-grok-ultra` keeps recording that
+pool from `orch usage record`, and the Cursor account is the CLI login that
+draws on it. Cursor stays in `refused_harnesses`: no Cursor build or review
+job runs (`docs/decisions/1411-cursor-accounts.md`).
+
 Account homes (issues #1183 and #1184). One bot user on one device can run
 several accounts of its harness, each from its own folder. A job placed on
 an account that is not the device's own login runs with `CLAUDE_CONFIG_DIR`
-(Claude), `CODEX_HOME` (Codex) or `CURSOR_CONFIG_DIR` (Cursor) set to
-`<home>/.factory-accounts/<id>`.
+(Claude) or `CODEX_HOME` (Codex) set to `<home>/.factory-accounts/<id>`.
 Its token variables are dropped by name after the login profile runs:
 `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`
-for Claude, `OPENAI_API_KEY` and `CODEX_API_KEY` for Codex, and
-`CURSOR_API_KEY` and `CURSOR_AUTH_TOKEN` for Cursor. The harness then
+for Claude, `OPENAI_API_KEY` and `CODEX_API_KEY` for Codex. The harness then
 signs in from the folder, never from a variable, and the values never reach
 the run log, the telemetry or the job detail. The job's usage probe and
 `skill-probe run --account <id>` run the same way, and the skill probe reads

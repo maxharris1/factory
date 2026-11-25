@@ -35,10 +35,10 @@ class CursorDriver:
         return None
 
     def account_isolation(self) -> AccountIsolation | None:
-        return AccountIsolation(
-            "CURSOR_CONFIG_DIR",
-            ("CURSOR_API_KEY", "CURSOR_AUTH_TOKEN"),
-        )
+        # CURSOR_CONFIG_DIR moves cli-config.json only. The login stays in
+        # ~/.config/cursor/auth.json on Linux and the cursor-* keychain items
+        # on macOS, so each device's cursor-bot login is its one account.
+        return None
 
     def extra_env(self) -> Mapping[str, str]:
         return {}
