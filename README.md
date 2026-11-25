@@ -2076,6 +2076,8 @@ already listed as stuck, each once).
   comments by outcome), every tracked ticket and the redacted log tail.
 - **Efficiency** (`efficiency.html`): poll health and Linear-budget health,
   and handoff savings with a one-line definition of scripted share.
+- **Evals** (`evals.html`): the weekly eval reports as one table, a column
+  per week, newest first, each value with its change from the week before.
 - **Health** (`health.html`, issue #92): every component heartbeat as up,
   stale or down, with last seen in ET, its age, pid, device, version and
   start time, and each harness whose queued jobs have no live waiter (see
@@ -2338,8 +2340,9 @@ the working directory when `--directory` is empty.
 `Conflicts=factory-dashboard.service` keeps the two from running at once.
 The HTTP server answers GET and HEAD (and, with GitHub actions on, POST
 under `/api`, below) only. It answers only for `/`, `/status.json`, the
-seven pages (`/index.html`, `/job.html`, `/activity.html`,
-`/efficiency.html`, `/health.html`, `/ticket.html`, `/settings.html`),
+eight pages (`/index.html`, `/job.html`, `/activity.html`,
+`/efficiency.html`, `/evals.html`, `/health.html`, `/ticket.html`,
+`/settings.html`),
 `/tickets.json` and a QA run's evidence under `/qa/runs/<run_id>`. Every
 other path, dot-file, `..` or encoded slash is a 404, and no directory is
 ever listed. Each file is opened, with `O_NOFOLLOW`, relative to a

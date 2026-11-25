@@ -3,7 +3,7 @@
 `orch dashboard snapshot` opens the dispatcher database with a SQLite
 `mode=ro` URI and reads the tail of poller.log. It never writes either.
 It writes status.json, the self-contained pages (PAGES: index.html,
-job.html, activity.html, efficiency.html, health.html, settings.html, ticket.html; see
+job.html, activity.html, efficiency.html, evals.html, health.html, settings.html, ticket.html; see
 lib/dashboard_page.py) and tickets.json to an output directory, each
 atomically (temp file in the same directory, fsync, then rename), as one
 set: a failed rename puts back every file already renamed. Each page's inline script fetches status.json every 1 to 2
