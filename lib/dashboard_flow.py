@@ -51,6 +51,7 @@ JOB_STATES = {
     "fix": "fixing",
     "update-from-main": "updating",
     "clarify": "questions",
+    "intake-clarify": "intake",
     "stuck": "stuck",
     "blocked": "blocked",
     "capped": "capped",

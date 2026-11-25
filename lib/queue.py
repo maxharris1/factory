@@ -54,6 +54,7 @@ ACTIONS = (
     "fix",
     "update-from-main",
     "clarify",
+    "intake-clarify",
     "stuck",
     "blocked",
     "capped",
