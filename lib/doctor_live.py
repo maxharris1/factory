@@ -1,10 +1,4 @@
-"""orch doctor --live: start each planned harness with the pinned canary and score its reply.
-
-skill_probe.plan_canary picks the harnesses and devices and builds each launch
-from the bot's own waiter argv, so the doctor starts a harness the way the
-waiter does. The reply is read from the harness's stdout and scored by
-pstack_pin.score_reply, the scorer the offline --responses path uses.
-"""
+"""orch doctor --live: start each planned harness with the pinned canary and score its reply."""
 
 from __future__ import annotations
 
@@ -24,11 +18,8 @@ def waiter_command(bot: str) -> Sequence[str]:
 
 
 def reply_text(stdout: str) -> str:
-    """The reply in plain or JSON-event stdout: the lines from the last `started-by:` on.
-
-    A harness can echo the prompt, which carries its own `started-by:` line,
-    and print its reply more than once, so only the last copy is scored.
-    """
+    """A harness can echo the prompt, which has its own `started-by:` line, and print
+    its reply twice, so only the lines from the last `started-by:` on are scored."""
     lines: list[str] = []
     for line in stdout.splitlines():
         try:
@@ -53,7 +44,6 @@ def live_canary(
     run: Spawn = spawn,
     out: Callable[[str], None] = print,
 ) -> list[str]:
-    """Run every planned row, report each passing or skipped one through out, return the failures."""
     drivers = {d.name: d for d in all_drivers() if harnesses is None or d.name in harnesses}
     commands: dict[str, Sequence[str]] = {}
     unreadable: dict[str, str] = {}

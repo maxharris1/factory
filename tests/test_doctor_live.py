@@ -2,7 +2,7 @@ import ast
 import json
 import os
 import shlex
-import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -486,7 +486,7 @@ def test_orch_doctor_live_stops_a_harness_past_its_timeout(
             os.kill(pid, 0)
         except ProcessLookupError:
             break
-        subprocess.run(["sleep", "0.1"], check=False)
+        time.sleep(0.1)
     else:
         pytest.fail("the harness's background child survived the timeout")
 
