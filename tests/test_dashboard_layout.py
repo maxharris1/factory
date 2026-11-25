@@ -103,7 +103,7 @@ def _pages(tmp_path: Path, **kwargs) -> dict[str, str]:
 
 
 def _no_script(html: str) -> str:
-    return re.sub(r"<script>.*?</script>", "", html, flags=re.S)
+    return re.sub(r"<script\b[^>]*>.*?</script>", "", html, flags=re.S)
 
 
 def _section(html: str, ident: str) -> str:

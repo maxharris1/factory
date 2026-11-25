@@ -1950,7 +1950,7 @@ def test_every_shown_segment_is_reachable_and_whole_in_a_browser(
     snapshot = _f1(base) if case == "phone-fit-poll-error" else copy.deepcopy(base)
     snapshot["health"]["publish_seconds"] = 15
     snapshot = _now(snapshot, STALE_AGE if fresh == "stale" else 0)
-    html = _fresh_page(snapshot) if fresh else _no_script(render_pages(snapshot)["index.html"])
+    html = _fresh_page(snapshot) if fresh else _no_script(_fresh_page(snapshot))
     browser = Browser()
     try:
         _open(browser, html, width, fresh)

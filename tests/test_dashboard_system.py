@@ -276,7 +276,7 @@ def _details_steps(tmp_path: Path, actions: list) -> list[dict]:
     from lib.dashboard_page import page_script
     snapshot = _snapshot(tmp_path)
     html = render_pages(snapshot)["health.html"]
-    assert '<script src="/static/app.js" defer></script>' in html
+    assert '<script src="/app.js" defer></script>' in html
     script = page_script(snapshot.get("statechart"))
     out = run_harness(tmp_path, DETAILS_HARNESS, script, snapshot, "health", BAR + ["hud", "components"], actions)
     return [step for step in out["steps"] if "open" in step]
