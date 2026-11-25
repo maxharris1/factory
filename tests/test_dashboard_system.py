@@ -754,8 +754,9 @@ def test_moved_panels_left_their_old_pages(tmp_path: Path) -> None:
     assert 'id="log"' not in pages["activity.html"]
     assert "renderHealth, renderLog" in script
     assert re.search(r"efficiency: \[renderHeadroom, renderTokens, renderRounds, renderSavings, renderRouting, "
-                     r"renderJobsLifetime\]", script)
+                     r"renderBalance, renderJobsLifetime\]", script)
     assert [name for name, html in pages.items() if 'id="routing"' in html] == ["efficiency.html"]
+    assert [name for name, html in pages.items() if 'id="balance"' in html] == ["efficiency.html"]
 
 
 

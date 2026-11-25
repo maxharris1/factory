@@ -19,7 +19,7 @@ from tests.test_dashboard_lanes import Browser, _page_with_status_stub, needs_ch
 from tests.test_dashboard_layout import _run_page, _section, _text, needs_node
 from tests.test_dashboard_telemetry import add_telemetry
 
-PANELS = ["headroom", "tokens", "rounds", "savings", "routing", "jobs-lifetime"]
+PANELS = ["headroom", "tokens", "rounds", "savings", "routing", "balance", "jobs-lifetime"]
 
 
 MACHINES = (
@@ -936,7 +936,7 @@ def test_panels_are_in_the_artboard_order(tmp_path: Path) -> None:
     assert found == sorted(found)
     rows = re.findall(r'<div class="ef-row">(.*?</section>)</div>', _section(page, "hud"))
     assert [re.findall(r'<section class="[^"]*" id="([^"]+)"', row) for row in rows] == [
-        ["headroom", "tokens"], ["rounds", "savings"],
+        ["headroom", "tokens"], ["rounds", "savings"], ["routing", "balance"],
     ]
 
 
