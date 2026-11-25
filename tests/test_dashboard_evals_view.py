@@ -171,6 +171,18 @@ def test_status_json_excludes_evals(tmp_path: Path) -> None:
     assert json.loads((out / "evals.json").read_text(encoding="utf-8")) == bundle
 
 
+def test_the_written_evals_page_shows_the_bundle_weeks(tmp_path: Path) -> None:
+    evals = tmp_path / "evals"
+    evals.mkdir()
+    write_week(evals, BAD, report(MIDDLE))
+    write_week(evals, GOOD, report(NEWEST))
+    out = tmp_path / "out"
+    write_snapshot_pages(out, {**snapshot_for(tmp_path), EVALS: collect_weekly(evals)})
+    main = MAIN.search((out / "evals.html").read_text(encoding="utf-8")).group(1)
+    assert "<table" in main
+    assert headers(main) == ["2026-11-23", "2026-11-16"]
+
+
 def test_evals_json_is_written_without_a_bundle(tmp_path: Path) -> None:
     write_snapshot_pages(tmp_path / "out", snapshot_for(tmp_path))
     assert json.loads((tmp_path / "out" / "evals.json").read_text(encoding="utf-8")) == {

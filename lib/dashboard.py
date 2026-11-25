@@ -2823,8 +2823,9 @@ def write_snapshot_pages(out_dir: Path, snapshot: dict) -> tuple[Path, ...]:
 
     The ticket records (RECORDS) go to tickets.json only and the weekly eval
     bundle (EVALS, lib/dashboard_evals.py) to evals.json only, a "no dir"
-    bundle when the snapshot has none; status.json, the
-    static assets and the pages are written from the rest of the snapshot. Each
+    bundle when the snapshot has none; status.json and the static assets are
+    written from the rest of the snapshot, and the pages from the rest plus the
+    eval bundle, so evals.html draws the weekly table. Each
     file is written to a temp file in the same directory and fsynced, then
     renamed into place, status.json first. If a later rename fails, every file
     already renamed is put back as it was (or removed if there was none), so the
@@ -2833,10 +2834,11 @@ def write_snapshot_pages(out_dir: Path, snapshot: dict) -> tuple[Path, ...]:
     order, then tickets.json and evals.json.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    status = {key: value for key, value in snapshot.items() if key not in (RECORDS, EVALS)}
+    paged = {key: value for key, value in snapshot.items() if key != RECORDS}
+    status = {key: value for key, value in paged.items() if key != EVALS}
     texts = {"status.json": json.dumps(status, indent=2, sort_keys=True, allow_nan=False) + "\n"}
     texts.update(render_static_assets(status))
-    texts.update(render_pages(status))
+    texts.update(render_pages(paged))
     texts["tickets.json"] = tickets_json(snapshot)
     texts["evals.json"] = evals_json(snapshot.get(EVALS))
     targets = [out_dir / name for name in texts]
