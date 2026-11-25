@@ -502,7 +502,7 @@ def test_the_cli_applies_through_the_service_scripts_and_leaks_no_secret(
         assert "FACTORY_WEBHOOK_AUTH" not in call["env"] and "FACTORY_WEBHOOK_URL" not in call["env"]
     (line,) = box.audit()
     assert line["restarted"] == ["poller", "waiter-codex-bot"]
-    assert line["pending"] == ["waiter-claude-bot", "waiter-cursor-bot"]
+    assert line["pending"] == ["waiter-claude-bot", "waiter-cursor-bot", "waiter-gemini-bot"]
     audit = (box.state / settings_apply.AUDIT_NAME).read_text()
     for text in (audit, out.out, out.err):
         assert TOKEN not in text and WEBHOOK not in text

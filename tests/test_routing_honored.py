@@ -39,8 +39,10 @@ def _ready(builder: str, head: str = HEAD) -> str:
 def test_go_header_parses_builder_and_reviewer() -> None:
     fields = parse_comment(_go("builder=codex reviewer=claude ")).as_dict()
     assert (fields["builder"], fields["reviewer"]) == ("codex", "claude")
+    gemini = parse_comment(_go("builder=claude reviewer=gemini ")).as_dict()
+    assert (gemini["builder"], gemini["reviewer"]) == ("claude", "gemini")
     with pytest.raises(HandoffError, match="bad reviewer"):
-        parse_comment(_go("reviewer=gemini "))
+        parse_comment(_go("reviewer=unknown "))
 
 
 def test_go_naming_builder_and_reviewer_queues_those(tmp_path: Path) -> None:
@@ -681,19 +683,36 @@ def test_brief_ticket_types_pick_their_build_role() -> None:
     ]
 
 
-def test_routing_pool_with_no_queueable_harness_holds_the_go(tmp_path: Path) -> None:
+def _gemini_only_build_pool():
     from lib.factory_md import FactoryRouting
 
-    config = replace(
+    return replace(
         factory(),
         routing=FactoryRouting(slots={"build": (("gemini", "gemini-2.5-pro", None),)}),
     )
+
+
+def test_routing_pool_of_only_gemini_queues_the_build_for_gemini(tmp_path: Path) -> None:
     dispatcher, queue = setup(tmp_path)
     go = comment("go-1", _go(""), author="grok-login")
-    dispatcher.process(ticket(go, factory_config=config))
+    dispatcher.process(ticket(go, factory_config=_gemini_only_build_pool()))
+
+    assert not _is_stuck(queue)
+    assert queue.claim("claude") is None and queue.claim("codex") is None
+    build = queue.claim("gemini")
+    assert build is not None and build.request.action == "build"
+    routing = json.loads(build.request.detail)["routing"]
+    assert (routing["builder"], routing["builder_model"]) == ("gemini", "gemini-2.5-pro")
+
+
+def test_routing_pool_whose_only_harness_is_refused_holds_the_go(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    dispatcher.refused_harnesses = frozenset({"gemini"})
+    go = comment("go-1", _go(""), author="grok-login")
+    dispatcher.process(ticket(go, factory_config=_gemini_only_build_pool()))
 
     assert _is_stuck(queue)
-    assert queue.claim("claude") is None and queue.claim("codex") is None
+    assert all(queue.claim(harness) is None for harness in ("claude", "codex", "gemini"))
 
 
 def _claude_only_pools():

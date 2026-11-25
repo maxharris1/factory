@@ -282,8 +282,8 @@ HEALTH_OK_SECONDS, HEALTH_LATE_SECONDS = health_thresholds(POLL_SECONDS)
 _OUTCOME = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
 _ROUND = re.compile(r"[0-9]{1,3}/[0-9]{1,3}")
 MACHINES_MAX_BYTES = 256 * 1024
-WAIT_RECIPIENTS = ("claude", "codex", "cursor")
-HARNESSES = ("claude", "codex", "cursor")
+WAIT_RECIPIENTS = ("claude", "codex", "cursor", "gemini")
+HARNESSES = ("claude", "codex", "cursor", "gemini")
 TRACKERS = ("github", "linear")
 ATTENTION_REASONS = (
     "ship-failed", "dedupe-dropped", "edited-comment", "base-mismatch", "stack-retarget-failed",
@@ -422,10 +422,14 @@ _RULES = (
     (_SECRET_ASSIGNMENT, _assignment),
     (_OPAQUE, _opaque),
 )
+_NON_OPAQUE_RULES = tuple(item for item in _RULES if item[0] is not _OPAQUE)
 MARKER = -1  # origin of a character a rule inserted
 
 
-def _apply_rules(text: str) -> tuple[str, list[int], set[int]]:
+def _apply_rules(
+    text: str,
+    rules: Sequence[tuple[re.Pattern[str], Callable[[re.Match[str]], tuple[int, str] | None]]] = _RULES,
+) -> tuple[str, list[int], set[int]]:
     """Run every rule in order over text.
 
     Returns the redacted text, the origin of each of its characters (an
@@ -434,7 +438,7 @@ def _apply_rules(text: str) -> tuple[str, list[int], set[int]]:
     """
     origin = list(range(len(text)))
     removed: set[int] = set()
-    for pattern, rule in _RULES:
+    for pattern, rule in rules:
         pieces: list[str] = []
         origins: list[int] = []
         last = 0
@@ -1359,9 +1363,18 @@ def _chunk_qa_path(encoded_rel: str) -> list[str] | None:
     if not encoded_rel or ".." in encoded_rel or "//" in encoded_rel:
         return None
     for form in (encoded_rel, unquote(encoded_rel)):
-        segments = form.replace("/", " ")
-        if redact(segments) != segments:
+        cleaned = _strip_control(form)
+        decoded, _spans, settled = _decode_map(cleaned)
+        if not settled:
             return None
+        for candidate in (cleaned, decoded):
+            if _apply_rules(candidate, _NON_OPAQUE_RULES)[2]:
+                return None
+            if any(redact(seg) != seg for seg in candidate.split("/")):
+                return None
+            segments = candidate.replace("/", " ")
+            if redact(segments) != segments:
+                return None
     return [encoded_rel[i : i + 16] for i in range(0, len(encoded_rel), 16)]
 
 
@@ -1370,7 +1383,10 @@ def _held_qa_run(
 ) -> sqlite3.Row | None:
     select = """
         SELECT run_id, scope, result, reason, evidence_dir FROM qa_runs
-        WHERE (state = 'reported' OR (state = 'cancelled' AND reason = 'rerun-qa')) AND
+        WHERE (
+            state = 'reported'
+            OR (state = 'cancelled' AND (reason = 'rerun-qa' OR reason LIKE 'rerun-qa:carried:%'))
+        ) AND
     """
     row = connection.execute(
         select + "lower(repo) = ? AND ticket_id = ? AND head = ? AND arm = 'primary' "
@@ -1379,8 +1395,10 @@ def _held_qa_run(
     ).fetchone()
     seen: set[str] = set()
     while row is not None and row["scope"] == "none":
-        source = str(row["reason"] or "").removeprefix("carried:")
-        if source == (row["reason"] or "") or source in seen:
+        raw_reason = str(row["reason"] or "")
+        carried = raw_reason.removeprefix("rerun-qa:")
+        source = carried.removeprefix("carried:")
+        if source == carried or not source or source in seen:
             return None
         seen.add(source)
         row = connection.execute(select + "run_id = ?", (source,)).fetchone()

@@ -35,4 +35,8 @@ harnesses:
     budget: medium (high)
     default: inherit-parent
     panel: [inherit-parent, inherit-parent]
+  gemini:
+    budget: medium (high)
+    default: inherit-parent
+    panel: [inherit-parent, inherit-parent]
 overrides: {}

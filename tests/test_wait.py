@@ -461,7 +461,9 @@ def test_wait_refuses_anything_but_an_owning_bot(tmp_path: Path, bot: str) -> No
 
 
 def test_owning_bots_match_the_dispatcher_recipients() -> None:
-    assert OWNING_BOTS == {"claude-bot": "claude", "codex-bot": "codex", "cursor-bot": "cursor"}
+    assert OWNING_BOTS == {
+        "claude-bot": "claude", "codex-bot": "codex", "cursor-bot": "cursor", "gemini-bot": "gemini",
+    }
 
 
 def test_a_bot_cannot_finish_or_heartbeat_another_bots_job(tmp_path: Path) -> None:
@@ -923,12 +925,21 @@ def test_a_broken_stdout_in_the_cli_exits_one_without_a_traceback(
 ) -> None:
     db, queue = make_db(tmp_path)
     orch = _unrestricted_orch(tmp_path)
+    machines = tmp_path / "machines.yml"
+    harnesses = "".join(f"      {harness}: {owner}\n" for owner, harness in OWNING_BOTS.items())
+    machines.write_text(
+        "devices:\n  - name: box\n    local: true\n    slot_max: 1\n"
+        f"    harnesses:\n{harnesses}    factory_root: /home/box/factory\n",
+        encoding="utf-8",
+    )
+    poller_adopts(queue, machines)
     job = queue.enqueue(request(recipient=OWNING_BOTS[bot]), dedupe_key="a")
     read_end, write_end = os.pipe()
     os.close(read_end)
     try:
         result = subprocess.run(
-            [sys.executable, str(ORCH), "wait", bot, "--db", str(db), "--orch", str(orch)],
+            [sys.executable, str(ORCH), "wait", bot, "--db", str(db), "--orch", str(orch),
+             "--machines", str(machines)],
             cwd=ROOT,
             stdout=write_end,
             stderr=subprocess.PIPE,

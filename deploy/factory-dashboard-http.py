@@ -823,7 +823,7 @@ def _is_max_jobs_expect(value: object) -> bool:
 
 
 ACCOUNT_ID = re.compile(r"^(?!\.\.?$)[A-Za-z0-9._-]{1,64}$")
-ACCOUNT_HARNESSES = ("claude", "codex", "cursor", "external")
+ACCOUNT_HARNESSES = ("claude", "codex", "cursor", "gemini", "external")
 DEFAULT_ACCOUNT_IDS = frozenset(
     f"{harness}-default" for harness in ACCOUNT_HARNESSES if harness != "external"
 )

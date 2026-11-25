@@ -197,12 +197,12 @@ def test_same_family_reviewer_is_refused(tmp_path: Path, harness: str) -> None:
     if harness == "cursor":
         assert found == [
             "same-family reviewer: builder family not established: "
-            "give a claude*/sonnet*/opus*/haiku*/gpt*/codex*/o<n> model hint",
+            "give a claude*/sonnet*/opus*/haiku*/gpt*/codex*/o<n>/gemini* model hint",
             "same-family reviewer: reviewer family not established: "
-            "give a claude*/sonnet*/opus*/haiku*/gpt*/codex*/o<n> model hint",
+            "give a claude*/sonnet*/opus*/haiku*/gpt*/codex*/o<n>/gemini* model hint",
         ]
         return
-    family = "anthropic" if harness == "claude" else "openai"
+    family = {"claude": "anthropic", "codex": "openai", "gemini": "google"}[harness]
     assert found == [
         "same-family reviewer: "
         f"builder family {family!r} and reviewer family {family!r}"
@@ -317,7 +317,7 @@ def test_unresolved_family_is_refused(
     assert config is None
     assert any("family not established" in finding.message for finding in findings)
     assert any(
-        "give a claude*/sonnet*/opus*/haiku*/gpt*/codex*/o<n> model hint"
+        "give a claude*/sonnet*/opus*/haiku*/gpt*/codex*/o<n>/gemini* model hint"
         in finding.message
         for finding in findings
     )

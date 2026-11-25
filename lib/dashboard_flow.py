@@ -616,6 +616,7 @@ FLOWMAP_TINT = {
     "claude": "#e0af68",
     "codex": "#7aa2f7",
     "cursor": "#bb9af7",
+    "gemini": "#9ece6a",
     "grok": "#73daca",
     "human": "#ff9e64",
 }

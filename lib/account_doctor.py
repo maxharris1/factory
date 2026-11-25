@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Literal
 
 from lib import attention, lane_limit
 from lib.harness_env import account_tokens, harness_env
+from lib.harnesses.gemini import AUTH_OVERRIDES as GEMINI_AUTH_OVERRIDES
 from lib.machines_yml import Device, MachinesConfig
 from lib.remote import (
     _UNTRACE,
@@ -30,7 +31,7 @@ if TYPE_CHECKING:
     from lib.queue import SQLiteJobQueue
 
 Status = Literal["ok", "signed-out", "mismatch", "unreachable"]
-Harness = Literal["claude", "codex", "cursor"]
+Harness = Literal["claude", "codex", "cursor", "gemini"]
 Source = Literal["preflight", "runtime", "doctor"]
 
 TABLE = "account_signins"
@@ -126,6 +127,9 @@ _CURSOR_STATES: dict[str, tuple[bool, str]] = {
     "unauthenticated": (False, NOT_LOGGED_IN),
     "error": (False, EXIT_NONZERO),
 }
+GEMINI_SIGNED_IN_EXIT = 42
+GEMINI_AUTH_EXIT = 41
+_GEMINI_NO_INPUT = "No input provided via stdin."
 
 
 @dataclass(frozen=True)
@@ -185,6 +189,7 @@ _RULES: dict[Harness, dict[str | None, _Rule]] = {
         "api_key": _Rule("signed-out", CODEX_API_KEY),
     },
     "cursor": {"login": _Rule("ok")},
+    "gemini": {"login": _Rule("ok")},
 }
 
 
@@ -193,6 +198,7 @@ AUTH_METHODS: dict[Harness, frozenset[str]] = {
     "claude": _CLAUDE_METHODS | {"unknown"},
     "codex": frozenset(method for _, method, _ in _CODEX_LINES if method is not None),
     "cursor": frozenset(_RULES["cursor"]),
+    "gemini": frozenset(_RULES["gemini"]),
 }
 
 
@@ -288,6 +294,15 @@ def parse_cursor(account: str, device: str, code: int, reply: bytes) -> Probe:
     )
 
 
+def parse_gemini(account: str, device: str, code: int, reply: bytes) -> Probe:
+    text = reply.decode("utf-8", errors="replace")
+    if code == GEMINI_SIGNED_IN_EXIT and _GEMINI_NO_INPUT in text:
+        return Probe(account, device, "gemini", True, True, "login", None, None, "")
+    if code == GEMINI_AUTH_EXIT:
+        return Probe(account, device, "gemini", True, False, None, None, None, NOT_LOGGED_IN)
+    return Probe(account, device, "gemini", True, False, None, None, None, NOT_UNDERSTOOD)
+
+
 @dataclass(frozen=True)
 class _Status:
     command: str
@@ -303,6 +318,8 @@ _STATUS: dict[Harness, _Status] = {
     "codex": _Status("codex login status", True, "CODEX_HOME", ("OPENAI_API_KEY", "CODEX_API_KEY"), parse_codex),
     "cursor": _Status("cursor-agent status --format json", False, "CURSOR_CONFIG_DIR",
                       ("CURSOR_API_KEY", "CURSOR_AUTH_TOKEN"), parse_cursor),
+    "gemini": _Status("env NO_BROWSER=true NO_COLOR=1 gemini", True, "GEMINI_CLI_HOME",
+                      GEMINI_AUTH_OVERRIDES, parse_gemini),
 }
 ACCOUNT_TOKEN_VARIABLES = tuple(name for status in _STATUS.values() for name in status.token_variables)
 
@@ -496,6 +513,7 @@ _LOGIN: dict[Harness, tuple[tuple[str, ...], str]] = {
     "claude": (("CLAUDE_CODE_OAUTH_TOKEN",), "claude auth login"),
     "codex": ((), "codex login --device-auth"),
     "cursor": (("CURSOR_API_KEY", "CURSOR_AUTH_TOKEN"), "cursor-agent login"),
+    "gemini": (GEMINI_AUTH_OVERRIDES, "NO_BROWSER=true gemini"),
 }
 _THEN = ", then orch accounts doctor"
 _STEP: dict[Status, str] = {

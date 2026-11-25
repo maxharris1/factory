@@ -399,6 +399,16 @@ A Cursor job runs on the device's `cursor-bot` login, the one Cursor account
 there, and the cross-family rule still picks a reviewer of another model
 family.
 
+### Gemini starts refused
+
+Gemini accounts sign in with Google for Gemini Code Assist, through the
+`gemini` CLI ([decision](decisions/1412-gemini-harness.md)). The doctor
+checks each gemini login, and a card row shows its sign-in command. The
+card has no Sign in button: the broker covers Claude and Codex only. Max
+decided that `orch.yml` lists `gemini` in `refused_harnesses` until its
+accounts are signed in on the devices, so a gemini row in `account_signins`
+changes no placement until then.
+
 ## 1. Declare the account
 
 Use Add account on the Accounts panel. Give the id, the harness, `max_jobs`
@@ -469,6 +479,24 @@ on each device, named inline in `machines.yml` on every device that runs it
 device with the command under "A Cursor card row" above. Settings cannot
 sign a device login out; run `cursor-agent logout` as `cursor-bot` on the
 device instead.
+
+For a Gemini account, run:
+
+```sh
+env -u GEMINI_API_KEY -u GOOGLE_API_KEY -u GOOGLE_CLOUD_ACCESS_TOKEN -u GOOGLE_APPLICATION_CREDENTIALS -u GOOGLE_GENAI_USE_GCA -u GOOGLE_GENAI_USE_VERTEXAI -u GEMINI_CLI_USE_COMPUTE_ADC -u CLOUD_SHELL -u GOOGLE_GEMINI_BASE_URL -u GEMINI_CLI_CUSTOM_HEADERS GEMINI_CLI_HOME=$HOME/.factory-accounts/<id> NO_BROWSER=true gemini
+```
+
+The `-u` flags keep every API key and token override out of the login, so
+the sign-in lands in the folder. Choose Sign in with Google, open the link it
+prints, sign in with the Gemini Code Assist account and paste the code back.
+Then type `/quit`. The `gemini` CLI has no `auth` subcommand.
+
+The doctor runs `env NO_BROWSER=true NO_COLOR=1 gemini </dev/null` in the
+folder with the same variables unset. A cached sign-in loads, then the CLI
+exits 42 with `No input provided via stdin`, and the doctor reads `ok`. No
+prompt reaches a model. Exit 41, an auth error, reads `signed-out`. Any
+other reply reads `signed-out` with `status reply not understood`. Gemini
+quota stays `not tracked`.
 
 ## 3. Check every sign-in
 

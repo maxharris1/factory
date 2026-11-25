@@ -53,6 +53,7 @@ OWNING_BOTS = {
     "claude-bot": "claude",
     "codex-bot": "codex",
     "cursor-bot": "cursor",
+    "gemini-bot": "gemini",
 }
 
 JOB_COLUMNS = frozenset(

@@ -760,7 +760,12 @@ class QaMixin:
         ).fetchone()
         connection.execute(
             """
-            UPDATE qa_runs SET state = 'cancelled', reason = 'rerun-qa'
+            UPDATE qa_runs
+            SET state = 'cancelled',
+                reason = CASE
+                    WHEN reason LIKE 'carried:%' THEN 'rerun-qa:' || reason
+                    ELSE 'rerun-qa'
+                END
             WHERE repo = ? AND ticket_id = ? AND head = ? AND arm = 'primary'
               AND state = 'reported'
             """,
@@ -976,7 +981,7 @@ class QaMixin:
 
     def _carried_qa_source(self, run_id: str, reason: str) -> sqlite3.Row | None:
         seen = {run_id}
-        current_reason = reason
+        current_reason = reason.removeprefix("rerun-qa:")
         last_source: sqlite3.Row | None = None
         with self._connect() as connection:
             while current_reason.startswith("carried:"):
@@ -997,7 +1002,7 @@ class QaMixin:
                 last_source = source
                 if source["scope"] != "none":
                     return source
-                current_reason = source["reason"] or ""
+                current_reason = (source["reason"] or "").removeprefix("rerun-qa:")
         return last_source
 
     def _visual_qa_hold(self, ticket: TrackedTicket) -> bool:
@@ -1010,7 +1015,10 @@ class QaMixin:
                 """
                 SELECT run_id, visual, evidence_dir FROM qa_runs
                 WHERE repo = ? AND ticket_id = ? AND arm = 'primary'
-                  AND (state = 'reported' OR (state = 'cancelled' AND reason = 'rerun-qa'))
+                  AND (
+                      state = 'reported'
+                      OR (state = 'cancelled' AND (reason = 'rerun-qa' OR reason LIKE 'rerun-qa:carried:%'))
+                  )
                   AND result = 'PASS' AND evidence_dir IS NOT NULL
                 """,
                 (ticket.repo.lower(), ticket.ticket_id),
@@ -1057,7 +1065,7 @@ class QaMixin:
                 else None
             )
         if row is not None and row["scope"] == "none":
-            reason = row["reason"] or ""
+            reason = (row["reason"] or "").removeprefix("rerun-qa:")
             if reason.startswith("carried:"):
                 source = self._carried_qa_source(row["run_id"], reason)
                 if source is not None and source["state"] == "reported" and source["comment_id"] is not None:

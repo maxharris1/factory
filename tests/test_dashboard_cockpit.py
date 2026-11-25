@@ -6,14 +6,10 @@ import http.client
 import importlib.util
 import json
 import shutil
-import sqlite3
 import subprocess
-import threading
-import time
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote
 
 import pytest
 
@@ -521,6 +517,7 @@ def _held_visual_db(tmp_path: Path, held_head: str, runs: list[tuple]) -> tuple[
     "secret_name",
     [
         "Bearer secret123456789012345678901234567890.png",
+        "Bearer a1B2/c3D4/e5F6.png",
         "ghp_123456789012345678901234567890123456.png",
         "password=hunter2hunter2hunter2.png",
         "max@example.com.png",
@@ -529,7 +526,9 @@ def _held_visual_db(tmp_path: Path, held_head: str, runs: list[tuple]) -> tuple[
 def test_chunked_qa_paths_never_publish_credential_shaped_names(tmp_path: Path, secret_name: str) -> None:
     evidence_dir = _make_lane_evidence(tmp_path / "qa-evidence")
     lane = evidence_dir / "lane-1"
-    (lane / "qa-1" / secret_name).write_bytes(b"\x89PNG\r\n\x1a\nfake-png")
+    target = lane / "qa-1" / secret_name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"\x89PNG\r\n\x1a\nfake-png")
     manifest = json.loads((lane / "manifest.json").read_text(encoding="utf-8"))
     manifest["files"].append({"path": f"qa-1/{secret_name}"})
     (lane / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -585,3 +584,35 @@ def test_gallery_follows_the_held_heads_carried_source(tmp_path: Path) -> None:
     [t42] = [row for row in snap["tickets"] if row["ticket_id"] == "42"]
 
     assert t42["visual_qa"]["run"] == [RUN_ID[:16], RUN_ID[16:]]
+
+
+def test_carried_gallery_survives_rerun_qa_while_replacement_runs(tmp_path: Path) -> None:
+    from tests.test_visual_qa_hold import _same_patch_rebase_held
+
+    run, screen = _same_patch_rebase_held(tmp_path, "block")
+    lane = screen.parent.parent
+    (lane / "manifest.json").write_text(
+        json.dumps({"files": [{"path": "qa-1/screen.png"}]}), encoding="utf-8"
+    )
+    db_path = tmp_path / "orch.db"
+    log = tmp_path / "events.jsonl"
+    log.write_text("", encoding="utf-8")
+    [(source_run_id,)] = run.rows("SELECT run_id FROM qa_runs WHERE head = ?", HEAD_A)
+
+    before = collect_snapshot(db_path, log, now=NOW)
+    [ticket_before] = [row for row in before["tickets"] if row["ticket_id"] == TICKET]
+    assert "".join(ticket_before["visual_qa"]["run"]) == source_run_id
+    assert ["".join(m["path_parts"]) for m in ticket_before["visual_qa"]["media"]] == ["qa-1/screen.png"]
+
+    run.post("rr-carried", _body("rerun-qa", "Re-verify after rebase.", head=HEAD_B))
+    run.poll()
+    assert run.rows("SELECT outcome FROM handled_comments WHERE comment_id = 'rr-carried'") == [
+        ("queued-rerun-qa",)
+    ]
+    assert run.rows("SELECT workflow_state FROM ticket_state") == [("awaiting-ok",)]
+
+    after = collect_snapshot(db_path, log, now=NOW)
+    [ticket_after] = [row for row in after["tickets"] if row["ticket_id"] == TICKET]
+    assert ticket_after["visual_qa"] is not None
+    assert "".join(ticket_after["visual_qa"]["run"]) == source_run_id
+    assert ["".join(m["path_parts"]) for m in ticket_after["visual_qa"]["media"]] == ["qa-1/screen.png"]
