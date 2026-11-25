@@ -2804,13 +2804,12 @@ def _job_run_command(argv: list[str]) -> int:
             log(f"job worktree {made.path}")
         bot_harness = telemetry.HARNESS_BY_BOT.get(args.bot)
         exposure.record(queue.connect, args.job_id, lambda: exposure.gather(
-            argv=command,
-            binary=codex_sandbox.for_device(command).argv[0] if placed.remote else command[0],
+            argv=codex_sandbox.for_device(command).argv if placed.remote else command,
             harness=telemetry.stream_flags(command, bot_harness).harness or bot_harness,
             brief=brief[0] if placed.remote else exposure.brief_file(box_brief),
             host=placed.device.name,
             factory_root=factory_root,
-            shell=exposure.remote_shell(placed.transport, placed.target)
+            shell=exposure.remote_shell(placed.transport, placed.target, remote_env)
             if placed.target is not None else exposure.local_shell(environment),
             launch_dir=placed.target.job_dir if placed.target is not None
             else None if made is None else str(made.path),

@@ -8,18 +8,19 @@ reports one (lib/telemetry.py).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import re
 import secrets
 import shlex
+import signal
 import sqlite3
 import subprocess
 import time
 import tomllib
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import closing
 from dataclasses import dataclass
 
 from lib.job_token import PROOF_ENV
@@ -51,6 +52,7 @@ _REVISION = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 # A binary that ignores --version may print anything, a secret included.
 _VERSION = re.compile(r"[\w .,:;()/+@~-]*\d+\.\d+[\w .,:;()/+@~-]*")
 _MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,127}")
+_ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]*")
 
 
 @dataclass(frozen=True)
@@ -143,32 +145,45 @@ def local_shell(environ: Mapping[str, str]) -> Shell:
 
     def shell(script: str, args: Sequence[str]) -> str | None:
         try:
-            completed = subprocess.run(
+            proc = subprocess.Popen(
                 ["/bin/sh", "-c", script, SHELL_NAME, *args],
                 env=env,
                 stdin=subprocess.DEVNULL,
-                capture_output=True,
-                timeout=TIMEOUT_SECONDS,
-                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
             )
-        except (subprocess.TimeoutExpired, OSError):
+        except OSError:
             return None
-        if completed.returncode != 0:
+        with proc:
+            try:
+                out, _ = proc.communicate(timeout=TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                proc.communicate()
+                return None
+        if proc.returncode != 0:
             return None
-        return completed.stdout.decode("utf-8", "replace").strip() or None
+        return out.decode("utf-8", "replace").strip() or None
 
     return shell
 
 
-def remote_shell(transport: Transport, target: RemoteTarget) -> Shell:
+def remote_shell(transport: Transport, target: RemoteTarget, env: Mapping[str, str] | None = None) -> Shell:
     """A link that timed out is not asked again: a lost device delays its start one timeout at most."""
     timed_out: list[bool] = []
+    exports = "".join(
+        f"export {name}={shlex.quote(value)}; "
+        for name, value in sorted((env or {}).items())
+        if _ENV_NAME.fullmatch(name) and name not in (PROOF_ENV, TAG_ENV)
+    )
 
     def shell(script: str, args: Sequence[str]) -> str | None:
         if timed_out or not isinstance(transport, ByteTransport):
             return None
         quoted = " ".join(shlex.quote(arg) for arg in args)
-        line = f"exec {LOGIN_SHELL} -lc {shlex.quote(script)} {SHELL_NAME} {quoted}"
+        line = f"exec {LOGIN_SHELL} -lc {shlex.quote(exports + script)} {SHELL_NAME} {quoted}"
         result = transport.exchange(ssh_argv(target, line), timeout=TIMEOUT_SECONDS)
         if result.timed_out:
             timed_out.append(True)
@@ -196,6 +211,7 @@ class Chosen:
 
 @dataclass(frozen=True)
 class _Command:
+    launcher: tuple[str, ...]
     args: tuple[str, ...]
     config_readable: bool
 
@@ -208,7 +224,7 @@ _CODEX_CONFIG_ENV = {"CODEX_HOME", "HOME"}
 
 def _harness_command_if_followable(argv: Sequence[str]) -> _Command | None:
     if not argv or os.path.basename(argv[0]) != "env":
-        return _Command(tuple(argv[1:]), True)
+        return _Command(tuple(argv[:1]), tuple(argv[1:]), True)
     readable = True
     options = True
     words = iter(enumerate(argv[1:], 1))
@@ -237,7 +253,7 @@ def _harness_command_if_followable(argv: Sequence[str]) -> _Command | None:
             options = False
             readable = readable and word.partition("=")[0] not in _CODEX_CONFIG_ENV
         else:
-            return _Command(tuple(argv[index + 1:]), readable)
+            return _Command(tuple(argv[: index + 1]), tuple(argv[index + 1:]), readable)
     return None
 
 
@@ -312,32 +328,106 @@ def _inline_settings(value: str | None) -> dict:
 
 
 _PROFILE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*")
-_CODEX_CONFIGS = r"""
-m=$1 home=${CODEX_HOME:-$HOME/.codex} d=${2:-.} codex_cd=$3 profile=$4
-if [ -n "$codex_cd" ]; then
-  case $codex_cd in /*) d=$codex_cd ;; *) d=$d/$codex_cd ;; esac
-  [ -d "$d" ] || exit 1
-else
-  case $d in /*) ;; *) d=$PWD/$d ;; esac
-  until [ -d "$d" ]; do d=${d%/*}; d=${d:-/}; done
-fi
-cd -- "$d" && d=$(pwd -P) || exit 1
-show() { [ -e "$2" ] || return 0; printf '%s %s\n' "$m" "$1"; cat -- "$2" || exit 1; echo; }
-show base "$home/config.toml"
-[ -z "$profile" ] || show profile "$home/$profile.config.toml"
-while :; do
-  [ "$d/.codex/config.toml" -ef "$home/config.toml" ] || show project "$d/.codex/config.toml"
-  [ "$d" = / ] && break
-  d=${d%/*}; d=${d:-/}
-done
+_PROBE = r"""
+m=$1 launch=$2 configs=$3 codex_cd=$4 profile=$5 root=$6 h=$7
+shift 7
+version() (
+  if [ -n "$launch" ] && ! cd -- "$launch" 2>/dev/null; then
+    bare=
+    for w in "$1" "$h"; do
+      case $w in /*) ;; */*) exit 1 ;; *) bare=1 ;; esac
+    done
+    if [ -n "$bare" ]; then
+      set -f; p=; IFS=:
+      for e in $PATH; do case $e in /*) p=$p${p:+:}$e ;; esac; done
+      [ -n "$p" ] || exit 1
+      PATH=$p
+    fi
+  fi
+  exec "$@" --version
+)
+revision() (
+  exec git -C "$root" rev-parse HEAD
+)
+codex_configs() (
+  home=${CODEX_HOME:-$HOME/.codex} d=${launch:-.}
+  if [ -n "$codex_cd" ]; then
+    case $codex_cd in /*) d=$codex_cd ;; *) d=$d/$codex_cd ;; esac
+    [ -d "$d" ] || exit 1
+  else
+    case $d in /*) ;; *) d=$PWD/$d ;; esac
+    until [ -d "$d" ]; do d=${d%/*}; d=${d:-/}; done
+  fi
+  cd -- "$d" && d=$(pwd -P) || exit 1
+  file() { [ -e "$2" ] || return 0; printf '%s-config %s\n' "$m" "$1"; cat -- "$2" || exit 1; echo; }
+  file base "$home/config.toml"
+  [ -z "$profile" ] || file profile "$home/$profile.config.toml"
+  while :; do
+    [ "$d/.codex/config.toml" -ef "$home/config.toml" ] || file project "$d/.codex/config.toml"
+    [ "$d" = / ] && break
+    d=${d%/*}; d=${d:-/}
+  done
+)
+section() {
+  name=$1; shift
+  out=$("$name" "$@") && printf '%s %s\n%s\n' "$m" "$name" "$out"
+}
+[ $# -eq 0 ] || section version "$@"
+[ -z "$root" ] || section revision
+[ -z "$configs" ] || section codex_configs
+exit 0
 """
 
 
-def _codex_configs(text: str | None, marker: str) -> list[tuple[str, dict]] | None:
-    if text is None:
-        return None
+@dataclass(frozen=True)
+class _Probed:
+    version: str = UNKNOWN
+    revision: str = UNKNOWN
+    configs: list[tuple[str, dict]] | None = None
+
+
+def _sections(text: str | None, marker: str) -> dict[str, list[str]]:
+    found: dict[str, list[str]] = {}
+    lines: list[str] | None = None
+    for line in (text or "").split("\n"):
+        if line.startswith(f"{marker} "):
+            lines = found.setdefault(line.removeprefix(f"{marker} "), [])
+        elif lines is not None:
+            lines.append(line)
+    return found
+
+
+def _probe(
+    shell: Shell,
+    launch_dir: str | None,
+    *,
+    launcher: Sequence[str] = (),
+    configs_of: _Selected | None = None,
+    root: str | None = None,
+) -> _Probed:
+    if not launcher and configs_of is None and root is None:
+        return _Probed()
+    marker = f"{SHELL_NAME}-{secrets.token_hex(16)}"
+    cd, profile = (configs_of.cd or "", configs_of.profile or "") if configs_of is not None else ("", "")
+    text = shell(_PROBE, (
+        marker, launch_dir or "", "1" if configs_of is not None else "", cd, profile, root or "",
+        launcher[-1] if launcher else "", *launcher,
+    ))
+    sections = _sections(text, marker)
+    lines = [line.strip() for line in sections.get("version", []) if line.strip()]
+    first = lines[0][:VERSION_LIMIT].rstrip() if lines else ""
+    revision = "\n".join(sections.get("revision", [])).strip()
+    configs = sections.get("codex_configs")
+    return _Probed(
+        first if _VERSION.fullmatch(first) else UNKNOWN,
+        revision if _REVISION.fullmatch(revision) else UNKNOWN,
+        None if configs is None else _codex_configs(configs, f"{marker}-config"),
+    )
+
+
+def _codex_configs(text: list[str], marker: str) -> list[tuple[str, dict]] | None:
     shown: list[tuple[str, list[str]]] = []
-    for line in text.split("\n"):
+    for line in text:
         if line.startswith(f"{marker} "):
             shown.append((line.removeprefix(f"{marker} "), []))
         elif shown:
@@ -351,15 +441,18 @@ def _codex_configs(text: str | None, marker: str) -> list[tuple[str, dict]] | No
 _CODEX_KEYS = {"model": "model", "effort": "model_reasoning_effort"}
 
 
-def _settled_by_codex_config(selected: _Selected, shell: Shell, launch_dir: str | None) -> dict[str, object]:
-    if selected.profile_overridden:
-        return {}
-    if selected.profile is not None and not _PROFILE.fullmatch(selected.profile):
-        return {}
-    marker = f"{SHELL_NAME}-{secrets.token_hex(16)}"
-    configs = _codex_configs(
-        shell(_CODEX_CONFIGS, (marker, launch_dir or "", selected.cd or "", selected.profile or "")), marker
+def _codex_config_wanted(command: _Command | None, selected: _Selected, harness: str | None) -> bool:
+    return (
+        harness == "codex"
+        and command is not None
+        and command.config_readable
+        and not (selected.model and selected.effort)
+        and not selected.profile_overridden
+        and (selected.profile is None or _PROFILE.fullmatch(selected.profile) is not None)
     )
+
+
+def _settled_by_codex_config(selected: _Selected, configs: list[tuple[str, dict]] | None) -> dict[str, object]:
     if configs is None:
         return {}
     files = dict(configs)
@@ -385,48 +478,31 @@ def _settled_by_codex_config(selected: _Selected, shell: Shell, launch_dir: str 
     return found
 
 
-def chosen(argv: Sequence[str], harness: str | None, shell: Shell, launch_dir: str | None = None) -> Chosen:
+def _parsed_command(argv: Sequence[str], harness: str | None) -> tuple[_Command | None, _Selected, bool]:
     command = _harness_command_if_followable(argv)
+    selected = _selected(command.args, harness) if command is not None else _Selected()
+    return command, selected, _codex_config_wanted(command, selected, harness)
+
+
+def _chosen(command: _Command | None, selected: _Selected, probed: _Probed) -> Chosen:
     if command is None:
         return Chosen(UNKNOWN, UNKNOWN)
-    selected = _selected(command.args, harness)
-    found: dict[str, object] = {"model": selected.model, "effort": selected.effort}
-    if harness == "codex" and command.config_readable and not all(found.values()):
-        given = {field: value for field, value in found.items() if value}
-        found = _settled_by_codex_config(selected, shell, launch_dir) | given
+    given = {field: value for field, value in (("model", selected.model), ("effort", selected.effort)) if value}
+    found = _settled_by_codex_config(selected, probed.configs) | given
     return Chosen(reported_model(found.get("model")) or UNKNOWN, reported_model(found.get("effort")) or UNKNOWN)
 
 
-_RESOLVE_AS_IN_AN_EMPTY_LAUNCH_DIR = """\
-case $1 in
-  /*) ;;
-  */*) exit 1 ;;
-  *)
-    set -f; p=; IFS=:
-    for e in $PATH; do case $e in /*) p=$p${p:+:}$e ;; esac; done
-    [ -n "$p" ] || exit 1
-    PATH=$p ;;
-esac
-"""
-_CLI_VERSION = f"""\
-if [ -n "$2" ] && ! cd -- "$2" 2>/dev/null; then
-{_RESOLVE_AS_IN_AN_EMPTY_LAUNCH_DIR}fi
-exec "$1" --version
-"""
+def chosen(argv: Sequence[str], harness: str | None, shell: Shell, launch_dir: str | None = None) -> Chosen:
+    command, selected, wanted = _parsed_command(argv, harness)
+    return _chosen(command, selected, _probe(shell, launch_dir, configs_of=selected if wanted else None))
 
 
 def cli_version(binary: str, shell: Shell, launch_dir: str | None = None) -> str:
-    out = shell(_CLI_VERSION, (binary, launch_dir or ""))
-    lines = [line.strip() for line in (out or "").splitlines() if line.strip()]
-    first = lines[0][:VERSION_LIMIT].rstrip() if lines else ""
-    return first if _VERSION.fullmatch(first) else UNKNOWN
+    return _probe(shell, launch_dir, launcher=(binary,)).version
 
 
 def factory_revision(root: str | None, shell: Shell) -> str:
-    if root is None:
-        return UNKNOWN
-    out = shell('exec git -C "$1" rev-parse HEAD', (root,))
-    return out if out is not None and _REVISION.fullmatch(out) else UNKNOWN
+    return _probe(shell, None, root=root).revision
 
 
 def brief_sha256(brief: bytes | None) -> str:
@@ -446,7 +522,6 @@ def brief_file(path: str | None) -> bytes | None:
 def gather(
     *,
     argv: Sequence[str],
-    binary: str,
     harness: str | None,
     brief: bytes | None,
     host: str,
@@ -457,14 +532,22 @@ def gather(
     # lib.brief imports lib.queue, which imports this module.
     from lib.brief.skills import pinned_paths
 
-    found = chosen(argv, harness, shell, launch_dir)
+    command, selected, wanted = _parsed_command(argv, harness)
+    probed = _probe(
+        shell,
+        launch_dir,
+        launcher=command.launcher if command is not None else (),
+        configs_of=selected if wanted else None,
+        root=factory_root,
+    )
+    found = _chosen(command, selected, probed)
     return Exposure(
         model=found.model,
-        cli_version=cli_version(binary, shell, launch_dir),
+        cli_version=probed.version,
         brief_sha256=brief_sha256(brief),
         skill_paths=None if brief is None else pinned_paths(brief.decode("utf-8", "replace")),
         host=host or UNKNOWN,
-        factory_revision=factory_revision(factory_root, shell),
+        factory_revision=probed.revision,
         effort=found.effort,
         harness=harness or UNKNOWN,
     )
@@ -480,7 +563,7 @@ def record(
     """Gather and store job_id's exposure; log one line either way. Never raises."""
     try:
         found = gather()
-        with closing(connect()) as connection, connection:
+        with contextlib.closing(connect()) as connection, connection:
             ensure_table(connection)
             write(connection, job_id, found, clock())
     except Exception as exc:

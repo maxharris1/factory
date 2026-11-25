@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from lib import exposure, job_run, telemetry
+from lib.harness_env import harness_env
 from lib.brief import render_brief
 from lib.brief.skills import Router, pinned_paths, resolve, section
 from lib.queue import JobRequest, SQLiteJobQueue
@@ -53,6 +54,14 @@ def _script(tmp_path: Path, name: str, body: str) -> Path:
     path.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
     path.chmod(0o755)
     return path
+
+
+def _codex_home(tmp_path: Path, files: dict[str, str]) -> Path:
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    for name, text in files.items():
+        (home / name).write_text(text, encoding="utf-8")
+    return home
 
 
 def _exposure(**changes: object) -> exposure.Exposure:
@@ -111,7 +120,7 @@ def test_exposure_records_the_router_paths_when_a_quoted_ci_log_holds_a_skills_s
     brief = render_brief(ci_job, bot="claude-bot", context=None, factory_root=FACTORY_ROOT)
     assert "\n## Skills\n- `/tmp/log-only/SKILL.md`\n" in brief
     found = exposure.gather(
-        argv=["claude", "-p"], binary="claude", harness="claude", brief=brief.encode(), host="box",
+        argv=["claude", "-p"], harness="claude", brief=brief.encode(), host="box",
         factory_root=FACTORY_ROOT, shell=_shell({}), launch_dir=None,
     )
     assert found.skill_paths == _router("builder", "claude-bot", "fix").paths
@@ -152,8 +161,12 @@ def test_pinned_paths_stops_at_the_next_section() -> None:
         (["codex", "exec", "-c", 'model="a"', "-m", "b"], "codex", "b"),
     ],
 )
-def test_the_model_comes_from_the_command_line(argv: list[str], harness: str, expected: str) -> None:
-    shell = _shell({"config.toml": 'model = "from-config"\n'})
+def test_the_model_comes_from_the_command_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, argv: list[str], harness: str, expected: str
+) -> None:
+    home = _codex_home(tmp_path, {"config.toml": 'model = "from-config"\n'})
+    monkeypatch.chdir(tmp_path)
+    shell = exposure.local_shell({"PATH": "/usr/bin:/bin", "CODEX_HOME": str(home)})
     assert exposure.chosen(argv, harness, shell).model == expected
 
 
@@ -187,24 +200,26 @@ def test_a_codex_job_without_a_model_flag_reads_its_config_toml(tmp_path: Path) 
     assert exposure.chosen(["codex", "exec", "--json"], "codex", shell, str(tmp_path)).model == "gpt-5.5-codex"
 
 
-def test_no_model_anywhere_is_unknown(tmp_path: Path) -> None:
-    shell = exposure.local_shell({"PATH": "/usr/bin:/bin", "CODEX_HOME": str(tmp_path / "none")})
-    assert exposure.chosen(["codex", "exec"], "codex", shell).model == exposure.UNKNOWN
-    assert exposure.chosen(["claude", "-p"], "claude", _shell({"config.toml": 'model = "x"'})).model == exposure.UNKNOWN
-    assert exposure.chosen(["codex", "exec"], "codex", _shell({"config.toml": "model = 3"})).model == exposure.UNKNOWN
-    assert exposure.chosen(["codex", "exec"], "codex", _shell({"config.toml": "not toml ["})).model == exposure.UNKNOWN
+@pytest.mark.parametrize(
+    ("argv", "config"),
+    [
+        (["codex", "exec"], None),
+        (["claude", "-p"], 'model = "x"\n'),
+        (["codex", "exec"], "model = 3\n"),
+        (["codex", "exec"], "not toml [\n"),
+    ],
+)
+def test_no_model_anywhere_is_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, argv: list[str], config: str | None
+) -> None:
+    home = _codex_home(tmp_path, {} if config is None else {"config.toml": config})
+    monkeypatch.chdir(tmp_path)
+    shell = exposure.local_shell({"PATH": "/usr/bin:/bin", "CODEX_HOME": str(home)})
+    assert exposure.chosen(argv, argv[0], shell).model == exposure.UNKNOWN
 
 
 BASE = 'model = "default-model"\n'
 REVIEW = 'model = "review-model"\n'
-
-
-def _codex_home(tmp_path: Path, files: dict[str, str]) -> Path:
-    home = tmp_path / "codex-home"
-    home.mkdir()
-    for name, text in files.items():
-        (home / name).write_text(text, encoding="utf-8")
-    return home
 
 
 @pytest.mark.parametrize(
@@ -346,7 +361,7 @@ def test_a_recorded_codex_profile_job_stores_the_profiles_model_and_effort(
     queue = SQLiteJobQueue(tmp_path / "orch.db", clock=time.time)
     argv = ["codex", "--profile", "review", "exec"]
     exposure.record(queue.connect, "job-1", lambda: exposure.gather(
-        argv=argv, binary="codex", harness="codex", brief=None, host="pc", factory_root=None,
+        argv=argv, harness="codex", brief=None, host="pc", factory_root=None,
         shell=exposure.local_shell({"PATH": "/usr/bin:/bin", "CODEX_HOME": str(home)}), launch_dir=None,
     ), lambda line: None)
     with closing(queue.connect()) as connection:
@@ -454,6 +469,31 @@ def test_a_version_that_exits_non_zero_or_is_missing_is_unknown(tmp_path: Path) 
     assert exposure.cli_version(str(tmp_path / "missing"), shell) == exposure.UNKNOWN
 
 
+@pytest.mark.parametrize(
+    ("wrapper", "expected"),
+    [
+        (["/usr/bin/env", "--", "{tools}/harness"], "harness-cli 4.0.0"),
+        (["env", "-u", "X", "--chdir=/", "{tools}/harness"], "harness-cli 4.0.0"),
+        (["env", "PATH={tools}:/usr/bin:/bin", "harness"], "harness-cli 4.0.0"),
+        (["harness"], "harness-cli 1.0.0"),
+        (["env", "-S", "harness"], exposure.UNKNOWN),
+    ],
+)
+def test_the_cli_version_is_the_harness_an_env_wrapper_launches(
+    tmp_path: Path, wrapper: list[str], expected: str
+) -> None:
+    tools, other = tmp_path / "tools", tmp_path / "other"
+    for directory, version in ((tools, "4.0.0"), (other, "1.0.0")):
+        directory.mkdir()
+        _script(directory, "harness", f"echo harness-cli {version}")
+    argv = [word.format(tools=tools) for word in wrapper] + ["exec"]
+    found = exposure.gather(
+        argv=argv, harness="codex", brief=None, host="box", factory_root=None,
+        shell=exposure.local_shell({"PATH": f"{other}:/usr/bin:/bin"}), launch_dir=None,
+    )
+    assert found.cli_version == expected
+
+
 def _two_harnesses(tmp_path: Path) -> tuple[Path, Path]:
     waiter, job = tmp_path / "waiter", tmp_path / "job"
     for directory, version in ((waiter, "1.0.0"), (job, "2.0.0")):
@@ -522,7 +562,7 @@ def test_gather_reads_the_version_and_the_project_config_in_the_launch_directory
     shell = exposure.local_shell({"PATH": "/usr/bin:/bin", "CODEX_HOME": str(home)})
 
     def gather(launch_dir: str | None) -> exposure.Exposure:
-        return exposure.gather(argv=["./harness", "exec"], binary="./harness", harness="codex", brief=None,
+        return exposure.gather(argv=["./harness", "exec"], harness="codex", brief=None,
                                host="box", factory_root=None, shell=shell, launch_dir=launch_dir)
 
     assert gather(str(job)) == exposure.Exposure(
@@ -592,7 +632,10 @@ def test_a_factory_root_that_is_not_git_or_missing_is_unknown(tmp_path: Path) ->
                                   "GIT_CEILING_DIRECTORIES": str(tmp_path)})
     assert exposure.factory_revision(str(tmp_path), shell) == exposure.UNKNOWN
     assert exposure.factory_revision(None, shell) == exposure.UNKNOWN
-    assert exposure.factory_revision("/x", _shell({"rev-parse": "not-a-sha"})) == exposure.UNKNOWN
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    _script(tools, "git", "echo not-a-sha")
+    assert exposure.factory_revision("/x", exposure.local_shell({"PATH": f"{tools}:/usr/bin:/bin"})) == exposure.UNKNOWN
 
 
 # --- the brief -------------------------------------------------------------------
@@ -608,19 +651,21 @@ def test_the_brief_hash_and_its_unknowns(tmp_path: Path) -> None:
     assert exposure.brief_sha256(b"") == exposure.UNKNOWN
 
 
-def test_gather_fills_every_field_and_says_unknown_where_it_cannot() -> None:
+def test_gather_fills_every_field_and_says_unknown_where_it_cannot(tmp_path: Path) -> None:
     router = _router("builder", "codex-bot")
     brief = f"# Brief\n\n{section(router)}\n\n## Task\n".encode()
-    shell = _shell({"--version": "codex-cli 1.2.3", "rev-parse": SHA})
+    _script(tmp_path, "codex", "echo codex-cli 1.2.3")
+    _script(tmp_path, "git", f'[ "$*" = "-C /f rev-parse HEAD" ] && echo {SHA}')
+    shell = exposure.local_shell({"PATH": f"{tmp_path}:/usr/bin:/bin"})
     found = exposure.gather(
-        argv=["codex", "exec", "-m", "gpt-5.5", "-c", "model_reasoning_effort=high"], binary="codex",
+        argv=["codex", "exec", "-m", "gpt-5.5", "-c", "model_reasoning_effort=high"],
         harness="codex", brief=brief, host="box", factory_root="/f", shell=shell, launch_dir=None,
     )
     assert found == exposure.Exposure(
         "gpt-5.5", "codex-cli 1.2.3", hashlib.sha256(brief).hexdigest(), router.paths, "box", SHA, "high", "codex"
     )
     nothing = exposure.gather(
-        argv=["claude", "-p"], binary="claude", harness=None,
+        argv=["claude", "-p"], harness=None,
         brief=b"# Brief\n## Task\n", host="", factory_root=None, shell=_shell({}), launch_dir=None,
     )
     assert nothing == exposure.Exposure(
@@ -681,6 +726,47 @@ def test_the_remote_shell_needs_a_byte_transport() -> None:
             raise AssertionError("never run")
 
     assert exposure.remote_shell(Plain(), TARGET)("exec true", []) is None  # type: ignore[arg-type]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_a_remote_codex_job_records_the_effort_of_the_account_its_worker_runs_as(tmp_path: Path) -> None:
+    login = tmp_path / "home"
+    (login / ".codex").mkdir(parents=True)
+    (login / ".codex" / "config.toml").write_text('model_reasoning_effort = "low"\n', encoding="utf-8")
+    (login / ".bash_profile").write_text(f"export CODEX_HOME={login / '.codex'}\n", encoding="utf-8")
+    account = _codex_home(tmp_path, {"config.toml": 'model_reasoning_effort = "high"\n'})
+    transport = _Transport(env={"HOME": str(login), "PATH": "/usr/bin:/bin"})
+    target = RemoteTarget("pc", "pc-codex-bot", "codex-bot", str(tmp_path / "work"), "job1")
+    found = exposure.gather(
+        argv=["codex", "exec", "-m", "flag-model"], harness="codex", brief=None, host="pc", factory_root=None,
+        shell=exposure.remote_shell(transport, target, harness_env("codex", str(account))),
+        launch_dir=target.job_dir,
+    )
+    assert (found.model, found.effort) == ("flag-model", "high")
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+@pytest.mark.parametrize(("root", "revision"), [(None, exposure.UNKNOWN), ("/f", SHA)])
+def test_gather_asks_a_remote_device_once_for_the_version_the_config_and_the_revision(
+    tmp_path: Path, root: str | None, revision: str
+) -> None:
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    _script(tools, "codex", "echo codex-cli 7.0.0")
+    _script(tools, "git", f'[ "$*" = "-C /f rev-parse HEAD" ] && echo {SHA}')
+    login = tmp_path / "home"
+    (login / ".codex").mkdir(parents=True)
+    (login / ".codex" / "config.toml").write_text('model_reasoning_effort = "high"\n', encoding="utf-8")
+    transport = _Transport(env={"HOME": str(login), "PATH": f"{tools}:/usr/bin:/bin"})
+    target = RemoteTarget("pc", "pc-codex-bot", "codex-bot", str(tmp_path / "work"), "job1")
+    found = exposure.gather(
+        argv=["codex", "exec", "-m", "flag-model"], harness="codex", brief=None, host="pc", factory_root=root,
+        shell=exposure.remote_shell(transport, target), launch_dir=target.job_dir,
+    )
+    assert (found.model, found.effort, found.cli_version, found.factory_revision) == (
+        "flag-model", "high", "codex-cli 7.0.0", revision
+    )
+    assert len(transport.argvs) == 1
 
 
 # --- the table and record --------------------------------------------------------
