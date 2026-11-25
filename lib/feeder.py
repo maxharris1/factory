@@ -1581,11 +1581,6 @@ class Feeder:
         self, contexts: Sequence[tuple[Project, FactoryContext]]
     ) -> tuple[int, int]:
         """Route rough issues on natural_label / natural_linear_state to D31 intake.
-
-        Rough issues never fail with refused-intake. A GitHub issue gets a draft
-        PR labelled `orch:state/intake`, where the orchestrator's questions,
-        brief and go start tracking; a Linear issue gets no GitHub write. Every
-        eligible rough issue enqueues one deduplicated `intake-clarify` wake.
         """
         natural_projects = [
             (project, context)
@@ -1704,8 +1699,6 @@ class Feeder:
         return queued, errors
 
     def _open_natural_pull(self, project: Project, context: FactoryContext, issue: IntakeIssue) -> int:
-        """The rough issue's draft PR, opened once on its feeder branch and
-        labelled so the orchestrator's first handoff on it starts tracking."""
         repo = project.repo
         branch = self._branch_for(issue)
         number = self.github.find_pull(repo, branch)

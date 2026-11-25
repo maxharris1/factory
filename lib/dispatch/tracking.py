@@ -283,9 +283,7 @@ class TrackingMixin:
         comment: Comment,
         fields: Mapping[str, str],
     ) -> bool:
-        """A trusted Grok brief, go or questions, or (ready_starts_review) the
-        builder's ready. Questions count so natural intake's D31 pause on a
-        PR with no brief yet is tracked and held at waiting-max.
+        """A trusted Grok brief, go or questions, or (ready_starts_review) the builder's ready.
 
         The ready path applies T2's own trust rule (factory.md's builder,
         role=builder, a trusted_logins author) and needs the ready head to

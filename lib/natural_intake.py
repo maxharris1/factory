@@ -1,10 +1,5 @@
 """Natural D31 clarifying intake workflow (E3-2).
 
-Rough, natural-language tickets skip the strict ``#204`` feeder template. The
-feeder opens a GitHub ticket's draft PR labelled ``orch:state/intake`` and wakes
-the orchestrator with one deduplicated ``intake-clarify`` item; the session's
-handoffs are posted on that PR (or the Linear ticket).
-
 D31 question discipline:
 - ``observable`` and ``default-able`` technical questions are recorded with
   their decisions/defaults without pausing on Max.
