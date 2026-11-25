@@ -69,6 +69,10 @@ _SUFFIXES: dict[Kind, str] = {
     "trace": ".zip",
     "log": ".log",
 }
+VISUAL_KINDS: frozenset[Kind] = frozenset({"screenshot", "video"})
+VISUAL_SUFFIXES: frozenset[str] = frozenset(
+    suffix for visual_kind in VISUAL_KINDS for suffix in _SUFFIXES[visual_kind].split()
+)
 _KIND_BY_SUFFIX = {suffix: kind for kind, suffixes in _SUFFIXES.items() for suffix in suffixes.split()}
 _ALL_KINDS: frozenset[Kind] = frozenset(get_args(Kind))
 _MANIFEST_ONLY: frozenset[Kind] = frozenset({"manifest"})
@@ -382,6 +386,72 @@ def kind(lane_rel: PurePosixPath) -> Kind:
 
 def keeps(standing: Standing, scenario_result: str | None, kind: Kind) -> bool:
     return kind in _KEPT.get((standing, scenario_result), _KEPT_OTHERWISE[standing])
+
+
+def visual_evidence_files(run_folder: Path) -> tuple[str, ...]:
+    """Sorted lane-relative posix paths of stored screenshot/video files under `run_folder`.
+
+    Inspects only real non-symlink directories and regular files under `lane-<n>`
+    subdirectories; symlinked run folders, lanes, subdirectories, or files are ignored.
+    """
+    if not isinstance(run_folder, Path):
+        return ()
+    try:
+        run_fd = os.open(run_folder, _DIR_FLAGS)
+    except OSError:
+        return ()
+    found: list[str] = []
+    try:
+        with os.scandir(run_fd) as entries:
+            lanes = sorted(
+                entry.name
+                for entry in entries
+                if _LANE.fullmatch(entry.name) and entry.is_dir(follow_symlinks=False)
+            )
+        for lane in lanes:
+            try:
+                lane_fd = os.open(lane, _DIR_FLAGS, dir_fd=run_fd)
+            except OSError:
+                continue
+            try:
+                for rel in _walk_visual(lane_fd, PurePosixPath()):
+                    found.append(PurePosixPath(lane, rel).as_posix())
+            finally:
+                os.close(lane_fd)
+    except OSError:
+        return ()
+    finally:
+        os.close(run_fd)
+    return tuple(sorted(found))
+
+
+def has_visual_evidence(run_folder: Path) -> bool:
+    return bool(visual_evidence_files(run_folder))
+
+
+def _walk_visual(fd: int, rel: PurePosixPath) -> Iterator[PurePosixPath]:
+    with os.scandir(fd) as scan:
+        entries = sorted(scan, key=lambda entry: entry.name)
+    for entry in entries:
+        if entry.is_symlink():
+            continue
+        path = rel / entry.name
+        if entry.is_dir(follow_symlinks=False):
+            try:
+                child = os.open(entry.name, _DIR_FLAGS, dir_fd=fd)
+            except OSError:
+                continue
+            try:
+                yield from _walk_visual(child, path)
+            finally:
+                os.close(child)
+        elif entry.is_file(follow_symlinks=False) and kind(path) in VISUAL_KINDS:
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISREG(info.st_mode):
+                yield path
 
 
 def recycle(

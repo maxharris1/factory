@@ -2124,7 +2124,7 @@ class LivePollSource:
             return cached
         read_at = self.clock()
         last = None if fresh or uncached else self._last_reads.get((project.repo.lower(), number))
-        if not reusable(last, probed, read_at) or bool(last.hold_inputs) != factory.hold_applies:
+        if not reusable(last, probed, read_at) or bool(last.hold_inputs) != factory.configured_hold_applies:
             last = None
         if last is None:
             # gh's --cache could serve a body older than the probe, which
@@ -2330,14 +2330,14 @@ class LivePollSource:
     ) -> dict[str, Any]:
         """Issue #86: labels, diff paths and label events for a hold.
 
-        Read only on a repo whose hold applies (FactoryConfig.hold_applies).
+        Read only on a repo whose configured hold applies (FactoryConfig.configured_hold_applies).
         Labels and label events are read every cycle, so a label from the
         last minute is seen. Diff paths change only with the head or base,
         so they are read once per head (#440). A read that fails is recorded
         and left None, which T4 treats as held (no ship) while every other
         row still runs.
         """
-        if not factory.hold_applies:
+        if not factory.configured_hold_applies:
             return {}
         reads = {
             "labels": self.github.pull_labels,

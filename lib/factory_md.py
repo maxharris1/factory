@@ -226,6 +226,7 @@ QA_TRACE = ("on-failure", "always", "never")
 _QA_KEYS = {
     "enabled",
     "gate",
+    "visual_hold",
     "runners",
     "shootout",
     "profile",
@@ -290,6 +291,7 @@ class QaConfig:
     lane: QaLane
     profile: str
     gate: str = "report"
+    visual_hold: bool = True
     shootout: bool = False
     lanes: int = 1
     paths: tuple[str, ...] = ()
@@ -350,8 +352,24 @@ class FactoryConfig:
             object.__setattr__(self, "finish_line", default_finish_line(self.ship))
 
     @property
-    def hold_applies(self) -> bool:
+    def configured_hold_applies(self) -> bool:
         return self.hold is not None and self.ship in ("merge", "handoff")
+
+    @property
+    def visual_hold_applies(self) -> bool:
+        return self.qa is not None and self.qa.visual_hold and self.ship in ("merge", "handoff")
+
+    @property
+    def hold_applies(self) -> bool:
+        return self.configured_hold_applies or self.visual_hold_applies
+
+    @property
+    def effective_hold(self) -> HoldConfig | None:
+        if self.configured_hold_applies:
+            return self.hold
+        if self.visual_hold_applies:
+            return HoldConfig(label=DEFAULT_HOLD_LABEL, approver=DEFAULT_HOLD_APPROVER, paths=())
+        return None
 
 
 def no_ci_base(factory: FactoryConfig, pr_base: str | None) -> str | None:
@@ -1101,6 +1119,10 @@ def _qa_config(value: object, problems: list[Finding], unknown: str = "error") -
         problems.append(Finding("error", "qa.enabled must be true or false"))
     required = enabled is True
     gate = _qa_choice(value.get("gate"), "qa.gate", QA_GATES, problems) or "report"
+    visual_hold = value.get("visual_hold", True)
+    if not isinstance(visual_hold, bool):
+        problems.append(Finding("error", "qa.visual_hold must be true or false"))
+        visual_hold = True
     runners = _qa_runners(value, required, problems, unknown)
     shootout = value.get("shootout", False)
     if not isinstance(shootout, bool):
@@ -1141,6 +1163,7 @@ def _qa_config(value: object, problems: list[Finding], unknown: str = "error") -
         lane=lane,
         profile=profile,
         gate=gate,
+        visual_hold=visual_hold,
         shootout=shootout,
         lanes=lanes,
         paths=paths,

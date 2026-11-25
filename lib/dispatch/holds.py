@@ -26,6 +26,7 @@ from lib.dispatch.helpers import (
 from lib.dispatch.ok_note import HeldStop, LatestVerdict, no_hold_body, ok_marker, other_head_body
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, ShipError, TrackedTicket
+from lib.factory_md import DEFAULT_HOLD_APPROVER, DEFAULT_HOLD_LABEL, HoldConfig
 from lib.handoff import parse_comment
 from lib.hold import HoldDecision, decide, ok_carries
 from lib.rule_engine import Escalate, Land, Wait
@@ -39,6 +40,25 @@ def _ok_head(comment: Comment) -> str | None:
 
 
 class HoldsMixin:
+    def _effective_hold_and_approvers(
+        self, ticket: TrackedTicket
+    ) -> tuple[HoldConfig, tuple[str, ...]]:
+        if ticket.factory.configured_hold_applies:
+            hold = ticket.factory.hold
+            assert hold is not None
+            return hold, (hold.approver,)
+        assert ticket.factory.visual_hold_applies
+        if self.approvals.app_trust:
+            candidates = tuple(sorted(self.approvals.logins))
+        elif self.approvals.logins:
+            candidates = tuple(
+                sorted(login for login in self.approvals.logins if self._trusted_login(login))
+            )
+        else:
+            candidates = tuple(sorted(self.trusted_logins.get("github", ())))
+        primary = candidates[0] if candidates else DEFAULT_HOLD_APPROVER
+        return HoldConfig(label=DEFAULT_HOLD_LABEL, approver=primary, paths=()), candidates
+
     def _hold_gate(
         self,
         ticket: TrackedTicket,
@@ -49,8 +69,7 @@ class HoldsMixin:
         unhandled and T4 re-checks it on every poll, at whatever the head
         then is. A held PR moves to awaiting-ok once per head and wakes
         Grok Bot once per head with the PR and head."""
-        hold = ticket.factory.hold
-        assert hold is not None
+        hold, _approvers = self._effective_hold_and_approvers(ticket)
         decision = self._hold_decision(ticket, head)
         if decision.unread is not None:
             return False, "hold-unread"
@@ -222,8 +241,8 @@ class HoldsMixin:
     def _read_hold(
         self, ticket: TrackedTicket, head: str, ok_head: str | None = None
     ) -> tuple[HoldDecision, bool, bool]:
-        hold = ticket.factory.hold
-        assert hold is not None
+        hold, approvers = self._effective_hold_and_approvers(ticket)
+        allowed_approvers = tuple(login for login in approvers if self._may_approve(login))
         waited = False
         coverage_unread = False
 
@@ -253,8 +272,11 @@ class HoldsMixin:
             label_events=ticket.label_events,
             factory_md_trust_changed=ticket.factory_md_trust_changed,
             comments=ticket.comments,
-            approver_allowed=self._may_approve(hold.approver),
+            approver_allowed=bool(allowed_approvers),
             covers=covers,
+            check_configured_hold=ticket.factory.configured_hold_applies,
+            visual_qa_hold=self._has_visual_qa_evidence(ticket, head),
+            approvers=allowed_approvers,
         )
         if waited and decision.blocks and decision.unread is None:
             decision = replace(decision, unread="moved-head ci")
@@ -265,7 +287,7 @@ class HoldsMixin:
         return decision, coverage_unread or waited, covered
 
     def _ok_carries(self, ticket: TrackedTicket, ok_head: str, head: str) -> bool | None:
-        hold = ticket.factory.hold
+        hold = ticket.factory.effective_hold
         assert hold is not None
         if self.hold_carry is None:
             return False
@@ -301,11 +323,10 @@ class HoldsMixin:
     def _read_ok(
         self, ticket: TrackedTicket, comment: Comment
     ) -> OkReading | Literal["unread"]:
-        hold = ticket.factory.hold
-        assert hold is not None
+        _hold, approvers = self._effective_hold_and_approvers(ticket)
         if not (
-            comment.author.casefold() == hold.approver.casefold()
-            and self._may_approve(hold.approver)
+            comment.author.casefold() in {login.casefold() for login in approvers}
+            and self._may_approve(comment.author)
         ):
             return "rejected-hold-ok-author"
         if ticket.current_head is None:

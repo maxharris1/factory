@@ -639,6 +639,7 @@ Optional:
   |---|---|---|---|
   | `qa.enabled` | boolean | required | False keeps QA off. The other keys are still checked. |
   | `qa.gate` | `report` \| `block` | `report` | `report` posts the result and never gates a ship. `block` gates the ship. |
+  | `qa.visual_hold` | boolean | true | When true on `ship: merge` or `ship: handoff`, a passing primary QA run with stored screenshot or video evidence (`.png`, `.jpg`, `.jpeg`, `.webp`, `.webm`, `.mp4`) automatically holds the PR in `awaiting-ok` (`reason: visual-qa-review`) until an approver posts `/ok <sha>` or `kind=ok`. |
   | `qa.runners` | list of `claude-cloud`, `cursor-cloud` | required when enabled | One or two runners, no repeat. The first is the primary. |
   | `qa.claude_cloud`, `qa.cursor_cloud` | mapping | none | One block for each listed runner, and none for an unlisted one. `environment` is a required token. `model` is an optional model hint, checked like `builder.model`. |
   | `qa.shootout` | boolean | false | True sends every run to every listed runner, for comparison. It needs two runners and `gate: report`. |

@@ -11,6 +11,7 @@ import re
 import sqlite3
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from lib.approver_commands import SlashQa
@@ -21,6 +22,7 @@ from lib.dispatch.types import Comment, TrackedTicket
 from lib.factory_md import QaConfig
 from lib.feeder_gates import path_matches
 from lib.handoff import HandoffError, parse_comment
+from lib.qa_evidence import has_visual_evidence
 from lib.queue import QA_RECIPIENT, Job, JobRequest, cancel_queued
 from lib.update_check import HeadDiff
 
@@ -878,6 +880,71 @@ class QaMixin:
             if fields["kind"] == "qa":
                 self._mark_handled(ticket, comment.id, self._qa_record(ticket, comment, fields))
 
+    def _carried_qa_source(self, run_id: str, reason: str) -> sqlite3.Row | None:
+        seen = {run_id}
+        current_reason = reason
+        last_source: sqlite3.Row | None = None
+        with self._connect() as connection:
+            while current_reason.startswith("carried:"):
+                source_id = current_reason.removeprefix("carried:")
+                if not source_id or source_id in seen:
+                    break
+                seen.add(source_id)
+                source = connection.execute(
+                    """
+                    SELECT run_id, scope, state, result, reason, comment_id, started_at, evidence_dir
+                    FROM qa_runs WHERE run_id = ?
+                    """,
+                    (source_id,),
+                ).fetchone()
+                if source is None:
+                    break
+                last_source = source
+                if source["scope"] != "none":
+                    return source
+                current_reason = source["reason"] or ""
+        return last_source
+
+    def _has_visual_qa_evidence(self, ticket: TrackedTicket, head: str) -> bool:
+        qa = ticket.factory.qa
+        if qa is None or not qa.visual_hold:
+            return False
+        self._record_unhandled_qa(ticket)
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT run_id, state, result, reason, evidence_dir
+                FROM qa_runs
+                WHERE repo = ? AND ticket_id = ? AND head = ? AND arm = 'primary'
+                ORDER BY rowid DESC LIMIT 1
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, head),
+            ).fetchone()
+            if row is None or row["state"] != "reported" or row["result"] != "PASS":
+                return False
+            evidence_dir = row["evidence_dir"]
+            reason = row["reason"] or ""
+            seen = {row["run_id"]}
+            while evidence_dir is None and reason.startswith("carried:"):
+                source_id = reason.removeprefix("carried:")
+                if not source_id or source_id in seen:
+                    break
+                seen.add(source_id)
+                source = connection.execute(
+                    """
+                    SELECT run_id, state, result, reason, evidence_dir
+                    FROM qa_runs WHERE run_id = ?
+                    """,
+                    (source_id,),
+                ).fetchone()
+                if source is None or source["state"] != "reported" or source["result"] != "PASS":
+                    return False
+                evidence_dir = source["evidence_dir"]
+                reason = source["reason"] or ""
+        if not evidence_dir:
+            return False
+        return has_visual_evidence(Path(evidence_dir))
+
     def _held_qa(self, ticket: TrackedTicket, head: str) -> dict[str, object] | None:
         qa = ticket.factory.qa
         assert qa is not None
@@ -895,11 +962,17 @@ class QaMixin:
         if row is None:
             return {"result": None, "reason": "no-qa-run", "summary": "No QA run: no-qa-run."}
         if row["scope"] == "none":
-            return {
-                "result": row["result"],
-                "reason": row["reason"],
-                "summary": f"No QA run: {row['reason']}.",
-            }
+            reason = row["reason"] or ""
+            if reason.startswith("carried:"):
+                source = self._carried_qa_source(row["run_id"], reason)
+                if source is not None and source["state"] == "reported" and source["comment_id"] is not None:
+                    row = source
+            if row["scope"] == "none":
+                return {
+                    "result": row["result"],
+                    "reason": row["reason"],
+                    "summary": f"No QA run: {row['reason']}.",
+                }
         if row["state"] in OPEN_STATES and self.queue.now() < (
             row["started_at"] + qa.timeout_minutes * 60
         ):
