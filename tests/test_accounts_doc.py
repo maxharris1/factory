@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
+import re
+from functools import cache
 from pathlib import Path
+from types import ModuleType
 from typing import get_args
 
 import pytest
 
-from lib import account_doctor, account_requests
+from lib import account_doctor, account_requests, account_signin, signin_attempt, signin_broker
 
 ROOT = Path(__file__).resolve().parents[1]
 DOC = ROOT / "docs" / "ACCOUNTS.md"
 DECISION = ROOT / "docs" / "decisions" / "1066-settings-accounts.md"
+SIGNIN_NOTE = ROOT / "docs" / "decisions" / "1067-dashboard-signin.md"
 
 COMMANDS = (
     "orch accounts prepare",
@@ -63,9 +68,14 @@ def test_every_detail_the_doctor_writes_is_in_the_status_table() -> None:
     assert missing == []
 
 
-@pytest.mark.parametrize("path", ["README.md", "docs/SPEC.md"])
-def test_readme_and_spec_link_the_procedure(path: str) -> None:
-    assert "docs/ACCOUNTS.md" in (ROOT / path).read_text(encoding="utf-8")
+@pytest.mark.parametrize("path, link", [
+    ("README.md", "docs/ACCOUNTS.md"),
+    ("README.md", "docs/ACCOUNTS.md#sign-in-from-settings"),
+    ("docs/SPEC.md", "ACCOUNTS.md"),
+    ("docs/SPEC.md", "ACCOUNTS.md#sign-in-from-settings"),
+])
+def test_readme_and_spec_link_the_procedure(path: str, link: str) -> None:
+    assert link in (ROOT / path).read_text(encoding="utf-8")
 
 
 def mac_token_steps() -> str:
@@ -109,10 +119,14 @@ def settings_section() -> str:
     return doc().partition("## Manage accounts from Settings")[2].split("\n## ", 1)[0]
 
 
-@pytest.mark.parametrize("op", sorted(account_requests.OPS))
+ALL_OPS = {**account_requests.OPS, **account_requests.BROKER_OPS}
+
+
+@pytest.mark.parametrize("op", sorted(ALL_OPS))
 def test_the_settings_op_table_gives_each_op_its_keys(op: str) -> None:
     row = next((line for line in settings_section().splitlines() if line.startswith(f"| `{op}` |")), "")
-    keys = set(account_requests.OPS[op])
+    assert row
+    keys = set(ALL_OPS[op])
     keys |= account_requests.SET_FIELDS if op == "set" else set()
     keys |= account_requests.REMOVE_EXPECT_KEYS if op == "remove" else set()
 
@@ -192,3 +206,114 @@ def test_run_doctor_is_documented_as_preparing_the_pair_first() -> None:
     assert "Doctor does the same: it prepares the pair before the pass" in prose["README.md"]
     assert "`prepare` and `doctor` each run `orch accounts prepare` for the pair" in prose["docs/SPEC.md"]
     assert [path for path, text in prose.items() if "Doctor runs only the" in text or "doctor runs only" in text] == []
+
+
+@cache
+def server() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("signin_doc_server", ROOT / "deploy" / "factory-dashboard-http.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def signin_note() -> str:
+    return SIGNIN_NOTE.read_text(encoding="utf-8")
+
+
+def decision_line(name: str) -> str:
+    lines = [line for line in signin_note().splitlines()
+             if line.startswith("- **Decision:**") and f"`{name}`" in line]
+    assert len(lines) == 1, name
+    return lines[0]
+
+
+def signin_section() -> str:
+    return doc().partition("## Sign in from Settings")[2].split("\n## ", 1)[0]
+
+
+@pytest.mark.parametrize("name, value", [
+    ("signin_attempt.EXPIRY_SECONDS", lambda: f"{signin_attempt.EXPIRY_SECONDS // 60} minutes"),
+    ("signin_broker.MAX_CONCURRENT", lambda: f"{signin_broker.MAX_CONCURRENT} at once"),
+    ("CODE_SECONDS", lambda: f"{server().CODE_SECONDS} seconds"),
+])
+def test_each_signin_limit_in_the_decision_note_matches_the_code(name: str, value) -> None:
+    assert signin_attempt.EXPIRY_SECONDS % 60 == 0
+    assert value() in decision_line(name)
+
+
+def test_the_decision_note_allowlist_is_exactly_the_codes_patterns() -> None:
+    decision_line("account_signin._ALLOW")
+    block = re.search(r"^```text\n(.*?)^```$", signin_note(), re.MULTILINE | re.DOTALL)
+    assert block
+    listed = set(block[1].splitlines())
+
+    broker = {pattern.pattern for allow in account_signin._ALLOW.values()
+              for pattern in (allow.url, allow.code) if pattern is not None}
+    page = {*(pattern.pattern for pattern in server().SIGNIN_URLS.values()), server().SIGNIN_CODE.pattern}
+
+    assert listed == broker
+    assert listed == page
+
+
+def test_the_decision_note_has_one_block_per_limit() -> None:
+    note = signin_note()
+
+    for field in ("- **Decision:**", "- **When:**", "- **Source:**"):
+        assert note.count(field) == 4, field
+    assert "decisions/1067-dashboard-signin.md" in signin_section()
+
+
+def test_the_signin_section_names_every_broker_refusal_and_result() -> None:
+    section = signin_section()
+    refused = {code for (code,) in refusals(ROOT / "lib" / "signin_broker.py", "Refused", None)}
+    results = {*get_args(account_signin.Outcome.__annotations__["result"]), "refused"}
+
+    assert refused
+    assert sorted(code for code in refused | results if f"`{code}`" not in section) == []
+
+
+SIGNIN_SERVER_SCOPES = frozenset({"_account_signin", "_signin_code", "_signin_cancel", "find", "use_code"})
+
+
+def test_the_signin_section_names_every_server_refusal_of_a_signin() -> None:
+    lines = signin_section().splitlines()
+    found = refusals(ROOT / "deploy" / "factory-dashboard-http.py", "ApiError", SIGNIN_SERVER_SCOPES)
+
+    assert found
+    assert sorted((status, code) for status, code in found
+                  if not any(line.startswith(f"| {status} |") and f"`{code}`" in line for line in lines)) == []
+
+
+def test_the_signin_section_names_every_failed_attempt_error() -> None:
+    section = signin_section()
+    errors = {"shared-identity", "disturbed-account", "token-auth", "signed-out", "unreachable",
+              "doctor-db", "no-doctor-row", *get_args(account_signin.End)} - {"exit", "expired", "cancelled"}
+
+    assert sorted(error for error in errors if f"`{error}`" not in section) == []
+
+
+@pytest.mark.parametrize("phrase", [
+    "`dashboard.settings.relay`", "`DASHBOARD_SIGNIN_RELAY`", "`BindPaths=`", "install-autostart",
+    "`CLAUDE_SECURESTORAGE_CONFIG_DIR`", COMMANDS[1], COMMANDS[2], "decisions/1067-dashboard-signin.md",
+])
+def test_the_signin_section_names_the_setup_and_the_fallback(phrase: str) -> None:
+    assert phrase in signin_section()
+
+
+def never_stored() -> str:
+    return signin_section().partition("### What is never stored")[2].split("\n### ", 1)[0]
+
+
+@pytest.mark.parametrize("store", [
+    "log", "`settings-audit.jsonl`", "`status.json`", "`orch.db`", "`orch.health.db`", "job files",
+])
+def test_never_stored_names_each_factory_store(store: str) -> None:
+    assert store in never_stored()
+
+
+def test_never_stored_leaves_the_clis_own_credentials_out_of_scope() -> None:
+    text = " ".join(never_stored().split())
+
+    assert "Out of scope:" in text
+    assert "`~/.factory-accounts/<id>`" in text
+    assert "Keychain" in text

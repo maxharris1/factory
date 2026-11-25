@@ -4,7 +4,9 @@ This guide signs one extra Claude or Codex account in on each device, so the
 factory can run that account's jobs from its own folder. Max does step 1.
 Step 2 runs as each bot on each listed device. Step 3 runs on the orch host.
 
-The factory never runs a login and never reads a credential file.
+The factory runs a login only when Max presses Sign in on the Settings
+page ([Sign in from Settings](#sign-in-from-settings)). It never reads a
+credential file.
 `orch accounts prepare` makes folders and links. `orch accounts doctor` runs
 `claude auth status` or `codex login status` and keeps only the status, the
 auth method, the plan name and a 12-character hash of the org and email.
@@ -29,7 +31,7 @@ A card shows these facts:
 
 Only the approver can sign in to the page. Signed in, the panel shows an
 Add account form. Each card shows Apply max_jobs, Apply devices, Pause or
-Resume, and Remove, plus Prepare, Run doctor and Sign out for each of its devices. A
+Resume, and Remove, plus Prepare, Run doctor, Sign in and Sign out for each of its devices. A
 card marked `read-only: default account` or `read-only: external account`
 shows no controls. A device's login account is read-only when `accounts:`
 does not declare it. The server refuses every `<harness>-default` account,
@@ -50,6 +52,7 @@ and writes the request to the settings spool. The card then shows
 | `remove` | `expect` | Remove | Deletes the account's block and keeps its comments. `expect` is the account as the card showed it, with `harness`, `max_jobs`, `paused` and `signed_in_on`. |
 | `prepare` | `device` | Prepare | Makes the account's folder on `device`, then runs the doctor. It edits nothing. |
 | `doctor` | `device` | Run doctor | Makes the account's folder on `device`, as Prepare does, then runs the doctor. It edits nothing. |
+| `signin` | `device` | Sign in | Goes to the sign-in broker, not the applier. [Sign in from Settings](#sign-in-from-settings) describes it. |
 | `signout` | `device` | Sign out | Runs `claude auth logout` or `codex logout` as the bot in the account's folder on `device`, with the five token variables and `CLAUDE_SECURESTORAGE_CONFIG_DIR` unset, then runs the doctor. It records `signed-out`, `failed`, or `refused` with `running-job` while the pair runs a job, or `signing-in` while the sign-in broker holds the pair. From the running-job check until its own doctor pass ends, a row in `signout_locks` keeps placement off the pair. The row names the request that took it, and only that request renews or deletes it. A sign-in attempt takes the same row, so a sign-out and a sign-in never hold one pair at once. A doctor pass never clears that row, and placement ignores one older than ten minutes. |
 
 ### Refusals by the server
@@ -156,6 +159,206 @@ add of the same id finds it.
 [decisions/1066-settings-accounts.md](decisions/1066-settings-accounts.md)
 records why remove needs a pause and no running job, why it keeps the
 folder, and why default and external accounts are read-only.
+
+## Sign in from Settings
+
+Sign in on a card's device row signs that account in on that device from
+the page. It is on only when the orch host's `orch.yml` sets
+`dashboard.settings.relay` and the dashboard's `http.env` sets
+`DASHBOARD_SIGNIN_RELAY`. Only a Claude or Codex card shows the button,
+and the broker refuses the device's own login. Without the relay, use the
+[CLI fallback](#the-cli-fallback).
+[decisions/1067-dashboard-signin.md](decisions/1067-dashboard-signin.md)
+records the time limit, the cap, the code expiry and the URL allowlist.
+
+### What Max sees
+
+1. Press Sign in. The card shows the attempt's state: `accepted`,
+   `preparing` (the broker makes the account's folder first), `launching`,
+   then `awaiting-url`.
+2. For Claude, the card shows a `https://claude.com/cai/oauth/authorize`
+   link and a paste box (`awaiting-code`). Open the link, sign in to the
+   account's own subscription, and paste the code Claude gives back. The
+   page sends the code once.
+3. For Codex, the card shows the `https://auth.openai.com/codex/device`
+   link and a code such as `ABCD-1234` (`awaiting-approval`). Open the link
+   and enter the code.
+4. The card shows `verifying` while the broker runs a doctor pass, then the
+   result.
+
+Cancel ends the attempt at any step. An attempt that is not done 15 minutes
+after the CLI starts ends `expired`. Each result is one line in the
+settings audit and one entry in the card's last results.
+
+| Result | Error | Cause | Fix |
+| --- | --- | --- | --- |
+| `ok` | (none) | The doctor reads the pair `ok`, and every other account on the device reads as it did before. | None. |
+| `mismatch` | `shared-identity` | The new sign-in has the same org and email as another account. | Sign in again to the account's own subscription. |
+| `mismatch` | `disturbed-account` | Another account on the device changed while this one signed in. The doctor detail reads `signing in changed account <ids>`. | See [The macOS Keychain check](#the-macos-keychain-check). |
+| `failed` | `token-auth` | The CLI signed in from a token variable, not the folder. | Follow [Move the Mac's profile token off the default account](#move-the-macs-profile-token-off-the-default-account). |
+| `failed` | `signed-out`, `unreachable` | The doctor pass after the CLI found no sign-in, or could not reach the device. | Sign in again, or fix ssh to the device. |
+| `failed` | `unrecognized-output` | The CLI printed no allowed link (and, for Codex, no code) in its first 30 seconds. | Use the CLI fallback, then check the CLI's version. |
+| `failed` | `doctor-db`, `no-doctor-row` | The broker could not write the doctor's rows, or the doctor returned no row for the pair. | Run `orch accounts doctor` on the orch host and read its output. |
+| `failed` | `prepare exited <code>: ...`, `launch: <error>` | Making the folder, or starting the CLI over ssh, failed. | Run Prepare, or the CLI fallback, and read the error. |
+| `expired` | (none) | 15 minutes passed. | Press Sign in again. |
+| `cancelled` | (none) | Max pressed Cancel, or the broker stopped. | None. |
+| `refused` | a code below | The broker refused the request before it started the CLI. | See the broker's refusals. |
+
+### How a sign-in travels
+
+1. The dashboard server checks the request against the `status.json` it
+   serves and writes an `op: signin` request into the settings spool. It
+   never runs the CLI.
+2. The sign-in broker on the orch host (`orch accounts signin-broker`)
+   lists the spool every 2 seconds. Over ssh it backs off to 30 seconds
+   while idle. It reads the spool and the relay the way `orch settings apply` does: over
+   the push login's one multiplexed ssh connection to `dashboard.push.host`
+   when the push is ssh, else as local directories.
+3. The broker checks the request again against `machines.yml`, the running
+   jobs and its own live attempts, then holds the pair in `signout_locks`,
+   so no job is placed on it and no sign-out runs while it signs in.
+4. The broker runs the harness's login with `ssh -tt` to the device as the
+   harness's login there, in the account's folder. It keeps the CLI's output
+   in memory and publishes only the parsed link and code to `<id>.relay`.
+5. The page polls `GET /api/accounts/signin?id=<id>`. The server answers
+   only the session that started the attempt, and re-checks the link and
+   code against the same allowlist before it shows them.
+6. A Claude paste code goes from the page to `<id>.code`, and Cancel to
+   `<id>.cancel`. The broker takes each one (renames, reads and removes it)
+   and types the code into the CLI once.
+7. When the CLI exits, the broker runs a doctor pass for the device and
+   judges the result. It writes one audit line, releases the hold, and
+   replaces `<id>.relay` with only the result and error.
+
+### Set up the relay
+
+1. Create the relay directory beside the settings spool, on the host that
+   serves the dashboard. The dashboard user (`dashboard.settings.spool_owner`)
+   owns it, and its group is the push login's group, which the server unit
+   also runs in (`SupplementaryGroups=`). Give it mode 2770, so the group
+   can read and rename each file and the world has no access. The server
+   refuses to start on a relay that is relative, missing, a symlink, not a
+   directory or open to the world. For example:
+
+   ```sh
+   sudo install -d -m 2770 -o factory-dash -g <push login group> /home/factory-dash/signin-relay
+   ```
+
+2. Add `DASHBOARD_SIGNIN_RELAY=/home/factory-dash/signin-relay` to
+   `/etc/factory-dashboard/http.env`, then run `install` again. `install`
+   writes a `BindPaths=` line for the relay into the unit's `paths.conf`
+   drop-in, so the sandboxed server can write there. Setting the relay
+   without `DASHBOARD_SETTINGS_SPOOL` is a configuration error.
+3. Add the same path to the orch host's `orch.yml` (or `orch.local.yml`):
+
+   ```yaml
+   dashboard:
+     settings:
+       relay: /home/factory-dash/signin-relay
+   ```
+
+   Without `dashboard.settings.relay`, the broker prints `dashboard sign-in
+   is off` and exits.
+4. On the orch host, as the checkout owner, run
+   `deploy/signin-broker-service.sh install-autostart`. Self-heal then keeps
+   the broker running ("Self-heal" in [README.md](../README.md)). The broker
+   logs to `signin-broker.log` in the state directory.
+
+### The broker's refusals
+
+A refusal ends the attempt `refused` and starts no CLI.
+
+| Code | Cause | Fix |
+| --- | --- | --- |
+| `not-approver` | The request's actor is not `dashboard.settings.approver`. | Sign in to the page as the approver. |
+| `unknown-account`, `unknown-device`, `<account> is not signed in on <device>` | `machines.yml` on the orch host does not list the pair. | Add the device to the account's `signed_in_on`. |
+| `machines.yml is invalid`, `no orch.db to record the doctor in` | The orch host cannot load its config or has no database yet. | Fix the orch host. |
+| `default-account` | The account is the device's own login. | Use the CLI fallback with the device's own login command. |
+| `device has install placeholders`, `no ssh_alias for <harness> on <device>` | The device has no ssh path for the harness. | Fill in the device in `machines.yml`. |
+| `no-home` | The device gives no `home` for the account's folder. | Set `home` on the device. |
+| `unreachable` | ssh to the device timed out or exited 255. | Fix ssh to the device as the bot. |
+| `attempt-live` | An attempt for this pair is still live. | Wait for it, or cancel it. |
+| `too-many` | 2 attempts are already live. | Wait for one to finish. |
+| `running-job` | The pair runs a job. | Wait for the job to finish. |
+| `signing-out` | A sign-out holds the pair. | Wait for it to finish. |
+| `cannot read running jobs` | The running-job check could not read `orch.db`. | Fix the orch host's database. |
+
+### The server's refusals
+
+The server refuses a sign-in request before it writes anything. The other
+codes in [Refusals by the server](#refusals-by-the-server) apply too.
+
+| Status | Code | Cause |
+| --- | --- | --- |
+| 400 | `bad-keys`, `bad-value` | The body is not exactly `account` and `device`, or `id` and `code`, of the right shape. |
+| 400 | `bad-code` | The paste code is not 8 to 512 characters of letters, digits and `._~#-`. |
+| 403 | `read-only` | A default account, or an account the snapshot marks read-only. |
+| 403 | `no-signin` | The account's harness has no dashboard sign-in (Cursor). |
+| 404 | `not-in-snapshot` | The account, or the device in its `signed_in_on`, is not in `status.json`. |
+| 404 | `no-attempt` | No attempt with that id belongs to this session, or it started more than 20 minutes ago. |
+| 409 | `running-job` | The snapshot shows a running job on that device. |
+| 409 | `no-code`, `code-used` | A paste code for a Codex attempt, or a second paste code. |
+| 500 | `relay` | The server could not write to the relay. |
+
+### What is never stored
+
+The CLI's output stays in the broker's memory. The sign-in link, the Codex
+code, the Claude paste code and any token or email the CLI prints never
+reach anything the factory keeps:
+
+- no log. The broker's `signin-broker.log` holds only error names and exit
+  codes, and the dashboard server logs only the method, path, status and
+  client address.
+- no `settings-audit.jsonl` line. The line holds the actor, the times, the
+  account, the device, `field: signin`, the doctor status before and after,
+  the result and the error.
+- no `status.json`. The card shows only what the doctor keeps.
+- no `orch.db` or `orch.health.db` row. `orch.db` keeps the doctor's row
+  (status, auth method, plan and a 12-character hash of the org and email)
+  and the pair's hold. `orch.health.db` keeps the broker's heartbeat.
+- no job files. A sign-in is not a job and has no job row or folder.
+
+The relay files are transient and 0640. `<id>.relay` holds the link and
+the Codex code only while the attempt is live. The final view holds only
+the result and error. The broker removes `<id>.code` and `<id>.cancel`
+when it takes them. The server removes a `<id>.code` the broker has not
+taken after 120 seconds, and a `<id>.cancel` after 900 seconds.
+
+Out of scope: the CLI's own credential files in `~/.factory-accounts/<id>`
+on the device, and the macOS Keychain entries the CLI writes. Those belong
+to the CLI, as they do after a CLI sign-in.
+
+### The macOS Keychain check
+
+On a Mac, the Claude CLI keeps its sign-in in the login Keychain, not only
+in the folder. The broker runs the login with the five token variables and
+`CLAUDE_SECURESTORAGE_CONFIG_DIR` unset, so no inherited variable points
+the CLI at another account's sign-in. The factory cannot read the Keychain
+to prove the entries stay apart. It checks the effect instead. Before each
+attempt the broker reads the doctor's view of every other account of the
+harness on the device, and after the CLI exits it reads them again.
+If any of them changed, the attempt ends `mismatch` with
+`disturbed-account`, the pair's row reads `signing in changed account
+<ids>`, and the card shows the CLI command. Sign the account in with the
+CLI fallback, then run Run doctor for the named accounts.
+
+Before the first sign-in on the Mac, follow
+[Move the Mac's profile token off the default account](#move-the-macs-profile-token-off-the-default-account).
+
+### The CLI fallback
+
+Every card row that is not `ok` still shows the step 2 command and the
+login to run it as. It is the only way to sign in when the relay is not
+set up, for the device's own login, for a Cursor account, and after a
+`mismatch`:
+
+```sh
+env -u CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR=~/.factory-accounts/<id> claude auth login
+CODEX_HOME=~/.factory-accounts/<id> codex login --device-auth
+```
+
+Then press Run doctor on the card, or run `orch accounts doctor` on the
+orch host.
 
 ## 1. Declare the account
 
