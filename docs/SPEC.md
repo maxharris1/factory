@@ -795,7 +795,9 @@ projects:
     # Optional backlog feeder intake (issue #85). Absent: not fed.
     # intake:
     #   label: factory:ready          # GitHub projects; default shown
+    #   natural_label: factory:idea   # optional GitHub rough-ticket label -> intake-clarify (E3-2)
     #   linear_state: In Progress     # Linear projects (required there)
+    #   natural_linear_state: Triage  # optional Linear rough-ticket state -> intake-clarify (E3-2)
     #   trusted: [login-or-user-id]   # default: trusted_logins / trusted_linear_users keys
     #   priority_labels: [priority:p0, priority:p1]  # build order tiers (#258); default none
     #   priority_from_linear: false   # Linear projects: priority Urgent..Low as tiers 0-3
@@ -1092,7 +1094,23 @@ also moves an issue in one of these states, wherever it sits in the team's
 order.
 `intake` (issue #85) turns on the backlog feeder for a project (section 4).
 A GitHub project names `label` (default `factory:ready`); a Linear project
-must name `linear_state` and may not name a label. `trusted` lists the
+must name `linear_state` and may not name a label. An optional
+`natural_label` (GitHub projects, convention `factory:idea`, must differ from
+`label`) or `natural_linear_state` (Linear projects, e.g. `Backlog` or `Triage`,
+must differ from `linear_state`) enables natural D31 clarifying intake (E3-2):
+a rough issue carrying that signal from a trusted login/user is never refused
+under `refused-intake`. On GitHub the feeder opens its draft PR on
+`factory/issue-<n>` labelled `orch:state/intake` (on Linear it writes no
+GitHub label), and enqueues one deduplicated `intake-clarify` orchestrator wake
+naming that PR or Linear ticket. A trusted orchestrator `questions` handoff
+starts tracking a labelled PR, like a brief or go, so a D31 product question
+holds it at `waiting-max` before any brief exists, while `label` / `linear_state` keeps enforcing the strict
+`#204` fast-path (an issue carrying both labels goes straight to strict intake).
+`lib/natural_intake.py` (`NaturalIntakeSession`) enforces D31 discipline:
+`observable` and `default-able` questions record decisions without pausing, only
+`product` questions enter `waiting-max` one call at a time, and promotion posts
+the structured brief (`Goal`, `Acceptance criteria`, `Likely files`, optional
+`Out of scope`, `Risk`, `Done-evidence`) plus `kind=go`. `trusted` lists the
 GitHub logins or Linear user IDs who may apply the signal; it defaults to
 the keys of `trusted_logins` or `trusted_linear_users`. The feeder reads who
 applied it (the actor of the latest `labeled` event, or of the latest move
@@ -1268,8 +1286,8 @@ factory repo itself). Such a PR needs no `orch:state/` label to be
 discovered: an open PR with a parseable `kind=ready` comment is a candidate,
 the trust and head rules above decide, and the poller writes the label once
 it tracks the PR (issue #59). Only that trusted `ready` admits an unlabelled
-PR: a Grok `brief` or `go` on it starts nothing until the PR is labelled. With the flag off, only a trusted Grok `brief`
-or `go` on a labelled PR starts tracking.
+PR: a Grok `brief`, `go` or `questions` on it starts nothing until the PR is labelled. With the flag off, only a trusted Grok `brief`,
+`go` or `questions` on a labelled PR starts tracking.
 
 `driver_inbox` (optional, issue #737) names one GitHub issue as
 `owner/name#<n>`. Its repo must be a configured project. With it set, each

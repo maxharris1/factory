@@ -80,6 +80,10 @@ Classify every question as one of:
 
 `post_questions` sets `state=waiting-max` when a product question is open. An answers comment is Max's words for a product question. Post several answers to one questions comment in one `answers_for` comment: the dispatcher resumes on the first trusted answers and rejects later ones.
 
+## Natural intake
+
+An `intake-clarify` wake is a rough ticket; read it at `detail.ticket_url`. Post every handoff on the wake's `ticket_id`, never on the rough issue. Run Intake, then post `NaturalIntakeSession(project.config).classify_and_post(...)`'s comment: it starts tracking, and a product question pauses at `waiting-max`. Post Max's answers in one `answer_all_product_questions` comment. Then post `promote(...)`'s `brief_comment` and `go_comment`.
+
 ## Routing and go
 
 Build a `RouteRequest` from `project.config`, the brief's risk, the likely files, a one-line summary, `urgent`, and `scope_changed`.
@@ -112,6 +116,7 @@ One row per wake the dispatcher sends Grok Bot: each `action` in `lib.dispatch.c
 | `stale` | A verdict for a head or round no longer current, named in `detail.outcome`. | Nothing to post. The current head gets its own review. |
 | `go-not-from-approver` | With the GitHub App on (#122), a `go` on a capped, blocked or waiting ticket, or answers on a `repeat-block`, came from a login not in `approver_logins`. Nothing resumed. | Repost through the approver profile per Commands, or run Stalled ticket. |
 | `clarify` | A `kind=questions` comment from a builder or reviewer. The dispatcher paused that step on the question. | Run Mid-work questions above. |
+| `intake-clarify` | A rough ticket (`intake.natural_label` or `natural_linear_state`) needs questions. `ticket_id` is its draft PR or Linear ticket. | Run Natural intake. |
 | `kind=go must set state=planning or state=building` | A `clarify` wake whose `detail.instruction` is this text. A trusted `go` had no valid `state`, so nothing was queued and no question is paused. | Call `choose_route` again and post `go_comment(decision, verify)` once. It writes a valid `state`. Do not post `answers_comment`: with no paused question it is rejected. |
 | `repeat-block` | A `clarify` wake whose `detail` starts `repeat-block:` and carries `stops=` and `for=`. A reviewer blocked the same rule twice. Only an approver `go` or `/go` releases it, adding a round at the cap. | `for=factory`: run Stalled ticket. `for=max`: ask Max `detail.question` once, with `stops=`. |
 | `criterion-unsatisfiable` | A `clarify` wake whose `detail` starts `criterion-unsatisfiable:`. A reviewer says an acceptance criterion cannot be met. | Challenge the criterion as in Stalled ticket. A changed criterion is a product call: ask Max `detail.question` once and post his words with `answers_comment`. |
