@@ -8,9 +8,14 @@ from pathlib import Path
 from types import ModuleType
 from typing import get_args
 
+import sqlite3
+
 import pytest
 
 from lib import account_doctor, account_requests, account_signin, signin_attempt, signin_broker
+from lib.dashboard_accounts import read_accounts
+from lib.dashboard_pages.settings import ADD_HARNESSES
+from lib.machines_yml import Account, Device, MachinesConfig
 
 ROOT = Path(__file__).resolve().parents[1]
 DOC = ROOT / "docs" / "ACCOUNTS.md"
@@ -231,14 +236,34 @@ def signin_section() -> str:
     return doc().partition("## Sign in from Settings")[2].split("\n## ", 1)[0]
 
 
-@pytest.mark.parametrize("name, value", [
-    ("signin_attempt.EXPIRY_SECONDS", lambda: f"{signin_attempt.EXPIRY_SECONDS // 60} minutes"),
-    ("signin_broker.MAX_CONCURRENT", lambda: f"{signin_broker.MAX_CONCURRENT} at once"),
-    ("CODE_SECONDS", lambda: f"{server().CODE_SECONDS} seconds"),
+SIGNIN_LIMITS = {
+    "expiry minutes": lambda: signin_attempt.EXPIRY_SECONDS / 60,
+    "cap": lambda: signin_broker.MAX_CONCURRENT,
+    "code seconds": lambda: server().CODE_SECONDS,
+    "cancel seconds": lambda: server().CANCEL_SECONDS,
+}
+
+
+@pytest.mark.parametrize("limit, path, pattern", [
+    ("expiry minutes", "docs/decisions/1067-dashboard-signin.md", r"ends `expired` (\d+) minutes after"),
+    ("expiry minutes", "docs/ACCOUNTS.md", r"An attempt that is not done (\d+) minutes"),
+    ("expiry minutes", "docs/ACCOUNTS.md", r"\| (\d+) minutes passed\. \|"),
+    ("expiry minutes", "README.md", r"the (\d+)-minute window"),
+    ("cap", "docs/decisions/1067-dashboard-signin.md", r"at most (\d+) at once"),
+    ("cap", "docs/ACCOUNTS.md", r"\| `too-many` \| (\d+) attempts are already live"),
+    ("cap", "README.md", r"the (\d+)-at-once cap"),
+    ("code seconds", "docs/decisions/1067-dashboard-signin.md", r"has not taken after (\d+) seconds"),
+    ("code seconds", "docs/ACCOUNTS.md", r"taken after (\d+) seconds, and a `<id>\.cancel`"),
+    ("code seconds", "README.md", r"has not taken after (\d+) seconds"),
+    ("code seconds", "docs/SPEC.md", r"removes an untaken paste code after (\d+) seconds"),
+    ("cancel seconds", "docs/ACCOUNTS.md", r"a `<id>\.cancel` after (\d+) seconds"),
 ])
-def test_each_signin_limit_in_the_decision_note_matches_the_code(name: str, value) -> None:
-    assert signin_attempt.EXPIRY_SECONDS % 60 == 0
-    assert value() in decision_line(name)
+def test_each_documented_signin_limit_is_the_codes_whole_number(limit: str, path: str, pattern: str) -> None:
+    text = " ".join((ROOT / path).read_text(encoding="utf-8").split())
+    found = [int(number) for number in re.findall(rf"(?<![\d.]){pattern}", text)]
+
+    assert len(found) == 1, (path, pattern, found)
+    assert found[0] == SIGNIN_LIMITS[limit](), (path, pattern, found)
 
 
 def test_the_decision_note_allowlist_is_exactly_the_codes_patterns() -> None:
@@ -317,3 +342,29 @@ def test_never_stored_leaves_the_clis_own_credentials_out_of_scope() -> None:
     assert "Out of scope:" in text
     assert "`~/.factory-accounts/<id>`" in text
     assert "Keychain" in text
+
+
+def test_the_cli_fallback_promises_a_command_only_where_a_card_shows_one() -> None:
+    machines = MachinesConfig(
+        devices=(Device(name="pc", slot_max=2,
+                        harnesses={harness: f"{harness}-bot" for harness in ADD_HARNESSES},
+                        accounts={harness: f"{harness}-own" for harness in ADD_HARNESSES},
+                        home="/home/{bot}"),),
+        accounts=tuple(Account(id=f"{harness}-extra", harness=harness, signed_in_on=("pc",))
+                       for harness in ADD_HARNESSES),
+    )
+    with sqlite3.connect(":memory:") as connection:
+        rows = [(account["harness"], row["command"])
+                for account in read_accounts(connection, 0, machines)
+                for row in account["signed_in_on"]]
+    with_command = {harness for harness, command in rows if command is not None}
+    without = {harness for harness, _ in rows} - with_command
+
+    section = doc().partition("### The CLI fallback")[2].split("\n## ", 1)[0]
+    promise, _, after = re.split(r"^```(?:sh)?$", section, flags=re.MULTILINE)
+    promise, after = " ".join(promise.split()), " ".join(after.split())
+
+    assert without
+    assert {harness for harness in ADD_HARNESSES if harness.capitalize() in promise} == with_command
+    assert {harness for harness in ADD_HARNESSES if f"A {harness.capitalize()} card row shows no command" in after} == without
+    assert "cursor-agent login" in after

@@ -357,9 +357,10 @@ Before the first sign-in on the Mac, follow
 
 ### The CLI fallback
 
-Every card row that is not `ok` still shows the step 2 command and the
-login to run it as. It is the only way to sign in when the relay is not
-set up, for the device's own login, for a Cursor account, and after a
+Every Claude or Codex card row that is not `ok` still shows the step 2
+command and the login to run it as, unless the device's home in
+`machines.yml` is still an install placeholder. It is the only way to sign
+in when the relay is not set up, for the device's own login, and after a
 `mismatch`:
 
 ```sh
@@ -369,6 +370,11 @@ CODEX_HOME=~/.factory-accounts/<id> codex login --device-auth
 
 Then press Run doctor on the card, or run `orch accounts doctor` on the
 orch host.
+
+A Cursor card row shows no command and no Sign in, because the doctor and
+the sign-in broker cover only Claude and Codex. A Cursor account is the
+device's cursor login itself, so sign it in by hand on the device as that
+login with `cursor-agent login`.
 
 ## 1. Declare the account
 
