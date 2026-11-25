@@ -5,7 +5,14 @@ import re
 
 import pytest
 
-from tests.regenerate_brief_snapshots import CASES, QA_CASES, _job, render_qa_snapshot, render_snapshot
+from tests.regenerate_brief_snapshots import (
+    CASES,
+    QA_CASES,
+    _job,
+    render_devices,
+    render_qa_snapshot,
+    render_snapshot,
+)
 
 DATA_SECTIONS = frozenset({
     "## Job data",
@@ -27,18 +34,18 @@ CEILINGS: dict[str, int] = {
     "ci-fix-log-unavailable": 13984,
     "fix": 13600,
     "fix-pre-ready": 12869,
-    "merge-only": 10058,
+    "merge-only": 10411,
     "plan": 13590,
     "plan-github": 13590,
     "plan-qa": 14380,
     "plan-round-2": 13886,
-    "qa:base-check": 7084,
-    "qa:base-check-fallback": 6508,
-    "qa:head": 7040,
-    "qa:head-fallback": 6464,
-    "qa:regression": 7075,
-    "qa:regression-fallback": 6499,
-    "rebase": 11898,
+    "qa:base-check": 7203,
+    "qa:base-check-fallback": 6627,
+    "qa:head": 7159,
+    "qa:head-fallback": 6583,
+    "qa:regression": 7194,
+    "qa:regression-fallback": 6618,
+    "rebase": 12251,
     "resume": 12492,
     "retry": 12830,
     "review": 17450,
@@ -56,9 +63,10 @@ CEILINGS: dict[str, int] = {
     "review-user-impact-round-2": 20858,
 }
 
-ROUTERLESS_BUILDER_KINDS = frozenset({"merge-only", "rebase"})
+DEVICES = ("box", "remote (mac)")
 BUILDER_ROUTER = "skills/factory/factory-builder/SKILL.md"
 REVIEWER_ROUTER = "skills/factory/factory-reviewer/SKILL.md"
+QA_ROUTER = "skills/factory/factory-qa/SKILL.md"
 
 REGROWTH = (
     "Strip slop with deslop over the diff, run the comments pass with no-comments, "
@@ -151,10 +159,9 @@ def test_paragraph_in_a_data_section_does_not_count() -> None:
     assert len(boilerplate(in_data)) == len(boilerplate(brief))
 
 
-@pytest.mark.parametrize("kind", sorted(CASES))
-def test_brief_names_head_criteria_evidence_and_router(kind: str) -> None:
+def check_contract(kind: str, brief: str) -> None:
     head, detail = job_detail(kind)
-    brief = without_job_data(render(kind))
+    brief = without_job_data(brief)
 
     if head:
         assert head in brief
@@ -187,14 +194,42 @@ def test_brief_names_head_criteria_evidence_and_router(kind: str) -> None:
             assert url in brief, url
 
     router = REVIEWER_ROUTER if detail["action"] == "review" else BUILDER_ROUTER
-    if kind in ROUTERLESS_BUILDER_KINDS:
-        assert "skills/factory/" not in brief
-    else:
-        assert brief.count(router) == 2, router
+    assert router in brief, router
+
+
+def test_every_case_renders_on_each_device() -> None:
+    for kind in CASES:
+        assert tuple(render_devices(kind)) == DEVICES, kind
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("kind", sorted(CASES))
+def test_brief_names_head_criteria_evidence_and_router(kind: str, device: str) -> None:
+    check_contract(kind, render_devices(kind)[device])
+
+
+@pytest.mark.parametrize(
+    ("kind", "dropped"),
+    [
+        ("resume", "3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6"),
+        ("fix", "ac-2"),
+        ("ci-fix", "https://github.com/owner/repo/actions/runs/123456"),
+        ("resume", "Use the v2 table."),
+        ("merge-only", BUILDER_ROUTER),
+        ("review", REVIEWER_ROUTER),
+    ],
+)
+def test_one_device_missing_a_fact_fails_even_when_the_other_has_it(kind: str, dropped: str) -> None:
+    devices = render_devices(kind)
+    box = devices["box"].replace(dropped, "")
+    assert box != devices["box"]
+    check_contract(kind, devices["remote (mac)"])
+    with pytest.raises(AssertionError):
+        check_contract(kind, box)
 
 
 @pytest.mark.parametrize("case", sorted(QA_CASES))
-def test_qa_brief_names_commit_criteria_evidence_and_no_router(case: str) -> None:
+def test_qa_brief_names_commit_criteria_evidence_and_router(case: str) -> None:
     facts = QA_CASES[case]
     brief = render_qa_snapshot(case)
     tested = facts.commit if facts.kind == "head" else facts.base_commit
@@ -205,5 +240,4 @@ def test_qa_brief_names_commit_criteria_evidence_and_no_router(case: str) -> Non
             assert f"{scenario.id}/{name}" in brief, name
     assert facts.links.result.fields["key"] in brief
     assert facts.links.bundle.fields["key"] in brief
-    assert "no skill needs to be installed" in brief
-    assert "skills/factory/" not in brief
+    assert f"router `{QA_ROUTER}`" in brief

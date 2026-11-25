@@ -15,6 +15,7 @@ Title the PR with the source issue, then a Conventional Commits title: `#<issue>
 CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
 Never poll, watch or wait on GitHub Actions or any other CI from inside this job.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
+Your router is `/srv/orch/factory/skills/factory/factory-builder/SKILL.md`. It gives a merge-only or rebase job no playbook and no helpers, so this Method is the whole job.
 
 ## Proof
 The ready names the pushed head, a merge commit of `origin/dev` that changes only conflict hunks.
@@ -124,6 +125,7 @@ Title the PR with the source issue, then a Conventional Commits title: `#<issue>
 CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
 Never poll, watch or wait on GitHub Actions or any other CI from inside this job.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
+Your router is `/home/claude-bot/factory/skills/factory/factory-builder/SKILL.md`. It gives a merge-only or rebase job no playbook and no helpers, so this Method is the whole job.
 
 ## Proof
 The ready names the pushed head, a merge commit of `origin/dev` that changes only conflict hunks.

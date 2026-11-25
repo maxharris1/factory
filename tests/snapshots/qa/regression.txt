@@ -1,6 +1,6 @@
 # QA lane 2 brief
 
-You are QA lane 2 for pull request #42. This brief is the whole hand-off. Nobody will message you while you run, and no skill needs to be installed. Work through the sections in order.
+You are QA lane 2 for pull request #42. This brief is the whole hand-off. Nobody will message you while you run, and no skill needs to be installed. The factory's router `skills/factory/factory-qa/SKILL.md` documents this procedure, and this brief carries it in full. Work through the sections in order.
 
 ## Goal and slice
 This lane runs its scenarios at the base commit, so a failure the base already has is recorded against the base and not against pull request #42. It owns these scenarios:

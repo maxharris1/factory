@@ -79,6 +79,18 @@ _GENERAL_HELPER = {
 }
 
 
+BUILDER_ROUTER = _factory("factory-builder/SKILL.md")
+
+
+def method_only_note(factory_root: str | None) -> str:
+    usable = factory_root is not None and _root_problem(factory_root) is None
+    path = BUILDER_ROUTER.under(factory_root) if usable else f"{BUILDER_ROUTER.path} in the deployed factory checkout"
+    return (
+        f"Your router is `{path}`. It gives a merge-only or rebase job no playbook and no helpers, "
+        "so this Method is the whole job."
+    )
+
+
 @dataclass(frozen=True)
 class Router:
     role: str
@@ -89,7 +101,7 @@ class Router:
 
 def builder_files(action: str, ticket_type: str | None) -> tuple[Pinned, ...]:
     return (
-        _factory("factory-builder/SKILL.md"),
+        BUILDER_ROUTER,
         _pstack("skills/poteto-mode/SKILL.md"),
         _pstack("skills/figure-it-out/SKILL.md"),
         PLAYBOOKS[ticket_type or "feature"],
