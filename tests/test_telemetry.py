@@ -1239,7 +1239,7 @@ _TRACING = {
 def test_a_tracing_login_profile_never_echoes_an_environment_value(
     tmp_path: Path, tracing: str, report_env: bool
 ) -> None:
-    from lib.remote import RemoteTarget, start_script
+    from lib.remote import RemoteTarget, new_tag, start_script
 
     home = tmp_path / "home"
     home.mkdir()
@@ -1247,7 +1247,7 @@ def test_a_tracing_login_profile_never_echoes_an_environment_value(
         f"export DEPLOY_PASSWORD={shlex.quote(WORKER_SECRET)}\n{_TRACING[tracing]}\n", encoding="utf-8"
     )
     job_secret = "otter" + "lantern-key"
-    target = RemoteTarget("pc", "unused", "codex-bot", str(tmp_path / "work"), "job", "a" * 32)
+    target = RemoteTarget("pc", "unused", "codex-bot", str(tmp_path / "work"), "job", new_tag())
     script = start_script(target, ["/usr/bin/printf", "finished\n"], {"JOB_TOKEN": job_secret}, report_env=report_env)
     run = subprocess.run(
         ["sh", "-c", script], env={"HOME": str(home), "PATH": "/usr/bin:/bin"},

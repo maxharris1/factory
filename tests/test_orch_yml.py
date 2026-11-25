@@ -790,7 +790,7 @@ def test_qa_shares_usage_with_loads_and_defaults_empty(tmp_path: Path) -> None:
         ("qa:\n  shares_usage_with: [claude-cloud]\n", "qa.shares_usage_with must be a mapping"),
         (
             "qa:\n  shares_usage_with:\n    gpu-cloud: claude\n",
-            "qa.shares_usage_with has unknown runner 'gpu-cloud'; expected one of claude-cloud, cursor-cloud",
+            "qa.shares_usage_with has unknown runner 'gpu-cloud'; expected one of claude-cloud, cursor-cloud, local-docker",
         ),
     ],
 )

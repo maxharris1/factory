@@ -2424,11 +2424,19 @@ sign-in broker and shows the relay view: the attempt's state, the sign-in
 URL the broker writes (and the code, for Codex), a box for the Claude paste
 code, and **Cancel**. The relay is an absolute,
 existing directory, not a symlink, that gives others no access (the group
-may write, since the push login shares it). A clicked Sign in finishes only
-once the sign-in broker runs on the orch host (issue #1398, PR #1401).
-Without it the attempt stays queued. The server never signs anything in
-itself. It writes only the request, the paste code and the cancel, and it
-removes a code the broker has not taken after 120 seconds.
+may write, since the push login shares it). The sign-in broker on the
+orch host (`orch accounts signin-broker`) takes the request, runs the
+harness's login on the device and writes the view. It reads the relay that
+the orch host's `dashboard.settings.relay` names, and
+`deploy/signin-broker-service.sh install-autostart` keeps it running.
+Without the broker the attempt stays queued. The server never signs
+anything in itself. It writes only the request, the paste code and the
+cancel, and it removes a code the broker has not taken after 120 seconds.
+[docs/ACCOUNTS.md](docs/ACCOUNTS.md#sign-in-from-settings) has the setup,
+the refusals, what is never stored, the macOS Keychain check and the CLI
+fallback. [docs/decisions/1067-dashboard-signin.md](docs/decisions/1067-dashboard-signin.md)
+records the 15-minute window, the 2-at-once cap, the code expiry and the
+URL allowlist.
 
 **GitHub actions (off by default).** With `DASHBOARD_GITHUB_CLIENT_ID` set
 in `http.env`, the server also answers a small JSON API under `/api` so the

@@ -1229,7 +1229,7 @@ def test_unknown_qa_runner_model_only_warns() -> None:
         ({"profile": "mobile"}, "qa.profile must be full-stack, supabase or none"),
         ({"lanes": 0}, "qa.lanes must be an integer from 1 to 3"),
         ({"lanes": 4}, "qa.lanes must be an integer from 1 to 3"),
-        ({"runners": ["gemini-cloud"]}, "qa.runners[0] must be claude-cloud or cursor-cloud"),
+        ({"runners": ["gemini-cloud"]}, "qa.runners[0] must be claude-cloud, cursor-cloud or local-docker"),
         ({"runners": ["claude-cloud", "claude-cloud"]}, "qa.runners names claude-cloud twice"),
         (
             {"runners": ["claude-cloud", "cursor-cloud"]},

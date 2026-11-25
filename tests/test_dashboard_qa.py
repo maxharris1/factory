@@ -100,7 +100,11 @@ def test_the_snapshot_carries_each_tracked_tickets_runs_at_its_newest_head(snaps
          "elapsed_seconds": 500, "run": [SHOOTOUT[1][:16], SHOOTOUT[1][16:]]},
     ]
     assert snapshot["qa"]["cap"] == CAP
-    assert snapshot["qa"]["runners"] == [{"runner": "claude-cloud", "open": 2}, {"runner": "cursor-cloud", "open": 0}]
+    assert snapshot["qa"]["runners"] == [
+        {"runner": "claude-cloud", "open": 2},
+        {"runner": "cursor-cloud", "open": 0},
+        {"runner": "local-docker", "open": 0},
+    ]
     assert snapshot["qa"]["queued"] == [{"repo": "maxharris1/cleffy", "count": 2}, {"repo": REPO, "count": 1}]
     assert "agent.example" not in json.dumps(snapshot)
 
@@ -111,7 +115,13 @@ def test_a_database_without_qa_tables_reads_as_no_qa(tmp_path: Path) -> None:
     log = tmp_path / "poller.log"
     log.write_text("", encoding="utf-8")
     assert collect_snapshot(db, log, now=NOW)["qa"] == {
-        "runs": [], "cap": None, "runners": [{"runner": "claude-cloud", "open": 0}, {"runner": "cursor-cloud", "open": 0}],
+        "runs": [],
+        "cap": None,
+        "runners": [
+            {"runner": "claude-cloud", "open": 0},
+            {"runner": "cursor-cloud", "open": 0},
+            {"runner": "local-docker", "open": 0},
+        ],
         "queued": [],
     }
 
@@ -193,6 +203,7 @@ def test_ac3_the_lanes_page_shows_open_lanes_against_the_cap_and_queued_qa_jobs(
     assert text == [
         ["claude-cloud", "2", "/", "2", "lanes", "at", "cap"],
         ["cursor-cloud", "0", "/", "2", "lanes"],
+        ["local-docker", "0", "/", "2", "lanes"],
         ["maxharris1/cleffy", "2", "waiting"],
         [REPO, "1", "waiting"],
     ]

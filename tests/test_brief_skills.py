@@ -120,10 +120,9 @@ def test_the_model_lines_and_the_helper_permission_are_there_with_no_cap(
     text = _brief(action, recipient, extra)
     assert brief_lines(recipient) in text
     assert "You may start helper agents as pstack recommends." in text
-    if action == "review":
-        assert "They do research only; you write the verdict." in text
-    else:
-        assert "They never post to GitHub or push." not in text
+    for gone in ("They win over any other model config", "They do research only; you write the verdict.",
+                 "start a general helper", "They never post to GitHub or push."):
+        assert gone not in text, gone
     assert not re.search(r"(at most|up to|no more than) \w+ (helper|agent)", text, re.IGNORECASE)
     assert not re.search(r"\b\d+ (helper|agent)s?\b", text, re.IGNORECASE)
 
@@ -131,7 +130,6 @@ def test_the_model_lines_and_the_helper_permission_are_there_with_no_cap(
 def test_codex_reviewer_helpers_run_on_sol() -> None:
     text = _brief("review", "codex", {"round": "2/3"})
     assert "interrogate reviewers: gpt-6.1-sol high" in text
-    assert "research only; you write the verdict" in text
 
 
 @pytest.mark.parametrize(("action", "recipient", "extra"), ALL_JOBS)
@@ -215,15 +213,12 @@ def test_the_device_check_runs_before_any_read(action: str, recipient: str, extr
     assert "post a `questions` handoff naming it, then stop" in section
 
 
-@pytest.mark.parametrize(("recipient", "helper"), [
-    ("claude", '`subagent_type: "general-purpose"`'),
-    ("codex", '`agent_type: "default"`'),
-    ("cursor", '`subagent_type: "generalPurpose"`'),
-])
-def test_a_harness_without_the_agent_name_starts_a_general_helper(recipient: str, helper: str) -> None:
+@pytest.mark.parametrize("recipient", ["claude", "codex", "cursor"])
+def test_the_brief_lists_the_agent_files_and_leaves_the_fallback_to_the_adapter(recipient: str) -> None:
     text = _brief("build", recipient, {})
-    assert helper in text
-    assert "tell it first to read and follow the agent file" in text
+    for gone in ('`subagent_type: "general-purpose"`', '`agent_type: "default"`',
+                 "tell it first to read and follow the agent file"):
+        assert gone not in text, gone
     assert f"`{FACTORY_ROOT}/skills/pstack/agents/comment-sicko.md`" in text
     assert f"`{FACTORY_ROOT}/skills/pstack/agents/poteto-agent.md`" in text
 
