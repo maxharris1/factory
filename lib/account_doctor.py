@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from lib.queue import SQLiteJobQueue
 
 Status = Literal["ok", "signed-out", "mismatch", "unreachable"]
-Harness = Literal["claude", "codex"]
+Harness = Literal["claude", "codex", "cursor"]
 Source = Literal["preflight", "runtime", "doctor"]
 
 TABLE = "account_signins"
@@ -88,6 +88,7 @@ _HOLD = (f"INSERT INTO {HOLDS} (account, device, since, seen, source, reason) VA
 NOT_LOGGED_IN = "not logged in"
 NOT_UNDERSTOOD = "status reply not understood"
 EXIT_NONZERO = "status command exited nonzero"
+PARTIAL_LOGIN = "partly signed in"
 _INCONCLUSIVE = frozenset({NOT_UNDERSTOOD, EXIT_NONZERO})
 NO_IDENTITY = "sign-in names no org and email"
 TOKEN_AUTH = "auth from a token variable, not the account folder"
@@ -115,6 +116,12 @@ _CODEX_LINES = (
     ("Logged in using an API key", "api_key", True),
     ("Not logged in", None, False),
 )
+_CURSOR_STATES: dict[str, tuple[bool, str]] = {
+    "authenticated": (True, ""),
+    "partially-authenticated": (False, PARTIAL_LOGIN),
+    "unauthenticated": (False, NOT_LOGGED_IN),
+    "error": (False, EXIT_NONZERO),
+}
 
 
 @dataclass(frozen=True)
@@ -173,6 +180,7 @@ _RULES: dict[Harness, dict[str | None, _Rule]] = {
         "chatgpt": _Rule("ok"),
         "api_key": _Rule("signed-out", CODEX_API_KEY),
     },
+    "cursor": {"login": _Rule("ok")},
 }
 
 
@@ -180,6 +188,7 @@ _CLAUDE_METHODS = frozenset(_RULES["claude"]) | {"none"}
 AUTH_METHODS: dict[Harness, frozenset[str]] = {
     "claude": _CLAUDE_METHODS | {"unknown"},
     "codex": frozenset(method for _, method, _ in _CODEX_LINES if method is not None),
+    "cursor": frozenset(_RULES["cursor"]),
 }
 
 
@@ -198,15 +207,21 @@ def _subscription(value: object) -> str | None:
     return value if isinstance(value, str) and SUBSCRIPTION.fullmatch(value) else None
 
 
-def _fingerprint(org: str | None, email: str | None) -> str | None:
-    if org is None or email is None:
+def _id_text(value: object) -> str | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return value if isinstance(value, str) and value else None
+
+
+def _fingerprint(*parts: str | None) -> str | None:
+    if None in parts:
         return None
-    return hashlib.sha256(f"{org}\0{email}".encode()).hexdigest()[:12]
+    return hashlib.sha256("\0".join(parts).encode()).hexdigest()[:12]
 
 
-def _signed_in(code: int, logged_in: bool) -> tuple[bool, str]:
+def _signed_in(code: int, logged_in: bool, signed_out: str = NOT_LOGGED_IN) -> tuple[bool, str]:
     if not logged_in:
-        return False, NOT_LOGGED_IN
+        return False, signed_out
     if code != 0:
         return False, EXIT_NONZERO
     return True, ""
@@ -248,6 +263,27 @@ def parse_codex(account: str, device: str, code: int, reply: bytes) -> Probe:
     return Probe(account, device, "codex", True, False, None, None, None, NOT_UNDERSTOOD)
 
 
+def parse_cursor(account: str, device: str, code: int, reply: bytes) -> Probe:
+    data = _json_object(reply)
+    state = _CURSOR_STATES.get(_text(data, "status") or "") if data is not None else None
+    if state is None:
+        return Probe(account, device, "cursor", True, False, None, None, None, NOT_UNDERSTOOD)
+    logged_in, detail = _signed_in(code, *state)
+    user = data.get("userInfo")
+    user_id = _id_text(user.get("userId")) if isinstance(user, dict) else None
+    return Probe(
+        account=account,
+        device=device,
+        harness="cursor",
+        reached=True,
+        logged_in=logged_in,
+        auth_method="login" if logged_in else None,
+        subscription_type=None,
+        fingerprint=_fingerprint("cursor", user_id),
+        detail=detail,
+    )
+
+
 @dataclass(frozen=True)
 class _Status:
     command: str
@@ -261,6 +297,8 @@ _STATUS: dict[Harness, _Status] = {
     "claude": _Status("claude auth status", False, "CLAUDE_CONFIG_DIR",
                       ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"), parse_claude),
     "codex": _Status("codex login status", True, "CODEX_HOME", ("OPENAI_API_KEY", "CODEX_API_KEY"), parse_codex),
+    "cursor": _Status("cursor-agent status --format json", False, "CURSOR_CONFIG_DIR",
+                      ("CURSOR_API_KEY", "CURSOR_AUTH_TOKEN"), parse_cursor),
 }
 _TOKEN_VARIABLES = tuple(name for status in _STATUS.values() for name in status.token_variables)
 
@@ -416,7 +454,7 @@ def _first_pass(probe: Probe, now: float) -> SignIn:
         status=rule.status,
         auth_method=probe.auth_method,
         subscription_type=probe.subscription_type,
-        fingerprint=probe.fingerprint if rule.needs_fingerprint and rule.status == "ok" else None,
+        fingerprint=probe.fingerprint if rule.status == "ok" else None,
         checked_at=now,
         detail=rule.detail,
     )
@@ -453,6 +491,7 @@ def judge(probes: Sequence[Probe], now: float) -> list[SignIn]:
 _LOGIN: dict[Harness, tuple[tuple[str, ...], str]] = {
     "claude": (("CLAUDE_CODE_OAUTH_TOKEN",), "claude auth login"),
     "codex": ((), "codex login --device-auth"),
+    "cursor": (("CURSOR_API_KEY", "CURSOR_AUTH_TOKEN"), "cursor-agent login"),
 }
 _THEN = ", then orch accounts doctor"
 _STEP: dict[Status, str] = {
