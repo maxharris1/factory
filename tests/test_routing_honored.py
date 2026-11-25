@@ -791,3 +791,36 @@ def test_ready_cannot_bypass_an_exhausted_routing_pool(tmp_path: Path) -> None:
 
     assert _queued(queue) == []
     assert _is_stuck(queue)
+
+
+def test_build_queued_before_routing_keeps_its_actual_builder(tmp_path: Path) -> None:
+    from lib.factory_md import FactoryRouting
+
+    unrouted = factory()
+    routed = replace(unrouted, routing=FactoryRouting(budget="medium"))
+    brief = comment(
+        "brief-1",
+        "<!-- orch:v1 kind=brief from=grok-bot role=orchestrator -->\n- Type: perf-issue\n",
+        author="grok-login",
+        created_at=0,
+    )
+    go = comment("go-1", _go(""), author="grok-login")
+    dispatcher, queue = setup(tmp_path)
+    dispatcher.process(ticket(brief, go, factory_config=unrouted))
+    build = queue.claim("claude")
+    assert build is not None and "routing" not in json.loads(build.request.detail)
+    queue.finish(build.id, owner="claude", handoff_comment_id="ready-1")
+
+    ready = comment("ready-1", _ready("claude"), author="claude-login", created_at=2)
+    dispatcher.process(
+        ticket(brief, go, ready, head=HEAD, ci={HEAD: CIResult("success")}, factory_config=routed)
+    )
+
+    assert _outcome(queue, "ready-1") == "queued-review"
+    with queue.connect() as connection:
+        reviews = connection.execute(
+            "SELECT recipient FROM jobs WHERE action = 'review'"
+        ).fetchall()
+    assert [row["recipient"] for row in reviews] == ["codex"]
+    restored = dispatcher._routed(ticket(brief, go, factory_config=routed)).factory
+    assert (restored.builder_harness, restored.reviewer_harness) == ("claude", "codex")

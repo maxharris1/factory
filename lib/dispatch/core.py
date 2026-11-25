@@ -409,15 +409,15 @@ class DispatcherBase:
 
     def _routed(self, ticket: TrackedTicket) -> TrackedTicket:
         """The ticket with the builder and reviewer its latest plan, build or
-        fix step was routed to (issue #206), or as read when that step names
-        no routing. A T6 retry is not a step: it repeats an older one. Raises RouteError when the restored pair, with today's
+        fix step was routed to (issue #206). A step that names no routing keeps
+        the harness it was queued for as builder. A T6 retry is not a step: it repeats an older one. Raises RouteError when the restored pair, with today's
         factory.md model hints, fails the cross-family rule."""
         if ticket.factory_md is not None:
             return ticket
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT detail, source_comment_id FROM jobs
+                SELECT detail, recipient, source_comment_id FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ?
                   AND action IN ('plan', 'build', 'fix') AND attempt = 1
                 ORDER BY created_at DESC, id DESC
@@ -427,8 +427,11 @@ class DispatcherBase:
             ).fetchone()
         routing = _detail_routing(None if row is None else row["detail"])
         if routing is None:
+            built_by = None if row is None else str(row["recipient"])
             try:
-                picks = _router_picks(ticket, self.refused_harnesses)
+                picks = _router_picks(
+                    ticket, self.refused_harnesses, builder_only=built_by
+                )
             except RoutingError as error:
                 named = self._routed_by_pending_go(ticket)
                 if named is not None:
