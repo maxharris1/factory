@@ -755,6 +755,7 @@ class SchemaMixin:
                     "ruled_at": "REAL",
                     "ruling_reason": "TEXT",
                     "evidence_dir": "TEXT",
+                    "visual": "INTEGER NOT NULL DEFAULT 0",
                     "cause": "TEXT CHECK (cause IS NULL OR cause IN ('product', 'drift'))",
                 },
             )

@@ -100,6 +100,11 @@ def test_qa_parked_ticket_resumes_via_answers_and_ships(tmp_path: Path) -> None:
     run.post("q3", body)
     run.poll(3)
 
+    assert run.actions.handoffs == []
+    assert run.rows("SELECT workflow_state FROM ticket_state") == [("awaiting-ok",)]
+    run.post("ok-a", f"/ok {HEAD_A}", author="maxharris1")
+    run.poll(3)
+
     assert run.actions.handoffs == [HEAD_A]
     assert run.rows("SELECT workflow_state FROM ticket_state") == [("handed-off",)]
 
