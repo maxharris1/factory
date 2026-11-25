@@ -568,6 +568,7 @@ def test_the_sweep_kills_only_a_finished_jobs_tagged_leftovers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, held: bool
 ) -> None:
     from lib import waiter as waiter_module
+    from lib.remote import new_tag
     from tests.fake_docker import Docker
     from tests.test_waiter import make_queue, set_state, sweeping_waiter
 
@@ -581,7 +582,7 @@ def test_the_sweep_kills_only_a_finished_jobs_tagged_leftovers(
     assert config is not None, findings
     pool = DevicePool(queue, config)
     done, running = enqueue(queue, "done"), enqueue(queue, "running")
-    finished_tag, running_tag = "a" * 32, "b" * 32
+    finished_tag, running_tag = new_tag(), new_tag()
     if held:
         claimed, _ = pool.claim("claude")
         assert claimed.id == done
