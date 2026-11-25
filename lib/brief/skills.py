@@ -68,11 +68,13 @@ REVIEWER_FILES = (
 ADAPTERS = {
     "claude-bot": _pstack("docs/harness/claude-code.md"),
     "codex-bot": _factory("harness/codex.md"),
+    "cursor-bot": _factory("harness/cursor.md"),
     "gemini-bot": _factory("harness/gemini.md"),
 }
 _READ_WITH = {
     "claude-bot": "Read each file with `Read`, not the Skill tool (`{adapter}`, Tools).",
     "codex-bot": "Read each file with the shell (`{adapter}`, Tools).",
+    "cursor-bot": "Read each file with the file-read tool or shell (`{adapter}`, Tools).",
     "gemini-bot": "Read each file with `read_file` or the shell (`{adapter}`, Tools).",
 }
 

@@ -393,7 +393,15 @@ def test_cursor_row_never_holds_the_email(tmp_path: Path, code: int, reply: byte
 
 ORG_B = "4b0c6c5e-0000-4000-8000-00000000b002"
 EMAIL_B = "bot-two@example.com"
-TOKENS = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY")
+TOKENS = (
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "CODEX_API_KEY",
+    "CURSOR_API_KEY",
+    "CURSOR_AUTH_TOKEN",
+)
 
 WORLD_MACHINES = """\
 orch_host: box

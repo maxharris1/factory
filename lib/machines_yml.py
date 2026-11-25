@@ -55,7 +55,9 @@ runs from <home>/.factory-accounts/<id>. Every declared account other
 than an external one must be signed in on some device. An optional
 max_jobs must be a positive integer, and an optional paused true or
 false. The older {bot, account} harness value, which names the device's
-own login account, still loads with a deprecation warning. The device name
+own login account, still loads with a deprecation warning, except for
+cursor: Cursor keeps one login per bot user, so a cursor account is always
+named as each device's cursor login this way. The device name
 `external` is reserved for external readings.
 """
 
@@ -78,6 +80,7 @@ from lib.schema import HARNESSES
 PLACEHOLDER_PREFIX = "REPLACE_WITH_"
 BOT_USERS = MappingProxyType({harness: f"{harness}-bot" for harness in HARNESSES})
 FORBIDDEN_WORKDIR_ROOT = "/mnt"
+DEVICE_LOGIN_ONLY = frozenset({"cursor"})
 BOT_TOKEN = "{bot}"
 DEFAULT_ORCH_HOST = "box"
 
@@ -442,12 +445,13 @@ def _accounts(
                     "an external account is not signed in on a device",
                 )
             )
-        elif signed_in_on and harness == "cursor":
+        elif signed_in_on and harness in DEVICE_LOGIN_ONLY:
             findings.append(
                 Finding(
                     "error",
                     f"{prefix}.signed_in_on is not supported for a cursor account: "
-                    "Cursor has no setting that keeps a second login in its own folder",
+                    "Cursor keeps its login outside any folder the factory can set, "
+                    "so name the account as each device's cursor login",
                 )
             )
         max_jobs = item.get("max_jobs")
@@ -532,7 +536,7 @@ def _check_sign_ins(
                     f"account {account.id!r} is not signed in on any device; "
                     + (
                         "name it as a device's cursor login"
-                        if account.harness == "cursor"
+                        if account.harness in DEVICE_LOGIN_ONLY
                         else "list it in signed_in_on"
                     ),
                 )
@@ -869,7 +873,7 @@ def _device(
             if resolved is None:
                 continue
             harnesses[harness], device_accounts[harness] = resolved
-            if isinstance(user, dict) and "account" in user and harness != "cursor":
+            if isinstance(user, dict) and "account" in user and harness not in DEVICE_LOGIN_ONLY:
                 findings.append(
                     Finding(
                         "warning",

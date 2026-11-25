@@ -132,4 +132,5 @@ def driver_for_command(basename: str, bot_harness: str | None = None) -> Harness
 # Register built-in drivers when the package is imported.
 from lib.harnesses import claude as _claude  # noqa: E402, F401
 from lib.harnesses import codex as _codex  # noqa: E402, F401
+from lib.harnesses import cursor as _cursor  # noqa: E402, F401
 from lib.harnesses import gemini as _gemini  # noqa: E402, F401

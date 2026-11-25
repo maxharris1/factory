@@ -13,11 +13,11 @@ import sqlite3
 from typing import get_args
 
 from lib import account_doctor, device_pool, usage_readings
-from lib.dashboard_usage import safe_text
-from lib.machines_yml import EXTERNAL, Account, MachinesConfig
+from lib.machines_yml import EXTERNAL, Account, Device, MachinesConfig
 from lib.queue import ACTIONS
 from lib.schema import HARNESSES
 
+TEXT_MAX = 100
 _TICKET = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,63}")
 _STATUSES = frozenset(get_args(account_doctor.Status))
 _DOCTORED = frozenset(get_args(account_doctor.Harness))
@@ -38,6 +38,14 @@ def _accounts(machines: MachinesConfig) -> list[Account]:
     return [account for account_id in ids if (account := machines.account(account_id)) is not None]
 
 
+def safe_text(value: object) -> str | None:
+    return value if isinstance(value, str) and 0 < len(value) <= TEXT_MAX and value.isprintable() else None
+
+
+def declared_devices(machines: MachinesConfig, account: Account) -> list[Device]:
+    return [device for device in machines.devices if account.id in machines.accounts_on(device.name, account.harness)]
+
+
 def _sign_ins(connection: sqlite3.Connection) -> dict[tuple[str, str], _SignInRow]:
     try:
         rows = connection.execute(
@@ -47,6 +55,10 @@ def _sign_ins(connection: sqlite3.Connection) -> dict[tuple[str, str], _SignInRo
     except sqlite3.OperationalError:
         return {}
     return {(str(account), str(device)): tuple(rest) for account, device, *rest in rows}
+
+
+def doctor_statuses(connection: sqlite3.Connection) -> dict[tuple[str, str], str]:
+    return {pair: row[0] for pair, row in _sign_ins(connection).items() if row[0] in _STATUSES}
 
 
 def _checked_at(value: object) -> float | None:
@@ -85,9 +97,7 @@ def _signed_in_on(
 ) -> list[dict]:
     entries = []
     methods = account_doctor.AUTH_METHODS.get(account.harness, frozenset())
-    for device in machines.devices:
-        if account.id not in machines.accounts_on(device.name, account.harness):
-            continue
+    for device in declared_devices(machines, account):
         status, method, subscription, checked_at, detail = sign_ins.get(
             (account.id, device.name), (None, None, None, None, None)
         )

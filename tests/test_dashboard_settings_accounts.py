@@ -14,7 +14,7 @@ from lib.account_requests import ADD_REFUSED
 from lib.dashboard import collect_snapshot, render_pages
 from tests import test_dashboard_layout as layout
 from tests import test_dashboard_settings as test_settings
-from tests.test_dashboard_accounts import MACHINES, NOW, SIGN_INS, sign_in, world
+from tests.test_dashboard_accounts import CURSOR_REASON, MACHINES, NOW, SIGN_INS, cursor_snapshot, sign_in, world
 from tests.test_remote_start import config_of
 from tests.test_dashboard_layout import BAR, HARNESS, _no_script, _section, _text, needs_node
 
@@ -129,6 +129,23 @@ def test_used_and_headroom_show_with_the_floor_marked(tmp_path: Path) -> None:
     default, claude_b = _facts(_card(panel, "claude-default")), _facts(_card(panel, "claude-b"))
     assert (default["5h used"], default["7d used"], default["headroom"]) == ("25%", "60%", "40% · floor 5%")
     assert (claude_b["5h used"], claude_b["7d used"], claude_b["headroom"]) == ("—", "—", "— · floor 5%")
+
+
+def test_a_cursor_card_shows_its_plan_each_device_doctor_status_and_why_usage_is_not_tracked(
+    tmp_path: Path,
+) -> None:
+    panel = _panel(cursor_snapshot(tmp_path))
+    card = _card(panel, "cursor-ultra")
+    facts = _facts(card)
+    assert (facts["harness"], facts["plan"], facts["usage"]) == ("cursor", "ultra", f"not tracked: {CURSOR_REASON}")
+    assert not {"5h used", "7d used", "headroom"} & set(facts)
+    assert re.findall(r'<li class="ac-dev" data-device="([^"]+)">', card) == ["box", "mac", "pc"]
+    assert '<span class="chip ok">ok</span>' in _device(card, "box")
+    assert '<span class="chip bad">signed-out</span>' in _device(card, "mac")
+    assert '<span class="chip warn">unreachable</span>' in _device(card, "pc")
+    claude = _facts(_card(panel, "claude-default"))
+    assert claude["5h used"] == "—"
+    assert "plan" not in claude and "usage" not in claude
 
 
 def test_headroom_under_the_floor_reads_below_floor(tmp_path: Path) -> None:

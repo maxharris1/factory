@@ -109,6 +109,10 @@ _FRAME = re.compile(rb"ORCH-ACCOUNT (\d+) (\d+)")
 _SIGNED_OUT = {
     "claude": re.compile(r"OAuth session expired|not logged in|run /login", re.IGNORECASE),
     "codex": re.compile(r"not logged in|401 Unauthorized|Please (?:log out and )?sign in again", re.IGNORECASE),
+    "cursor": re.compile(
+        r"not logged in|not authenticated|run cursor-agent login|401 Unauthorized|invalid api key",
+        re.IGNORECASE,
+    ),
 }
 
 SUBSCRIPTION = re.compile(r"[a-z][a-z0-9_]{0,23}")
@@ -317,7 +321,7 @@ _STATUS: dict[Harness, _Status] = {
     "gemini": _Status("env NO_BROWSER=true NO_COLOR=1 gemini", True, "GEMINI_CLI_HOME",
                       GEMINI_AUTH_OVERRIDES, parse_gemini),
 }
-_TOKEN_VARIABLES = tuple(name for status in _STATUS.values() for name in status.token_variables)
+ACCOUNT_TOKEN_VARIABLES = tuple(name for status in _STATUS.values() for name in status.token_variables)
 
 
 def status_script(harness: Harness, homes: Sequence[str | None], *, drop_profile_login: bool = True) -> str:
@@ -330,7 +334,7 @@ def status_script(harness: Harness, homes: Sequence[str | None], *, drop_profile
     ]
     inner = " ".join([
         f"{_UNTRACE}set +e;",
-        *([f"unset {' '.join(_TOKEN_VARIABLES)} {status.home_variable};"] if drop_profile_login else []),
+        *([f"unset {' '.join(ACCOUNT_TOKEN_VARIABLES)} {status.home_variable};"] if drop_profile_login else []),
         f"printf '\\n%s\\n' {_BEGIN.decode()};",
         *calls,
     ])
