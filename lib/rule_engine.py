@@ -136,6 +136,9 @@ class FirstCapGrant:
 
     def rule(self, facts: Facts) -> Ruling:
         assert isinstance(facts, StopFacts)
+        policy = Check("policy", not (facts.site == "cap" and facts.policy == "convergence"), facts.policy)
+        if not policy.passed:
+            return Ruling(self.name, Escalate("convergence-owns-cap"), (policy,))
         repeated = ["unknown"] if facts.prior_grants is None else sorted(set(facts.finding_ids) & facts.prior_grants)
         checks = (
             Check("stop", facts.stop != "stalled", facts.stop),
@@ -143,7 +146,7 @@ class FirstCapGrant:
             *((Check("repeat-stops", facts.repeat_stops == 1, facts.repeat_stops),) if facts.site == "repeat" else ()),
             Check("stuck", not facts.stuck, int(facts.stuck)),
             Check("earlier-round", not repeated, repeated[0] if repeated else None),
-            Check("policy", not (facts.site == "cap" and facts.policy == "convergence"), facts.policy),
+            policy,
         )
         failed = next((check for check in checks if not check.passed), None)
         if failed is not None:

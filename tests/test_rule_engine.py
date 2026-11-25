@@ -216,10 +216,11 @@ def test_a_prior_grant_on_another_finding_still_grants() -> None:
     assert isinstance(ruling.outcome, Grant)
 
 
-def test_a_cap_under_convergence_escalates_on_policy() -> None:
-    ruling = decide(dataclasses.replace(STOP, policy="convergence"))
-    assert ruling.outcome == Escalate("policy")
-    assert [check for check in ruling.checks if check.passed is False] == [Check("policy", False, "convergence")]
+@pytest.mark.parametrize("change", [{}, {"stop": "stalled"}, {"stuck": True}, {"prior_grants": None}])
+def test_a_cap_under_convergence_escalates_convergence_owns_cap(change: dict) -> None:
+    ruling = decide(dataclasses.replace(STOP, policy="convergence", **change))
+    assert ruling.outcome == Escalate("convergence-owns-cap")
+    assert ruling.checks == (Check("policy", False, "convergence"),)
 
 
 def test_a_cap_under_rounds_grants() -> None:
