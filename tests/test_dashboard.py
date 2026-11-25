@@ -614,7 +614,7 @@ def test_snapshot_shape(tmp_path: Path) -> None:
         "rules",
         "usage",  # subscription headroom per bot account (#151)
         "accounts",
-        "routing",  # the config/routing.yml role matrix (#1611)
+        "routing",
         "ticket_records",
     }
     assert snapshot["feeder"] is None  # no backlog feeder has run on this database
