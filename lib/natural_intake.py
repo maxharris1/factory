@@ -1,8 +1,9 @@
 """Natural D31 clarifying intake workflow (E3-2).
 
-Allows rough, natural-language tickets to enter ``orch:state/intake`` and wake
-the orchestrator via a single deduplicated ``intake-clarify`` item rather than
-failing the strict ``#204`` feeder template.
+Rough, natural-language tickets skip the strict ``#204`` feeder template. The
+feeder opens a GitHub ticket's draft PR labelled ``orch:state/intake`` and wakes
+the orchestrator with one deduplicated ``intake-clarify`` item; the session's
+handoffs are posted on that PR (or the Linear ticket).
 
 D31 question discipline:
 - ``observable`` and ``default-able`` technical questions are recorded with
@@ -24,10 +25,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from lib.factory_md import FactoryConfig
-from lib.handoff import Handoff, format_comment
 from lib.orchestrate import (
-    FROM,
-    ROLE,
     ClassifiedQuestion,
     GoBlocked,
     OrchestrateError,
@@ -70,90 +68,6 @@ class PromotionArtifacts:
     brief_comment: str
     go_comment: str
     decision: RouteDecision
-
-
-def _one_line(value: object, name: str) -> str:
-    if not isinstance(value, str):
-        raise NaturalIntakeError(f"{name} must be a string")
-    cleaned = value.strip()
-    if not cleaned:
-        raise NaturalIntakeError(f"{name} is empty")
-    if "\n" in cleaned or "\r" in cleaned:
-        raise NaturalIntakeError(f"{name} must be one line")
-    return cleaned
-
-
-def _items(heading: str, entries: Sequence[str]) -> str:
-    if not entries:
-        return f"**{heading}**\nNone.\n\n"
-    bullets = "\n".join(f"- {entry}" for entry in entries)
-    return f"**{heading}**\n{bullets}\n\n"
-
-
-def _paragraph(heading: str, text: str) -> str:
-    return f"**{heading}**\n{text}\n\n"
-
-
-def render_structured_brief(
-    *,
-    risk: str,
-    goal: str,
-    acceptance_criteria: Sequence[str],
-    likely_files: Sequence[str],
-    done_evidence: str,
-    out_of_scope: Sequence[str] = (),
-    visible: bool = True,
-) -> str:
-    """Render a validated ``orch:v1 kind=brief`` comment for promoted intake.
-
-    When ``out_of_scope`` is empty, delegates directly to
-    ``lib.orchestrate.brief_comment``. When ``out_of_scope`` is provided,
-    validates every field with the same rules and inserts an ``**Out of scope**``
-    section between ``Likely files`` and ``Risk``.
-    """
-    scope_items = [_one_line(item, "out of scope item") for item in out_of_scope]
-    if not scope_items:
-        return brief_comment(
-            risk=risk,
-            goal=goal,
-            acceptance_criteria=acceptance_criteria,
-            likely_files=likely_files,
-            done_evidence=done_evidence,
-            visible=visible,
-        )
-    # Validate core fields through brief_comment first so rules never drift.
-    brief_comment(
-        risk=risk,
-        goal=goal,
-        acceptance_criteria=acceptance_criteria,
-        likely_files=likely_files,
-        done_evidence=done_evidence,
-        visible=visible,
-    )
-    criteria = [_one_line(item, "acceptance criterion") for item in acceptance_criteria]
-    files = [_one_line(item, "likely file") for item in likely_files]
-    body = "".join(
-        (
-            _paragraph("Goal", goal.strip()),
-            _items("Acceptance criteria", [f"[ ] {item}" for item in criteria]),
-            _items("Likely files", files),
-            _items("Out of scope", scope_items),
-            _paragraph("Risk", risk),
-            _paragraph("Done-evidence", done_evidence.strip()),
-        )
-    )
-    return format_comment(
-        Handoff(
-            fields=(
-                ("kind", "brief"),
-                ("from", FROM),
-                ("role", ROLE),
-                ("risk", risk),
-            ),
-            body=body,
-        ),
-        visible=visible,
-    )
 
 
 class NaturalIntakeSession:
@@ -281,7 +195,7 @@ class NaturalIntakeSession:
             scope_changed=scope_changed,
         )
         decision = choose_route(request)
-        brief = render_structured_brief(
+        brief = brief_comment(
             risk=risk,
             goal=goal,
             acceptance_criteria=acceptance_criteria,

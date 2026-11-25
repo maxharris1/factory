@@ -1582,9 +1582,10 @@ class Feeder:
     ) -> tuple[int, int]:
         """Route rough issues on natural_label / natural_linear_state to D31 intake.
 
-        Rough issues never fail with refused-intake. On GitHub they receive the
-        `orch:state/intake` label (never on Linear), and every eligible rough
-        issue enqueues a single deduplicated `intake-clarify` orchestrator wake.
+        Rough issues never fail with refused-intake. A GitHub issue gets a draft
+        PR labelled `orch:state/intake`, where the orchestrator's questions,
+        brief and go start tracking; a Linear issue gets no GitHub write. Every
+        eligible rough issue enqueues one deduplicated `intake-clarify` wake.
         """
         natural_projects = [
             (project, context)
@@ -1648,28 +1649,32 @@ class Feeder:
                     continue
                 if issue.applied_by not in trusted:
                     continue
-                if (
-                    issue.tracker == "github"
-                    and context.config.tickets == "github"
-                    and issue.key.isdigit()
-                    and INTAKE_STATE_LABEL.lower() not in lower_labels
-                ):
+                dedupe_key = f"intake-clarify:{project.repo.lower()}:{issue.key}"
+                with self.queue.connect() as connection:
+                    if connection.execute(
+                        "SELECT 1 FROM jobs WHERE dedupe_key = ?", (dedupe_key,)
+                    ).fetchone():
+                        continue
+                ticket_id, link = issue.key, issue.url
+                if not project.linear_project_ids:
                     try:
-                        self.github.add_labels(project.repo, int(issue.key), (INTAKE_STATE_LABEL,))
+                        number = self._open_natural_pull(project, context, issue)
                     except Exception as exc:
                         errors += 1
                         self.log(
-                            f"feeder: cannot label natural intake {project.repo}#{issue.key}: "
+                            f"feeder: cannot open natural intake PR for {project.repo}#{issue.key}: "
                             f"{safe_ship_error(exc)}"
                         )
                         continue
+                    ticket_id = str(number)
+                    link = f"https://github.com/{project.repo}/pull/{number}"
                 payload: dict[str, object] = {
                     "project_bot": project.grok_bot,
                     "detail": (
                         f"{_ticket_name(issue)} entered natural intake ({signal_name}): "
                         "run D31 clarifying questions before posting brief and go."
                     ),
-                    "link": issue.url,
+                    "link": link,
                     "ticket_url": issue.url,
                     "tracker": issue.tracker,
                     "signal": signal_name,
@@ -1679,14 +1684,13 @@ class Feeder:
                     payload["title"] = " ".join(issue.title.split())[:180]
                 request = JobRequest(
                     repo=project.repo,
-                    ticket_id=issue.key,
+                    ticket_id=ticket_id,
                     action="intake-clarify",
                     recipient="grok",
                     source_comment_id=f"feeder-natural-intake:{issue.key}",
                     timeout_seconds=resolve_job_timeout(self.config, project.repo) * 60,
                     detail=json.dumps(payload, sort_keys=True),
                 )
-                dedupe_key = f"intake-clarify:{project.repo.lower()}:{issue.key}"
                 with self.queue.connect() as connection:
                     before = connection.total_changes
                     self.queue.enqueue_in_transaction(connection, request, dedupe_key=dedupe_key)
@@ -1698,6 +1702,28 @@ class Feeder:
                         f"({signal_name})"
                     )
         return queued, errors
+
+    def _open_natural_pull(self, project: Project, context: FactoryContext, issue: IntakeIssue) -> int:
+        """The rough issue's draft PR, opened once on its feeder branch and
+        labelled so the orchestrator's first handoff on it starts tracking."""
+        repo = project.repo
+        branch = self._branch_for(issue)
+        number = self.github.find_pull(repo, branch)
+        if number is None:
+            base = project.base_for(None) or context.config.base_branch
+            if self.github.branch_sha(repo, branch) is None:
+                base_sha = self.github.branch_sha(repo, base)
+                if base_sha is None:
+                    raise ValueError(f"base branch {base} does not exist on {repo}")
+                start = self.github.create_start_commit(
+                    repo, base_sha, f"Start {_ticket_name(issue)}: {issue.title}"[:200]
+                )
+                self.github.create_branch(repo, branch, start)
+            number = self.github.open_draft_pull(
+                repo, branch=branch, base=base, title=_pull_title(issue), body=_pull_body(issue)
+            )
+        self.github.add_labels(repo, number, (FACTORY_LABEL, INTAKE_STATE_LABEL))
+        return number
 
     # -- intake template (#204) ------------------------------------------------------
 

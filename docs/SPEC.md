@@ -1096,10 +1096,13 @@ must name `linear_state` and may not name a label. An optional
 `natural_label` (GitHub projects, convention `factory:idea`, must differ from
 `label`) or `natural_linear_state` (Linear projects, e.g. `Backlog` or `Triage`,
 must differ from `linear_state`) enables natural D31 clarifying intake (E3-2):
-rough issues carrying that signal from a trusted login/user enter
-`orch:state/intake` on GitHub (never applying GitHub labels on Linear) and
-enqueue one deduplicated `intake-clarify` orchestrator wake instead of failing
-with `refused-intake`, while `label` / `linear_state` keeps enforcing the strict
+a rough issue carrying that signal from a trusted login/user is never refused
+under `refused-intake`. On GitHub the feeder opens its draft PR on
+`factory/issue-<n>` labelled `orch:state/intake` (on Linear it writes no
+GitHub label), and enqueues one deduplicated `intake-clarify` orchestrator wake
+naming that PR or Linear ticket. A trusted orchestrator `questions` handoff
+starts tracking a labelled PR, like a brief or go, so a D31 product question
+holds it at `waiting-max` before any brief exists, while `label` / `linear_state` keeps enforcing the strict
 `#204` fast-path (an issue carrying both labels goes straight to strict intake).
 `lib/natural_intake.py` (`NaturalIntakeSession`) enforces D31 discipline:
 `observable` and `default-able` questions record decisions without pausing, only
@@ -1281,8 +1284,8 @@ factory repo itself). Such a PR needs no `orch:state/` label to be
 discovered: an open PR with a parseable `kind=ready` comment is a candidate,
 the trust and head rules above decide, and the poller writes the label once
 it tracks the PR (issue #59). Only that trusted `ready` admits an unlabelled
-PR: a Grok `brief` or `go` on it starts nothing until the PR is labelled. With the flag off, only a trusted Grok `brief`
-or `go` on a labelled PR starts tracking.
+PR: a Grok `brief`, `go` or `questions` on it starts nothing until the PR is labelled. With the flag off, only a trusted Grok `brief`,
+`go` or `questions` on a labelled PR starts tracking.
 
 `driver_inbox` (optional, issue #737) names one GitHub issue as
 `owner/name#<n>`. Its repo must be a configured project. With it set, each

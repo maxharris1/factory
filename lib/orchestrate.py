@@ -508,6 +508,7 @@ def brief_comment(
     acceptance_criteria: Sequence[str],
     likely_files: Sequence[str],
     done_evidence: str,
+    out_of_scope: Sequence[str] = (),
     visible: bool = False,
 ) -> str:
     if risk not in ("low", "high"):
@@ -520,11 +521,13 @@ def brief_comment(
     if not criteria:
         raise OrchestrateError("acceptance criteria are empty")
     files = [_one_line(item, "likely file") for item in likely_files]
+    scope = [_one_line(item, "out of scope item") for item in out_of_scope]
     body = "".join(
         (
             _paragraph("Goal", goal.strip()),
             _items("Acceptance criteria", [f"[ ] {item}" for item in criteria]),
             _items("Likely files", files),
+            _items("Out of scope", scope) if scope else "",
             _paragraph("Risk", risk),
             _paragraph("Done-evidence", done_evidence.strip()),
         )

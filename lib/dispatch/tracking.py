@@ -283,16 +283,18 @@ class TrackingMixin:
         comment: Comment,
         fields: Mapping[str, str],
     ) -> bool:
-        """A trusted Grok brief/go, or (ready_starts_review) the builder's ready.
+        """A trusted Grok brief, go or questions, or (ready_starts_review) the
+        builder's ready. Questions count so natural intake's D31 pause on a
+        PR with no brief yet is tracked and held at waiting-max.
 
         The ready path applies T2's own trust rule (factory.md's builder,
         role=builder, a trusted_logins author) and needs the ready head to
         name the PR head, so T2 can then queue the review in the same cycle.
         An unlabelled PR admitted through the issue #59 ready exception
-        starts tracking only that way: its Grok brief or go still needs the
+        starts tracking only that way: its Grok handoff still needs the
         orch:state/ label.
         """
-        if fields["kind"] in ("brief", "go"):
+        if fields["kind"] in ("brief", "go", "questions"):
             if ticket.admitted_by_ready:
                 return False
             return self._trusted(

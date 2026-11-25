@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from lib.dispatcher import Comment, Dispatcher
+from lib.evidence.criteria import numbered
 from lib.factory_md import load_factory_md, parse_factory_context
 from lib.feeder import FEEDER_TABLE, Feeder, IntakeIssue
 from lib.handoff import parse_comment
@@ -17,7 +18,6 @@ from lib.natural_intake import (
     INTAKE_STATE_LABEL,
     NATURAL_INTAKE_ACTION,
     NaturalIntakeSession,
-    render_structured_brief,
 )
 from lib.orch_yml import (
     DEFAULT_NATURAL_INTAKE_LABEL,
@@ -41,6 +41,7 @@ from tests.test_hooks import (
     TRUSTED_LOGINS,
     FakeGrokDelivery,
     FakeReviewActions,
+    FakeSource,
     T7Hook,
     T8Hook,
     ticket,
@@ -287,9 +288,8 @@ def test_rough_github_issue_enters_intake_and_deduplicates_wakes(tmp_path: Path)
     assert first.refused == 0
     assert first.fed == ()
     assert first.errors == 0
-    # Applied orch:state/intake on the issue; opened no draft PR.
-    assert gh.labels[("owner/app", 42)] == [INTAKE_STATE_LABEL]
-    assert gh.pulls == {}
+    [(_repo, number)] = gh.pulls
+    assert gh.labels[("owner/app", number)] == ["factory", INTAKE_STATE_LABEL]
     # No refused-intake row or intake-refused needs_attention.
     with queue.connect() as conn:
         assert conn.execute(f"SELECT COUNT(*) FROM {FEEDER_TABLE}").fetchone()[0] == 0
@@ -299,20 +299,20 @@ def test_rough_github_issue_enters_intake_and_deduplicates_wakes(tmp_path: Path)
     job = jobs[0]
     assert job["action"] == NATURAL_INTAKE_ACTION
     assert job["recipient"] == "grok"
-    assert job["ticket_id"] == "42"
+    assert job["ticket_id"] == str(number)
     detail = json.loads(job["detail"])
     assert detail["natural_intake"] is True
     assert detail["signal"] == "factory:idea"
-    assert detail["link"] == "https://github.com/owner/app/issues/42"
+    assert detail["link"] == f"https://github.com/owner/app/pull/{number}"
+    assert detail["ticket_url"] == "https://github.com/owner/app/issues/42"
     assert detail["title"] == issue.title
 
-    # Second poll: issue already carries orch:state/intake -> no re-label, no duplicate wake.
-    gh.issues["owner/app"] = [replace(issue, labels=("factory:idea", INTAKE_STATE_LABEL))]
     gh.calls.clear()
     second = feeder.feed_once()
     assert second.natural_queued == 0
     assert second.errors == 0
-    assert not any(call.startswith("labels:") for call in gh.calls)
+    assert len(gh.pulls) == 1
+    assert not any(call.startswith(("commit:", "branch:", "pull:")) for call in gh.calls)
     with queue.connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
 
@@ -339,7 +339,6 @@ def test_natural_intake_ignores_untrusted_and_started_and_retries_label_failure(
         head=lambda: "h" * 40,
     )
 
-    # Simulate transient GitHub failure on add_labels: nothing enqueued yet, error counted.
     gh.fail["labels"] = 1
     first = feeder.feed_once()
     assert first.natural_queued == 0
@@ -347,15 +346,13 @@ def test_natural_intake_ignores_untrusted_and_started_and_retries_label_failure(
     with queue.connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
 
-    # Next poll succeeds for #12 only (untrusted #10 and missing applied_by #11 skipped).
     second = feeder.feed_once()
     assert second.natural_queued == 1
     assert second.errors == 0
-    assert ("owner/app", 10) not in gh.labels
-    assert ("owner/app", 11) not in gh.labels
-    assert gh.labels[("owner/app", 12)] == [INTAKE_STATE_LABEL]
+    assert [pull["head"] for pull in gh.pulls.values()] == ["factory/issue-12"]
+    [(_repo, number)] = gh.pulls
+    assert gh.labels[("owner/app", number)] == ["factory", INTAKE_STATE_LABEL]
 
-    # Ticket already past questions in ticket_state is never re-queued.
     gh.issues["owner/app"].append(_rough_github_issue("13", applied_by="maxharris1"))
     with queue.connect() as conn:
         conn.execute(
@@ -367,7 +364,7 @@ def test_natural_intake_ignores_untrusted_and_started_and_retries_label_failure(
         )
     third = feeder.feed_once()
     assert third.natural_queued == 0
-    assert ("owner/app", 13) not in gh.labels
+    assert len(gh.pulls) == 1
 
 
 def test_linear_natural_intake_applies_no_github_labels_and_respects_assignees(
@@ -460,7 +457,8 @@ def test_factory_ready_keeps_strict_204_validation_and_takes_precedence(tmp_path
     assert len(report.fed) == 1
     assert report.refused == 1
     assert report.natural_queued == 1
-    assert ("owner/app", 3) in gh.labels and gh.labels[("owner/app", 3)] == [INTAKE_STATE_LABEL]
+    natural = next(n for (_r, n), pull in gh.pulls.items() if pull["head"] == "factory/issue-3")
+    assert gh.labels[("owner/app", natural)] == ["factory", INTAKE_STATE_LABEL]
     with queue.connect() as conn:
         actions = {
             (row["ticket_id"], row["action"])
@@ -471,15 +469,13 @@ def test_factory_ready_keeps_strict_204_validation_and_takes_precedence(tmp_path
             for row in conn.execute(f"SELECT issue, state FROM {FEEDER_TABLE}").fetchall()
         }
     assert ("2", "refused") in actions
-    assert ("2", NATURAL_INTAKE_ACTION) not in actions
-    assert ("3", NATURAL_INTAKE_ACTION) in actions
-    assert ("3", "refused") not in actions
+    assert {ticket for ticket, action in actions if action == NATURAL_INTAKE_ACTION} == {str(natural)}
     assert states["1"] == "fed"
     assert states["2"] == "refused-intake"
     assert "3" not in states
 
 
-def test_natural_intake_wake_delivers_to_driver_inbox_without_fake_pr_link(tmp_path: Path) -> None:
+def test_natural_intake_wake_delivers_to_driver_inbox_with_its_pull(tmp_path: Path) -> None:
     cfg = orch_config(
         tmp_path,
         GITHUB_NATURAL_ORCH
@@ -517,9 +513,10 @@ def test_natural_intake_wake_delivers_to_driver_inbox_without_fake_pr_link(tmp_p
     repo, number, body = inbox_issue.posts[0]
     assert (repo, number) == ("owner/app", 7)
     lines = body.splitlines()
-    assert lines[0] == "**Wake: intake-clarify** on owner/app 42"
-    assert lines[1] == "PR: unknown"
-    assert lines[2] == "Cause: https://github.com/owner/app/issues/42"
+    [(_repo, number)] = gh.pulls
+    assert lines[0] == f"**Wake: intake-clarify** on owner/app {number}"
+    assert lines[1] == f"PR: https://github.com/owner/app/pull/{number}"
+    assert lines[2] == f"Cause: https://github.com/owner/app/pull/{number}"
     assert "natural intake (factory:idea)" in body
 
 
@@ -765,16 +762,96 @@ def test_dispatcher_full_waiting_max_pause_resume_and_go_launch(tmp_path: Path) 
     assert claimed.request.action == "build"
 
 
-def test_render_structured_brief_delegates_without_out_of_scope() -> None:
-    comment = render_structured_brief(
+@pytest.mark.parametrize("out_of_scope", [(), ("UI redesign",)])
+def test_promoted_brief_keeps_acceptance_criteria_after_an_html_goal(
+    out_of_scope: tuple[str, ...],
+) -> None:
+    session = NaturalIntakeSession(_factory_config())
+    session.classify_and_post("Strip script tags from rendered notes.", [])
+    artifacts = session.promote(
+        goal="<script> tags must be removed.",
+        acceptance_criteria=["Scripts are removed.", "Safe HTML remains."],
+        likely_files=["lib/a.py"],
+        out_of_scope=out_of_scope,
         risk="low",
-        goal="Simple cleanup",
-        acceptance_criteria=["Remove unused helper"],
-        likely_files=["lib/clean.py"],
-        done_evidence="pytest tests/test_clean.py",
+        done_evidence="Tests pass.",
         visible=False,
     )
-    parsed = parse_comment(comment)
-    assert parsed.as_dict()["kind"] == "brief"
-    assert "**Out of scope**" not in parsed.body
-    assert "**Done-evidence**" in parsed.body
+    body = parse_comment(artifacts.brief_comment).body
+    assert [c.text for c in numbered(body)] == ["Scripts are removed.", "Safe HTML remains."]
+    assert ("- UI redesign" in body) == bool(out_of_scope)
+
+
+def test_rough_github_issue_opens_a_tracked_pull_that_pauses_then_launches(
+    tmp_path: Path,
+) -> None:
+    cfg = orch_config(tmp_path, GITHUB_NATURAL_ORCH)
+    gh = LabelAwareFakeGitHub()
+    gh.issues["owner/app"] = [_rough_github_issue("31")]
+    db = tmp_path / "orch.db"
+    queue = SQLiteJobQueue(db, clock=lambda: 1000.0)
+    context = _parse_context(FACTORY_MD)
+    feeder = Feeder(
+        queue,
+        cfg,
+        machines(tmp_path),
+        github=gh,
+        linear=None,
+        factory_for=lambda _p: context,
+        head=lambda: "h" * 40,
+    )
+    assert feeder.feed_once().natural_queued == 1
+    [(repo, number)] = gh.pulls
+    assert repo == "owner/app"
+    assert gh.pulls[(repo, number)]["head"] == "factory/issue-31"
+    assert gh.pulls[(repo, number)]["draft"] is True
+    assert INTAKE_STATE_LABEL in gh.labels[(repo, number)]
+    with queue.connect() as conn:
+        [job] = conn.execute("SELECT ticket_id, detail FROM jobs").fetchall()
+    assert job["ticket_id"] == str(number)
+    pull_url = f"https://github.com/owner/app/pull/{number}"
+    assert json.loads(job["detail"])["link"] == pull_url
+    assert json.loads(job["detail"])["ticket_url"] == "https://github.com/owner/app/issues/31"
+
+    dispatcher = Dispatcher(
+        db,
+        queue,
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+        hooks=(T7Hook(), T8Hook(None)),
+    )
+    comments: list[Comment] = []
+
+    def post(body: str) -> str | None:
+        comments.append(
+            Comment(str(300 + len(comments)), "grok-login", body, 1000.0 + len(comments),
+                    url=f"{pull_url}#c{len(comments)}")
+        )
+        pull = replace(ticket(*comments, ticket_id=str(number)), repo="owner/app")
+        dispatcher.poll_once(FakeSource(pull))
+        with queue.connect() as conn:
+            row = conn.execute(
+                "SELECT workflow_state FROM ticket_state WHERE ticket_id = ?", (str(number),)
+            ).fetchone()
+        return None if row is None else row[0]
+
+    session = NaturalIntakeSession(_factory_config())
+    asked = session.classify_and_post(
+        "Improve onboarding.", [ClassifiedQuestion("Allow guests?", "product")]
+    )
+    assert post(asked.comment) == "waiting-max"
+    answered = session.answer_all_product_questions([("Allow guests?", "No.")])
+    assert post(answered.comment) == "questions"
+    artifacts = session.promote(
+        goal="Improve onboarding",
+        acceptance_criteria=["Owners can onboard"],
+        likely_files=["app.py"],
+        risk="low",
+        done_evidence="pytest passes",
+    )
+    post(artifacts.brief_comment)
+    post(artifacts.go_comment)
+    claimed = queue.claim("claude")
+    assert claimed is not None
+    assert (claimed.request.action, claimed.request.ticket_id) == ("build", str(number))
