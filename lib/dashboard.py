@@ -239,6 +239,7 @@ from lib.qa_cloud import qa_id
 from lib.queue import (
     ACTIONS, LOCAL_GATE_PASSED, RECIPIENTS, STATES, PriorityMark, passed_head, priority_marks,
 )
+from lib.role_router import role_matrix
 from lib.schema import TICKETS
 from lib import max_actions
 from lib.status import PAUSED_STATES, _hold_approvers
@@ -984,6 +985,7 @@ def collect_snapshot(
         "rules": rules_and_limits(chart),
         "usage": usage,
         "accounts": accounts,
+        "routing": role_matrix(),
         RECORDS: records,
     }
     snapshot["ci_lane"] = ci_lane(snapshot)

@@ -295,6 +295,38 @@ def _slot_lookup(
     return None
 
 
+def role_matrix(path: Path = ROOT / ROUTING_PATH) -> dict:
+    """Every role's preference pool under the active budget tier, looked up as `resolve_slot` does."""
+    if not path.is_file():
+        return {"state": "missing", "roles": []}
+    config, findings = parse_routing_yml(path.read_text(encoding="utf-8"))
+    if config is None:
+        errors = [f.message for f in findings if f.severity == "error"]
+        return {"state": "invalid", "errors": errors, "roles": []}
+    budget = config.budget
+    tier = config.budget_overrides.get(budget, {})
+    rows = []
+    for role in ROLE_SLOTS:
+        entry, source, clamp = _slot_lookup(tier, role), "budget_overrides", False
+        if entry is None:
+            entry, source, clamp = _slot_lookup(config.roles, role), "roles", True
+        if entry is None or entry == "inherit":
+            rows.append({"role": role, "source": "unset" if entry is None else "inherit", "candidates": []})
+            continue
+        rows.append({"role": role, "source": source, "candidates": [
+            {
+                "rank": rank,
+                "harness": cand.harness,
+                "model": cand.model,
+                "family": family_for(cand.harness, cand.model)[0],
+                "effort": _clamp_effort(cand.effort, budget) if clamp else cand.effort,
+                "configured": cand.effort,
+            }
+            for rank, cand in enumerate(entry, 1)
+        ]})
+    return {"state": "ok", "budget": budget, "ceiling": EFFORT_CEILING_BY_BUDGET[budget], "roles": rows}
+
+
 def _factory_override_entry(factory: FactoryConfig | None, role: str) -> SlotEntry | None:
     if factory is None or factory.routing is None:
         return None
