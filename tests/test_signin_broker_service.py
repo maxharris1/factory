@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -66,7 +67,7 @@ def home(tmp_path: Path):
 
 
 def _service(home: Path, *args: str, **extra: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
+    result = subprocess.run(
         ["bash", str(SERVICE), *args],
         env=sandbox_env(home, **{
             "PATH": "/usr/bin:/bin",
@@ -79,6 +80,10 @@ def _service(home: Path, *args: str, **extra: str) -> subprocess.CompletedProces
         timeout=60,
         check=False,
     )
+    started = re.search(r"started sign-in broker \(pid (\d+)\)", result.stdout)
+    if started:
+        _wait_for(lambda: int(started[1]) in _pids(home))
+    return result
 
 
 def _starts(home: Path) -> list[tuple[int, list[str]]]:
