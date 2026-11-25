@@ -158,7 +158,7 @@ def test_driver_claude_reads_the_claude_block(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("extra", "message"),
     [
-        ("driver: codex\n" + CLAUDE_BLOCK, "driver must be grok or claude"),
+        ("driver: codex\n" + CLAUDE_BLOCK, "driver must be grok, claude or pull"),
         ("driver: claude\n", "driver: claude requires a claude block"),
         (
             "claude:\n  fire_url_env: FACTORY_CLAUDE_FIRE_URL\n",

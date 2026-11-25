@@ -1298,6 +1298,19 @@ the routine limits of 30 fires per hour per task and 100 per hour per account.
 `grok_webhook: false` with `driver_inbox` keeps its meaning under either
 driver. Heal and deploy escalations still use the `grok:` webhook.
 
+Setting `driver: pull` (E3-1) decouples orchestration from external webhooks
+altogether: the poller writes each wake directly into `driver_inbox`
+(deduplicated by `logical_key`, with `pull_state = 'queued'`) and requires
+neither a `grok:` nor `claude:` block. Any AI orchestrator (Claude, Codex,
+Gemini, Grok, or Cursor) blocks at zero idle token cost with
+`orch wait orchestrator`, acknowledges and extends its lease with
+`orch orchestrator ack` / `heartbeat`, and finishes with
+`orch orchestrator finish` (recording token usage and USD spend in
+`job_telemetry` under `bot = 'orchestrator'`). Expired leases are reclaimed
+automatically back to `'queued'`. The vendor-neutral skill lives at
+`skills/factory/orchestrator/SKILL.md` (pinned in `skills/skills.lock`), and
+`deploy/orch-orchestrator.service` ships the systemd user-unit template.
+
 ### Project devices
 
 `projects[].devices` (optional, issue #1171) lists the machines.yml device

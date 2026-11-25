@@ -616,6 +616,18 @@ accounts signin-broker [--state DIR] [--db PATH] [--machines PATH] [--orch PATH]
   $ORCH_DB or orch.db in the state dir. Exits 1 on an invalid orch.yml, a
   relay host ssh -G names no user for, or a --once pass that cannot read
   the spool; a serving broker logs spool errors and retries.
+
+wait orchestrator [--db PATH] [--claimer ID] [--lease-seconds N] [--poll-seconds N] [--once]
+  Block at zero token cost until a pull wake is available in driver_inbox,
+  atomically claim it with a lease token, print one JSON object and exit 0.
+  With --once, exits 0 without output when no wake is queued.
+
+orchestrator (ack | heartbeat | finish) <job-id> --token TOKEN [--db PATH] ...
+  Acknowledge, renew the lease on, release (--release), or finish a claimed
+  pull orchestrator wake. finish accepts optional telemetry flags (--harness,
+  --repo, --tokens-in, --tokens-cached, --tokens-out, --cost-usd,
+  --elapsed-seconds, --turns, --exit-code) to record orchestrator spend in
+  job_telemetry (bot='orchestrator').
 """
 
 
@@ -687,6 +699,8 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_usage, argv[1:])
     if argv[0] == "accounts":
         return _call(_accounts, argv[1:])
+    if argv[0] == "orchestrator":
+        return _call(_orchestrator, argv[1:])
     print(f"unknown command: {argv[0]}", file=sys.stderr)
     print(USAGE, end="", file=sys.stderr)
     return 2
@@ -863,6 +877,8 @@ def _log_message(argv: list[str]) -> int:
 
 
 def _wait(argv: list[str]) -> int:
+    if argv and argv[0] == "orchestrator":
+        return _wait_orchestrator(argv[1:])
     parser = _Parser(prog="orch wait", add_help=True)
     parser.add_argument("bot")
     parser.add_argument("--db", type=Path)
@@ -934,6 +950,139 @@ def _wait(argv: list[str]) -> int:
         return 1
     except KeyboardInterrupt:
         return 130
+    return 0
+
+
+def _wait_orchestrator(argv: list[str]) -> int:
+    from lib import orchestrator_pull
+
+    parser = _Parser(prog="orch wait orchestrator", add_help=True)
+    parser.add_argument("--db", type=Path)
+    parser.add_argument("--claimer", type=str)
+    parser.add_argument(
+        "--lease-seconds", type=float, default=orchestrator_pull.DEFAULT_LEASE_SECONDS
+    )
+    parser.add_argument("--poll-seconds", type=float, default=1.0)
+    parser.add_argument("--once", action="store_true")
+    args = parser.parse_args(argv)
+    if args.poll_seconds <= 0:
+        print("orch wait orchestrator: --poll-seconds must be positive", file=sys.stderr)
+        return 2
+    if (retired := _retired()) is not None:
+        print(
+            f"orch wait orchestrator: this host is retired as the orch host ({retired}); not waiting",
+            file=sys.stderr,
+        )
+        return 79
+    database = _db_path(args.db)
+    signal.signal(signal.SIGTERM, _exit_on_term)
+    try:
+        orchestrator_pull.wait_for_wake(
+            database,
+            sys.stdout,
+            claimer=args.claimer,
+            lease_seconds=args.lease_seconds,
+            poll_seconds=args.poll_seconds,
+            once=args.once,
+            keep_ignored=True,
+        )
+    except ValueError as exc:
+        print(f"orch wait orchestrator: {exc}", file=sys.stderr)
+        return 2
+    except WaitError as exc:
+        _quiet_stdout()
+        print(f"orch wait orchestrator: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+    return 0
+
+
+def _orchestrator(argv: list[str]) -> int:
+    from lib import orchestrator_pull
+
+    if not argv or argv[0] in ("-h", "--help"):
+        print(
+            "usage: orch orchestrator (ack | heartbeat | finish) <job-id> --token TOKEN [--db PATH] ...",
+            file=sys.stderr if not argv else sys.stdout,
+        )
+        return 0 if argv else 2
+    sub, rest = argv[0], argv[1:]
+    if sub not in ("ack", "heartbeat", "finish"):
+        print(f"orch orchestrator: unknown subcommand {sub!r}", file=sys.stderr)
+        return 2
+    parser = _Parser(prog=f"orch orchestrator {sub}", add_help=True)
+    parser.add_argument("job_id")
+    parser.add_argument("--token", required=True)
+    parser.add_argument("--db", type=Path)
+    if sub in ("ack", "heartbeat"):
+        parser.add_argument(
+            "--lease-seconds", type=float, default=orchestrator_pull.DEFAULT_LEASE_SECONDS
+        )
+    else:
+        parser.add_argument("--result", type=str)
+        parser.add_argument("--release", action="store_true")
+        parser.add_argument("--harness", type=str)
+        parser.add_argument("--repo", type=str, default="")
+        parser.add_argument("--tokens-in", type=int)
+        parser.add_argument("--tokens-cached", type=int, default=0)
+        parser.add_argument("--tokens-out", type=int)
+        parser.add_argument("--cost-usd", type=float)
+        parser.add_argument("--elapsed-seconds", type=float, default=0.0)
+        parser.add_argument("--turns", type=int, default=1)
+        parser.add_argument("--exit-code", type=int, default=0)
+        parser.add_argument("--exit-reason", type=str, default="done")
+    args = parser.parse_args(rest)
+    database = _db_path(args.db)
+    try:
+        if sub == "ack":
+            ok = orchestrator_pull.ack_wake(
+                database, args.job_id, lease_token=args.token, lease_seconds=args.lease_seconds
+            )
+        elif sub == "heartbeat":
+            ok = orchestrator_pull.heartbeat_wake(
+                database, args.job_id, lease_token=args.token, lease_seconds=args.lease_seconds
+            )
+        else:
+            usage = None
+            if (
+                args.harness is not None
+                or args.tokens_in is not None
+                or args.tokens_out is not None
+                or args.cost_usd is not None
+            ):
+                usage = orchestrator_pull.OrchestratorUsage(
+                    harness=args.harness or "orchestrator",
+                    repo=args.repo,
+                    tokens_in=args.tokens_in,
+                    tokens_cached=args.tokens_cached,
+                    tokens_out=args.tokens_out,
+                    cost_usd=args.cost_usd,
+                    elapsed_seconds=args.elapsed_seconds,
+                    turns=args.turns,
+                    exit_code=args.exit_code,
+                    exit_reason=args.exit_reason,
+                )
+            ok = orchestrator_pull.finish_wake(
+                database,
+                args.job_id,
+                lease_token=args.token,
+                result=args.result,
+                release=args.release,
+                usage=usage,
+            )
+    except ValueError as exc:
+        print(f"orch orchestrator {sub}: {exc}", file=sys.stderr)
+        return 2
+    except WaitError as exc:
+        print(f"orch orchestrator {sub}: {exc}", file=sys.stderr)
+        return 1
+    if not ok:
+        print(
+            f"orch orchestrator {sub}: lease not active or token mismatch for {args.job_id}",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
