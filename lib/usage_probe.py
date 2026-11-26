@@ -56,7 +56,7 @@ from pathlib import Path
 
 from lib import codex_rollout, telemetry
 from lib.harness_env import ACCOUNT_ISOLATION
-from lib.harnesses.gemini import AUTH_OVERRIDES
+from lib.harnesses.gemini import UNSET as GEMINI_UNSET
 from lib.job_token import PROOF_ENV
 from lib.machines_yml import MachinesConfig
 from lib.remote import LOGIN_SHELL, TAG_ENV, ByteTransport, RemoteTarget, Transport, ssh_argv
@@ -80,7 +80,6 @@ REQUEST = (
     + b"\n"
 )
 GEMINI_ARGS = ("-p", "/usage", "--output-format", "json")
-GEMINI_UNSET = (*AUTH_OVERRIDES, "GEMINI_CLI_HOME")
 TIMEOUT_SECONDS = 30.0
 LOGIN_NAME = "orch-usage"
 

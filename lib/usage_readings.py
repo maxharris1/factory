@@ -499,9 +499,9 @@ def parse_agy_usage(payload: object, now: float) -> list[Reading]:
     `payload` is the reply's stdout (bytes, the JSON document after any
     warning lines) or the parsed document. Only the `Gemini Models` group
     is read; each bucket maps to a window by `window`, else by `id`. A
-    remaining fraction outside 0-1 leaves `used` None, and a reset time
-    that is not an ISO time within RESET_HORIZON_SECONDS of now is dropped.
-    A window the group leaves out is a no-reading. A reply that is not a
+    remaining fraction outside 0-1 leaves `used` None. A bucket whose reset
+    time is not an ISO time within RESET_HORIZON_SECONDS of now, and a
+    window the group leaves out, is a no-reading. A reply that is not a
     successful `usage` command, or has no `Gemini Models` group, is no
     observation at all."""
     reply = _agy_reply(payload)
@@ -524,16 +524,14 @@ def parse_agy_usage(payload: object, now: float) -> list[Reading]:
         )
         if window is None or window in readings:
             continue
-        remaining = used_fraction(bucket.get("remaining_fraction"))
         resets = iso_time(bucket.get("reset_time"))
-        readings[window] = Reading(
-            window,
-            None if remaining is None else round(1.0 - remaining, 6),
-            None if resets is None else reset_time(int(resets), now),
-            now,
-            0,
-            now,
-        )
+        resets_at = None if resets is None else reset_time(int(resets), now)
+        if resets_at is None:
+            readings[window] = missing(window, now, 0, now)
+            continue
+        remaining = used_fraction(bucket.get("remaining_fraction"))
+        used = None if remaining is None else round(1.0 - remaining, 6)
+        readings[window] = Reading(window, used, resets_at, now, 0, now)
     return [readings.get(window) or missing(window, now, 0, now) for window in WINDOWS]
 
 

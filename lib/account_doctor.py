@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Literal
 
 from lib import attention, lane_limit
 from lib.harness_env import account_tokens, harness_env
-from lib.harnesses.gemini import AUTH_OVERRIDES as GEMINI_AUTH_OVERRIDES
+from lib.harnesses.gemini import AUTH_OVERRIDES as GEMINI_AUTH_OVERRIDES, UNSET as _GEMINI_UNSET
 from lib.machines_yml import Device, MachinesConfig
 from lib.remote import (
     _UNTRACE,
@@ -134,7 +134,6 @@ _CURSOR_STATES: dict[str, tuple[bool, str]] = {
 }
 GEMINI_SIGNED_OUT = "Please sign in to view available models"
 _GEMINI_MODEL_ROW = re.compile(r"(?P<model>[a-z0-9]+(?:\.[a-z0-9]+)*(?:-[a-z0-9]+(?:\.[a-z0-9]+)*)+)\s+(?P<name>\S.*)")
-_GEMINI_UNSET = (*GEMINI_AUTH_OVERRIDES, "GEMINI_CLI_HOME")
 
 
 @dataclass(frozen=True)
