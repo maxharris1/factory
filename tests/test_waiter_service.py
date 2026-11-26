@@ -72,7 +72,7 @@ def _make_home(home: Path) -> Path:
 
 def _cleanup(home: Path) -> None:
     try:
-        for bot in ("claude-bot", "codex-bot"):
+        for bot in ("claude-bot", "codex-bot", "gemini-bot"):
             _service(home, bot, "stop")
     finally:
         for pid in _all_starts(home):
@@ -123,7 +123,7 @@ def _starts(home: Path, bot: str = "claude-bot") -> list[int]:
 
 
 def _all_starts(home: Path) -> list[int]:
-    return [pid for bot in ("claude-bot", "codex-bot") for pid in _starts(home, bot)]
+    return [pid for bot in ("claude-bot", "codex-bot", "gemini-bot") for pid in _starts(home, bot)]
 
 
 def _wait_for(predicate, seconds: float = 15.0):
