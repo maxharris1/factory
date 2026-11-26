@@ -115,7 +115,8 @@ _SIGNED_OUT = {
         re.IGNORECASE,
     ),
     "gemini": re.compile(
-        r"Please sign in|not signed in|Launch the CLI without arguments to sign in", re.IGNORECASE
+        r"Please sign in|not signed in|Launch the CLI without arguments to sign in|authentication required",
+        re.IGNORECASE,
     ),
 }
 

@@ -22,6 +22,13 @@ def test_builtin_claude_and_codex_drivers_are_registered_and_satisfy_protocol() 
         assert harnesses.driver_for_bot(driver.bot_user) is driver
 
 
+def test_every_registered_driver_names_its_own_stream_event_kinds() -> None:
+    for driver in harnesses.all_drivers():
+        assert callable(getattr(type(driver), "event_kind", None)), driver.name
+    assert harnesses.get("gemini").event_kind({"event": "result", "type": "x"}) == "result"
+    assert harnesses.get("claude").event_kind({"event": "result", "type": "x"}) == "x"
+
+
 def test_unregistered_harness_lookup_fails_cleanly() -> None:
     assert harnesses.find("nonexistent-harness") is None
     assert harnesses.driver_for_bot("ghost-bot") is None
@@ -137,6 +144,9 @@ def test_custom_driver_plugs_into_harness_env_and_telemetry_without_code_changes
 
         def stream_flags(self, argv, bot_harness=None) -> StreamFlags:
             return StreamFlags([*argv, "--stream"], "dummy", True, "dummy")
+
+        def event_kind(self, event) -> object:
+            return event.get("type")
 
         def handles_event(self, kind: object) -> bool:
             return kind == "dummy.done"

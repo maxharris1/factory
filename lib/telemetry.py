@@ -1245,15 +1245,10 @@ class Summary:
     def feed(self, event: dict, now: float) -> None:
         self.events += 1
         self.last_event_at = now
-        kind = event.get("type")
-        if not isinstance(kind, str):
-            return
         own = harnesses.find(self.harness)
-        if own is not None and own.handles_event(kind):
-            own.parse_event(self, kind, event, now)
-            return
-        for driver in harnesses.all_drivers():
-            if driver is not own and driver.handles_event(kind):
+        for driver in sorted(harnesses.all_drivers(), key=lambda driver: driver is not own):
+            kind = driver.event_kind(event)
+            if isinstance(kind, str) and driver.handles_event(kind):
                 driver.parse_event(self, kind, event, now)
                 return
 
@@ -1473,61 +1468,69 @@ class Summary:
             self._finished(call_id, error, output)
 
     def _gemini(self, kind: str, event: dict, now: float) -> None:
+        payload = event.get(kind)
+        if not isinstance(payload, dict):
+            return
         if kind == "init":
             if self.model is None:
-                self.model = exposure.reported_model(event.get("model"))
-            return
-        if kind == "message":
-            if event.get("role") == "assistant" and not self._totals:
-                self.turns += 1
-            return
-        if kind == "tool_use":
-            name = str(event.get("tool_name") or event.get("name") or "unknown")
-            call_id = str(event.get("tool_id") or event.get("id") or f"gemini-call-{self.events}")
-            params = event.get("parameters") if isinstance(event.get("parameters"), dict) else {}
-            lower = name.lower()
-            command: str | None = None
-            if any(word in lower for word in ("shell", "bash", "terminal", "run_command")):
-                command = _command_text(params.get("command") or params.get("cmd"))
-                self._tool(name)
-                self.commands += 1
-                step = self._step(now, "command", "command", "running")
-            else:
-                label = self._tool(name)
-                if any(word in lower for word in ("write", "edit", "replace", "patch")):
-                    self._touch(params.get("file_path") or params.get("path"))
-                step = self._step(now, "tool", label, "running")
-            self._open[call_id] = (step, command)
-            return
-        if kind == "tool_result":
-            call_id = str(event.get("tool_id") or event.get("id") or "")
-            status = str(event.get("status") or "").lower()
-            error = status == "error" or bool(event.get("is_error"))
-            output = _text_of(event.get("output") or event.get("content") or "")
-            self._finished(call_id, error, output)
-            return
-        if kind == "error":
-            self._error(now, "error")
-            return
-        if kind == "result":
+                self.model = exposure.reported_model(payload.get("model"))
+        elif kind == "step_update":
+            self._agy_step(payload, now)
+        elif kind == "result":
             self._totals = True
-            stats = event.get("stats") if isinstance(event.get("stats"), dict) else {}
-            usage = event.get("usage") if isinstance(event.get("usage"), dict) else stats
-            if usage:
-                cached = _int(usage.get("cached") or usage.get("cached_tokens") or usage.get("cache_read_input_tokens"))
-                inp = _int(usage.get("input_tokens") or usage.get("prompt_tokens"))
-                out = _int(usage.get("output_tokens") or usage.get("candidates_tokens"))
-                if inp or out or cached:
-                    self.usage_seen = True
-                    self.tokens_in = inp
-                    self.tokens_cached = cached
-                    self.tokens_out = out
-            status = str(event.get("status") or event.get("subtype") or "success").lower()
-            if event.get("is_error") or status == "error":
+            usage = payload.get("usage")
+            if isinstance(usage, dict):
+                self.usage_seen = True
+                self.tokens_in = _int(usage.get("input_tokens"))
+                self.tokens_cached = _int(usage.get("cache_read_tokens"))
+                self.tokens_out = _int(usage.get("output_tokens"))
+            if payload.get("status") == "SUCCESS":
+                self.cli_reason = "success"
+            else:
                 self.cli_reason = "error"
                 self._step(now, "error", "error", "error")
-            else:
-                self.cli_reason = "success"
+
+    def _agy_step(self, step: dict, now: float) -> None:
+        call_id = f"agy-step-{step.get('step_index')}"
+        done = step.get("state") == "DONE"
+        usage = step.get("usage")
+        if done and isinstance(usage, dict) and not self._totals:
+            self.usage_seen = True
+            self.tokens_in += _int(usage.get("input_tokens"))
+            self.tokens_cached += _int(usage.get("cache_read_tokens"))
+            self.tokens_out += _int(usage.get("output_tokens"))
+        step_type = step.get("step_type")
+        if step_type == "agent_response":
+            if done and call_id not in self._seen_items:
+                self._seen_items.add(call_id)
+                self.turns += 1
+            return
+        if step_type != "tool":
+            return
+        info = step.get("tool_info") if isinstance(step.get("tool_info"), dict) else {}
+        if call_id not in self._seen_items:
+            self._seen_items.add(call_id)
+            self._agy_tool(call_id, str(step.get("tool_name") or info.get("name") or "unknown"), info, now)
+        if done:
+            error = info.get("error")
+            message = error.get("message") if isinstance(error, dict) else None
+            self._finished(call_id, bool(error), _text_of(info.get("output") or message or ""))
+
+    def _agy_tool(self, call_id: str, name: str, info: dict, now: float) -> None:
+        params = info.get("parameters") if isinstance(info.get("parameters"), dict) else {}
+        lower = name.lower()
+        command: str | None = None
+        if any(word in lower for word in ("shell", "bash", "terminal", "run_command")):
+            command = _command_text(params.get("CommandLine") or params.get("command"))
+            self._tool(name)
+            self.commands += 1
+            step = self._step(now, "command", "command", "running")
+        else:
+            label = self._tool(name)
+            if any(word in lower for word in ("write", "edit", "replace", "patch")):
+                self._touch(params.get("TargetFile") or params.get("file_path") or params.get("path"))
+            step = self._step(now, "tool", label, "running")
+        self._open[call_id] = (step, command)
 
     # -- Codex: codex exec --json --
 
@@ -1658,11 +1661,11 @@ def exit_reason(code: int | None, cli_reason: str | None) -> str:
 
 # The CLI's own end of a run: the line goes out then (and at the end of the
 # stream otherwise), so a process left holding the pipe cannot keep it back.
-_END_EVENTS = frozenset().union(*(driver.end_events for driver in harnesses.all_drivers()))
-
-
-def _is_end_event(kind: object) -> bool:
-    return isinstance(kind, str) and any(kind in driver.end_events for driver in harnesses.all_drivers())
+def _is_end_event(event: dict) -> bool:
+    return any(
+        isinstance(kind := driver.event_kind(event), str) and kind in driver.end_events
+        for driver in harnesses.all_drivers()
+    )
 
 
 def final_message(event: dict) -> str | None:
@@ -1813,7 +1816,7 @@ class Session:
                 self._final = (self._final or "") + message if delta and self._streaming else message
                 self._final_sent = False
             self._streaming = delta
-            if _is_end_event(event.get("type")):
+            if _is_end_event(event):
                 self._send_handoff()
 
     def _learn(self, line: bytes) -> None:

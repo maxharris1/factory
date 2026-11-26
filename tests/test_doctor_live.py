@@ -329,9 +329,11 @@ def stream_json_reply(bot: str, token: str) -> str:
 
 def gemini_delta_reply(bot: str, token: str) -> str:
     chunks = [f"started-by: {bot}\nskill: factory-builder\ntoken: ", token[:20], token[20:], "\n"]
-    events = [{"type": "init", "model": "gemini-3.1-pro"}]
-    events += [{"type": "message", "role": "assistant", "content": chunk, "delta": True} for chunk in chunks]
-    events += [{"type": "result", "status": "success", "stats": {}}]
+    step = {"step_index": 1, "step_type": "agent_response"}
+    events = [{"event": "init", "init": {"model": "gemini-3.1-pro"}}]
+    events += [{"event": "step_update", "step_update": {**step, "state": "ACTIVE", "text_delta": c}} for c in chunks]
+    events += [{"event": "step_update", "step_update": {**step, "state": "DONE"}}]
+    events += [{"event": "result", "result": {"status": "SUCCESS", "response": "".join(chunks)}}]
     return "".join(json.dumps(event) + "\n" for event in events)
 
 
