@@ -86,4 +86,5 @@ def create(name: str) -> Runner:
         raise KeyError(f"no QA runner named {name!r}") from None
 
 
+from lib.qa_runners import claude_cloud as _claude_cloud  # noqa: E402, F401
 from lib.qa_runners import local_docker as _local_docker  # noqa: E402, F401

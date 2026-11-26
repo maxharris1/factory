@@ -1,11 +1,13 @@
-"""#784: the QA worker and lane coordinator, driven tick by tick with the fake runner."""
+"""#784/#785: the QA worker and lane coordinator, driven tick by tick with fake and claude-cloud runners."""
 
 from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import sqlite3
+import subprocess
 import tarfile
 from collections.abc import Callable
 from dataclasses import replace
@@ -25,7 +27,8 @@ from lib.qa_cloud import (
     Decision, LaneRow, QaWorker, Stale, audited, decide, newest, plan_slices, qa_id, render_comment, s_id, save_name,
 )
 from lib.qa_evidence import collect, record_evidence_dir, run_dir
-from lib.qa_runners import LaunchFailed, RunnerOutage, UsageLimit
+from lib.qa_runners import AgentInfo, AgentStatus, Lane, Launched, LaunchError, LaunchFailed, RunnerOutage, UsageLimit
+from lib.qa_runners.claude_cloud import ClaudeCloudConfig, ClaudeCloudRunner
 from lib.qa_runners.fake import FakeRunner
 from lib.poll_source import HTTPResult
 from lib.qa_storage import BUNDLE_NAME, RESULT_NAME, StorageError
@@ -56,6 +59,202 @@ NO_COMMENTS = HTTPResult(200, json.dumps(
 ))
 GIB = 2**30
 _BRIEF_IDS = re.compile(r'"id": "(s-[0-9]+)"')
+_GIT_ENV = {
+    **os.environ,
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_AUTHOR_NAME": "QA",
+    "GIT_AUTHOR_EMAIL": "qa@example.invalid",
+    "GIT_COMMITTER_NAME": "QA",
+    "GIT_COMMITTER_EMAIL": "qa@example.invalid",
+}
+_ACTIVE_CLAUDE_BACKEND: Path | None = None
+
+_FAKE_CLAUDE_SH_TEMPLATE = """#!/bin/sh
+set -eu
+state="{state}"
+if [ "${{1:-}}" = "--version" ]; then
+    echo "2.1.323 (Claude Code)"
+    exit 0
+fi
+mode=""
+for arg in "$@"; do
+    if [ "$arg" = "-p" ]; then
+        mode="stop"
+        break
+    fi
+done
+if [ "$mode" = "stop" ]; then
+    sid=""
+    prev=""
+    for arg in "$@"; do
+        if [ "$prev" = "--cloud" ]; then
+            sid="$arg"
+            break
+        fi
+        prev="$arg"
+    done
+    if [ -f "$state/next_stop_err" ]; then
+        cat "$state/next_stop_err" >&2
+        rm -f "$state/next_stop_err"
+        exit 1
+    fi
+    printf '%s\\n' "$sid" >> "$state/stopped.log"
+    printf '{{"ok":true,"session_id":"%s","url":"https://claude.ai/code/%s?from=cli&m=0"}}\\n' "$sid" "$sid"
+    exit 0
+fi
+if [ ! -t 1 ]; then
+    echo "Error: --cloud requires an interactive terminal." >&2
+    exit 1
+fi
+if [ -f "$state/next_launch_err" ]; then
+    cat "$state/next_launch_err" >&2
+    rm -f "$state/next_launch_err"
+    exit 1
+fi
+n=0
+if [ -f "$state/counter" ]; then
+    n="$(cat "$state/counter")"
+fi
+n=$((n + 1))
+printf '%s\\n' "$n" > "$state/counter"
+sid="session_qa_${{n}}"
+printf 'Created cloud session: QA lane %s\\n' "$n"
+printf 'View: https://claude.ai/code/%s?from=cli&m=0\\n' "$sid"
+printf 'Resume with: claude --teleport %s\\n' "$sid"
+"""
+
+
+@pytest.fixture(scope="module")
+def _claude_cli_assets(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    base = tmp_path_factory.mktemp("qa-claude-cli")
+    source = base / "source"
+    subprocess.run(["git", "init", "-b", "main", str(source)], env=_GIT_ENV, check=True, capture_output=True, text=True)
+    (source / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=source, env=_GIT_ENV, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=source, env=_GIT_ENV, check=True, capture_output=True, text=True)
+    return source
+
+
+@pytest.fixture(params=["fake", "claude-cloud"], autouse=True)
+def _qa_runner_backend(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    _claude_cli_assets: Path,
+) -> str:
+    if request.param == "claude-cloud":
+        monkeypatch.setattr(
+            __import__(__name__, fromlist=["_ACTIVE_CLAUDE_BACKEND"]),
+            "_ACTIVE_CLAUDE_BACKEND",
+            _claude_cli_assets,
+        )
+    else:
+        monkeypatch.setattr(
+            __import__(__name__, fromlist=["_ACTIVE_CLAUDE_BACKEND"]),
+            "_ACTIVE_CLAUDE_BACKEND",
+            None,
+        )
+    return str(request.param)
+
+
+class ClaudeCloudCliAdapter:
+    """Drives the real ClaudeCloudRunner against a fake `claude` CLI executable on PATH."""
+
+    def __init__(self, tmp_path: Path, source: Path) -> None:
+        self.name = "claude-cloud"
+        self.launched: list[Lane] = []
+        self.launch_errors: list[BaseException] = []
+        self.stop_errors: list[Exception] = []
+        self._state = tmp_path / "claude-cli-state"
+        self._state.mkdir(parents=True, exist_ok=True)
+        bin_dir = tmp_path / "claude-bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        exe = bin_dir / "claude"
+        exe.write_text(_FAKE_CLAUDE_SH_TEMPLATE.format(state=str(self._state)), encoding="utf-8")
+        exe.chmod(0o755)
+        self._config_dir = tmp_path / "claude-qa-config"
+        self._config_dir.mkdir(parents=True, exist_ok=True)
+        self._work_root = tmp_path / "claude-work"
+        env = {
+            **_GIT_ENV,
+            "PATH": f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+        }
+        self._runner = ClaudeCloudRunner(
+            ClaudeCloudConfig(
+                config_dir=self._config_dir,
+                work_root=self._work_root,
+                repo_cache_root=tmp_path / "claude-repos",
+                claude_binary="claude",
+                repo_url_template=str(source),
+            ),
+            home=tmp_path / "claude-home",
+            environ=env,
+        )
+
+    @property
+    def stopped(self) -> list[str]:
+        log = self._state / "stopped.log"
+        if not log.exists():
+            return []
+        return [line.strip() for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    @property
+    def agents(self) -> dict[str, AgentStatus]:
+        sessions_dir = self._work_root / "sessions"
+        if not sessions_dir.exists():
+            return {}
+        result: dict[str, AgentStatus] = {}
+        for marker in sorted(sessions_dir.glob("*.json")):
+            data = json.loads(marker.read_text(encoding="utf-8"))
+            result[str(data["agent_id"])] = "ended" if data.get("state") == "ended" else "running"
+        return result
+
+    def launch(self, lane: Lane) -> Launched:
+        already_launched = self._runner._saved_lane(lane.lane_id) is not None
+        if not already_launched and self.launch_errors:
+            err = self.launch_errors.pop(0)
+            if isinstance(err, UsageLimit):
+                (self._state / "next_launch_err").write_text(
+                    "Error: You've hit your usage limit. Try again later.\n", encoding="utf-8"
+                )
+            elif isinstance(err, RunnerOutage):
+                (self._state / "next_launch_err").write_text(
+                    "Error: 503 Service Unavailable - connection reset by peer\n", encoding="utf-8"
+                )
+            elif isinstance(err, LaunchFailed):
+                (self._state / "next_launch_err").write_text(
+                    f"Error: launch refused: {err}\n", encoding="utf-8"
+                )
+            else:
+                raise err
+        launched = self._runner.launch(lane)
+        if not already_launched:
+            self.launched.append(lane)
+        return launched
+
+    def status(self, agent_id: str) -> AgentStatus:
+        return self._runner.status(agent_id)
+
+    def stop(self, agent_id: str) -> None:
+        if self.stop_errors:
+            self.stop_errors.pop(0)
+            (self._state / "next_stop_err").write_text(
+                "Error: ECONNRESET connection reset by peer\n", encoding="utf-8"
+            )
+        self._runner.stop(agent_id)
+
+    def end(self, agent_id: str) -> None:
+        marker = self._runner._session_marker(agent_id)
+        data = json.loads(marker.read_text(encoding="utf-8")) if marker.exists() else {"agent_id": agent_id}
+        data["state"] = "ended"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    def describe(self, agent_id: str) -> AgentInfo:
+        return self._runner.describe(agent_id)
+
+    def ping(self) -> str:
+        return self._runner.ping()
 
 
 def live(count: int, packs: dict[str, str | None] | None = None) -> list[dict]:
@@ -126,7 +325,15 @@ class Lab:
         qa = replace(qa_config(shootout=shootout), lanes=lanes, timeout_minutes=5, gate=gate)
         qa = replace(qa, runners=tuple(item for name in runners for item in qa.runners if item.name == name))
         self.run = Harness(tmp_path, qa)
-        self.fakes = {name: FakeRunner(name) for name in ("claude-cloud", "cursor-cloud")}
+        self._claude_is_cli = _ACTIVE_CLAUDE_BACKEND is not None
+        self.fakes: dict[str, FakeRunner | ClaudeCloudCliAdapter] = {
+            "claude-cloud": (
+                ClaudeCloudCliAdapter(tmp_path, _ACTIVE_CLAUDE_BACKEND)
+                if _ACTIVE_CLAUDE_BACKEND is not None
+                else FakeRunner("claude-cloud")
+            ),
+            "cursor-cloud": FakeRunner("cursor-cloud"),
+        }
         self.head_outcome: dict[str, str] = {}
         self.base_outcome: dict[str, str] = {}
         self.broken: dict[tuple[int, int], Callable[[dict], None]] = {}
@@ -214,6 +421,12 @@ class Lab:
 
     def launched(self) -> list:
         return [lane for fake in self.fakes.values() for lane in fake.launched]
+
+    def agent_id(self, n: int) -> str:
+        return f"session_qa_{n}" if self._claude_is_cli else f"claude-cloud-{n}"
+
+    def expected_describe(self) -> str:
+        return "(machine unknown, agent claude-2.1.323)" if self._claude_is_cli else "(machine fake-4cpu-16gb, agent fake-1.0)"
 
     def only_comment(self) -> str:
         assert len(self.posted) == 1, self.posted
@@ -387,7 +600,7 @@ def test_lane_ended_without_result_is_blocked(tmp_path: Path) -> None:
     lab.enqueue(ids=2)
     lab.silent.add((0, 1))
     lab.tick()
-    lab.fakes["claude-cloud"].end("claude-cloud-1")
+    lab.fakes["claude-cloud"].end(lab.agent_id(1))
     lab.tick(2)
 
     assert [row[3:5] for row in lab.lanes()] == [("gap", "ended-without-result")]
@@ -405,32 +618,29 @@ def test_lane_past_timeout_is_stopped_and_blocked(tmp_path: Path) -> None:
     lab.tick(3)
 
     assert [row[3:5] for row in lab.lanes()] == [("timed-out", "no-result-in-time")]
-    assert lab.fakes["claude-cloud"].stopped == ["claude-cloud-1"]
+    assert lab.fakes["claude-cloud"].stopped == [lab.agent_id(1)]
     assert lab.header()["result"] == "BLOCKED"
-
-
-class ReleaseRecorder(FakeRunner):
-    def __init__(self, name: str) -> None:
-        super().__init__(name)
-        self.stop_calls: list[str] = []
-
-    def stop(self, agent_id: str) -> None:
-        self.stop_calls.append(agent_id)
-        super().stop(agent_id)
 
 
 def test_reported_and_ended_lanes_release_their_agent(tmp_path: Path) -> None:
     lab = Lab(tmp_path, lanes=2)
-    fake = lab.fakes["claude-cloud"] = ReleaseRecorder("claude-cloud")
-    lab.worker = lab.new_worker()
+    fake = lab.fakes["claude-cloud"]
+    stop = fake.stop
+    stop_calls: list[str] = []
+
+    def record_stop(agent_id: str) -> None:
+        stop_calls.append(agent_id)
+        stop(agent_id)
+
+    fake.stop = record_stop
     lab.enqueue(ids=2)
     lab.silent.add((1, 1))
     lab.tick(2)
-    fake.end("claude-cloud-2")
+    fake.end(lab.agent_id(2))
     lab.tick(2)
 
     assert [row[3:5] for row in lab.lanes()] == [("reported", None), ("gap", "ended-without-result")]
-    assert sorted(set(fake.stop_calls)) == ["claude-cloud-1", "claude-cloud-2"]
+    assert sorted(set(stop_calls)) == sorted([lab.agent_id(1), lab.agent_id(2)])
 
 
 def test_a_failed_release_is_logged_and_the_lane_still_reports(tmp_path: Path) -> None:
@@ -735,7 +945,7 @@ def test_cancelled_run_leaves_no_open_lane(tmp_path: Path) -> None:
 
     assert lab.run.rows("SELECT COUNT(*) FROM qa_lanes WHERE state IN ('launching', 'running')") == [(0,)]
     assert [row[3] for row in lab.lanes()] == ["cancelled", "cancelled"]
-    assert sorted(lab.fakes["claude-cloud"].stopped) == ["claude-cloud-1", "claude-cloud-2"]
+    assert sorted(lab.fakes["claude-cloud"].stopped) == sorted([lab.agent_id(1), lab.agent_id(2)])
     assert lab.run.rows("SELECT state FROM jobs WHERE action = 'qa' AND head = ?", HEAD_A) == [("failed",)]
     assert all(f"head={HEAD_A}" not in body for _, body in lab.posted.values())
 
@@ -761,7 +971,7 @@ def test_comment_header_parses_for_every_outcome(tmp_path: Path, setup: Callable
         **({"cause": "product"} if result == "FAIL" else {}),
     }
     assert lab.only_comment().rstrip().endswith("<!-- qa-run run-784-claude-cloud -->")
-    assert "(machine fake-4cpu-16gb, agent fake-1.0)" in lab.only_comment()
+    assert lab.expected_describe() in lab.only_comment()
 
 
 def test_smoke_run_posts_blocked_with_no_scenarios(tmp_path: Path) -> None:
@@ -939,8 +1149,8 @@ def test_cancel_keeps_a_lane_open_until_its_stop_succeeds(tmp_path: Path) -> Non
 
     lab.tick()
     assert [row[3] for row in lab.lanes()] == ["cancelled"]
-    assert lab.fakes["claude-cloud"].stopped == ["claude-cloud-1"]
-    assert lab.fakes["claude-cloud"].agents == {"claude-cloud-1": "ended"}
+    assert lab.fakes["claude-cloud"].stopped == [lab.agent_id(1)]
+    assert lab.fakes["claude-cloud"].agents == {lab.agent_id(1): "ended"}
 
 
 def test_cancel_stops_an_agent_launched_before_a_crash_saved_its_id(tmp_path: Path) -> None:
@@ -964,7 +1174,7 @@ def test_cancel_stops_an_agent_launched_before_a_crash_saved_its_id(tmp_path: Pa
     lab.tick()
 
     assert [row[3] for row in lab.lanes()] == ["cancelled"]
-    assert fake.stopped == ["claude-cloud-1"]
+    assert fake.stopped == [lab.agent_id(1)]
     assert len(fake.launched) == 1
 
 
@@ -986,7 +1196,7 @@ def test_a_restarted_worker_adopts_an_agent_launched_before_a_crash_saved_its_id
     lab.worker = lab.new_worker()
     lab.tick()
 
-    assert lab.run.rows("SELECT state, agent_id FROM qa_lanes") == [("running", "claude-cloud-1")]
+    assert lab.run.rows("SELECT state, agent_id FROM qa_lanes") == [("running", lab.agent_id(1))]
     assert len(fake.launched) == 1
 
     lab.silent.clear()
@@ -1523,7 +1733,7 @@ def test_refused_evidence_drops_and_relaunches_once(tmp_path: Path) -> None:
         (0, "head", 1, "dropped", "evidence-refused", "claude-cloud"),
         (0, "head", 2, "reported", None, "claude-cloud"),
     ]
-    assert lab.fakes["claude-cloud"].stopped == ["claude-cloud-1", "claude-cloud-2"]
+    assert lab.fakes["claude-cloud"].stopped == [lab.agent_id(1), lab.agent_id(2)]
     assert "qa lane 1 of run-784-claude-cloud: evidence refused: bundle.tar.gz is missing" in lab.logs
     assert lab.header()["result"] == "PASS"
     assert_no_signed_link(lab)
@@ -1549,7 +1759,7 @@ def test_storage_error_waits_and_retries(tmp_path: Path) -> None:
     outage = "fetch qa/factory/run-784-claude-cloud/lane-1/result.json: HTTP 503"
     lab.storage.fail.append(StorageError(outage))
     lab.tick()
-    lab.fakes["claude-cloud"].end("claude-cloud-1")
+    lab.fakes["claude-cloud"].end(lab.agent_id(1))
     lab.storage.fail.append(StorageError(outage))
     lab.tick()
 
@@ -1680,7 +1890,7 @@ def _decided_comment(lab: Lab) -> tuple[Decision, str]:
         rows = [LaneRow.of(row) for row in connection.execute("SELECT * FROM qa_lanes ORDER BY lane_no")]
     plan = lab.worker._plan(job)
     decision = decide(rows, plan.detail)
-    lanes = [(row, "(machine fake-4cpu-16gb, agent fake-1.0)") for row in newest(rows).values()]
+    lanes = [(row, lab.expected_describe()) for row in newest(rows).values()]
     return decision, render_comment(plan, plan.detail, decision, runner="claude-cloud", attempt=1, lanes=lanes)
 
 
