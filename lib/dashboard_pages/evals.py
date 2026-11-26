@@ -60,7 +60,7 @@ EVAL_ROWS = (
 def _value(row: EvalRow, weeks: list[dict], i: int) -> float | None:
     def read(j: int) -> float | None:
         value = weeks[j]["metrics"].get(row.metric) if j < len(weeks) else None
-        return None if isinstance(value, bool) or not isinstance(value, (int, float)) else value
+        return None if isinstance(value, bool) or not isinstance(value, (int, float)) else float(value)
 
     now = read(i)
     if not row.shipped or now is None:
@@ -69,8 +69,12 @@ def _value(row: EvalRow, weeks: list[dict], i: int) -> float | None:
     return None if before is None else now - before
 
 
-def _half_up(value: float, digits: int) -> float:
-    return math.floor(value * 10**digits + 0.5) / 10**digits
+def _half_up(value: float, digits: int) -> float | None:
+    scaled = value * 10**digits
+    if not math.isfinite(scaled):
+        return None
+    whole = math.floor(scaled)
+    return (whole + 1 if scaled - whole >= 0.5 else whole) / 10**digits
 
 
 def _format(kind: Kind, number: float, suffix: str, signed: bool) -> str:
@@ -81,10 +85,11 @@ def _format(kind: Kind, number: float, suffix: str, signed: bool) -> str:
 def _cell(row: EvalRow, weeks: list[dict], i: int) -> str:
     kind = KINDS[row.kind]
     now, before = _value(row, weeks, i), _value(row, weeks, i + 1)
-    text = "n/a" if now is None else _format(kind, _half_up(now * kind.scale, kind.digits), kind.suffix, False)
-    if now is None or before is None:
+    shown = None if now is None else _half_up(now * kind.scale, kind.digits)
+    text = "n/a" if shown is None else _format(kind, shown, kind.suffix, False)
+    delta = None if now is None or before is None else _half_up((now - before) * kind.scale, kind.digits)
+    if delta is None:
         return f'<td>{_span("ev-v", text)} {_chip("n/a")}</td>'
-    delta = _half_up((now - before) * kind.scale, kind.digits)
     tone = "muted" if not delta else "ok" if (delta > 0) == (row.better == "up") else "bad"
     return f'<td>{_span("ev-v", text)} {_chip(_format(kind, delta, kind.delta_suffix, True), tone)}</td>'
 

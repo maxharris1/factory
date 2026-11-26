@@ -8,7 +8,8 @@ lib/dashboard_page.py) and tickets.json to an output directory, each
 atomically (temp file in the same directory, fsync, then rename), as one
 set: a failed rename puts back every file already renamed. Each page's inline script fetches status.json every 1 to 2
 seconds and updates in place. The Evals table is not in status.json; the
-page fetches evals.json once per new status.json and redraws it from that.
+page fetches evals.json for each new status.json, again on later polls
+until its generated_at_epoch catches up, and redraws it from that.
 Without script (or when status.json cannot
 be fetched) the server-rendered page reloads every refresh_seconds (15 to
 30). The job page's diagram is model/chart.mmd (lib/dashboard_flow.py).
@@ -2825,8 +2826,9 @@ def write_snapshot_pages(out_dir: Path, snapshot: dict) -> tuple[Path, ...]:
 
     The ticket records (RECORDS) go to tickets.json only and the weekly eval
     bundle (EVALS, lib/dashboard_evals.py) to evals.json only, a "no dir"
-    bundle when the snapshot has none; status.json and the static assets are
-    written from the rest of the snapshot, and the pages from the rest plus the
+    bundle when the snapshot has none, with the snapshot's generated_at_epoch
+    so the page can tell an evals.json older than status.json; status.json and
+    the static assets are written from the rest of the snapshot, and the pages from the rest plus the
     eval bundle, so evals.html draws the weekly table. Each
     file is written to a temp file in the same directory and fsynced, then
     renamed into place, status.json first. If a later rename fails, every file
@@ -2842,7 +2844,7 @@ def write_snapshot_pages(out_dir: Path, snapshot: dict) -> tuple[Path, ...]:
     texts.update(render_static_assets(status))
     texts.update(render_pages(paged))
     texts["tickets.json"] = tickets_json(snapshot)
-    texts["evals.json"] = evals_json(snapshot.get(EVALS))
+    texts["evals.json"] = evals_json(snapshot.get(EVALS), snapshot.get("generated_at_epoch"))
     targets = [out_dir / name for name in texts]
     temps: list[str] = []
     try:

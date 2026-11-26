@@ -14,9 +14,11 @@ or date is malformed, when it is not one regular, singly linked file opened
 without following a link inside the dir, when it is over MAX_SNAPSHOT_BYTES,
 or when it is not UTF-8 JSON (NaN and Infinity included) with an object
 `metrics`. Inside a kept week only METRIC_KEYS are kept, any value but a
-finite number or null becomes "unrecorded", and a `since` or `until` that is
-not YYYY-MM-DDTHH:MM:SSZ becomes null. While the bundle is over
+finite number or null, or an integer too large for a float, becomes
+"unrecorded", and a `since` or `until` that is not YYYY-MM-DDTHH:MM:SSZ
+becomes null. While the bundle is over
 MAX_BUNDLE_BYTES, its oldest week is dropped and counted as skipped.
+`evals_json` adds the snapshot's `generated_at_epoch` beside them, as tickets.json does.
 """
 
 from __future__ import annotations
@@ -90,10 +92,10 @@ def _collect(dir_fd: int) -> dict:
     return _bundle("ok" if weeks else "no snapshots", weeks, skipped)
 
 
-def evals_json(bundle: dict | None) -> str:
+def evals_json(bundle: dict | None, epoch: float | None = None) -> str:
     """Compact JSON with <, > and & written as JSON escapes, as tickets.json is."""
     text = json.dumps(
-        bundle if bundle is not None else _bundle("no dir", [], 0),
+        {**(bundle if bundle is not None else _bundle("no dir", [], 0)), "generated_at_epoch": epoch},
         separators=(",", ":"),
         sort_keys=True,
         allow_nan=False,
@@ -152,7 +154,13 @@ def _reject(constant: str) -> object:
 
 
 def _value(value: object) -> object:
-    if value is None or (isinstance(value, int) and not isinstance(value, bool)):
+    if value is None:
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        try:
+            float(value)
+        except OverflowError:
+            return UNRECORDED
         return value
     if isinstance(value, float) and math.isfinite(value):
         return value

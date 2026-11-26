@@ -2097,8 +2097,10 @@ rows that appear since the last snapshot flash briefly, and the job page
 redraws each job's path (SVG nodes made with `createElementNS`, in the
 namespace of the server-drawn chart) and copies the server-drawn full chart
 with the highlight moved. The Evals table comes from `evals.json`, not
-`status.json`: the page fetches `evals.json` once for each new `status.json`
-snapshot and redraws the table from it, and when that fetch fails (a 401
+`status.json`: the page fetches `evals.json` for each new `status.json`
+snapshot and redraws the table from it. While the bundle's
+`generated_at_epoch` is older than the snapshot's (a publish still under
+way), it fetches again on each later poll. When that fetch fails (a 401
 when signed out, any other error, or a malformed bundle) the table already
 on the page stays. If `status.json`
 cannot be fetched at all, the server-rendered page stays and reloads as

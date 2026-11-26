@@ -127,7 +127,8 @@ def test_values_are_normalized_without_skipping_the_week(tmp_path: Path) -> None
         '{"window": {"since": "last monday", "until": "' + UNTIL + '\\n"}, "metrics": {'
         '"tickets-succeeded": true, "poll-errors": "7", "stuck-jobs": {"unrecorded": "x"},'
         '"failed-jobs": [1], "cycle-time-p50-hours": 1e999, "cap-rate": 0.25,'
-        '"first-pass-approve-rate": null, "wasted-wakes": 4, "secret-metric": 1}}',
+        '"first-pass-approve-rate": null, "wasted-wakes": 4, "secret-metric": 1,'
+        '"max-interventions": 1' + "0" * 400 + '}}',
     )
     (week,) = collect_weekly(tmp_path)["weeks"]
     assert week == {
@@ -143,6 +144,7 @@ def test_values_are_normalized_without_skipping_the_week(tmp_path: Path) -> None
             "cap-rate": 0.25,
             "first-pass-approve-rate": None,
             "wasted-wakes": 4,
+            "max-interventions": "unrecorded",
         },
     }
 
@@ -175,10 +177,12 @@ def test_status_json_excludes_evals(tmp_path: Path) -> None:
     write_week(evals, GOOD)
     bundle = collect_weekly(evals)
     out = tmp_path / "out"
-    paths = write_snapshot_pages(out, {**snapshot_for(tmp_path), EVALS: bundle})
+    snapshot = snapshot_for(tmp_path)
+    paths = write_snapshot_pages(out, {**snapshot, EVALS: bundle})
     assert [path.name for path in paths[-2:]] == ["tickets.json", "evals.json"]
     assert EVALS not in json.loads((out / "status.json").read_text(encoding="utf-8"))
-    assert json.loads((out / "evals.json").read_text(encoding="utf-8")) == bundle
+    written = json.loads((out / "evals.json").read_text(encoding="utf-8"))
+    assert written == {**bundle, "generated_at_epoch": snapshot["generated_at_epoch"]}
 
 
 def test_the_written_evals_page_shows_the_bundle_weeks(tmp_path: Path) -> None:
@@ -194,9 +198,10 @@ def test_the_written_evals_page_shows_the_bundle_weeks(tmp_path: Path) -> None:
 
 
 def test_evals_json_is_written_without_a_bundle(tmp_path: Path) -> None:
-    write_snapshot_pages(tmp_path / "out", snapshot_for(tmp_path))
+    snapshot = snapshot_for(tmp_path)
+    write_snapshot_pages(tmp_path / "out", snapshot)
     assert json.loads((tmp_path / "out" / "evals.json").read_text(encoding="utf-8")) == {
-        "schema": 1, "state": "no dir", "weeks": [], "skipped": 0,
+        "schema": 1, "state": "no dir", "weeks": [], "skipped": 0, "generated_at_epoch": snapshot["generated_at_epoch"],
     }
 
 
@@ -599,6 +604,15 @@ ROUNDING_BEFORE = {
     "cycle-time-p50-hours": 0.3, "cycle-time-p90-hours": 1234.1, "productive-cost-usd": 12_345.68,
     "wasted-cost-usd": 0.1300001, "max-interventions": True,
 }
+HUGE = {
+    "tickets-succeeded": 10**22, "poll-errors": 10**21, "stuck-jobs": 2**53 + 1, "failed-jobs": 1.5e300,
+    "first-pass-approve-rate": 1e300, "cap-rate": 1.7e308, "cycle-time-p50-hours": 1.7e308,
+    "cycle-time-p90-hours": 9.87654321e25, "productive-cost-usd": 1e307, "wasted-cost-usd": 1.2345678901234567e23,
+}
+HUGE_BEFORE = {
+    "tickets-succeeded": 1, "poll-errors": 1, "stuck-jobs": 1, "failed-jobs": -1.5e300,
+    "cycle-time-p50-hours": -1.7e308, "wasted-cost-usd": 1,
+}
 PARITY = {
     "no dir": {"schema": 1, "state": "no dir", "weeks": [], "skipped": 0},
     "no snapshots, skipped": {"schema": 1, "state": "no snapshots", "weeks": [], "skipped": 2},
@@ -609,14 +623,16 @@ PARITY = {
         {"week": "2026-11-09", "metrics": OLDEST}]},
     "rounding and thousands": {"schema": 1, "state": "ok", "skipped": 0, "weeks": [
         {"week": "2026-11-23", "metrics": ROUNDING}, {"week": "2026-11-16", "metrics": ROUNDING_BEFORE}]},
+    "past float precision and range": {"schema": 1, "state": "ok", "skipped": 0, "weeks": [
+        {"week": "2026-11-23", "metrics": HUGE}, {"week": "2026-11-16", "metrics": HUGE_BEFORE}]},
     "hostile": {"schema": 1, "state": "ok", "skipped": 0, "weeks": [
         {"week": '<img src=x onerror="y">&\'', "metrics": {"poll-errors": "<b>", "stuck-jobs": True}},
         {"week": "2026-11-16", "metrics": {"poll-errors": 1, "stuck-jobs": 1}}]},
 }
 
 
-def served(bundle: dict) -> dict:
-    return {"status": 200, "body": json.loads(evals_json(bundle))}
+def served(bundle: dict, epoch: float) -> dict:
+    return {"status": 200, "body": {**json.loads(evals_json(bundle)), "generated_at_epoch": epoch}}
 
 
 def section_inner(bundle: dict) -> str:
@@ -630,7 +646,8 @@ def section_inner(bundle: dict) -> str:
 @pytest.mark.parametrize("bundle", PARITY.values(), ids=PARITY)
 def test_the_script_draws_the_same_table_as_the_server(tmp_path: Path, bundle: dict) -> None:
     snapshot = snapshot_for(tmp_path / "db")
-    out = _run_page(tmp_path / "page", snapshot, "evals", EVALS_IDS, evals=served(bundle))
+    out = _run_page(tmp_path / "page", snapshot, "evals", EVALS_IDS,
+                    evals=served(bundle, snapshot["generated_at_epoch"]))
     assert out["evals"] == 1
     assert out["html"]["evals"] == section_inner(bundle)
 
@@ -654,11 +671,26 @@ POLLING = (
     layout.HARNESS.replace("function act(actions) {", "async function act(actions) {")
     .replace("const intervals = [];", "const intervals = [];\nconst realSetTimeout = setTimeout;\nconst polls = [];\n"
              "global.setTimeout = (fn, ms) => fn && fn.name === 'poll' ? polls.push(fn) : realSetTimeout(fn, ms);")
+    .replace("let evalsFetches = 0;", "let evalsFetches = 0;\nlet evalsServed = null;\nconst heldEvals = [];")
+    .replace(
+        "    const answer = evalsAnswer || {status: 404, body: null};\n"
+        "    return Promise.resolve(",
+        "    const answer = evalsServed || evalsAnswer || {status: 404, body: null};\n"
+        "    const reply = {ok: answer.status === 200, status: answer.status, json: () => Promise.resolve(answer.body)};\n"
+        "    if (answer.hold) return new Promise((resolve, reject) => heldEvals.push(\n"
+        "      {release: () => resolve(reply), drop: () => reject(new Error('dropped'))}));\n"
+        "    return Promise.resolve(",
+    )
     .replace(
         "    } else if (kind === 'record') {",
         "    } else if (kind === 'poll') {\n"
         "      Object.assign(status, arg);\n"
         "      polls.splice(0).forEach(fn => fn());\n"
+        "      await new Promise(resolve => realSetTimeout(resolve, 20));\n"
+        "    } else if (kind === 'serve') {\n"
+        "      evalsServed = arg;\n"
+        "    } else if (kind === 'drop' || kind === 'release') {\n"
+        "      heldEvals.splice(0).forEach(held => held[kind]());\n"
         "      await new Promise(resolve => realSetTimeout(resolve, 20));\n"
         "    } else if (kind === 'record') {",
     )
@@ -666,21 +698,110 @@ POLLING = (
              "realSetTimeout(async () => {\n  await act(JSON.parse(actionsText));")
 )
 
+NOV_16 = {"schema": 1, "state": "ok", "skipped": 0, "weeks": [{"week": "2026-11-16", "metrics": MIDDLE}]}
+BOTH_WEEKS = {"schema": 1, "state": "ok", "skipped": 0, "weeks": [
+    {"week": "2026-11-23", "metrics": NEWEST}, {"week": "2026-11-16", "metrics": MIDDLE}]}
+
+
+def polled(tmp_path: Path, actions: list, first: dict) -> tuple[dict, float]:
+    snapshot = snapshot_for(tmp_path / "db")
+    epoch = snapshot["generated_at_epoch"]
+    assert all(fragment in POLLING for fragment in ("heldEvals.push", "evalsServed = arg", "await act("))
+    out = layout.run_harness(
+        tmp_path / "page", POLLING, render_static_assets(snapshot)["app.js"], snapshot, "evals", EVALS_IDS,
+        actions(epoch) if callable(actions) else actions, evals=first(epoch) if callable(first) else first,
+    )
+    return out, epoch
+
 
 @needs_node
 def test_the_script_fetches_evals_json_once_per_new_snapshot(tmp_path: Path) -> None:
-    assert POLLING.count("polls") == 3 and "await act(" in POLLING
-    snapshot = snapshot_for(tmp_path / "db")
-    epoch = snapshot["generated_at_epoch"]
-    out = layout.run_harness(
-        tmp_path / "page", POLLING, render_static_assets(snapshot)["app.js"], snapshot, "evals", EVALS_IDS,
-        [["advance", 1], ["poll", {}], ["poll", {"generated_at_epoch": epoch + 30}], ["advance", 1],
-         ["poll", {}], ["poll", {"generated_at_epoch": epoch + 60}]],
-        evals=served(PARITY["one week"]),
-    )
-    assert out["fetches"] == 5
+    out, _ = polled(tmp_path, lambda epoch: [
+        ["advance", 1], ["poll", {}], ["serve", served(NOV_16, epoch + 30)],
+        ["poll", {"generated_at_epoch": epoch + 30}], ["advance", 1], ["poll", {}],
+        ["serve", served(PARITY["one week"], epoch + 60)], ["poll", {"generated_at_epoch": epoch + 60}],
+        ["advance", 1], ["poll", {}],
+    ], lambda epoch: served(NOV_16, epoch))
+    assert out["fetches"] == 6
     assert out["evals"] == 3
     assert out["html"]["evals"] == section_inner(PARITY["one week"])
+
+
+@needs_node
+def test_a_bundle_older_than_the_snapshot_is_fetched_again_until_the_publish_lands(tmp_path: Path) -> None:
+    out, _ = polled(tmp_path, lambda epoch: [
+        ["poll", {"generated_at_epoch": epoch + 30}],
+        ["serve", served(BOTH_WEEKS, epoch + 30)], ["poll", {}], ["poll", {}],
+    ], lambda epoch: served(NOV_16, epoch))
+    assert out["html"]["evals"] == section_inner(BOTH_WEEKS)
+    assert out["evals"] == 3
+
+
+@needs_node
+def test_a_bundle_newer_than_the_snapshot_is_drawn_and_not_fetched_again(tmp_path: Path) -> None:
+    out, _ = polled(tmp_path, [["poll", {}], ["poll", {}]], lambda epoch: served(BOTH_WEEKS, epoch + 30))
+    assert out["html"]["evals"] == section_inner(BOTH_WEEKS)
+    assert out["evals"] == 1
+
+
+@needs_node
+@pytest.mark.parametrize("end", ["drop", "release"], ids=["failed", "answered with the older bundle"])
+def test_a_held_fetch_for_an_older_snapshot_leaves_the_newer_one_to_load(tmp_path: Path, end: str) -> None:
+    out, _ = polled(tmp_path, lambda epoch: [
+        ["poll", {"generated_at_epoch": epoch + 30}], [end, None],
+        ["serve", served(BOTH_WEEKS, epoch + 30)], ["poll", {}], ["poll", {}],
+    ], lambda epoch: {**served(NOV_16, epoch), "hold": True})
+    assert out["html"]["evals"] == section_inner(BOTH_WEEKS)
+    assert out["evals"] == 2
+
+
+def test_numbers_past_float_precision_and_range_render_as_a_float_would() -> None:
+    rows = table(panel(PARITY["past float precision and range"]))
+    assert {label: cells[0] for label, cells in rows.items()} == {
+        "Throughput (tickets shipped)": ("10,000,000,000,000,000,000,000", "n/a", "muted"),
+        "First-pass approve rate (lifetime)": (f"{1e302:,.0f}%", "n/a", "muted"),
+        "Cap rate (lifetime)": ("n/a", "n/a", "muted"),
+        "Poll errors": ("1,000,000,000,000,000,000,000", "+1,000,000,000,000,000,000,000", "bad"),
+        "Stuck jobs": ("9,007,199,254,740,992", "+9,007,199,254,740,991", "bad"),
+        "Failed jobs": (f"{1.5e300:,.0f}", f"+{3e300:,.0f}", "bad"),
+        "Cycle time p50": ("n/a", "n/a", "muted"),
+        "Cycle time p90": ("98,765,432,099,999,996,838,936,576.0 h", "n/a", "muted"),
+        "Max interventions": ("n/a", "n/a", "muted"),
+        "Wasted wakes": ("n/a", "n/a", "muted"),
+        "Productive spend": ("n/a", "n/a", "muted"),
+        "Wasted spend": ("$123,456,789,012,345,669,025,792.00", "+$123,456,789,012,345,669,025,792.00", "bad"),
+    }
+
+
+MALFORMED = {
+    "week without a name": {"weeks": [{"metrics": {}}]},
+    "week name not text": {"weeks": [{"week": 7, "metrics": {}}]},
+    "week not an object": {"weeks": [None]},
+    "week a list": {"weeks": [["2026-11-23"]]},
+    "metrics a list": {"weeks": [{"week": "2026-11-23", "metrics": []}]},
+    "metrics null": {"weeks": [{"week": "2026-11-23", "metrics": None}]},
+    "skipped negative": {"skipped": -1},
+    "skipped a fraction": {"skipped": 1.5},
+    "skipped text": {"skipped": "2"},
+    "unknown state": {"state": "fine"},
+    "unknown schema": {"schema": 2},
+    "no epoch": {"generated_at_epoch": None},
+    "a list": None,
+}
+
+
+@needs_node
+@pytest.mark.parametrize("change", MALFORMED.values(), ids=MALFORMED)
+def test_a_malformed_bundle_keeps_the_drawn_table(tmp_path: Path, change: dict | None) -> None:
+    def bad(epoch: float) -> dict:
+        body = {**served(BOTH_WEEKS, epoch + 30)["body"], **(change or {})}
+        return {"status": 200, "body": [body] if change is None else body}
+
+    out, _ = polled(tmp_path, lambda epoch: [
+        ["serve", bad(epoch)], ["poll", {"generated_at_epoch": epoch + 30}], ["poll", {}], ["poll", {}],
+    ], lambda epoch: served(NOV_16, epoch))
+    assert out["html"]["evals"] == section_inner(NOV_16)
+    assert out["evals"] == 2
 
 
 @needs_node
