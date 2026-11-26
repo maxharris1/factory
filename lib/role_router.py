@@ -323,7 +323,7 @@ def _fields(found: dict[str, tuple[str | None, str]]) -> dict:
 
 
 def _effective(harness: str, model: str | None, effort: str | None, waiter: Sequence[str] | None) -> dict:
-    routed = {"model": model, "effort": effort}
+    routed = {"model": model, "effort": effort if harness in EFFORT_FLAG_HARNESSES else None}
     if waiter is None:
         found = {field: (value, "unknown" if value is None else "routing.yml") for field, value in routed.items()}
         return {**_fields(found), "replaced": {}, "applied": True}
@@ -577,6 +577,7 @@ HARNESS_BINARIES: Mapping[str, frozenset[str]] = MappingProxyType(
 )
 
 _CODEX_EFFORT_KEY = "model_reasoning_effort"
+EFFORT_FLAG_HARNESSES: frozenset[str] = frozenset({"claude", "codex"})
 
 
 def _without_option(

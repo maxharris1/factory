@@ -149,6 +149,9 @@ def test_a_routed_gemini_effort_never_reaches_the_cli(tmp_path: Path) -> None:
     matrix = _matrix(tmp_path, text, {"gemini": GEMINI_WAITER})
     assert (_effective(matrix, "build", 3)["effort"], _effective(matrix, "build", 3)["effort_source"]) == (
         None, "CLI default")
+    unseen = _matrix(tmp_path, text, {"gemini": None})
+    assert _effective(unseen, "build", 3) == _routed("gemini-2.5-pro", None)
+    assert _effective(_matrix(tmp_path, text), "build", 3) == _routed("gemini-2.5-pro", None)
 
 
 def test_a_missing_waiter_leaves_only_what_routing_names(tmp_path: Path) -> None:
