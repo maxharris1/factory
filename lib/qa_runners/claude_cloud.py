@@ -167,7 +167,10 @@ _OUTAGE_PATTERNS = (
         r"failed to connect|could not connect|network is unreachable|"
         r"temporary failure in name resolution|name or service not known|"
         r"nodename nor servname provided|no route to host|operation timed out|connection closed by|"
-        r"kex_exchange_identification|early eof|remote end hung up unexpectedly)\b",
+        r"kex_exchange_identification|early eof|remote end hung up unexpectedly|"
+        r"empty reply from server|broken pipe|recv failure|send failure|server returned nothing|"
+        r"transfer closed with outstanding|unexpected eof|couldn't connect to server|"
+        r"failure when receiving data)\b",
         re.IGNORECASE,
     ),
 )
@@ -179,6 +182,8 @@ _ACCESS_DENIED_PATTERNS = (
         re.IGNORECASE,
     ),
 )
+_GIT_TRANSPORT_PATTERN = re.compile(r"unable to access|rpc failed|curl \d+", re.IGNORECASE)
+_GIT_HTTP_STATUS = re.compile(r"returned error:\s*(\d{3})", re.IGNORECASE)
 _ALREADY_ENDED_PATTERNS = (
     re.compile(
         r"\b(?:session(?:\s+[A-Za-z0-9._-]+)?\s+(?:has\s+)?(?:already\s+)?(?:ended|stopped|completed|archived|expired|terminated)|"
@@ -247,6 +252,17 @@ def _is_outage(text: str) -> bool:
 def _is_access_denied(text: str) -> bool:
     plain = _strip_ansi(text)
     return any(pattern.search(plain) for pattern in _ACCESS_DENIED_PATTERNS)
+
+
+def _is_git_transport_failure(text: str) -> bool:
+    plain = _strip_ansi(text)
+    if not _GIT_TRANSPORT_PATTERN.search(plain):
+        return False
+    status = _GIT_HTTP_STATUS.search(plain)
+    if status is None:
+        return True
+    code = int(status.group(1))
+    return code == 429 or code >= 500
 
 
 def _is_already_ended(text: str, *, under_launch_account: bool) -> bool:
@@ -739,7 +755,7 @@ class ClaudeCloudRunner:
         if proc.returncode != 0:
             combined = "\n".join(part for part in (proc.stderr, proc.stdout) if part)
             err = _sanitize_error_text(combined) or f"exit {proc.returncode}"
-            if not _is_access_denied(combined) and _is_outage(combined):
+            if not _is_access_denied(combined) and (_is_outage(combined) or _is_git_transport_failure(combined)):
                 raise RunnerOutage(f"git {args[0]} failed: {err}")
             raise LaunchFailed(f"git {args[0]} failed: {err}")
         return (proc.stdout or "").strip()
@@ -774,8 +790,16 @@ class ClaudeCloudRunner:
                         else:
                             shutil.rmtree(checkout)
                     checkout.parent.mkdir(parents=True, exist_ok=True)
-                    self._git_ok("init", "--quiet", str(checkout))
-                    self._git_ok("remote", "add", "origin", remote_url, cwd=checkout)
+                    staging = _assert_safe_host_path(checkout.parent / f".{checkout.name}.init", home=self._home)
+                    if staging.exists() or staging.is_symlink():
+                        if staging.is_symlink() or staging.is_file():
+                            staging.unlink()
+                        else:
+                            shutil.rmtree(staging)
+                    self._git_ok("init", "--quiet", str(staging))
+                    staging.rename(checkout)
+                self._git_ok("config", "remote.origin.url", remote_url, cwd=checkout)
+                self._git_ok("config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*", cwd=checkout)
                 self._git_ok(
                     "fetch", "--force", str(repo_cache), f"+{temp_ref}:refs/remotes/origin/{lane.base_ref}",
                     cwd=checkout,
@@ -783,7 +807,6 @@ class ClaudeCloudRunner:
             finally:
                 self._git("update-ref", "-d", temp_ref, cwd=repo_cache)
 
-        self._git_ok("remote", "set-url", "origin", remote_url, cwd=checkout)
         # Clean any local drift before checkout so advancing base_ref never collides with dirty tracked files.
         if self._git("rev-parse", "--verify", "HEAD", cwd=checkout).returncode == 0:
             self._git_ok("reset", "--hard", "--quiet", "HEAD", cwd=checkout)

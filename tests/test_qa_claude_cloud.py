@@ -29,6 +29,8 @@ from lib.qa_runners.claude_cloud import (
     WORK_ROOT_ENV,
     ClaudeCloudConfig,
     ClaudeCloudRunner,
+    RunCommand,
+    _default_run,
     parse_launch_output,
 )
 from tests.test_qa_cloud import Lab
@@ -193,6 +195,7 @@ def _runner(
     environments: dict[str, str] | None = None,
     repo_url_template: str | None = None,
     launch_timeout: int = 30,
+    run: RunCommand = _default_run,
 ) -> tuple[ClaudeCloudRunner, Path]:
     if source is None and repo_url_template is None:
         source, _ = _source_repo(tmp_path)
@@ -219,7 +222,7 @@ def _runner(
         if environments is None
         else environments,
     )
-    return ClaudeCloudRunner(cfg, home=tmp_path / "home", environ=env), state_dir
+    return ClaudeCloudRunner(cfg, home=tmp_path / "home", environ=env, run=run), state_dir
 
 
 def _lane(
@@ -586,6 +589,107 @@ def test_git_http_503_raises_runner_outage_and_triggers_coordinator_fallback(tmp
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_git_empty_reply_raises_runner_outage_and_triggers_coordinator_fallback(tmp_path: Path) -> None:
+    class _EmptyReply(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.close_connection = True
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _EmptyReply)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        runner, _ = _runner(
+            tmp_path / "runner",
+            repo_url_template=f"http://127.0.0.1:{server.server_address[1]}/{{repo}}.git",
+            environments={"full-stack": "ccpool_full_stack"},
+        )
+        with pytest.raises(RunnerOutage):
+            runner.launch(_lane(environment="full-stack"))
+
+        lab = Lab(tmp_path / "lab", lanes=1, runners=("claude-cloud", "cursor-cloud"))
+        lab.fakes["claude-cloud"] = runner
+        lab.worker = lab.new_worker()
+        lab.enqueue(ids=1)
+        lab.tick(3)
+        assert lab.header()["runner"] == "cursor-cloud"
+        assert lab.header()["result"] == "PASS"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        ("fatal: unable to access 'https://repo.invalid/o/r.git/': Empty reply from server", RunnerOutage),
+        ("fatal: unable to access 'https://repo.invalid/o/r.git/': Recv failure: Connection reset by peer", RunnerOutage),
+        ("error: RPC failed; curl 18 transfer closed with outstanding read data remaining", RunnerOutage),
+        ("fatal: unable to access 'https://repo.invalid/o/r.git/': The requested URL returned error: 429", RunnerOutage),
+        ("fatal: unable to access 'https://repo.invalid/o/r.git/': The requested URL returned error: 403", LaunchFailed),
+        ("fatal: unable to access 'https://repo.invalid/o/r.git/': The requested URL returned error: 400", LaunchFailed),
+        ("client_loop: send disconnect: Broken pipe", RunnerOutage),
+    ],
+)
+def test_git_failure_classification(tmp_path: Path, stderr: str, expected: type[Exception]) -> None:
+    def _fail(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 128, stdout="", stderr=stderr)
+
+    runner = ClaudeCloudRunner(
+        ClaudeCloudConfig(config_dir=None, work_root=tmp_path / "work", repo_cache_root=tmp_path / "repos"),
+        home=tmp_path / "home",
+        environ=GIT_ENV,
+        run=_fail,
+    )
+    with pytest.raises(expected) as raised:
+        runner._git_ok("fetch", "origin")
+    assert type(raised.value) is expected
+
+
+class _WorkerExit(BaseException):
+    pass
+
+
+def test_worker_exit_right_after_checkout_init_leaves_base_branch_usable(tmp_path: Path) -> None:
+    source, _ = _source_repo(tmp_path)
+    exited = False
+
+    def _exit_after_init(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal exited
+        result = _default_run(argv, **kwargs)
+        if "init" in argv and not exited:
+            exited = True
+            raise _WorkerExit
+        return result
+
+    runner, state_dir = _runner(tmp_path, source=source, run=_exit_after_init)
+    with pytest.raises(_WorkerExit):
+        runner.launch(_lane("lane-retried"))
+
+    restarted, _ = _runner(tmp_path, source=source, bin_dir=tmp_path / "bin")
+    restarted.launch(_lane("lane-retried"))
+    restarted.launch(_lane("lane-next"))
+
+    assert len(_calls(state_dir)) == 2
+    assert _calls(state_dir)[-1]["head"] == _git("rev-parse", "main", cwd=source)
+
+
+def test_checkout_without_origin_remote_heals_on_launch(tmp_path: Path) -> None:
+    source, _ = _source_repo(tmp_path)
+    runner, state_dir = _runner(tmp_path, source=source)
+    checkout = runner.checkout_path_for("acme/widgets", "main")
+    checkout.parent.mkdir(parents=True)
+    _git("init", "--quiet", str(checkout))
+
+    runner.launch(_lane("lane-first"))
+    runner.launch(_lane("lane-second"))
+
+    assert len(_calls(state_dir)) == 2
+    assert _calls(state_dir)[-1]["head"] == _git("rev-parse", "main", cwd=source)
 
 
 def test_restart_adopts_session_when_only_session_marker_survived_crash(tmp_path: Path) -> None:
