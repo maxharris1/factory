@@ -34,9 +34,11 @@ from tests.test_github_actions import (
     PULL,
     STATUS,
     CHECKS,
+    WORKFLOW_RUNS,
     adapter,
     draft_pull,
     pr,
+    pr_workflow_runs,
     served,
 )
 from tests.test_ship_redrive import (
@@ -287,6 +289,7 @@ def test_a_failing_rerun_supersedes_an_earlier_pass() -> None:
         (1, "test", "success", "2026-11-12T19:00:00Z"),
     ))
     gh.route(STATUS, served("status-empty.json"))
+    gh.route(WORKFLOW_RUNS, pr_workflow_runs(11))
     result = actions.ci_status("owner/repo", HEAD)
     assert result.status == "failure" and "test" in (result.log or "")
 
@@ -298,6 +301,7 @@ def test_distinct_checks_with_one_failure_still_fail() -> None:
         (2, "test", "success", "2026-11-12T19:30:00Z"),
     ))
     gh.route(STATUS, served("status-empty.json"))
+    gh.route(WORKFLOW_RUNS, pr_workflow_runs(11))
     assert actions.ci_status("owner/repo", HEAD).status == "failure"
 
 
@@ -522,6 +526,7 @@ def test_two_workflows_with_one_job_name_keep_the_failure() -> None:
         (2, "test", "success", "2026-11-12T19:30:00Z", 22),  # workflow B, later
     ))
     gh.route(STATUS, served("status-empty.json"))
+    gh.route(WORKFLOW_RUNS, pr_workflow_runs(11, 22))
     result = actions.ci_status("owner/repo", HEAD)
     assert result.status == "failure" and "test" in (result.log or "")
 

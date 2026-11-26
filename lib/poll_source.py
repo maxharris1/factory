@@ -63,6 +63,7 @@ from lib.feeder import FEEDER_TABLE
 from lib.factory_md import (
     FactoryConfig,
     FactoryContext,
+    no_ci_base,
     parse_factory_context,
     parse_factory_md,
     trust_front_matter_changed,
@@ -721,6 +722,7 @@ class LastRead(NamedTuple):
     ci: CIResult
     hold_inputs: dict[str, Any]
     reviews: tuple[PullReview, ...] = ()
+    required_checks: tuple[str, ...] = ()
 
 
 def reusable(last: LastRead | None, probed: str | None, now: float) -> bool:
@@ -2124,7 +2126,11 @@ class LivePollSource:
             return cached
         read_at = self.clock()
         last = None if fresh or uncached else self._last_reads.get((project.repo.lower(), number))
-        if not reusable(last, probed, read_at) or bool(last.hold_inputs) != factory.configured_hold_applies:
+        if (
+            not reusable(last, probed, read_at)
+            or bool(last.hold_inputs) != factory.configured_hold_applies
+            or last.required_checks != _required_checks_for(factory, last.pull)
+        ):
             last = None
         if last is None:
             # gh's --cache could serve a body older than the probe, which
@@ -2158,11 +2164,19 @@ class LivePollSource:
                     else self._comments_for(project.repo, number, listed)
                 )
             hold_inputs = self._hold_inputs(project.repo, number, factory, pull)
-            ci = self.github.ci_status(project.repo, head)
+            required_checks = _required_checks_for(factory, pull)
+            ci = self.github.ci_status(project.repo, head, required_checks=required_checks)
             reviews = self._reviews(project.repo, number, factory)
             if not fresh and None not in hold_inputs.values():
                 self._last_reads[(project.repo.lower(), number)] = LastRead(
-                    probed, read_at, pull, comments, ci, hold_inputs, reviews
+                    probed,
+                    read_at,
+                    pull,
+                    comments,
+                    ci,
+                    hold_inputs,
+                    reviews,
+                    required_checks,
                 )
         brief = canonical_brief(comments, self._trusted)
         source_issue = github_source(pull, project.repo, number)
@@ -2519,7 +2533,9 @@ class LivePollSource:
                 self._linear_merged(project, identifier, allow_merged)
             head = _pr_head(pull, project.repo, pr_number)
             pr_title = _open_title(pull)
-            raw = self.github.ci_status(project.repo, head)
+            raw = self.github.ci_status(
+                project.repo, head, required_checks=_required_checks_for(factory, pull)
+            )
             ci[head] = self._gated_ci(
                 project.repo, identifier, pr_number, factory, pull, raw, {}, fresh=fresh
             )
@@ -3574,6 +3590,14 @@ def _pull_facts(pull: Mapping[str, Any], *, fresh: bool) -> dict[str, Any]:
         "pr_base": _pr_base(pull),
         "pr_commits": pull["commits"] if type(pull.get("commits")) is int else None,
     }
+
+
+def _required_checks_for(
+    factory: FactoryConfig, pull: Mapping[str, Any]
+) -> tuple[str, ...]:
+    if no_ci_base(factory, _pr_base(pull)) is not None:
+        return ()
+    return factory.ci_required_checks
 
 
 def _pr_base(pull: Mapping[str, Any]) -> str | None:
