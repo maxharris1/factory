@@ -2434,7 +2434,8 @@ UNKNOWN = Exposure("unknown", "unknown", "unknown", None, "unknown", "unknown", 
 
 def _shown(found: Exposure) -> list[tuple[str, str]]:
     paths = "unknown" if found.skill_paths is None else ", ".join(found.skill_paths)
-    return [("model", found.model), ("CLI version", found.cli_version), ("brief sha256", found.brief_sha256),
+    return [("model", found.model), ("effort", found.effort), ("harness", found.harness),
+            ("CLI version", found.cli_version), ("brief sha256", found.brief_sha256),
             ("skill paths", paths), ("host", found.host), ("factory revision", found.factory_revision)]
 
 
@@ -2465,18 +2466,18 @@ def _exposure_facts(markup: str) -> list[tuple[str, str]]:
 
 
 @pytest.mark.parametrize("found", [INDEPENDENT, REAL, UNKNOWN], ids=["independent", "real", "unknown"])
-def test_a_running_job_s_ticket_page_shows_its_six_exposure_fields(tmp_path: Path, found: Exposure) -> None:
+def test_a_running_job_s_ticket_page_shows_its_eight_exposure_fields(tmp_path: Path, found: Exposure) -> None:
     from lib.dashboard import write_snapshot_pages
 
     snapshot = _exposed(tmp_path, found)
     (row,) = snapshot["running"]
-    assert set(row["exposure"]) == SIX
+    assert set(row["exposure"]) == EIGHT
     status = write_snapshot_pages(tmp_path / "out", snapshot)[0]
     assert json.loads(status.read_text(encoding="utf-8"))["running"][0]["exposure"] == row["exposure"]
     assert _exposure_facts(_ticket_server(snapshot, EXPOSURE_ADDRESS)) == _shown(found)
 
 
-SIX = {"model", "cli_version", "brief_sha256", "skill_paths", "host", "factory_revision"}
+EIGHT = {"model", "effort", "harness", "cli_version", "brief_sha256", "skill_paths", "host", "factory_revision"}
 
 
 def _run_log_exposures(markup: str) -> dict[str, list[tuple[str, list[tuple[str, str]]]]]:
@@ -2490,6 +2491,25 @@ def _run_log_exposures(markup: str) -> dict[str, list[tuple[str, list[tuple[str,
                                       re.findall(r'<tr><th scope="row">([^<]*)</th><td>([^<]*)</td></tr>', rows)])
             for caption, rows in re.findall(
                 r'<table class="exp"><caption>([^<]*)</caption><tbody>(.*?)</tbody></table>', item, re.S)
+        )
+    return found
+
+
+def _run_log_models(markup: str) -> dict[str, list[tuple[str, str, str]]]:
+    log = re.search(r'<ol class="runlog">(.*?)</ol>', markup, re.S)
+    assert log, "no run log"
+    found: dict[str, list[tuple[str, str, str]]] = {}
+    for item in re.findall(r"<li>(.*?)</li>", log.group(1), re.S):
+        state = re.search(r'data-state="([^"]*)"', item).group(1)
+        jobs = re.search(r'<div class="exp-jobs">(.*?)</div>', item, re.S)
+        found.setdefault(state, [])
+        if not jobs:
+            continue
+        assert item.index("</button>") < jobs.start() < item.index('<details class="exp-more"'), state
+        found[state].extend(
+            (html.unescape(job), html.unescape(action), html.unescape(model)) for job, action, model in re.findall(
+                r'<span class="exp-job"><span class="job">([^<]*)</span><span class="act">([^<]*)</span>'
+                r'<span class="model">([^<]*)</span></span>', jobs.group(1))
         )
     return found
 
@@ -2530,26 +2550,34 @@ def _ticket_jobs(tmp_path: Path, written: dict[str, Exposure | None], *, table: 
 
 def test_the_run_log_shows_each_job_s_exposure(tmp_path: Path) -> None:
     snapshot, ids = _ticket_jobs(tmp_path, {"plan": REAL, "build": INDEPENDENT})
-    shown = _run_log_exposures(_ticket_server(snapshot, EXPOSURE_ADDRESS))
+    markup = _ticket_server(snapshot, EXPOSURE_ADDRESS)
+    shown = _run_log_exposures(markup)
     assert shown["planning"] == [(f"{ids['plan'][:8]} · plan", _shown(REAL))]
     assert shown["building"] == [(f"{ids['build'][:8]} · build", _shown(INDEPENDENT))]
     assert all(not jobs for state, jobs in shown.items() if state not in ("planning", "building"))
+    models = _run_log_models(markup)
+    assert models["planning"] == [(ids["plan"][:8], "plan", "gpt-5.5-codex · high")]
+    assert models["building"] == [(ids["build"][:8], "build", "independent-model · high")]
+    assert all(not jobs for state, jobs in models.items() if state not in ("planning", "building"))
     jobs = _record_jobs(snapshot)
     assert set(jobs) == {ids["plan"][:8], ids["build"][:8]}
-    assert all(set(job["exposure"]) == SIX for job in jobs.values())
+    assert all(set(job["exposure"]) == EIGHT for job in jobs.values())
     assert jobs[ids["plan"][:8]]["exposure"]["brief_sha256"] == [REAL.brief_sha256[i:i + 16] for i in range(0, 64, 16)]
 
 
 @pytest.mark.parametrize("table", [True, False], ids=["no-row", "no-table"])
-def test_a_job_with_no_exposure_row_shows_six_unknowns(tmp_path: Path, table: bool) -> None:
+def test_a_job_with_no_exposure_row_shows_eight_unknowns(tmp_path: Path, table: bool) -> None:
     snapshot, ids = _ticket_jobs(tmp_path, {"plan": None, "build": None}, table=table)
-    assert set(snapshot["running"][0]["exposure"]) == SIX
+    assert set(snapshot["running"][0]["exposure"]) == EIGHT
     markup = _ticket_server(snapshot, EXPOSURE_ADDRESS)
     assert _exposure_facts(markup) == _shown(UNKNOWN)
     shown = _run_log_exposures(markup)
     assert shown["planning"] == [(f"{ids['plan'][:8]} · plan", _shown(UNKNOWN))]
     assert shown["building"] == [(f"{ids['build'][:8]} · build", _shown(UNKNOWN))]
-    assert all(set(job["exposure"]) == SIX and set(job["exposure"].values()) == {"unknown"}
+    models = _run_log_models(markup)
+    assert models["planning"] == [(ids["plan"][:8], "plan", "unknown")]
+    assert models["building"] == [(ids["build"][:8], "build", "unknown")]
+    assert all(set(job["exposure"]) == EIGHT and set(job["exposure"].values()) == {"unknown"}
                for job in _record_jobs(snapshot).values())
 
 
@@ -2562,6 +2590,8 @@ def test_exposure_stays_on_the_run_log_after_the_job_finishes(tmp_path: Path) ->
     assert [row["job"] for row in snapshot["running"]] == [build]
     before = _run_log_exposures(_ticket_server(snapshot, EXPOSURE_ADDRESS))["building"]
     assert before == [(f"{build} · build", _shown(INDEPENDENT))]
+    line = [(build, "build", "independent-model · high")]
+    assert _run_log_models(_ticket_server(snapshot, EXPOSURE_ADDRESS))["building"] == line
     recorded = _record_jobs(snapshot)[build]["exposure"]
 
     SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: NOW + 1).finish(
@@ -2570,6 +2600,7 @@ def test_exposure_stays_on_the_run_log_after_the_job_finishes(tmp_path: Path) ->
 
     assert after["running"] == []
     assert _run_log_exposures(_ticket_server(after, EXPOSURE_ADDRESS))["building"] == before
+    assert _run_log_models(_ticket_server(after, EXPOSURE_ADDRESS))["building"] == line
     assert _record_jobs(after)[build]["exposure"] == recorded
 
 
@@ -2592,6 +2623,11 @@ def test_the_script_draws_the_server_s_run_log_exposure(tmp_path: Path, written:
     shown = _run_log_exposures(views["script"])
     assert shown["planning"] == [(f"{ids['plan'][:8]} · plan", _shown(written["plan"] or UNKNOWN))]
     assert shown["building"] == [(f"{ids['build'][:8]} · build", _shown(written["build"] or UNKNOWN))]
+    models = _run_log_models(views["script"])
+    assert models["planning"] == [(ids["plan"][:8], "plan", "gpt-5.5-codex · high" if written["plan"] else "unknown")]
+    assert models["building"] == [
+        (ids["build"][:8], "build", "independent-model · high" if written["build"] else "unknown")
+    ]
 
 
 def _flow_jobs(result: dict) -> dict[str, str]:
@@ -2661,7 +2697,7 @@ def test_a_qa_job_keeps_its_exposure_on_the_run_log_after_it_finishes(tmp_path: 
         assert [row["job"] for row in snapshot["running"]] == ([job_id[:8]] if phase == "running" else [])
         assert _run_log_exposures(_ticket_server(snapshot, EXPOSURE_ADDRESS))["ship"] == [caption], phase
         assert set(_record_jobs(snapshot)) == {job_id[:8]}, phase
-        assert set(_record_jobs(snapshot)[job_id[:8]]["exposure"]) == SIX
+        assert set(_record_jobs(snapshot)[job_id[:8]]["exposure"]) == EIGHT
 
 
 @needs_node
@@ -2700,7 +2736,7 @@ def test_the_run_log_and_each_visit_s_job_metadata_render_collapsed(tmp_path: Pa
         assert item.startswith("<button"), item
         visit = re.search(r'data-visit="(\d+)"', item).group(1)
         assert '<span class="name">' in item.split("</button>")[0], item
-        meta = re.search(r'</button><details class="exp-more" data-key="runlog-jobs:([^"]*)"><summary>([^<]*)</summary>'
+        meta = re.search(r'</button><div class="exp-jobs">.*?</div><details class="exp-more" data-key="runlog-jobs:([^"]*)"><summary>([^<]*)</summary>'
                          r'(<table class="exp">.*</table>)</details>$', item, re.S)
         assert ('<table class="exp">' in item) == bool(meta), item
         if meta:
