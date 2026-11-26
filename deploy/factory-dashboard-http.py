@@ -17,10 +17,11 @@ empty. This server:
   resolved through symlinks before those checks);
 - answers GET and HEAD for the snapshot, and only for /, /status.json, the
   pages (/index.html, /activity.html, /efficiency.html, /evals.html, /job.html,
-  /health.html, /ticket.html, /settings.html) and /tickets.json (the ticket
-  records), the files `orch dashboard push` writes. Every other path, including
-  dot-files such as the push's temp files and anything with `..` or an
-  encoded slash, is 404, and no directory is ever listed;
+  /health.html, /ticket.html, /settings.html), /tickets.json (the ticket
+  records) and /evals.json (the weekly eval bundle), the files `orch dashboard
+  push` writes. Every other path, including the weekly-*.json reports, dot-files
+  such as the push's temp files and anything with `..` or an encoded slash, is
+  404, and no directory is ever listed;
 - also answers GET and HEAD for a QA run's evidence (qa/<run_id>/ under the
   directory, as qa_evidence.collect() lays out lanes): /qa/runs/<run_id>
   serves that run's index.html, and /qa/runs/<run_id>/lane-<n>/<path>
@@ -140,11 +141,14 @@ ROUTES = {
     "/": "index.html",
     "/status.json": "status.json",
     "/tickets.json": "tickets.json",
+    "/evals.json": "evals.json",
     **{f"/{name}": name for name in PAGES},
 }
+JSON_READS = ("/status.json", "/tickets.json", "/evals.json")
 CONTENT_TYPES = {
     "status.json": "application/json",
     "tickets.json": "application/json",
+    "evals.json": "application/json",
     **{name: "text/html; charset=utf-8" for name in PAGES},
 }
 SECURITY_HEADERS = {
@@ -1648,7 +1652,7 @@ class SnapshotHandler(BaseHTTPRequestHandler):
             and actions.config.require_auth_reads
             and actions.current(self._cookie("factory_session")) is None
         ):
-            if path in ("/status.json", "/tickets.json") or path.startswith(QA_RUNS) or path in STATIC_ROUTES:
+            if path in JSON_READS or path.startswith(QA_RUNS) or path in STATIC_ROUTES:
                 self._json(401, {"error": "no-session"})
                 return
             if path in ROUTES:

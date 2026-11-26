@@ -11,11 +11,11 @@ GOLDEN = {
     "settings.CSS": "6d28070b6f594121087183618668c453fadcae7644fa256dd493bce321f334c9",
     "settings.SCRIPT": "d46f60efba23c4a043d1eadd1810faf435e72c8beeecbdc519f3ab9d77c7a3dc",
     "seeded/main": "5fcd6365b9b111a4793a9885a6a5590189bbd2bc081bcfb209426850758f87d3",
-    "seeded/chrome": "2eaa09bc5a0e8dca86e8fca5becc26fb962999496985824555fdeb173236b050",
+    "seeded/chrome": "c4f48dbfb205e2d0320599d921b528d0fd2bd45478ff4010b9a9233c344c5b12",
     "hostile/main": "5fcd6365b9b111a4793a9885a6a5590189bbd2bc081bcfb209426850758f87d3",
-    "hostile/chrome": "5e76145cfa5575068199a74c288299e13a4618403bbcaf59258d74dc3cd51cb9",
+    "hostile/chrome": "2d0ebd9ffc8c56e23d24c8e5e433bce31914e65fc4966a802f583431ec409933",
     "empty/main": "5fcd6365b9b111a4793a9885a6a5590189bbd2bc081bcfb209426850758f87d3",
-    "empty/chrome": "f8e2b2ab3db9a261f6abf827dfb52aa17afa9754c2db88748cde22b26c5adac5",
+    "empty/chrome": "57e64f505d92c35ef075d2f9d788f9c6e1d687f1f3945295fe9e0c763785f1d9",
 }
 
 
