@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.server
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -632,6 +633,16 @@ def test_git_empty_reply_raises_runner_outage_and_triggers_coordinator_fallback(
         ("fatal: unable to access 'https://repo.invalid/o/r.git/': The requested URL returned error: 429", RunnerOutage),
         ("fatal: unable to access 'https://repo.invalid/o/r.git/': The requested URL returned error: 403", LaunchFailed),
         ("fatal: unable to access 'https://repo.invalid/o/r.git/': The requested URL returned error: 400", LaunchFailed),
+        ("fatal: unable to access 'https://repo.invalid/o/r.git/': The requested URL returned error: 408", RunnerOutage),
+        ("fatal: unable to access 'https://qa-review.invalid/o/r.git/': CONNECT tunnel failed, response 403", LaunchFailed),
+        ("fatal: unable to access 'https://qa-review.invalid/o/r.git/': CONNECT tunnel failed, response 407", LaunchFailed),
+        ("fatal: unable to access 'https://qa-review.invalid/o/r.git/': CONNECT tunnel failed, response 429", RunnerOutage),
+        ("fatal: unable to access 'https://qa-review.invalid/o/r.git/': CONNECT tunnel failed, response 502", RunnerOutage),
+        (
+            "fatal: unable to access 'https://qa-review.invalid/o/r.git/': Received HTTP code 403 from proxy after CONNECT",
+            LaunchFailed,
+        ),
+        ("error: RPC failed; HTTP 403 curl 22 The requested URL returned error: 403", LaunchFailed),
         ("client_loop: send disconnect: Broken pipe", RunnerOutage),
     ],
 )
@@ -1095,6 +1106,55 @@ def test_git_http_access_denial_is_launch_failed_without_runner_backoff(tmp_path
     finally:
         server.shutdown()
         server.server_close()
+
+
+@pytest.mark.parametrize("status", [403, 407])
+def test_git_proxy_connect_denial_is_launch_failed_without_runner_backoff(tmp_path: Path, status: int) -> None:
+    listener = socket.create_server(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    requests: list[bytes] = []
+    stopping = threading.Event()
+
+    def _serve() -> None:
+        while not stopping.is_set():
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            with conn:
+                data = b""
+                while b"\r\n\r\n" not in data:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                requests.append(data)
+                conn.sendall(f"HTTP/1.1 {status} Denied\r\nContent-Length: 0\r\n\r\n".encode())
+
+    thread = threading.Thread(target=_serve, daemon=True)
+    thread.start()
+    try:
+        runner, _ = _runner(
+            tmp_path / "runner",
+            repo_url_template="https://qa-review.invalid/{repo}.git",
+            environments={"full-stack": "ccpool_full_stack"},
+            extra_env={"https_proxy": f"http://127.0.0.1:{port}", "GIT_TERMINAL_PROMPT": "0"},
+        )
+        with pytest.raises(LaunchFailed):
+            runner.launch(_lane(environment="full-stack"))
+        assert any(r.startswith(b"CONNECT qa-review.invalid:443 ") for r in requests), "git tunnelled through the proxy"
+
+        lab = Lab(tmp_path / "lab", lanes=1, runners=("claude-cloud",))
+        lab.fakes["claude-cloud"] = runner
+        lab.worker = lab.new_worker()
+        lab.enqueue(ids=1)
+        lab.tick(3)
+        assert lab.run.rows("SELECT runner FROM qa_runner_backoff") == []
+        assert [row[3:5] for row in lab.lanes()] == [("gap", "launch-failed:LaunchFailed")]
+    finally:
+        stopping.set()
+        listener.close()
+        thread.join(timeout=5)
 
 
 def test_git_ssh_permission_denied_is_launch_failed(tmp_path: Path) -> None:

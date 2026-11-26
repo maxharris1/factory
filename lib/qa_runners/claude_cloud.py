@@ -174,16 +174,14 @@ _OUTAGE_PATTERNS = (
         re.IGNORECASE,
     ),
 )
-_ACCESS_DENIED_PATTERNS = (
-    re.compile(r"returned error:\s*(?:401|403|404|407)\b", re.IGNORECASE),
-    re.compile(
-        r"\b(?:permission denied|authentication failed|repository not found|access denied|"
-        r"could not read (?:username|password)|terminal prompts disabled|host key verification failed)\b",
-        re.IGNORECASE,
-    ),
+_ACCESS_DENIED_PATTERN = re.compile(
+    r"\b(?:permission denied|authentication failed|repository not found|access denied|"
+    r"could not read (?:username|password)|terminal prompts disabled|host key verification failed)\b",
+    re.IGNORECASE,
 )
 _GIT_TRANSPORT_PATTERN = re.compile(r"unable to access|rpc failed|curl \d+", re.IGNORECASE)
-_GIT_HTTP_STATUS = re.compile(r"returned error:\s*(\d{3})", re.IGNORECASE)
+_HTTP_STATUS = re.compile(r"(?:returned error:|\bresponse|\bHTTP code|\bHTTP(?:/[\d.]+)?)\s*(\d{3})\b", re.IGNORECASE)
+_RETRYABLE_CLIENT_STATUSES = frozenset({408, 429})
 _ALREADY_ENDED_PATTERNS = (
     re.compile(
         r"\b(?:session(?:\s+[A-Za-z0-9._-]+)?\s+(?:has\s+)?(?:already\s+)?(?:ended|stopped|completed|archived|expired|terminated)|"
@@ -249,20 +247,20 @@ def _is_outage(text: str) -> bool:
     return any(pattern.search(plain) for pattern in _OUTAGE_PATTERNS)
 
 
+def _is_client_error(status: int) -> bool:
+    return 400 <= status < 500 and status not in _RETRYABLE_CLIENT_STATUSES
+
+
 def _is_access_denied(text: str) -> bool:
     plain = _strip_ansi(text)
-    return any(pattern.search(plain) for pattern in _ACCESS_DENIED_PATTERNS)
+    if _ACCESS_DENIED_PATTERN.search(plain):
+        return True
+    return any(_is_client_error(int(code)) for code in _HTTP_STATUS.findall(plain))
 
 
 def _is_git_transport_failure(text: str) -> bool:
     plain = _strip_ansi(text)
-    if not _GIT_TRANSPORT_PATTERN.search(plain):
-        return False
-    status = _GIT_HTTP_STATUS.search(plain)
-    if status is None:
-        return True
-    code = int(status.group(1))
-    return code == 429 or code >= 500
+    return _GIT_TRANSPORT_PATTERN.search(plain) is not None and not _is_access_denied(plain)
 
 
 def _is_already_ended(text: str, *, under_launch_account: bool) -> bool:
