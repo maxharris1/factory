@@ -1784,7 +1784,10 @@ def test_tickets_json_carries_a_finished_job_s_exposure(tmp_path: Path) -> None:
         "action": "build",
         "recipient": "claude",
         "exposure": {
+            "round": "unknown",
             "model": "opus",
+            "effort": "high",
+            "harness": "claude",
             "cli_version": "claude 2.1.0",
             "brief_sha256": ["c" * 16] * 4,
             "skill_paths": ["/skills/a/SKILL.md"],
