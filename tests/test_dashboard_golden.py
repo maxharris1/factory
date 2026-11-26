@@ -18,10 +18,19 @@ from tests.test_dashboard_ticket_detail import SHIPPED, _with_shipped
 
 GOLDEN = Path(__file__).parent / "golden" / "dashboard"
 SOURCE = "a2bb7247d6e85731543c23ceabbd0f72ee98e0fa"
+EXTENDED = "e0183d64d82d37d7a87ac7b1b6754224f8d19db0"
 RUNNING = "maxharris1/cleffy#13"
 STOPPED = "aut0-code/aut0#AUT-7"
 ASKING = "maxharris1/tracy-harris-coaching#5"
+QUEUED = "maxharris1/cleffy#12"
 QUESTION = {"text": "Sign in with OAuth or an API key?", "options": ["OAuth", "Key"]}
+VISUAL_QA = {
+    "state": "awaiting-ok",
+    "wait": {"why": "visual-qa-review", "comment_id": "55", "detail": None},
+    "visual_qa": {"run": ["0123456789abcdef", "0123456789abcdef"], "media": [
+        {"lane": 1, "path_parts": ["qa-1/01-landing.png"], "scenario": "landing", "result": "verified"},
+        {"lane": 1, "path_parts": ["qa-1/walkthrough.webm"], "kind": "video", "result": "failed"}]},
+}
 VARIANTS = {"snapshot": _snapshot, "held_more_than_running": _held_more_than_running}
 
 SNAPSHOT_PANELS = (
@@ -33,30 +42,42 @@ SNAPSHOT_PANELS = (
 )
 
 
-def on(address: str, draw: Callable[[dict], str]) -> Callable[[dict], str]:
-    return lambda c: draw(c[address])
+def on(kind: str, draw: Callable[[dict], str]) -> Callable[[dict], str]:
+    return lambda c: draw(c[kind])
+
+
+KINDS = {"running": RUNNING, "shipped": SHIPPED, "stopped": STOPPED, "queued": QUEUED, "idle": ASKING}
+SECTIONS = {"_runlog": lambda t: td._runlog(t["key"], t["model"]),
+            **{f"_{name}": draw for name, draw in td.SECTIONS.items()}}
+
+
+def renders(kind: str, section: str) -> bool:
+    spec = td.TICKET_KINDS[kind]
+    return section == "_runlog" or section[1:] in (*spec.get("lead", ()), *spec["sections"])
+
+
+def section_panels(section: str, draw: Callable[[dict], str]) -> dict[str, Callable[[dict], str]]:
+    first, *rest = (kind for kind in KINDS if renders(kind, section))
+    return {section: on(first, draw), **{f"{section}.{kind}": on(kind, draw) for kind in rest}}
 
 
 PANELS: dict[str, Callable[[dict], str]] = {
     **{panel.__name__: lambda c, panel=panel: panel(c["snapshot"]) for panel in SNAPSHOT_PANELS},
-    "_runlog": on(RUNNING, lambda t: td._runlog(t["key"], t["model"])),
-    "_journey": on(RUNNING, lambda t: td._journey(t["row"], t["model"])),
-    "_next": on(RUNNING, lambda t: td._next(t["model"])),
-    "_liverun": on(RUNNING, lambda t: td._liverun(t["row"], t["started"])),
-    "_chart": on(RUNNING, lambda t: td._chart(t["key"], t["model"], t["chart"])),
-    "_summary": on(SHIPPED, lambda t: td._summary(t["model"])),
-    "_ended": on(SHIPPED, lambda t: td._ended(t["model"])),
-    "_why": on(STOPPED, lambda t: td._why(t["model"])),
-    "_exposure": on(RUNNING, lambda t: td._exposure(t["row"])),
-    "ticket_cockpit_html": lambda c: cockpit.ticket_cockpit_html(c[ASKING]),
+    **{name: panel for section, draw in SECTIONS.items() for name, panel in section_panels(section, draw).items()},
+    "ticket_cockpit_html": lambda c: cockpit.ticket_cockpit_html({**c["asking"], "questions": [QUESTION]}),
+    "ticket_cockpit_html.visual-qa": lambda c: cockpit.ticket_cockpit_html({**c["asking"], **VISUAL_QA}),
 }
 
 README = f"""# Dashboard leaf panel goldens
 
-Server-rendered HTML of every leaf panel, one block per fixture variant, rendered from main {SOURCE}.
-The ticket panels render running `{RUNNING}`, stopped `{STOPPED}` (`_why`) and shipped `{SHIPPED}`
-(`_summary`, `_ended`, added by `_with_shipped`). `ticket_cockpit_html` renders waiting-max `{ASKING}`
-with one open question added.
+Server-rendered HTML of every leaf panel, one block per fixture variant. The 35 unsuffixed goldens were rendered
+from main {SOURCE}; the `.<kind>` and `.visual-qa` goldens from main {EXTENDED}, whose dashboard code is the same.
+
+Each ticket page section is pinned for every ticket kind whose page shows it: running `{RUNNING}`, shipped
+`{SHIPPED}` (added by `_with_shipped`), stopped `{STOPPED}`, queued `{QUEUED}` and idle `{ASKING}`.
+`<section>.html` holds the first of those kinds that shows the section and `<section>.<kind>.html` each other one.
+`ticket_cockpit_html` renders waiting-max `{ASKING}` with one open question added, and
+`ticket_cockpit_html.visual-qa` the same ticket waiting on a visual QA review.
 
 Regenerate:
 
@@ -64,27 +85,26 @@ Regenerate:
 """
 
 
-def ticket(snapshot: dict, address: str) -> dict:
-    found = td.resolve_ticket(snapshot, address, snapshot.get(RECORDS))
-    assert found and found["address"] == address, address
+def ticket(snapshot: dict, kind: str) -> dict:
+    found = td.resolve_ticket(snapshot, KINDS[kind], snapshot.get(RECORDS))
+    assert found and (found["address"], found["kind"]) == (KINDS[kind], kind), kind
     chart = snapshot.get("statechart")
     return {
         "row": found["row"],
         "ticket": found.get("ticket"),
         "chart": chart,
         "model": {**td._detail_model(found["row"], chart), "now": snapshot.get("generated_at_epoch")},
-        "started": td.TICKET_KINDS[found["kind"]]["started"],
+        "started": td.TICKET_KINDS[kind]["started"],
         "key": found["address"],
     }
 
 
 def context(snapshot: dict) -> dict:
+    shipped = _with_shipped(copy.deepcopy(snapshot))
     return {
         "snapshot": snapshot,
-        RUNNING: ticket(snapshot, RUNNING),
-        STOPPED: ticket(snapshot, STOPPED),
-        SHIPPED: ticket(_with_shipped(copy.deepcopy(snapshot)), SHIPPED),
-        ASKING: {**next(row for row in snapshot["tickets"] if ticket_address(row) == ASKING), "questions": [QUESTION]},
+        **{kind: ticket(shipped if kind == "shipped" else snapshot, kind) for kind in KINDS},
+        "asking": next(row for row in snapshot["tickets"] if ticket_address(row) == ASKING),
     }
 
 
@@ -111,7 +131,7 @@ def rendered(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
 
 
 def test_the_golden_files_are_exactly_the_leaf_panels(rendered: dict[str, str]) -> None:
-    assert len(PANELS) == 35
+    assert len(PANELS) == 51
     assert {path.stem for path in GOLDEN.glob("*.html")} == set(PANELS)
 
 
