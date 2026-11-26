@@ -80,7 +80,7 @@ def test_shipped_machines_yml_runs_orch_on_pc_with_box_remote_and_mac_reported()
     )
     assert pc.login_for("codex") == "codex-bot"
 
-    assert (box.name, box.enabled, box.slot_max, box.ssh_user) == ("box", True, 6, "box")
+    assert (box.name, box.enabled, box.slot_max, box.ssh_user) == ("box", True, 6, None)
     assert box.tailscale_name == "grokbot-factory-box.tail68624b.ts.net"
     assert dict(box.harnesses) == bots
     assert (box.workdir_root, box.ssh_alias, box.factory_root) == (
@@ -88,7 +88,7 @@ def test_shipped_machines_yml_runs_orch_on_pc_with_box_remote_and_mac_reported()
         "box-{bot}",
         "/home/box/factory",
     )
-    assert {harness: box.login_for(harness) for harness in bots} == dict.fromkeys(bots, "box")
+    assert {harness: box.login_for(harness) for harness in bots} == bots
     assert {harness: box.ssh_alias_for(harness) for harness in bots} == {
         "claude": "box-claude-bot",
         "codex": "box-codex-bot",
