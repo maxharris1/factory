@@ -19,6 +19,7 @@ AUTH_OVERRIDES = (
     "GOOGLE_GEMINI_BASE_URL",
     "GEMINI_CLI_CUSTOM_HEADERS",
 )
+UNSET = (*AUTH_OVERRIDES, "GEMINI_CLI_HOME")
 
 
 class GeminiDriver:
@@ -83,8 +84,10 @@ class GeminiDriver:
         summary._gemini(kind, event, now)
 
     def probe_usage(self, payload: object, now: float) -> list[Any]:
-        # agy has no non-interactive quota command (#1412).
-        return []
+        """The readings in `agy -p /usage --output-format json`'s reply."""
+        from lib import usage_readings
+
+        return usage_readings.parse_agy_usage(payload, now)
 
     def handoff_marker(self, event: Mapping[str, Any]) -> str | None:
         if event.get("event") != "result":

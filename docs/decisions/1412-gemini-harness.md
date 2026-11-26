@@ -9,7 +9,10 @@
 
 - `orch accounts doctor` probes a Gemini account with `env NO_BROWSER=true NO_COLOR=1 gemini </dev/null`, run as the account's folder. With a cached Google sign-in the CLI loads it and then exits 42 because stdin is empty, so no prompt reaches a model. With no sign-in it exits 41 before any input is read. `tests/fixtures/gemini_status` has each reply.
 - The sign-in command is `NO_BROWSER=true gemini` with the folder set and the overrides unset. It is interactive: choose Sign in with Google, open the link, paste the code back, then `/quit`. `docs/ACCOUNTS.md` gives the full command.
-- Quota stays `not tracked`: the CLI has no non-interactive quota command.
+- Quota stayed `not tracked`: the upstream `gemini` CLI had no non-interactive quota command.
+  Superseded on 2026-11-26: the Antigravity `agy` CLI (1.5.18) answers `agy -p /usage --output-format json`
+  with `num_turns: 0`, no model turn, so `orch job run` reads Gemini quota at each gemini job's start
+  (`lib/usage_probe.py`, the README's Dashboard section).
 
 ## Live config, not applied
 

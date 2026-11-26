@@ -62,7 +62,7 @@ def test_gemini_is_first_class_in_schema_wait_queue_and_registry() -> None:
     assert driver.account_isolation() is None
     assert "gemini" in DEVICE_LOGIN_ONLY
     assert driver.probe_usage({}, NOW) == []
-    assert usage_readings.NOT_TRACKED["gemini"]
+    assert "gemini" not in usage_readings.NOT_TRACKED
 
 
 def test_a_gemini_account_cannot_run_from_a_folder_of_its_own() -> None:
@@ -256,7 +256,7 @@ skills: []
     assert "gemini" in pstack_models.load_map()
 
 
-def test_gemini_not_tracked_reason_surfaces_in_efficiency_and_settings(tmp_path: Path) -> None:
+def test_gemini_is_tracked_in_efficiency_and_settings(tmp_path: Path) -> None:
     import sqlite3
     from lib import dashboard_accounts, dashboard_usage
     from lib.dashboard_pages import efficiency, settings
@@ -270,18 +270,18 @@ def test_gemini_not_tracked_reason_surfaces_in_efficiency_and_settings(tmp_path:
         db.execute(usage_readings.DDL)
         usage = dashboard_usage.read_usage(db, NOW, config)
         entry = next(e for e in usage["accounts"] if e["account"] == "gemini-ultra")
-        assert entry["state"] == "not tracked"
-        assert entry["not_tracked"] == usage_readings.NOT_TRACKED["gemini"]
+        assert entry["state"] == "no reading"
+        assert entry["not_tracked"] is None
         html = efficiency._headroom({"usage": usage, "generated_at_epoch": NOW})
-        assert usage_readings.NOT_TRACKED["gemini"] in html
+        assert "not tracked" not in html
 
         accounts = dashboard_accounts.read_accounts(db, NOW, config)
         acct = next(a for a in accounts if a["id"] == "gemini-ultra")
         assert acct["plan"] == "ultra"
-        assert acct["not_tracked"] == usage_readings.NOT_TRACKED["gemini"]
+        assert acct["not_tracked"] is None
         facts = dict((k, v) for k, v, _ in settings.account_facts(acct))
         assert facts["plan"] == "ultra"
-        assert usage_readings.NOT_TRACKED["gemini"] in facts["usage"]
+        assert "usage" not in facts and "5h used" in facts
 
 
 GEMINI_STATUS = Path(__file__).parent / "fixtures" / "gemini_status"

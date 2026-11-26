@@ -1861,6 +1861,16 @@ CLI's own output, captured by `orch job run` for every job and stored in
   timestamp, so rereading an old event never makes it fresh. A newer
   `token_count` whose `rate_limits` is null or missing, or that leaves a
   window out, reads that window as `no reading`.
+- **Gemini:** at a gemini job's start, `orch job run` runs `agy -p /usage
+  --output-format json` (on the job's device, as gemini-bot, with the same
+  Google/Gemini overrides the account doctor unsets; agy answers the slash
+  command with no model turn). Only the `Gemini Models` group is read: its
+  `5h` and `weekly` buckets are `five_hour` and `seven_day`, and `used` is
+  `1 - remaining_fraction`. A bucket whose `reset_time` is missing, not an
+  ISO time with its zone, or not within 30 days of now (the unused
+  third-party pool reports `1970-01-01T00:00:00Z`) reads that window as
+  `no reading`, as Claude and Codex do. A failed or empty probe logs one
+  line and never fails the job.
 
 A window that a reply with other limits leaves null or out, in 3 fresh
 readings in a row for the account on any of its devices (none more than 24
@@ -1972,6 +1982,8 @@ it with `agy models`, and the sign-in is interactive `agy`. Both run with
 `GOOGLE_GENAI_USE_VERTEXAI`, `GEMINI_CLI_USE_COMPUTE_ADC`, `CLOUD_SHELL`,
 `GOOGLE_GEMINI_BASE_URL`, `GEMINI_CLI_CUSTOM_HEADERS` and `GEMINI_CLI_HOME`
 unset, so no key in the login profile can stand in for the login.
+Its usage is read with `agy -p /usage --output-format json` under the same
+rule at each gemini job's start (Dashboard, above).
 To sign an account in on each device, follow [docs/ACCOUNTS.md](docs/ACCOUNTS.md).
 
 The Accounts panel on the Settings page (issue #1066) adds and removes

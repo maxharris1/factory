@@ -17,3 +17,10 @@ account id. Thread ids are the test id `00000000-0000-4000-8000-000000000151`.
   with `token_count` events carrying `rate_limits.primary`/`secondary` (`used_percent`,
   `window_minutes`, and `resets_at` or the older `resets_in_seconds`). The text lines in it
   exist to prove they are never kept.
+- `agy-1.5.18-usage.json`: the reply to `agy -p /usage --output-format json` (Antigravity CLI
+  1.5.18, run as gemini-bot on pc, 2026-11-26): `status: SUCCESS`, `num_turns: 0`, no model turn.
+  The keys and the reply's shape are the CLI's own, including the top-level `conversation_id`,
+  `response` and `usage` keys and each bucket's `description`, which the parser ignores; their
+  values are sanitized and it holds no account id. A real reply may follow a warning line. Only the
+  `Gemini Models` group is read; the `Claude and GPT models` group is the unused third-party
+  pool, whose `1970-01-01T00:00:00Z` reset time is out of horizon.

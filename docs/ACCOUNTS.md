@@ -409,6 +409,12 @@ decided that `orch.yml` lists `gemini` in `refused_harnesses` until its
 accounts are signed in on the devices, so a gemini row in `account_signins`
 changes no placement until then.
 
+Gemini quota is tracked. At each gemini job's start, `orch job run` runs
+`agy -p /usage --output-format json` as the device's gemini-bot with the
+doctor's Google/Gemini overrides unset; agy answers with no model turn.
+The card and the Efficiency row show its 5h and weekly windows from the
+`Gemini Models` group.
+
 ## 1. Declare the account
 
 Use Add account on the Accounts panel. Give the id, the harness, `max_jobs`

@@ -2735,7 +2735,22 @@ def _job_run_command(argv: list[str]) -> int:
         sessions.append(session)
         command = session.flags.argv
         binary = usage_probe.claude_binary(session.flags)
-        if binary is None:
+        agy = usage_probe.gemini_binary(session.flags)
+        if agy is not None:
+            target = placed.target
+            usage_reads = [
+                usage_probe.start_gemini(
+                    lambda readings: session.add_usage(
+                        readings, placed.account, own_login=placed.account_home is None
+                    ),
+                    session.clock,
+                    (lambda: usage_probe.gemini_remote(placed.transport, target))
+                    if target is not None
+                    else (lambda: usage_probe.gemini_local(agy, account_environ(inherited, session.harness, None))),
+                    log,
+                )
+            ]
+        elif binary is None:
             log(f"usage probe: skipped ({session.flags.reason})")
         else:
             target = placed.target
