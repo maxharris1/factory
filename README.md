@@ -2098,11 +2098,13 @@ redraws each job's path (SVG nodes made with `createElementNS`, in the
 namespace of the server-drawn chart) and copies the server-drawn full chart
 with the highlight moved. The Evals table comes from `evals.json`, not
 `status.json`: the page fetches `evals.json` for each new `status.json`
-snapshot and redraws the table from it. While the bundle's
-`generated_at_epoch` is older than the snapshot's (a publish still under
-way), it fetches again on each later poll. When that fetch fails (a 401
-when signed out, any other error, or a malformed bundle) the table already
-on the page stays. If `status.json`
+snapshot and redraws the table from any bundle newer than the table on the
+page. While the bundle's `generated_at_epoch` is older than the snapshot's
+(a publish still under way, or a live push that sent `status.json` alone),
+it fetches again on each later poll. When that fetch fails (a 401 when
+signed out, any other error, or a malformed bundle: anything
+`collect_weekly` could not have written) the table already on the page
+stays. If `status.json`
 cannot be fetched at all, the server-rendered page stays and reloads as
 without script. Everything is inline: no external asset, font or CDN, so it
 works offline on the tailnet. The look follows Omarchy (omarchy.org): the

@@ -328,7 +328,7 @@ def test_one_week_has_one_column_and_no_deltas(tmp_path: Path) -> None:
 NEWEST = {
     "tickets-succeeded": 10, "first-pass-approve-rate": 0.85, "cap-rate": 0.1, "poll-errors": 5,
     "stuck-jobs": 1, "failed-jobs": 0, "cycle-time-p50-hours": 6.5, "cycle-time-p90-hours": 20,
-    "max-interventions": 2, "wasted-wakes": "x", "productive-cost-usd": 41.2, "wasted-cost-usd": 3.1,
+    "max-interventions": 2, "wasted-wakes": "unrecorded", "productive-cost-usd": 41.2, "wasted-cost-usd": 3.1,
 }
 MIDDLE = {
     "tickets-succeeded": 7, "first-pass-approve-rate": 0.8, "cap-rate": 0.1, "poll-errors": 3,
@@ -602,7 +602,7 @@ ROUNDING = {
 ROUNDING_BEFORE = {
     "tickets-succeeded": 1_000, "first-pass-approve-rate": 0.13, "cap-rate": 0.0049, "poll-errors": 2.5,
     "cycle-time-p50-hours": 0.3, "cycle-time-p90-hours": 1234.1, "productive-cost-usd": 12_345.68,
-    "wasted-cost-usd": 0.1300001, "max-interventions": True,
+    "wasted-cost-usd": 0.1300001, "max-interventions": "unrecorded",
 }
 HUGE = {
     "tickets-succeeded": 10**22, "poll-errors": 10**21, "stuck-jobs": 2**53 + 1, "failed-jobs": 1.5e300,
@@ -613,6 +613,11 @@ HUGE_BEFORE = {
     "tickets-succeeded": 1, "poll-errors": 1, "stuck-jobs": 1, "failed-jobs": -1.5e300,
     "cycle-time-p50-hours": -1.7e308, "wasted-cost-usd": 1,
 }
+TIES = {
+    "productive-cost-usd": 70368744177664.125, "poll-errors": 10**21, "cycle-time-p50-hours": 1125899906842624.25,
+    "wasted-cost-usd": 0.125,
+}
+TIES_BEFORE = {"productive-cost-usd": 0, "poll-errors": 0, "cycle-time-p50-hours": 0, "wasted-cost-usd": 0}
 PARITY = {
     "no dir": {"schema": 1, "state": "no dir", "weeks": [], "skipped": 0},
     "no snapshots, skipped": {"schema": 1, "state": "no snapshots", "weeks": [], "skipped": 2},
@@ -625,9 +630,8 @@ PARITY = {
         {"week": "2026-11-23", "metrics": ROUNDING}, {"week": "2026-11-16", "metrics": ROUNDING_BEFORE}]},
     "past float precision and range": {"schema": 1, "state": "ok", "skipped": 0, "weeks": [
         {"week": "2026-11-23", "metrics": HUGE}, {"week": "2026-11-16", "metrics": HUGE_BEFORE}]},
-    "hostile": {"schema": 1, "state": "ok", "skipped": 0, "weeks": [
-        {"week": '<img src=x onerror="y">&\'', "metrics": {"poll-errors": "<b>", "stuck-jobs": True}},
-        {"week": "2026-11-16", "metrics": {"poll-errors": 1, "stuck-jobs": 1}}]},
+    "ties at the last digit": {"schema": 1, "state": "ok", "skipped": 0, "weeks": [
+        {"week": "2026-11-23", "metrics": TIES}, {"week": "2026-11-16", "metrics": TIES_BEFORE}]},
 }
 
 
@@ -745,6 +749,15 @@ def test_a_bundle_newer_than_the_snapshot_is_drawn_and_not_fetched_again(tmp_pat
 
 
 @needs_node
+def test_a_published_bundle_is_drawn_when_a_status_only_push_lands_before_the_next_poll(tmp_path: Path) -> None:
+    out, _ = polled(tmp_path, lambda epoch: [
+        ["serve", served(BOTH_WEEKS, epoch + 30)], ["poll", {"generated_at_epoch": epoch + 31}],
+        ["poll", {}], ["poll", {}], ["poll", {}],
+    ], lambda epoch: served(NOV_16, epoch))
+    assert out["html"]["evals"] == section_inner(BOTH_WEEKS)
+
+
+@needs_node
 @pytest.mark.parametrize("end", ["drop", "release"], ids=["failed", "answered with the older bundle"])
 def test_a_held_fetch_for_an_older_snapshot_leaves_the_newer_one_to_load(tmp_path: Path, end: str) -> None:
     out, _ = polled(tmp_path, lambda epoch: [
@@ -787,6 +800,22 @@ MALFORMED = {
     "unknown schema": {"schema": 2},
     "no epoch": {"generated_at_epoch": None},
     "a list": None,
+    "week name empty": {"weeks": [{"week": "", "metrics": {}}]},
+    "week name not a date": {"weeks": [{"week": "2026-02-30", "metrics": {}}]},
+    "week name hostile": {"weeks": [{"week": '<img src=x onerror="y">&\'', "metrics": {}}]},
+    "weeks oldest first": {"weeks": [{"week": "2026-11-16", "metrics": {}}, {"week": "2026-11-23", "metrics": {}}]},
+    "a week twice": {"weeks": [{"week": "2026-11-23", "metrics": {}}, {"week": "2026-11-23", "metrics": {}}]},
+    "more weeks than kept": {"weeks": [
+        {"week": (date(2026, 11, 23) - timedelta(weeks=n)).isoformat(), "metrics": {}} for n in range(KEEP + 1)]},
+    "metric text": {"weeks": [{"week": "2026-11-23", "metrics": {"poll-errors": "<b>"}}]},
+    "metric true": {"weeks": [{"week": "2026-11-23", "metrics": {"stuck-jobs": True}}]},
+    "metric unknown": {"weeks": [{"week": "2026-11-23", "metrics": {"poll-error": 1}}]},
+    "since not a time": {"weeks": [{"week": "2026-11-23", "since": "monday", "metrics": {}}]},
+    "until not text": {"weeks": [{"week": "2026-11-23", "until": 5, "metrics": {}}]},
+    "no dir with weeks": {"state": "no dir"},
+    "no snapshots with weeks": {"state": "no snapshots"},
+    "ok without weeks": {"weeks": []},
+    "no dir with skipped": {"state": "no dir", "weeks": [], "skipped": 1},
 }
 
 

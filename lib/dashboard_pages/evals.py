@@ -5,6 +5,7 @@ import math
 from dataclasses import asdict, dataclass
 from typing import Literal
 
+from lib.dashboard_evals import KEEP, METRIC_KEYS, UNRECORDED
 from lib.dashboard_pages.common import _chip, _e, _panel, _span
 from lib.dashboard_static import read_asset
 
@@ -117,6 +118,7 @@ def _evals(snapshot: dict) -> str:
 
 SCRIPT = read_asset("js/evals.js").replace("__EVALS__", json.dumps(
     {"rows": [asdict(row) for row in EVAL_ROWS], "kinds": {name: asdict(kind) for name, kind in KINDS.items()},
-     "texts": {"title": TITLE, "no_dir": NO_DIR, "no_snapshots": NO_SNAPSHOTS}},
+     "texts": {"title": TITLE, "no_dir": NO_DIR, "no_snapshots": NO_SNAPSHOTS},
+     "keep": KEEP, "metric_keys": METRIC_KEYS, "unrecorded": UNRECORDED},
     separators=(",", ":"),
 ))
