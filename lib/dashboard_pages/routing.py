@@ -11,21 +11,51 @@ SCRIPT = read_asset("js/routing.js")
 TITLE = "Role routing"
 SOURCE_WORDS = {"roles": "roles", "budget_overrides": "budget override", "inherit": "inherit", "unset": "not set"}
 NOTE = ("The first eligible candidate in each list runs. A roles effort above the budget's ceiling is cut to it; "
-        "a budget override runs as written.")
+        "a budget override runs as written. Each runs line is the model and effort a new job gets once the bot's "
+        "waiter-<bot>.yml argv is applied; CLI default means the harness picks.")
+
+
+def _value(value: str | None, source: str) -> str:
+    if value is None:
+        return _span("rt-v default", source)
+    return _span("rt-v", value) + _span("rt-src", source)
+
+
+def _values(found: dict) -> str:
+    return f"{_value(found['model'], found['model_source'])} · {_value(found['effort'], found['effort_source'])}"
+
+
+def _runs(effective: dict) -> str:
+    flags = [f"waiter {pinned} replaced" for pinned in effective["replaced"].values()]
+    if not effective["applied"]:
+        flags.append("routing.yml flags not added by this waiter")
+    return f'<div class="rt-runs">runs {_values(effective)}{"".join(_span("rt-flag", flag) for flag in flags)}</div>'
+
+
+def _head(cand: dict) -> str:
+    head = " · ".join(part for part in (cand["harness"], cand["model"]) if part)
+    if cand["effort"] is None:
+        return _e(head)
+    if cand["configured"] == cand["effort"]:
+        return f"{_e(head + ' · ')}{_span('rt-e', cand['effort'])}"
+    return f"{_e(head + ' · ')}{_span('rt-e clamped', cand['configured'] + ' → ' + cand['effort'])}"
 
 
 def _candidate(cand: dict) -> str:
-    head = " · ".join(part for part in (cand["harness"], cand["model"]) if part)
-    if cand["effort"] is None:
-        return f"<li>{_e(head)}</li>"
-    if cand["configured"] == cand["effort"]:
-        return f"<li>{_e(head + ' · ')}{_span('rt-e', cand['effort'])}</li>"
-    return f"<li>{_e(head + ' · ')}{_span('rt-e clamped', cand['configured'] + ' → ' + cand['effort'])}</li>"
+    return f"<li>{_head(cand)}{_runs(cand['effective'])}</li>"
+
+
+def _fallback(row: dict) -> str:
+    said = _span("muted", "falls back to factory.md " + ("reviewer" if row["role"] == "review" else "builder"))
+    if not row["fallback"]:
+        return said
+    items = "".join(f"<li>{_e(entry['harness'])}: {_values(entry)}</li>" for entry in row["fallback"])
+    return f'{said}<ul class="rt-fallback">{items}</ul>'
 
 
 def _pool(row: dict) -> str:
     if not row["candidates"]:
-        return _span("muted", "falls back to factory.md " + ("reviewer" if row["role"] == "review" else "builder"))
+        return _fallback(row)
     return f'<ol class="rt-pool">{"".join(_candidate(cand) for cand in row["candidates"])}</ol>'
 
 
