@@ -546,7 +546,8 @@ def test_running_job_carries_its_flow(tmp_path: Path) -> None:
     keys = ("state", "who", "started_at", "duration_seconds", "time_known", "off_chart",
             "reason", "current", "jobs")
     unknown = dict.fromkeys(
-        ("model", "cli_version", "brief_sha256", "skill_paths", "host", "factory_revision"), "unknown")
+        ("model", "effort", "harness", "cli_version", "brief_sha256", "skill_paths", "host", "factory_revision"),
+        "unknown")
 
     def ran(job: str, action: str, recipient: str) -> list[dict]:
         return [{"job": job, "action": action, "recipient": recipient, "exposure": unknown}]

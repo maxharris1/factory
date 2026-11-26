@@ -60,7 +60,8 @@ from `running` and `queued`.
 
 Exposure (#1014): each `running` row's `exposure`, and each job in a
 ticket flow visit's `jobs`, is its job_exposure row (lib/exposure.py):
-{model, cli_version, brief_sha256, skill_paths, host, factory_revision},
+{model, effort, harness, cli_version, brief_sha256, skill_paths, host,
+factory_revision},
 every field "unknown" when none was recorded. skill_paths is a list, or
 "unknown". A digest is a list of 16-character parts the page joins,
 since a whole one reads as an opaque token and would be redacted; a value
@@ -1876,10 +1877,13 @@ def _digest(value: str) -> list[str]:
 def _exposure(found: exposure.Exposure | None) -> dict:
     if found is None:
         return dict.fromkeys(
-            ("model", "cli_version", "brief_sha256", "skill_paths", "host", "factory_revision"), exposure.UNKNOWN
+            ("model", "effort", "harness", "cli_version", "brief_sha256", "skill_paths", "host", "factory_revision"),
+            exposure.UNKNOWN,
         )
     return {
         "model": _clean(found.model),
+        "effort": _clean(found.effort),
+        "harness": _clean(found.harness),
         "cli_version": _clean(found.cli_version),
         "brief_sha256": _digest(found.brief_sha256),
         "skill_paths": exposure.UNKNOWN if found.skill_paths is None else [_clean(p) for p in found.skill_paths],

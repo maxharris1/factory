@@ -6,6 +6,7 @@ import html
 import re
 import urllib.parse
 
+from lib.exposure import UNKNOWN
 from lib.pr_title import label
 from lib.dashboard_static import read_asset
 
@@ -153,6 +154,10 @@ def _b(value: object, cls: str = "") -> str:
 def _span(cls: str | None, text: object) -> str:
     attr = f' class="{cls}"' if cls else ""
     return f"<span{attr}>{_e(text)}</span>"
+
+
+def model_effort(found: dict) -> str:
+    return " · ".join(v for v in (found["model"], found["effort"]) if v != UNKNOWN)
 
 
 def _bot(name: object) -> str:
