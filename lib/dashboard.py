@@ -176,7 +176,7 @@ import re
 import sqlite3
 import shutil
 import tempfile
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
@@ -249,11 +249,12 @@ from lib.qa_cloud import qa_id
 from lib.queue import (
     ACTIONS, LOCAL_GATE_PASSED, RECIPIENTS, STATES, PriorityMark, passed_head, priority_marks,
 )
-from lib.role_router import role_matrix
+from lib.role_router import ORCHESTRATOR_BOT, role_matrix
 from lib.schema import TICKETS
 from lib import max_actions
 from lib.status import PAUSED_STATES, _hold_approvers
 from lib.wait import OWNING_BOTS
+from lib.waiter import WaiterError, default_harness_config, load_harness_command
 from lib.worktrees import pid_alive
 
 SCHEMA = "factory-dashboard/v1"
@@ -827,6 +828,7 @@ def collect_snapshot(
     orch: OrchConfig | None = None,
     publish_seconds: float | None = None,
     uptime: component_health.Uptime | None = None,
+    waiters: Mapping[str, Sequence[str] | None] | None = None,
 ) -> dict:
     """Read everything once. `last_cycle_at` is when the poller's last cycle
     ended (the live push passes it); without it poll health is "unknown".
@@ -842,7 +844,9 @@ def collect_snapshot(
     (None for a one-off snapshot): the page keeps the component states it
     observed until a newer snapshot is overdue (lib/dashboard_page.py).
     `uptime` is the boot and monotonic clock at `now`, so a heartbeat's age
-    leaves out time the box was suspended (lib/health.py)."""
+    leaves out time the box was suspended (lib/health.py). `waiters` is
+    each bot's waiter argv by bot name (`waiter_argv`), from which the Role
+    routing panel shows what a new job runs; None looks at no waiter."""
     if (
         isinstance(refresh_seconds, bool)
         or not isinstance(refresh_seconds, int)
@@ -996,12 +1000,22 @@ def collect_snapshot(
         "rules": rules_and_limits(chart),
         "usage": usage,
         "accounts": accounts,
-        "routing": role_matrix(),
+        "routing": role_matrix(waiters=waiters),
         RECORDS: records,
     }
     snapshot["ci_lane"] = ci_lane(snapshot)
     return _scrub(snapshot)  # type: ignore[return-value]
 
+
+
+def waiter_argv() -> dict[str, tuple[str, ...] | None]:
+    found: dict[str, tuple[str, ...] | None] = {}
+    for bot in (*OWNING_BOTS, ORCHESTRATOR_BOT):
+        try:
+            found[bot] = load_harness_command(default_harness_config(bot), bot).command
+        except WaiterError:
+            found[bot] = None
+    return found
 
 
 def _without_checkout_paths(health: dict) -> dict:

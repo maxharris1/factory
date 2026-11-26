@@ -11,15 +11,15 @@ NAME = page_name(__file__)
 GOLDEN = {
     "efficiency.CSS": "159fdfbcc55b166f35d0fc8a141641a773e92ee2a5fae1224a6ae0d777336120",
     "efficiency.SCRIPT": "997f9c391299a200bb1580ccdfe68aa42a3911f30e2e0daba8c8b0d91abc6388",
-    "routing.CSS": "e6c7ee7099be006cebb80d2c965a9c60d3aa1d429ecf9a9af5dc9f797c39c137",
-    "routing.SCRIPT": "a9d2c2f0bcda434daea5b4c0c186a0e21e6523307d9f19a6baf919a7e6bdcc21",
+    "routing.CSS": "60f7063494f043e67318e6a26deb9d1cc4c6044e1a83c72d651a163aa8079070",
+    "routing.SCRIPT": "cfe73b60b32ff0a7ca7c2964e07e97c7a05794b3a136b4519e549f34f3e8c1c4",
     "TELEMETRY_CSS": "649dcbbee7a9591b4dac5c5d49a14247192fb5baffe024921698d935b8437071",
     "__TELEMETRY__": "a36660b73d6a3ff62efe3db3e1e644deb2aa93f51ddf1021c50b9c150f96e114",
-    "seeded/main": "7026fe18daced5a6eab6af6f0eba7dd2729534bb5bfb8e48461391326ebdaf64",
+    "seeded/main": "ebdc8cd691a5831ea96af4206e97b5761c9628e4420dbc30c6e5469c2443c32f",
     "seeded/chrome": "425286c58ed83cffc174dd0ad820954cefee741079893345fd2d83a055c2ebee",
-    "hostile/main": "7026fe18daced5a6eab6af6f0eba7dd2729534bb5bfb8e48461391326ebdaf64",
+    "hostile/main": "ebdc8cd691a5831ea96af4206e97b5761c9628e4420dbc30c6e5469c2443c32f",
     "hostile/chrome": "2e39aff37188fc706bfb14ea8b5eb8b3f8aff006f1b95bf4fcb6fe9ab4dacff6",
-    "empty/main": "f9629ee2bbfd175876a2ef6c21a503a6f9b4433a44f138930b2fd4770bb8ad74",
+    "empty/main": "438ed8ba8e25822ebe9a2765c67a4df9ed3abced7a97d2041a31953a5a22a371",
     "empty/chrome": "20d8e3ed5aa84ad6552966eb8a60e6e1ac053dfd139d1a93cd86ef3a3960d4d1",
 }
 

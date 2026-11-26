@@ -25,6 +25,7 @@ from typing import Literal
 
 import yaml
 
+from lib import exposure
 from lib.factory_md import FactoryConfig, resolved_family
 from lib.load import Finding, load_yaml
 from lib.pstack_pin import ROOT
@@ -42,6 +43,7 @@ EFFORT_CEILING_BY_BUDGET: dict[str, str] = {
 }
 
 KNOWN_HARNESSES: tuple[str, ...] = ("claude", "codex", "cursor", "gemini")
+WAITER_BOTS: Mapping[str, str] = MappingProxyType({harness: f"{harness}-bot" for harness in KNOWN_HARNESSES})
 
 ROLE_SLOTS: tuple[str, ...] = (
     "orchestrate",
@@ -306,32 +308,141 @@ def _central_entry(
     return _slot_lookup(routing.roles, role), "roles"
 
 
-def role_matrix(path: Path = ROOT / ROUTING_PATH) -> dict:
+Waiters = Mapping[str, Sequence[str] | None]
+
+ORCHESTRATOR_BOT = "orchestrator"
+WAITER_ORDER: tuple[str, ...] = (*WAITER_BOTS.values(), ORCHESTRATOR_BOT)
+_BOT_HARNESS: Mapping[str, str] = MappingProxyType({bot: harness for harness, bot in WAITER_BOTS.items()})
+
+DISPATCHER = "dispatcher"
+ORCHESTRATOR_WAITER = f"waiter-{ORCHESTRATOR_BOT}.yml"
+FACTORY_MD = "factory.md"
+LAUNCHERS: Mapping[str, str | None] = MappingProxyType({
+    "orchestrate": ORCHESTRATOR_WAITER,
+    "plan": DISPATCHER,
+    "build": DISPATCHER,
+    "build:feature": DISPATCHER,
+    "build:bug": DISPATCHER,
+    "build:refactor": DISPATCHER,
+    "build:perf": DISPATCHER,
+    "review": DISPATCHER,
+    "qa": FACTORY_MD,
+    "helper:deep": None,
+    "helper:standard": None,
+    "helper:fast": None,
+    "helper:panel": None,
+})
+_UNKNOWN_RUNS: Mapping[str, str | None] = MappingProxyType(
+    {"model": None, "model_source": "unknown", "effort": None, "effort_source": "unknown"})
+_QA_RUNS: Mapping[str, str | None] = MappingProxyType(
+    {"model": None, "model_source": FACTORY_MD, "effort": None, "effort_source": "runner default"})
+
+
+def _sourced(value: str, reached: str | None, waiter: str) -> tuple[str | None, str]:
+    if value == exposure.UNKNOWN:
+        return None, "CLI default"
+    return value, "routing.yml" if value == reached else waiter
+
+
+def _fields(found: dict[str, tuple[str | None, str]]) -> dict:
+    return {key: item for field, (value, source) in found.items()
+            for key, item in ((field, value), (f"{field}_source", source))}
+
+
+def _waiter_harness(bot: str, argv: Sequence[str]) -> str | None:
+    if bot in _BOT_HARNESS:
+        return _BOT_HARNESS[bot]
+    names = {Path(word).name for word in argv}
+    return next((harness for harness in KNOWN_HARNESSES if HARNESS_BINARIES[harness] & names), None)
+
+
+def _pinned(bot: str, argv: Sequence[str] | None) -> exposure.Chosen | None:
+    return None if argv is None else exposure.parsed(argv, _waiter_harness(bot, argv))
+
+
+def _own(pinned: exposure.Chosen | None, source: str) -> dict:
+    if pinned is None:
+        return dict(_UNKNOWN_RUNS)
+    return _fields({field: _sourced(getattr(pinned, field), None, source) for field in ("model", "effort")})
+
+
+def _effective(harness: str, model: str | None, effort: str | None, waiter: Sequence[str] | None) -> dict:
+    pinned = None if waiter is None else exposure.parsed(waiter, harness)
+    if pinned is None:
+        applied = None if waiter is None else routing_reaches(waiter, harness)
+        return {**_UNKNOWN_RUNS, "replaced": {}, "applied": applied}
+    routed = {"model": model, "effort": effort if harness in EFFORT_FLAG_HARNESSES else None}
+    applied = routing_reaches(waiter, harness)
+    runs = exposure.parsed(launched_argv(waiter, harness=harness, model=model, effort=effort), harness)
+    source = f"waiter-{WAITER_BOTS[harness]}.yml"
+    reached = routed if applied else {"model": None, "effort": None}
+    found = {field: _sourced(getattr(runs, field), reached[field], source) for field in routed}
+    replaced = {field: getattr(pinned, field) for field, value in routed.items()
+                if found[field][1] == "routing.yml" and getattr(pinned, field) not in (exposure.UNKNOWN, value)}
+    return {**_fields(found), "replaced": replaced, "applied": applied}
+
+
+def _status(argv: Sequence[str] | None, pinned: exposure.Chosen | None) -> str:
+    if argv is None:
+        return "missing"
+    return "opaque" if pinned is None else "ok"
+
+
+def _candidate(rank: int, cand: Candidate, effort: str | None) -> dict:
+    return {"rank": rank, "harness": cand.harness, "model": cand.model,
+            "family": family_for(cand.harness, cand.model)[0], "effort": effort, "configured": cand.effort}
+
+
+def _role_row(config: RoutingConfig, role: str, waiters: Waiters, pinned: Mapping[str, exposure.Chosen | None]) -> dict:
+    entry, source = _central_entry(config, role, config.budget)
+    launch = LAUNCHERS[role]
+    pool = () if entry is None or entry == "inherit" else entry
+    candidates = [_candidate(rank, cand, _clamp_effort(cand.effort, config.budget) if source == "roles" else cand.effort)
+                  for rank, cand in enumerate(pool, 1)]
+    row = {"role": role, "source": "unset" if entry is None else "inherit" if entry == "inherit" else source,
+           "launch": launch, "candidates": candidates}
+    if launch == DISPATCHER:
+        for cand in candidates:
+            waiter = waiters.get(WAITER_BOTS[cand["harness"]])
+            cand["effective"] = _effective(cand["harness"], cand["model"], cand["effort"], waiter)
+    elif launch == ORCHESTRATOR_WAITER:
+        row["runs"] = _own(pinned.get(ORCHESTRATOR_BOT), ORCHESTRATOR_WAITER)
+    elif launch == FACTORY_MD:
+        row["runs"] = dict(_QA_RUNS)
+    return row
+
+
+def _plan_on_builder(plan: dict, build: dict) -> None:
+    builder = build["candidates"][0]["harness"] if build["candidates"] else None
+    for cand in plan["candidates"]:
+        cand["on_builder"] = None if builder is None else cand["harness"] == builder
+    plan["builder"] = builder
+    plans = any(cand["on_builder"] for cand in plan["candidates"])
+    plan["plans"] = None if builder is None else "plan" if plans else "build"
+
+
+def role_matrix(path: Path = ROOT / ROUTING_PATH, waiters: Waiters | None = None) -> dict:
+    """Each role's candidates, and what a new job in it runs given the launcher that starts it (`LAUNCHERS`).
+
+    `waiters` maps a bot (`WAITER_ORDER`) to its waiter argv, or None when the waiter config is missing or
+    unreadable; None for the whole map means no waiter was looked at. A value an unread or uninterpretable
+    waiter decides is unknown. No argv beyond the parsed model and effort reaches the result.
+    """
+    known = waiters or {}
+    pinned = {bot: _pinned(bot, argv) for bot, argv in known.items()}
+    status = {bot: _status(known[bot], pinned[bot]) for bot in WAITER_ORDER if bot in known}
     if not path.is_file():
-        return {"state": "missing", "roles": []}
+        return {"state": "missing", "roles": [], "waiters": status}
     config, findings = parse_routing_yml(path.read_text(encoding="utf-8"))
     if config is None:
         errors = [f.message for f in findings if f.severity == "error"]
-        return {"state": "invalid", "errors": errors, "roles": []}
-    budget = config.budget
-    rows = []
-    for role in ROLE_SLOTS:
-        entry, source = _central_entry(config, role, budget)
-        if entry is None or entry == "inherit":
-            rows.append({"role": role, "source": "unset" if entry is None else "inherit", "candidates": []})
-            continue
-        rows.append({"role": role, "source": source, "candidates": [
-            {
-                "rank": rank,
-                "harness": cand.harness,
-                "model": cand.model,
-                "family": family_for(cand.harness, cand.model)[0],
-                "effort": _clamp_effort(cand.effort, budget) if source == "roles" else cand.effort,
-                "configured": cand.effort,
-            }
-            for rank, cand in enumerate(entry, 1)
-        ]})
-    return {"state": "ok", "budget": budget, "ceiling": EFFORT_CEILING_BY_BUDGET[budget], "roles": rows}
+        return {"state": "invalid", "errors": errors, "roles": [], "waiters": status}
+    rows = {role: _role_row(config, role, known, pinned) for role in ROLE_SLOTS}
+    _plan_on_builder(rows["plan"], rows["build"])
+    unrouted = [{"harness": harness, **_own(pinned[bot], f"waiter-{bot}.yml")}
+                for harness, bot in WAITER_BOTS.items() if status.get(bot) == "ok"]
+    return {"state": "ok", "budget": config.budget, "ceiling": EFFORT_CEILING_BY_BUDGET[config.budget],
+            "waiters": status, "unrouted": unrouted, "roles": list(rows.values())}
 
 
 def _factory_override_entry(factory: FactoryConfig | None, role: str) -> SlotEntry | None:
@@ -521,6 +632,7 @@ HARNESS_BINARIES: Mapping[str, frozenset[str]] = MappingProxyType(
 )
 
 _CODEX_EFFORT_KEY = "model_reasoning_effort"
+EFFORT_FLAG_HARNESSES: frozenset[str] = frozenset({"claude", "codex"})
 
 
 def _without_option(
@@ -593,20 +705,30 @@ def apply_argv_flags(
     return [*argv[:idx], *extra, *argv[idx:]]
 
 
+def routing_reaches(command: Sequence[str], harness: str) -> bool:
+    """Whether routed flags reach `command`: only a direct call of the harness's own binary takes them."""
+    return bool(command) and Path(command[0]).name in HARNESS_BINARIES.get(harness, frozenset())
+
+
+def launched_argv(command: Sequence[str], *, harness: str, model: str | None, effort: str | None) -> list[str]:
+    """What `orch job run` launches for a routed job.
+
+    `command` with the routed flags when `command[0]` is the harness's own binary (HARNESS_BINARIES),
+    else `command` unchanged, so no flag is injected into a shell or test wrapper.
+    """
+    if not routing_reaches(command, harness):
+        return list(command)
+    return apply_argv_flags(command, harness=harness, model=model, effort=effort)
+
+
 def routing_argv_for_detail(
     command: Sequence[str],
     *,
     harness: str,
     detail: str | None,
 ) -> list[str]:
-    """Apply validated routing model/effort from a queued job's detail JSON, if present.
-
-    Only modifies argv when `command` is a recognized CLI invocation for
-    `harness` (never injecting flags into arbitrary shell or test wrappers).
-    """
-    if not detail or not command:
-        return list(command)
-    if Path(command[0]).name not in HARNESS_BINARIES.get(harness, frozenset()):
+    """Apply validated routing model/effort from a queued job's detail JSON, if present."""
+    if not detail:
         return list(command)
     try:
         parsed = json.loads(detail)
@@ -625,9 +747,7 @@ def routing_argv_for_detail(
     pick = "plan" if action == "plan" and isinstance(routing.get("planner"), str) else side
     model = routing.get(f"{pick}_model")
     effort = routing.get(f"{pick}_effort")
-    if model is None and effort is None:
-        return list(command)
-    return apply_argv_flags(
+    return launched_argv(
         command,
         harness=harness,
         model=model if isinstance(model, str) else None,
