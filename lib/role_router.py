@@ -311,10 +311,10 @@ def _central_entry(
 Waiters = Mapping[str, Sequence[str] | None]
 
 
-def _sourced(value: str, routed: str | None, waiter: str) -> tuple[str | None, str]:
+def _sourced(value: str, reached: str | None, waiter: str) -> tuple[str | None, str]:
     if value == exposure.UNKNOWN:
         return None, "CLI default"
-    return value, "routing.yml" if value == routed else waiter
+    return value, "routing.yml" if value == reached else waiter
 
 
 def _fields(found: dict[str, tuple[str | None, str]]) -> dict:
@@ -331,9 +331,8 @@ def _effective(harness: str, model: str | None, effort: str | None, waiter: Sequ
     pinned = exposure.parsed(waiter, harness)
     runs = exposure.parsed(launched_argv(waiter, harness=harness, model=model, effort=effort), harness)
     source = f"waiter-{WAITER_BOTS[harness]}.yml"
-    # Routing never reaches a wrapped waiter, so a value equal to the routed one is still the waiter's.
-    found = {field: _sourced(getattr(runs, field), value if applied else None, source)
-             for field, value in routed.items()}
+    reached = routed if applied else {"model": None, "effort": None}
+    found = {field: _sourced(getattr(runs, field), reached[field], source) for field in routed}
     replaced = {field: getattr(pinned, field) for field, value in routed.items()
                 if found[field][1] == "routing.yml" and getattr(pinned, field) not in (exposure.UNKNOWN, value)}
     return {**_fields(found), "replaced": replaced, "applied": applied}
