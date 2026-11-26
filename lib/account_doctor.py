@@ -132,7 +132,7 @@ _CURSOR_STATES: dict[str, tuple[bool, str]] = {
     "error": (False, EXIT_NONZERO),
 }
 GEMINI_SIGNED_OUT = "Please sign in to view available models"
-_GEMINI_MODEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._:/-]*[A-Za-z0-9])?(?:\s+\S.*)?")
+_GEMINI_MODEL_ROW = re.compile(r"(?P<model>[a-z0-9]+(?:\.[a-z0-9]+)*(?:-[a-z0-9]+(?:\.[a-z0-9]+)*)+)\s+(?P<name>\S.*)")
 _GEMINI_UNSET = (*GEMINI_AUTH_OVERRIDES, "GEMINI_CLI_HOME")
 
 
@@ -298,14 +298,14 @@ def parse_cursor(account: str, device: str, code: int, reply: bytes) -> Probe:
     )
 
 
-def _gemini_model_list(text: str) -> bool:
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    return bool(lines) and all(_GEMINI_MODEL.fullmatch(line) for line in lines)
+def _gemini_model_rows(text: str) -> list[tuple[str, str]]:
+    rows = [_GEMINI_MODEL_ROW.fullmatch(line.strip()) for line in text.splitlines() if line.strip()]
+    return [(row["model"], row["name"]) for row in rows] if all(rows) else []
 
 
 def parse_gemini(account: str, device: str, code: int, stdout: bytes, stderr: bytes) -> Probe:
     out = stdout.decode("utf-8", errors="replace")
-    if code == 0 and _gemini_model_list(out):
+    if code == 0 and _gemini_model_rows(out):
         return Probe(account, device, "gemini", True, True, "login", None, None, "")
     if code == 1 and GEMINI_SIGNED_OUT in out + stderr.decode("utf-8", errors="replace"):
         return Probe(account, device, "gemini", True, False, None, None, None, NOT_LOGGED_IN)
