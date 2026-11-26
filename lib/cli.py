@@ -598,16 +598,18 @@ usage migrate [--db PATH]
 usage record --account ID --window five_hour|seven_day|weekly --used FRACTION
              --resets-at EPOCH [--observed-at EPOCH] [--db PATH] [--machines PATH]
   Store one usage reading for an account machines.yml declares with
-  harness: external (Grok, Cursor), whose usage no factory process can
-  read. --used is the used fraction, 0 to 1; weekly is stored as
-  seven_day. --resets-at is whole epoch seconds within 30 days of now.
+  harness: external (Grok) or harness: cursor, whose usage no factory
+  process can read. Claude, Codex and Gemini accounts are read at each
+  job's start and are refused. --used is the used fraction, 0 to 1;
+  weekly is stored as seven_day. --resets-at is whole epoch seconds
+  within 30 days of now.
   --observed-at defaults to now and may be at most 300 seconds ahead.
   A reading no newer than the stored one is not written: it prints
   "kept newer reading" and exits 0. --db defaults to $ORCH_DB, --machines
   to the checkout's machines.yml. Exits 2 and writes nothing on an
-  unknown or non-external account, a bad value, an unknown option, or a
-  usage_readings table without the account column (run orch usage
-  migrate first); 1 when the database cannot be written.
+  unknown account or one with an automatic source, a bad value, an
+  unknown option, or a usage_readings table without the account column
+  (run orch usage migrate first); 1 when the database cannot be written.
 
 accounts prepare --device NAME [--account ID] [--machines PATH]
   Run as each bot on its device. Makes ~/.factory-accounts/<id> mode 700

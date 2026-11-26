@@ -14,13 +14,14 @@ orch_host: pc
 # keep their login outside any folder, so a cursor or gemini account is each
 # device's cursor-bot or gemini-bot login, named inline as
 # {bot: <harness>-bot, account: <id>}, never signed_in_on.
-# cursor-ultra is that login; cursor-grok-ultra records the weekly Ultra
-# pool Cursor shares with Grok, which `orch usage record` writes.
+# cursor-ultra is that login; `orch usage record --account cursor-ultra`
+# records its weekly usage. cursor-grok-ultra is an optional Grok-only
+# external pool, not Cursor's row.
 accounts:
   - {id: codex-pro-1, harness: codex, plan: pro, label: "Codex Pro", signed_in_on: [pc]}
   - {id: cursor-ultra, harness: cursor, plan: ultra, label: "Cursor Ultra"}
   - {id: gemini-pro-1, harness: gemini, plan: pro, label: "Gemini Pro"}
-  - {id: cursor-grok-ultra, harness: external, plan: ultra, label: "Grok and Cursor Ultra"}
+  - {id: cursor-grok-ultra, harness: external, plan: ultra, label: "Grok Ultra"}
 devices:
   - name: pc
     tailscale_name: pc-wsl-bots.example.ts.net

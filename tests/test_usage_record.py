@@ -5,8 +5,15 @@ from pathlib import Path
 
 import pytest
 
-from lib import cli
-from lib.usage_readings import CLOCK_SKEW_SECONDS, RESET_HORIZON_SECONDS, ensure_table
+from lib import cli, usage_record
+from lib.machines_yml import MachinesConfig
+from lib.usage_readings import (
+    ACCOUNT_READINGS,
+    ACCOUNT_READINGS_DDL,
+    CLOCK_SKEW_SECONDS,
+    RESET_HORIZON_SECONDS,
+    ensure_table,
+)
 
 MACHINES = """
 orch_host: box
@@ -241,3 +248,121 @@ def test_help_lists_usage_record(capsys) -> None:
     out = capsys.readouterr().out
     assert "\n  usage " in out
     assert "usage record --account ID --window" in out
+
+
+CURSOR_MACHINES = """
+orch_host: box
+accounts:
+  - {id: cursor-grok-ultra, harness: external, plan: ultra}
+  - {id: cursor-ultra, harness: cursor, plan: ultra}
+  - {id: claude-a, harness: claude}
+  - {id: codex-a, harness: codex}
+  - {id: gemini-a, harness: gemini}
+devices:
+  - name: box
+    local: true
+    slot_max: 1
+    harnesses:
+      claude: {bot: claude-bot, account: claude-a}
+      codex: {bot: codex-bot, account: codex-a}
+      cursor: {bot: cursor-bot, account: cursor-ultra}
+      gemini: {bot: gemini-bot, account: gemini-a}
+""".lstrip()
+
+
+@pytest.fixture
+def cursor_machines(tmp_path: Path) -> Path:
+    path = tmp_path / "cursor-machines.yml"
+    path.write_text(CURSOR_MACHINES, encoding="utf-8")
+    return path
+
+
+def account_rows(db: Path) -> list[tuple]:
+    with closing(sqlite3.connect(db)) as connection:
+        return connection.execute(
+            f"SELECT account, device, window, harness, bot, used, resets_at, job_id FROM {ACCOUNT_READINGS}"
+            " ORDER BY account, window"
+        ).fetchall()
+
+
+def test_a_cursor_account_reading_is_stored_under_the_cursor_harness(db: Path, cursor_machines: Path) -> None:
+    assert record(db, cursor_machines, account="cursor-ultra", window="weekly", used="0.01") == 0
+
+    assert rows(db) == [
+        (
+            "cursor",
+            "cursor-ultra",
+            "external",
+            "seven_day",
+            0.01,
+            RESETS,
+            float(OBSERVED),
+            "orch-usage-record",
+            0,
+            float(OBSERVED),
+            "cursor-ultra",
+        )
+    ]
+
+
+def test_a_cursor_account_reading_reaches_the_account_table_under_the_cursor_harness(
+    db: Path, cursor_machines: Path
+) -> None:
+    with closing(sqlite3.connect(db)) as connection:
+        connection.execute(ACCOUNT_READINGS_DDL)
+        connection.commit()
+
+    assert record(db, cursor_machines, account="cursor-ultra", window="weekly", used="0.01") == 0
+
+    assert account_rows(db) == [
+        ("cursor-ultra", "external", "seven_day", "cursor", "cursor-ultra", 0.01, RESETS, "orch-usage-record")
+    ]
+    assert "external" not in {row[0] for row in rows(db)}
+
+
+def test_an_external_account_still_records_beside_a_declared_cursor_account(db: Path, cursor_machines: Path) -> None:
+    assert record(db, cursor_machines) == 0
+
+    assert [(row[0], row[1], row[10]) for row in rows(db)] == [
+        ("external", "cursor-grok-ultra", "cursor-grok-ultra")
+    ]
+
+
+@pytest.mark.parametrize(
+    "account", ["claude-a", "codex-a", "gemini-a", "claude-default", "cursor-default", "not-declared"]
+)
+def test_an_account_with_an_automatic_source_or_unknown_is_refused(
+    db: Path, cursor_machines: Path, capsys, account: str
+) -> None:
+    before = dump(db)
+
+    assert record(db, cursor_machines, account=account) == 2
+
+    assert len(capsys.readouterr().err.strip().splitlines()) == 1
+    assert dump(db) == before
+
+
+@pytest.mark.parametrize("account", ["claude-default", "codex-default", "gemini-default", "cursor-default"])
+def test_an_undeclared_default_account_is_refused_when_no_cursor_account_is_declared(
+    db: Path, machines: Path, capsys, account: str
+) -> None:
+    before = dump(db)
+
+    assert record(db, machines, account=account) == 2
+
+    assert len(capsys.readouterr().err.strip().splitlines()) == 1
+    assert dump(db) == before
+
+
+@pytest.mark.parametrize("account", ["claude-default", "codex-default", "gemini-default", "cursor-default"])
+def test_parse_refuses_an_implicit_default_account_with_no_declared_accounts(account: str) -> None:
+    with pytest.raises(usage_record.Refused):
+        usage_record.parse(
+            MachinesConfig(),
+            account=account,
+            window="weekly",
+            used="0.01",
+            resets_at=str(RESETS),
+            observed_at=None,
+            now=float(NOW),
+        )

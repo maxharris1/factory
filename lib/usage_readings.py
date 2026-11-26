@@ -76,12 +76,20 @@ if TYPE_CHECKING:
 
 TABLE = "usage_readings"
 WINDOWS = ("five_hour", "seven_day")
-SOURCES = {"claude": "get_usage", "codex": "rollout", "gemini": "agy /usage", "external": "external"}
+SOURCES = {
+    "claude": "get_usage",
+    "codex": "rollout",
+    "gemini": "agy /usage",
+    "cursor": "usage record",
+    "external": "external",
+}
 # Checked on Cursor CLI 2026.11.22. The factory never reads a credential
-# (docs/ACCOUNTS.md), so a harness listed here stays unread.
+# (docs/ACCOUNTS.md), so no probe reads a harness listed here. Its accounts
+# take manual readings from `orch usage record` (lib/usage_record.py), and
+# an account with none is `not tracked` for this reason.
 NOT_TRACKED: Mapping[str, str] = MappingProxyType({
-    "cursor": "the Cursor CLI reports no usage without reading its login token, "
-              "and the usage of the shared Ultra pool is on the external account",
+    "cursor": "the Cursor CLI reports no usage without reading its login token; "
+              "record its weekly usage with orch usage record",
 })
 CODEX_WINDOW_MINUTES = {300: "five_hour", 10080: "seven_day"}
 AGY_GROUP = "Gemini Models"

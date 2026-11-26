@@ -1,12 +1,15 @@
-"""`orch usage record`: one usage reading for an external account.
+"""`orch usage record`: one usage reading for an account no probe reads.
 
 No factory process can read Grok's or Cursor's usage, so an operator or a
 Grok Bot routine reports it by hand. Only accounts machines.yml declares
-with `harness: external` are accepted. The reading is stored in
-usage_readings under harness, bot and device `external`, keyed by the
-account id, and in usage_account_readings (bot: the account id) once
-`orch usage migrate` has created it. It never replaces a reading with a
-newer source time.
+with `harness: external`, or with a harness that has no automatic source
+(NOT_TRACKED: cursor), are accepted; an implicit `<harness>-default` account
+that machines.yml does not list is refused; Claude, Codex and Gemini are read at
+each job's start and are refused. The reading is stored in usage_readings
+under the account's own harness (`external` or `cursor`), bot the account
+id and the reserved device `external`, keyed by the account id, and in
+usage_account_readings once `orch usage migrate` has created it. It never
+replaces a reading with a newer source time.
 Only the account id, the window and numbers are written.
 """
 
@@ -24,9 +27,9 @@ from lib.usage_readings import (
     ACCOUNT_READINGS,
     ACCOUNT_READINGS_UPSERT,
     CLOCK_SKEW_SECONDS,
-    EXTERNAL,
     EXTERNAL_DEVICE,
     EXTERNAL_JOB,
+    NOT_TRACKED,
     RESET_HORIZON_SECONDS,
     TABLE,
     ensure_table,
@@ -59,6 +62,7 @@ class Refused(ValueError):
 @dataclass(frozen=True)
 class ExternalReading:
     account: str
+    harness: str
     window: str
     used: float
     resets_at: int
@@ -75,11 +79,14 @@ def parse(
     observed_at: str | None,
     now: float,
 ) -> ExternalReading:
-    declared = machines.account(account)
+    declared = next((item for item in machines.accounts if item.id == account), None)
     if declared is None:
         raise Refused("the account is not declared in machines.yml")
-    if declared.harness != EXTERNAL_HARNESS:
-        raise Refused(f"account {declared.id} is not harness: external in machines.yml")
+    if declared.harness != EXTERNAL_HARNESS and declared.harness not in NOT_TRACKED:
+        raise Refused(
+            f"account {declared.id} is harness {declared.harness}, whose usage is read automatically;"
+            f" only harness: external or {', '.join(sorted(NOT_TRACKED))} accounts are recorded"
+        )
     stored_window = WINDOW_NAMES.get(window)
     if stored_window is None:
         raise Refused(f"--window must be one of {', '.join(WINDOW_NAMES)}")
@@ -93,7 +100,7 @@ def parse(
     observed = now if observed_at is None else _float(observed_at)
     if observed is None or not math.isfinite(observed) or observed > now + CLOCK_SKEW_SECONDS:
         raise Refused(f"--observed-at must be epoch seconds no more than {CLOCK_SKEW_SECONDS}s ahead of now")
-    return ExternalReading(declared.id, stored_window, fraction, resets, observed)
+    return ExternalReading(declared.id, declared.harness, stored_window, fraction, resets, observed)
 
 
 def store(database: Path, reading: ExternalReading) -> bool:
@@ -110,7 +117,7 @@ def store(database: Path, reading: ExternalReading) -> bool:
             written = connection.execute(
                 _UPSERT,
                 (
-                    EXTERNAL,
+                    reading.harness,
                     reading.account,
                     EXTERNAL_DEVICE,
                     reading.window,
@@ -124,7 +131,7 @@ def store(database: Path, reading: ExternalReading) -> bool:
             ).rowcount > 0
             if ACCOUNT_READINGS in tables(connection):
                 values = (reading.used, reading.resets_at, reading.observed_at, EXTERNAL_JOB, 0, reading.observed_at)
-                keyed = (reading.account, EXTERNAL_DEVICE, reading.window, EXTERNAL, reading.account, *values)
+                keyed = (reading.account, EXTERNAL_DEVICE, reading.window, reading.harness, reading.account, *values)
                 written = connection.execute(ACCOUNT_READINGS_UPSERT, keyed).rowcount > 0 and written
         except BaseException:
             connection.execute("ROLLBACK")

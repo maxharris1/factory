@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import account_doctor, usage_readings
+from lib import account_doctor, usage_readings, usage_record
 from lib.account_doctor import SignIn
 from lib.dashboard import collect_snapshot
 from lib.dashboard_accounts import read_accounts
@@ -146,6 +146,23 @@ def cursor_world(tmp_path: Path, *, usage_tables: bool) -> tuple[Path, Path]:
 
 def cursor_snapshot(tmp_path: Path, *, usage_tables: bool = False) -> dict:
     db, machines = cursor_world(tmp_path, usage_tables=usage_tables)
+    return collect_snapshot(db, tmp_path / "poll.log", now=NOW, machines_path=machines)
+
+
+CURSOR_RESET = int(NOW) + 3 * 86_400
+
+
+def record_cursor(db: Path, machines: Path, *, used: str = "0.01", window: str = "weekly",
+                  observed_at: float = NOW - 60, resets_at: int = CURSOR_RESET) -> None:
+    """What `orch usage record --account cursor-ultra` stores, clocked at NOW."""
+    reading = usage_record.parse(config_of(machines), account="cursor-ultra", window=window, used=used,
+                                 resets_at=str(resets_at), observed_at=str(observed_at), now=NOW)
+    assert usage_record.store(db, reading)
+
+
+def recorded_cursor_snapshot(tmp_path: Path, **kwargs: object) -> dict:
+    db, machines = cursor_world(tmp_path, usage_tables=True)
+    record_cursor(db, machines, **kwargs)
     return collect_snapshot(db, tmp_path / "poll.log", now=NOW, machines_path=machines)
 
 
@@ -399,3 +416,19 @@ def test_a_device_that_stops_taking_work_keeps_its_account_sign_in_and_running_j
           "login": "claude-bot"}],
         [{"ticket": "17", "kind": "build", "device": "box"}],
     )]
+
+
+def test_a_recorded_cursor_reading_fills_the_cursor_card(tmp_path: Path) -> None:
+    db, machines = cursor_world(tmp_path, usage_tables=True)
+    record_cursor(db, machines)
+    with contextlib.closing(sqlite3.connect(db)) as connection:
+        accounts = by_id(read_accounts(connection, NOW, config_of(machines)))
+    cursor = accounts["cursor-ultra"]
+    assert (cursor["not_tracked"], cursor["seven_day_used"], cursor["five_hour_used"]) == (None, 0.01, None)
+    assert cursor["headroom"] == 0.99
+
+
+def test_without_a_reading_the_cursor_reason_points_at_orch_usage_record() -> None:
+    reason = usage_readings.NOT_TRACKED["cursor"]
+    assert "orch usage record" in reason
+    assert "shared" not in reason and "pool" not in reason and "external account" not in reason
