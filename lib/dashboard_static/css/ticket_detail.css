@@ -64,6 +64,10 @@
 .runlog .dur{font-size:11px;color:var(--text-2)}
 .runlog .offchip{padding:0 6px;border:1px solid rgba(255,158,100,0.4);background:rgba(255,158,100,0.09);color:#ff9e64;font-size:11px;line-height:1.6;font-weight:500;white-space:nowrap}
 .runlog .note{display:block;font:12px/1.5 var(--sans);color:var(--text-2)}
+.runlog .exp-jobs{display:flex;flex-wrap:wrap;gap:2px 12px;margin:0 8px 6px 38px;font:11px/1.5 var(--mono);color:var(--text-2)}
+.runlog .exp-job{display:flex;gap:6px}
+.runlog .exp-job .job{color:var(--muted)}
+.runlog .exp-job .model{color:var(--text)}
 .runlog .exp{width:calc(100% - 46px);table-layout:fixed;margin:0 8px 8px 38px;border-collapse:collapse;font:11px/1.5 var(--mono);color:var(--text-2)}
 .runlog .exp caption{text-align:left;color:var(--muted);padding:0 0 2px}
 .runlog .exp-more>summary{margin:0 8px 8px 38px;cursor:pointer;font:11px/1.5 var(--mono);color:var(--muted)}

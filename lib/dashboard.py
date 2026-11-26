@@ -60,8 +60,10 @@ from `running` and `queued`.
 
 Exposure (#1014): each `running` row's `exposure`, and each job in a
 ticket flow visit's `jobs`, is its job_exposure row (lib/exposure.py):
-{model, cli_version, brief_sha256, skill_paths, host, factory_revision},
-every field "unknown" when none was recorded. skill_paths is a list, or
+{model, effort, harness, cli_version, brief_sha256, skill_paths, host,
+factory_revision}, every field "unknown" when none was recorded, plus
+`round`, the review round the job ran in: its detail's round number, else
+its qa_runs round, else "unknown". skill_paths is a list, or
 "unknown". A digest is a list of 16-character parts the page joins,
 since a whole one reads as an opaque token and would be redacted; a value
 that is not a digest is one part.
@@ -1887,13 +1889,33 @@ def _digest(value: str) -> list[str]:
     return [value[i : i + 16] for i in range(0, len(value), 16)]
 
 
-def _exposure(found: exposure.Exposure | None) -> dict:
+def _qa_rounds(connection: sqlite3.Connection, tables: set[str]) -> dict[str, int]:
+    if "qa_runs" not in tables:
+        return {}
+    return {
+        str(job_id): int(number)
+        for job_id, number in connection.execute("SELECT job_id, round FROM qa_runs WHERE job_id IS NOT NULL")
+    }
+
+
+def _review_round(detail: object, qa_round: int | None) -> str:
+    found = _detail_round(detail)
+    if found is not None:
+        return found.split("/")[0]
+    return exposure.UNKNOWN if qa_round is None else str(qa_round)
+
+
+def _exposure(found: exposure.Exposure | None, review_round: str) -> dict:
     if found is None:
-        return dict.fromkeys(
-            ("model", "cli_version", "brief_sha256", "skill_paths", "host", "factory_revision"), exposure.UNKNOWN
+        return {"round": review_round} | dict.fromkeys(
+            ("model", "effort", "harness", "cli_version", "brief_sha256", "skill_paths", "host", "factory_revision"),
+            exposure.UNKNOWN,
         )
     return {
+        "round": review_round,
         "model": _clean(found.model),
+        "effort": _clean(found.effort),
+        "harness": _clean(found.harness),
         "cli_version": _clean(found.cli_version),
         "brief_sha256": _digest(found.brief_sha256),
         "skill_paths": exposure.UNKNOWN if found.skill_paths is None else [_clean(p) for p in found.skill_paths],
@@ -1927,6 +1949,7 @@ def _read_db(
     tables = _tables(connection)
     jobs = "jobs" in tables
     exposures = exposure.read_all(connection)
+    qa_rounds = _qa_rounds(connection, tables)
     sources = read_sources(connection)
     if "tracked_tickets" in tables:
         for repo, ticket_id in connection.execute(
@@ -2041,7 +2064,9 @@ def _read_db(
                     "device": device,
                     "elapsed_seconds": _age(now, started) or 0,
                     "elapsed_from": elapsed_from,
-                    "exposure": _exposure(exposures.get(str(row["id"]))),
+                    "exposure": _exposure(
+                        exposures.get(str(row["id"])), _review_round(row["detail"], qa_rounds.get(str(row["id"])))
+                    ),
                 }
                 running.append(item)
                 active.append((item, str(row["repo"]), str(row["ticket_id"])))
@@ -2205,6 +2230,7 @@ def _read_db(
         now,
         tables,
         exposures,
+        qa_rounds,
     )
     for key, info in ticket_info.items():
         flows[key] = anchor_close(flows[key], info.closed_at, now)
@@ -2587,6 +2613,7 @@ def _ticket_flows(
     now: float,
     tables: set[str],
     exposures: dict[str, exposure.Exposure],
+    qa_rounds: dict[str, int],
 ) -> tuple[dict[tuple[str, str], dict], dict[tuple[str, str], int], dict[tuple[str, str], float]]:
     """(flow, accepted retries, tracked_at) per ticket key (repo casefolded,
     ticket id). Each table is read once, whole, and kept for `keys` only: no
@@ -2605,7 +2632,7 @@ def _ticket_flows(
         )
         for row in connection.execute(
             "SELECT jobs.id, jobs.repo, jobs.ticket_id, jobs.action, jobs.recipient, jobs.created_at, "
-            f"jobs.attempt, {times} "
+            f"jobs.attempt, jobs.detail, {times} "
             "FROM jobs "
             + ("LEFT JOIN job_telemetry t ON t.job_id = jobs.id " if joined else "")
             + "ORDER BY jobs.created_at, jobs.rowid"
@@ -2620,7 +2647,9 @@ def _ticket_flows(
                     _telemetry_time(row["finished_at"]),
                     int(row["attempt"]),
                     _clean(str(row["id"])[:8], 8),
-                    _exposure(exposures.get(str(row["id"]))),
+                    _exposure(
+                        exposures.get(str(row["id"])), _review_round(row["detail"], qa_rounds.get(str(row["id"])))
+                    ),
                 ))
     recorded: dict[tuple[str, str], list[Transition]] = {key: [] for key in keys}
     if "ticket_transitions" in tables:

@@ -80,7 +80,7 @@ def test_shipped_machines_yml_runs_orch_on_pc_with_box_remote_and_mac_reported()
     )
     assert pc.login_for("codex") == "codex-bot"
 
-    assert (box.name, box.enabled, box.slot_max, box.ssh_user) == ("box", True, 6, "box")
+    assert (box.name, box.enabled, box.slot_max, box.ssh_user) == ("box", True, 6, None)
     assert box.tailscale_name == "grokbot-factory-box.tail68624b.ts.net"
     assert dict(box.harnesses) == bots
     assert (box.workdir_root, box.ssh_alias, box.factory_root) == (
@@ -88,7 +88,7 @@ def test_shipped_machines_yml_runs_orch_on_pc_with_box_remote_and_mac_reported()
         "box-{bot}",
         "/home/box/factory",
     )
-    assert {harness: box.login_for(harness) for harness in bots} == dict.fromkeys(bots, "box")
+    assert {harness: box.login_for(harness) for harness in bots} == bots
     assert {harness: box.ssh_alias_for(harness) for harness in bots} == {
         "claude": "box-claude-bot",
         "codex": "box-codex-bot",
@@ -223,6 +223,30 @@ def test_docs_place_an_unplaced_job_on_the_orch_host_not_the_box() -> None:
     assert "runs on the orch host (`orch_host` in `machines.yml`" in readme
     assert "refuses a placeholder unless `--allow-placeholders`" not in spec
     assert "skips a device with a placeholder" in spec
+
+
+def test_shipped_docs_describe_the_login_the_shipped_box_selects() -> None:
+    config, _ = load_machines_yml(ROOT / "machines.yml", overlay=False)
+    box = config.device("box")
+    logins = {box.login_for(harness) for harness in box.harnesses}
+    assert box.ssh_user is None and logins == set(box.harnesses.values())
+
+    def flat(path: str) -> str:
+        return " ".join((ROOT / path).read_text(encoding="utf-8").split())
+
+    readme_shipped = flat("README.md").split("The shipped file sets `orch_host: pc`", 1)[1]
+    readme_shipped = readme_shipped.split("To stop new jobs on a device", 1)[0]
+    spec_shipped = flat("docs/SPEC.md").split("The shipped file sets `orch_host: pc`", 1)[1]
+    spec_shipped = spec_shipped.split("A device schedules only when", 1)[0]
+    for shipped in (readme_shipped, spec_shipped):
+        assert "ssh_user" not in shipped
+        assert all(f"`{login}`" in shipped for login in logins)
+
+    runbook = (ROOT / "docs" / "RUNBOOK-HARDENING.md").read_text(encoding="utf-8")
+    hardening = runbook.split("\n## 3. ", 1)[1].split("\n## 4. ", 1)[0]
+    assert "The shipped `machines.yml` now omits `ssh_user`" in " ".join(hardening.split())
+    shared = [p for p in hardening.split("\n\n") if "`ssh_user: box`" in p]
+    assert shared and all("legacy" in p.lower() for p in shared)
 
 
 def test_example_passes_strict_check() -> None:

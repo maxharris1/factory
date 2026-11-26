@@ -252,12 +252,13 @@ def test_shipped_pc_and_box_resolve_each_bot_to_its_own_alias_and_login() -> Non
         "cursor": "box-cursor-bot",
     }
     assert (pc.enabled, box.enabled, mac.enabled) == (True, True, False)
-    assert remote.ssh_argv(remote_target(box, "codex", "job1"), "true")[-5:] == [
-        "-l", "box", "--", "box-codex-bot", "true",
-    ]
-    assert remote.ssh_argv(remote_target(pc, "codex", "job1"), "true")[-5:] == [
-        "-l", "codex-bot", "--", "pc-wsl-codex-bot", "true",
-    ]
+    for harness, bot in (("claude", "claude-bot"), ("codex", "codex-bot"), ("cursor", "cursor-bot")):
+        assert remote.ssh_argv(remote_target(box, harness, "job1"), "true")[-5:] == [
+            "-l", bot, "--", f"box-{bot}", "true",
+        ]
+        assert remote.ssh_argv(remote_target(pc, harness, "job1"), "true")[-5:] == [
+            "-l", bot, "--", f"pc-wsl-{bot}", "true",
+        ]
     assert mac.ssh_alias_for("claude") is None
 
 
