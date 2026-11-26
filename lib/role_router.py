@@ -331,6 +331,7 @@ def _effective(harness: str, model: str | None, effort: str | None, waiter: Sequ
     pinned = exposure.parsed(waiter, harness)
     runs = exposure.parsed(launched_argv(waiter, harness=harness, model=model, effort=effort), harness)
     source = f"waiter-{WAITER_BOTS[harness]}.yml"
+    # Routing never reaches a wrapped waiter, so a value equal to the routed one is still the waiter's.
     found = {field: _sourced(getattr(runs, field), value if applied else None, source)
              for field, value in routed.items()}
     replaced = {field: getattr(pinned, field) for field, value in routed.items()

@@ -163,6 +163,8 @@ def test_a_wrapped_waiter_gets_no_routing_flags(tmp_path: Path) -> None:
     assert _effective(matrix, "build", 1) == {
         "model": "claude-haiku-4-5", "model_source": "waiter-claude-bot.yml",
         "effort": None, "effort_source": "CLI default", "replaced": {}, "applied": False}
+    same = _matrix(tmp_path, waiters={"claude": ("env", "FOO=1", "claude", "-p", "--model", "claude-opus-4-6")})
+    assert _effective(same, "build", 1)["model_source"] == "waiter-claude-bot.yml"
 
 
 def test_a_slot_with_no_candidates_falls_back_to_each_readable_waiter(tmp_path: Path) -> None:
