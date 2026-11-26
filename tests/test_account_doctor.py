@@ -738,16 +738,22 @@ def framed(*frames: tuple[int, int, bytes], before: bytes = b"") -> bytes:
 
 def test_replies_drop_profile_output_and_split_frames() -> None:
     stdout = framed((0, 0, b'{"a": 1}'), (1, 3, b"Not logged in"), before=b"ORCH-ACCOUNT 0 9\nnoise")
-    assert account_doctor._replies(stdout, 2) == {0: (0, b'{"a": 1}'), 1: (3, b"Not logged in")}
+    assert account_doctor._replies(stdout, 2) == {0: (0, b'{"a": 1}', b""), 1: (3, b"Not logged in", b"")}
 
 
 def test_replies_ignore_a_forged_marker_inside_a_reply() -> None:
     stdout = framed((0, 0, b"first\nORCH-ACCOUNT 1 0\nstill first"), (1, 1, b"second"))
-    assert account_doctor._replies(stdout, 2) == {0: (0, b"first\nORCH-ACCOUNT 1 0\nstill first"), 1: (1, b"second")}
+    assert account_doctor._replies(stdout, 2) == {0: (0, b"first\nORCH-ACCOUNT 1 0\nstill first", b""), 1: (1, b"second", b"")}
+
+
+def test_replies_split_stderr_only_for_a_split_status() -> None:
+    stdout = framed((0, 0, b"gemini-3.1-pro\nORCH-ACCOUNT-STDERR\nWarning"))
+    assert account_doctor._replies(stdout, 1, split=True) == {0: (0, b"gemini-3.1-pro", b"Warning")}
+    assert account_doctor._replies(stdout, 1) == {0: (0, b"gemini-3.1-pro\nORCH-ACCOUNT-STDERR\nWarning", b"")}
 
 
 def test_replies_without_a_frame_leave_it_out() -> None:
-    assert account_doctor._replies(framed((0, 0, b"only")), 2) == {0: (0, b"only")}
+    assert account_doctor._replies(framed((0, 0, b"only")), 2) == {0: (0, b"only", b"")}
     assert account_doctor._replies(b"no begin line\nORCH-ACCOUNT 0 0\n", 1) == {}
 
 

@@ -625,12 +625,14 @@ def resolve_pair(request: PairRequest, machines: Path, approver: str,
     return config, device, account.harness
 
 
-def prepare_pair(transport: ByteTransport, machines: Path, device: Device, harness: str,
-                 account: str) -> str | None:
+def prepare_pair(transport: ByteTransport, machines: Path, config: MachinesConfig, device: Device,
+                 harness: str, account: str) -> str | None:
     """Run `orch accounts prepare` for the pair on its device; the error, or None."""
     unreachable = account_doctor.no_ssh_path(device, harness)
     if unreachable is not None:
         return unreachable
+    if config.accounts_on(device.name, harness)[:1] == (account,):
+        return None
     command = shlex.join([f"{device.factory_root_for(harness)}/bin/orch", "accounts", "prepare",
                           "--device", device.name, "--account", account,
                           "--machines", "/dev/stdin"])
@@ -774,7 +776,7 @@ class Applier:
             with closing(sqlite3.connect(self.db, timeout=30, isolation_level=None)) as connection:
                 account_doctor.ensure_table(connection)
                 previous = _signin(connection, request)
-                error = prepare_pair(self.transport, self.machines, device, harness, request.account)
+                error = prepare_pair(self.transport, self.machines, config, device, harness, request.account)
                 account_doctor.run(connection, config, self.transport, self.clock(), self.repo)
                 new = _signin(connection, request)
         except sqlite3.Error as exc:

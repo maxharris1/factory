@@ -56,8 +56,8 @@ than an external one must be signed in on some device. An optional
 max_jobs must be a positive integer, and an optional paused true or
 false. The older {bot, account} harness value, which names the device's
 own login account, still loads with a deprecation warning, except for
-cursor: Cursor keeps one login per bot user, so a cursor account is always
-named as each device's cursor login this way. The device name
+cursor and gemini: each keeps one login per bot user, so their accounts are
+always named as each device's own login this way. The device name
 `external` is reserved for external readings.
 """
 
@@ -80,7 +80,7 @@ from lib.schema import HARNESSES
 PLACEHOLDER_PREFIX = "REPLACE_WITH_"
 BOT_USERS = MappingProxyType({harness: f"{harness}-bot" for harness in HARNESSES})
 FORBIDDEN_WORKDIR_ROOT = "/mnt"
-DEVICE_LOGIN_ONLY = frozenset({"cursor"})
+DEVICE_LOGIN_ONLY = frozenset({"cursor", "gemini"})
 BOT_TOKEN = "{bot}"
 DEFAULT_ORCH_HOST = "box"
 
@@ -449,9 +449,9 @@ def _accounts(
             findings.append(
                 Finding(
                     "error",
-                    f"{prefix}.signed_in_on is not supported for a cursor account: "
-                    "Cursor keeps its login outside any folder the factory can set, "
-                    "so name the account as each device's cursor login",
+                    f"{prefix}.signed_in_on is not supported for a {harness} account: "
+                    f"{harness.capitalize()} keeps its login outside any folder the factory can set, "
+                    f"so name the account as each device's {harness} login",
                 )
             )
         max_jobs = item.get("max_jobs")
@@ -535,7 +535,7 @@ def _check_sign_ins(
                     "error",
                     f"account {account.id!r} is not signed in on any device; "
                     + (
-                        "name it as a device's cursor login"
+                        f"name it as a device's {account.harness} login"
                         if account.harness in DEVICE_LOGIN_ONLY
                         else "list it in signed_in_on"
                     ),

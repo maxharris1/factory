@@ -8,17 +8,18 @@ orch_host: pc
 # harness is claude, codex, cursor, gemini, or external (a plan no factory process
 # runs; `orch usage record` writes its readings). A bare bot value under a
 # device's harnesses means the account <harness>-default, which needs no
-# entry. signed_in_on lists the devices a claude, codex or gemini account is
+# entry. signed_in_on lists the devices a claude or codex account is
 # signed in on; each such device names home, the bot's home folder, and the
-# account's folder there is <home>/.factory-accounts/<id>. Cursor keeps its
-# login outside any folder, so a cursor account is each device's cursor-bot
-# login, named inline as {bot: cursor-bot, account: <id>}, never signed_in_on.
+# account's folder there is <home>/.factory-accounts/<id>. Cursor and Gemini
+# keep their login outside any folder, so a cursor or gemini account is each
+# device's cursor-bot or gemini-bot login, named inline as
+# {bot: <harness>-bot, account: <id>}, never signed_in_on.
 # cursor-ultra is that login; cursor-grok-ultra records the weekly Ultra
 # pool Cursor shares with Grok, which `orch usage record` writes.
 accounts:
   - {id: codex-pro-1, harness: codex, plan: pro, label: "Codex Pro", signed_in_on: [pc]}
   - {id: cursor-ultra, harness: cursor, plan: ultra, label: "Cursor Ultra"}
-  - {id: gemini-pro-1, harness: gemini, plan: pro, label: "Gemini Pro", signed_in_on: [pc]}
+  - {id: gemini-pro-1, harness: gemini, plan: pro, label: "Gemini Pro"}
   - {id: cursor-grok-ultra, harness: external, plan: ultra, label: "Grok and Cursor Ultra"}
 devices:
   - name: pc
@@ -28,7 +29,7 @@ devices:
       claude: claude-bot
       codex: codex-bot
       cursor: {bot: cursor-bot, account: cursor-ultra}
-      gemini: gemini-bot
+      gemini: {bot: gemini-bot, account: gemini-pro-1}
     home: /home/{bot}
     # workdir_root is where job worktrees are made (empty at job start).
     # factory_root is the deployed factory checkout (skills/, bin/orch), not

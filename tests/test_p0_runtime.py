@@ -453,7 +453,7 @@ def test_signin_broker_resets_backoff_when_worker_finishes_within_tick(tmp_path:
     broker._release = lambda attempt: None  # type: ignore[method-assign]
 
     def fake_admit(req, previous):
-        attempt = signin_broker.Attempt(req, "claude", fake_device, "/home/claude-b", previous)  # type: ignore[arg-type]
+        attempt = signin_broker.Attempt(req, "claude", fake_device, "/home/claude-b", previous, SimpleNamespace())  # type: ignore[arg-type]
         with broker._lock:
             broker._attempts[(req.account, req.device)] = attempt
         return attempt

@@ -35,6 +35,11 @@ CODEX_PERMANENT = (
     "Your access token could not be refreshed because you have since logged out or signed in to "
     "another account. Please sign in again.",
 )
+GEMINI_SIGNED_OUT = {
+    "type": "result",
+    "status": "error",
+    "error": {"message": "Error: Please sign in to view available models. Launch the CLI without arguments to sign in."},
+}
 CODEX_TRANSIENT = {"type": "turn.failed", "error": {"message": "Failed to refresh token: 503 Service Unavailable"}}
 
 
@@ -118,9 +123,11 @@ def _no_retry_rows(db: Path) -> bool:
     ("codex", {"type": "error", "message": "unexpected status 401 Unauthorized: Missing bearer"}),
     ("codex", {"type": "turn.failed", "error": {"message": CODEX_REFRESH}}),
     *(("codex", {"type": "turn.failed", "error": {"message": m}}) for m in CODEX_PERMANENT),
+    ("gemini", GEMINI_SIGNED_OUT),
+    ("gemini", {"type": "error", "message": GEMINI_SIGNED_OUT["error"]["message"]}),
 ], ids=["claude-error-field", "claude-oauth-result", "claude-not-logged-in", "codex-not-logged-in",
         "codex-401", "codex-refresh-token", "codex-refresh-reused", "codex-refresh-revoked",
-        "codex-refresh-unknown", "codex-refresh-account-changed"])
+        "codex-refresh-unknown", "codex-refresh-account-changed", "gemini-result", "gemini-error"])
 def test_detect_signout_reads_each_harness_auth_failure(harness: str, event: dict) -> None:
     assert account_doctor.detect_signout(harness, event)
 
@@ -136,10 +143,12 @@ def test_detect_signout_reads_each_harness_auth_failure(harness: str, event: dic
     ("codex", CODEX_TRANSIENT),
     ("codex", {"type": "error", "message": "Failed to refresh token: 500 Internal Server Error"}),
     ("cursor", {"type": "error", "message": "stream disconnected before completion"}),
+    ("gemini", {**GEMINI_SIGNED_OUT, "error": {"message": "Quota exceeded for this model. Try again later."}}),
+    ("gemini", {"type": "message", "role": "assistant", "content": GEMINI_SIGNED_OUT["error"]["message"]}),
     ("unknown", {"type": "error", "message": "Not logged in"}),
 ], ids=["claude-usage-limit", "claude-not-error", "claude-500", "claude-other-error", "claude-plain-text",
         "codex-disconnect", "codex-agent-text", "codex-refresh-503", "codex-refresh-500", "cursor-disconnect",
-        "other-harness"])
+        "gemini-quota", "gemini-agent-text", "other-harness"])
 def test_detect_signout_ignores_other_failures_and_agent_text(harness: str, event: dict) -> None:
     assert not account_doctor.detect_signout(harness, event)
 
@@ -158,6 +167,19 @@ def test_a_claude_run_that_dies_signed_out_holds_its_pair(tmp_path: Path) -> Non
     with sqlite3.connect(db) as connection:
         dump = "\n".join(str(row) for row in connection.iterdump())
     assert "OAuth session" not in dump, "no message text is stored"
+
+
+def test_a_gemini_run_that_dies_signed_out_holds_its_pair(tmp_path: Path) -> None:
+    db = tmp_path / "d.db"
+    now = [START]
+    queue = SQLiteJobQueue(db, clock=lambda: now[0])
+    job = queue.enqueue(JobRequest("owner/repo", "7", "build", "gemini", "c1", 3600), dedupe_key="build:7")
+    setup(tmp_path, now=now)
+    session = _session(db, tmp_path, job.id, "gemini", now, device="pc", account="gemini-ultra")
+    _feed(session, GEMINI_SIGNED_OUT)
+    session.finish(1)
+    assert _holds(db) == [("gemini-ultra", "pc", START, "runtime", account_doctor.AUTHENTICATION_FAILED)]
+    assert _events(db, job.id) == [SIGNED_OUT]
 
 
 def test_a_codex_run_on_the_default_account_holds_the_default_pair(tmp_path: Path) -> None:
