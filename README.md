@@ -1880,10 +1880,11 @@ with a Codex plan that reports only its 7-day window. Its `used` stays null,
 and the other window alone is then the account's headroom.
 
 A newer `no reading` replaces older numbers. A window that has reset, or a
-reading older than 24 hours, is `stale` and its `used` is null. Every Cursor
-account shows `not tracked: <reason>` on its own muted row with its plan,
-jobs and devices: the Cursor CLI reports no usage without reading its login
-token. A database without the table shows `no telemetry`.
+reading older than 24 hours, is `stale` and its `used` is null. A Cursor
+account shows the reading `orch usage record` stored on it (source `usage
+record`); with none it shows `not tracked: <reason>` on its own muted row
+with its plan, jobs and devices: the Cursor CLI reports no usage without
+reading its login token. A database without the table shows `no telemetry`.
 
 Each row also shows the account's jobs (`2 running · max 3`, or `no max`)
 and its devices (`signed in on pc, box · running on pc`), from the same read
@@ -1899,7 +1900,7 @@ readings, its own pause and its own Efficiency row. Declare accounts in
 accounts:
   - {id: claude-max-1, harness: claude, plan: max, label: "Claude Max", signed_in_on: [pc, box]}
   - {id: claude-max-2, harness: claude, plan: max, signed_in_on: [pc], max_jobs: 2}
-  - {id: cursor-grok-ultra, harness: external, plan: ultra}
+  - {id: grok-ultra, harness: external, plan: ultra}
 devices:
   - name: pc
     home: /home/{bot}
@@ -1948,15 +1949,15 @@ account and a declared Cursor account that no device names as its login.
 `cursor-bot` on each of those devices with `CURSOR_API_KEY`,
 `CURSOR_AUTH_TOKEN` and `CURSOR_CONFIG_DIR` unset, and keeps only the status
 and a 12-character hash of the user id the reply names, never the email.
-Settings cannot sign a device login out. Cursor usage stays `not tracked`:
-the CLI shows its usage meters only in the interactive `/usage` view, and no
+Settings cannot sign a device login out. No probe reads Cursor usage: the
+CLI shows its usage meters only in the interactive `/usage` view, and no
 documented non-interactive command or API reports used and reset without
-reading the login's credentials. Efficiency and Settings show that reason on
-the account. The Ultra plan's included usage is one weekly pool shared with
-Grok, so the `external` account `cursor-grok-ultra` keeps recording that
-pool from `orch usage record`, and the Cursor account is the CLI login that
-draws on it. Max allowed Cursor as a build and review harness, so `orch.yml`
-no longer lists it in `refused_harnesses`
+reading the login's credentials. Cursor's weekly used and reset are
+recorded on the Cursor account itself (`orch usage record --account
+cursor-ultra`), and Efficiency and Settings show that reading on the
+account's row; there is no pooled row. A Cursor account with no reading
+shows `not tracked` and the reason. Max allowed Cursor as a build and
+review harness, so `orch.yml` no longer lists it in `refused_harnesses`
 (`docs/decisions/1411-cursor-accounts.md`).
 
 Account homes (issues #1183 and #1184). One bot user on one device can run
@@ -2026,18 +2027,21 @@ every account serving it is limited. Readings also rank accounts for
 placement through the score and the floor (see "Device pool"). They do not
 change which harness builds or reviews a job.
 
-Grok and Cursor usage is visible only to Grok Bot, so an `external` account
-takes readings from a command:
+No factory process can read Grok or Cursor usage, so an `external` account
+or a `cursor` account takes readings from a command:
 
 ```sh
-bin/orch usage record --account cursor-grok-ultra --window weekly --used 0.42 --resets-at 1795467840
+bin/orch usage record --account cursor-ultra --window weekly --used 0.42 --resets-at 1795467840
 ```
 
 `--window` is `five_hour`, `seven_day` or `weekly` (stored as `seven_day`).
 `--used` is a fraction from 0 to 1, `--resets-at` an epoch second within 30
 days, and `--observed-at` (default now) may not be in the future. Only
-accounts with `harness: external` are accepted, and a reading older than
-the stored one is kept out (`kept newer reading`). The command takes no
+declared accounts with `harness: external` or a harness no probe reads
+(today `cursor`) are accepted; Claude, Codex and Gemini accounts are read
+at each job's start and are refused. The reading is stored under the
+account's own harness, and a reading older than the stored one is kept out
+(`kept newer reading`). The command takes no
 credential, cookie or token. A scheduled Grok Bot routine that calls
 `orch usage record` is a separate step that needs Max's approval. This
 ticket does not create it.

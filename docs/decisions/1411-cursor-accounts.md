@@ -41,16 +41,19 @@ JSON and never the text renderer's wording:
 Two different user ids are two sign-ins. It never opens a credential file
 and never stores the email or user id.
 
-## Usage: not tracked
+## Usage: recorded by hand
 
 The CLI shows its included-usage meters only in the interactive `/usage`
 view. No documented non-interactive command or API reports used and reset
-without reading the login's credentials, so Cursor stays in
-`usage_readings.NOT_TRACKED`, and Efficiency and Settings show the reason
-it maps Cursor to. The Ultra plan's included usage is
-one weekly pool shared with Grok. The `external` account `cursor-grok-ultra`
-keeps recording that pool from `orch usage record`; `cursor-ultra` is the
-CLI login that draws on it.
+without reading the login's credentials, so no probe reads Cursor and it
+stays in `usage_readings.NOT_TRACKED`. Its weekly used and reset are
+recorded on the Cursor account itself (`cursor-ultra`) with `orch usage
+record`, stored under harness `cursor` with source `usage record`.
+Efficiency and Settings show that reading on the account's own row; only a
+Cursor account with no reading shows `not tracked` and the reason
+`NOT_TRACKED` maps Cursor to. There is no pooled Efficiency row: an earlier
+version recorded a weekly Ultra pool shared with Grok on the `external`
+account `cursor-grok-ultra`, and Max dropped that pooling.
 
 ## Proposed machines.yml (not applied)
 

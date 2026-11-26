@@ -384,12 +384,19 @@ env -u CURSOR_API_KEY -u CURSOR_AUTH_TOKEN -u CURSOR_CONFIG_DIR cursor-agent log
 On macOS the Cursor CLI keeps that login in the Keychain, so no variable
 moves it to a folder and a Cursor account has no `signed_in_on`.
 
-A Cursor card shows the account's plan and `not tracked: <reason>` in place
-of 5h used, 7d used and headroom. The Efficiency page shows the same reason
-on the account's own muted row. The reason comes from `NOT_TRACKED` in
-`lib/usage_readings.py`: the Cursor CLI reports no usage without reading its
-login token, and nothing in the factory reads a credential. The shared Ultra
-pool's usage is on the `external` account.
+The Cursor CLI reports no usage without reading its login token, and
+nothing in the factory reads a credential, so no probe reads a Cursor
+account. Record its weekly used and reset on the account itself:
+
+```sh
+bin/orch usage record --account cursor-ultra --window weekly --used 0.01 --resets-at <epoch>
+```
+
+A Cursor card then shows 5h used, 7d used and headroom from that reading,
+and the Efficiency page shows it on the account's row with source `usage
+record`. There is no pooled row. A Cursor account with no reading shows its
+plan and `not tracked: <reason>` instead, on its own muted row on
+Efficiency; the reason comes from `NOT_TRACKED` in `lib/usage_readings.py`.
 
 ### Cursor builds and reviews
 
