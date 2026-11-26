@@ -50,7 +50,9 @@ this node's own) are required, the process must not run as a bot account,
 and POST is answered under /api only, to those clients only. The last
 X-Forwarded-For hop is used as the client only when the TCP peer is this
 node's TAILNET_IP and the kernel's socket table (/proc/net/tcp) shows that
-peer socket owned by root, which is tailscaled (tailscale serve's backend).
+peer socket established and owned by root, which is tailscaled (tailscale
+serve's backend). A closed non-root socket's leftover timewait row reports
+uid 0 and is not trusted.
 Bot accounts are not root, so their forged X-Forwarded-For is ignored;
 X-Forwarded-For from any other peer is ignored too. Sign-in is
 GitHub's OAuth device flow; the token stays in this process's memory and is
@@ -313,8 +315,6 @@ class ActionsConfig(NamedTuple):
     https: bool = False
     oauth_scope: str = "repo"
     require_auth_reads: bool = False
-    # This node's TAILNET_IP. X-Forwarded-For is trusted only from a peer at
-    # this address whose socket /proc/net/tcp lists as root's (tailscaled).
     own_address: str | None = None
 
 
@@ -639,14 +639,16 @@ class GitHubClient:
                           token=token, payload={"body": body})
 
 
-# tailscaled runs as root; bots and factory-dash do not.
-PROXY_UID = 0
+TAILSCALED_UID = 0
+TCP_ESTABLISHED = "01"
 
 
 def tcp_socket_uid(
     peer: tuple[str, int], local: tuple[str, int], table: Path = Path("/proc/net/tcp")
 ) -> int | None:
-    """Owner uid of the peer's end of the IPv4 TCP connection peer <-> local."""
+    """Owner uid of the peer's end of the established IPv4 TCP connection
+    peer <-> local, else None. A closed socket's timewait row is unowned and
+    reports uid 0, so only an ESTABLISHED row counts."""
     def encode(ip: str, port: int) -> str:
         return f"{int.from_bytes(ipaddress.IPv4Address(ip).packed, sys.byteorder):08X}:{port:04X}"
 
@@ -657,7 +659,7 @@ def tcp_socket_uid(
         return None
     for line in lines:
         cols = line.split()
-        if len(cols) > 7 and (cols[1], cols[2]) == want:
+        if len(cols) > 7 and (cols[1], cols[2], cols[3]) == (*want, TCP_ESTABLISHED):
             return int(cols[7])
     return None
 
@@ -674,7 +676,7 @@ def action_client(
         ipaddress.IPv4Address(hop)
     except ValueError:
         return peer[0]
-    if tcp_socket_uid(peer, local) != PROXY_UID:
+    if tcp_socket_uid(peer, local) != TAILSCALED_UID:
         return peer[0]
     return hop
 

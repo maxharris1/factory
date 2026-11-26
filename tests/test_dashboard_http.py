@@ -9,6 +9,7 @@ are served, never anything outside the directory, never a listing.
 import http.client
 import importlib.util
 import os
+import socket
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -640,20 +641,47 @@ def test_tcp_socket_uid_reads_the_peer_sockets_owner(tmp_path) -> None:
     header = ("  sl  local_address rem_address   st tx_queue rx_queue tr tm->when "
               "retrnsmt   uid  timeout inode")
     rows = [
-        (LOCAL, (OWN, 40000), 1001),
-        ((OWN, 40000), LOCAL, 0),
-        ((OWN, 40001), LOCAL, 1002),
+        (LOCAL, (OWN, 40000), "01", 1001),
+        ((OWN, 40000), LOCAL, "01", 0),
+        ((OWN, 40001), LOCAL, "01", 1002),
+        ((OWN, 40003), LOCAL, "05", 0),
+        ((OWN, 40004), LOCAL, "06", 0),
     ]
     table = tmp_path / "tcp"
     table.write_text("\n".join([header] + [
-        f"   {n}: {addr(*a)} {addr(*b)} 01 00000000:00000000 00:00000000 00000000 {uid:>5} 0 {1000 + n} 1"
-        for n, (a, b, uid) in enumerate(rows)
+        f"   {n}: {addr(*a)} {addr(*b)} {st} 00000000:00000000 00:00000000 00000000 {uid:>5} 0 {1000 + n} 1"
+        for n, (a, b, st, uid) in enumerate(rows)
     ]) + "\n")
     fn = server_module.tcp_socket_uid
     assert fn((OWN, 40000), LOCAL, table) == 0
     assert fn((OWN, 40001), LOCAL, table) == 1002
     assert fn((OWN, 40002), LOCAL, table) is None
+    assert fn((OWN, 40003), LOCAL, table) is None
+    assert fn((OWN, 40004), LOCAL, table) is None
     assert fn((OWN, 40000), LOCAL, tmp_path / "missing") is None
+
+
+@pytest.mark.skipif(not HAS_TCP_TABLE, reason="needs /proc/net/tcp")
+@pytest.mark.skipif(os.geteuid() == 0, reason="test process is the proxy uid")
+def test_tcp_socket_uid_does_not_report_a_disconnected_peer_as_root() -> None:
+    listener = socket.create_server(("127.0.0.1", 0))
+    client = socket.create_connection(listener.getsockname())
+    accepted, _ = listener.accept()
+    try:
+        peer = accepted.getpeername()[:2]
+        local = accepted.getsockname()[:2]
+        assert server_module.tcp_socket_uid(peer, local) == os.geteuid()
+        client.close()
+        deadline = time.monotonic() + 2
+        uid = os.geteuid()
+        while uid == os.geteuid() and time.monotonic() < deadline:
+            time.sleep(0.01)
+            uid = server_module.tcp_socket_uid(peer, local)
+        assert uid is None
+    finally:
+        client.close()
+        accepted.close()
+        listener.close()
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="test process is the proxy uid")
@@ -666,7 +694,7 @@ def test_forged_xff_from_a_local_non_root_process_is_ignored(serve_actions, fake
 
 @pytest.mark.skipif(not HAS_TCP_TABLE, reason="needs /proc/net/tcp")
 def test_xff_from_the_proxy_socket_can_sign_in(serve_actions, fake_github, monkeypatch) -> None:
-    monkeypatch.setattr(server_module, "PROXY_UID", os.geteuid())
+    monkeypatch.setattr(server_module, "TAILSCALED_UID", os.geteuid())
     client = serve_actions(clients=(LISTED,), own_address="127.0.0.1")
     assert client.post("/api/signin")[0] == 404
     status, body = client.post("/api/signin", **{"X-Forwarded-For": f"100.64.0.9, {LISTED}"})
@@ -677,7 +705,7 @@ def test_xff_from_the_proxy_socket_can_sign_in(serve_actions, fake_github, monke
 
 @pytest.mark.skipif(not HAS_TCP_TABLE, reason="needs /proc/net/tcp")
 def test_proxy_xff_does_not_skip_origin_checks(serve_actions, monkeypatch) -> None:
-    monkeypatch.setattr(server_module, "PROXY_UID", os.geteuid())
+    monkeypatch.setattr(server_module, "TAILSCALED_UID", os.geteuid())
     client = serve_actions(clients=(LISTED,), own_address="127.0.0.1")
     assert client.post(
         "/api/signin",
