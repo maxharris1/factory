@@ -447,6 +447,48 @@ def test_stop_tls_certificate_expired_remains_retryable_until_delivery_succeeds(
     assert len(stop_calls) == 2
 
 
+def test_silent_remote_exit_reclaims_lane_at_timeout_when_stop_sees_already_ended(
+    tmp_path: Path,
+) -> None:
+    """Claude Code 2.1.322 has no non-interactive cloud status CLI command (#780):
+    a lane whose remote session exits silently stays running on the local marker
+    until qa.timeout_minutes, when stop() observes already-ended and releases the slot."""
+    source, _ = _source_repo(tmp_path)
+    runner, state_dir = _runner(
+        tmp_path / "runner",
+        source=source,
+        environments={"full-stack": "ccpool_full_stack"},
+    )
+    lab = Lab(tmp_path / "lab", lanes=1, runners=("claude-cloud",))
+    lab.fakes["claude-cloud"] = runner
+    lab.worker = lab.new_worker()
+    lab.enqueue(ids=1)
+    lab.silent.add((0, 1))
+
+    # Launch the lane; the remote session then exits silently without uploading results.
+    lab.tick(2)
+    [(agent_id,)] = lab.run.rows("SELECT agent_id FROM qa_lanes")
+    assert agent_id == "session_01TestClaude0001"
+    assert runner.status(agent_id) == "running"
+    (state_dir / "mode.json").write_text(
+        json.dumps({"stop_error": {"code": 1, "text": f"Error: session {agent_id} has already ended"}}),
+        encoding="utf-8",
+    )
+
+    # Before qa.timeout_minutes, status() stays running without polling a non-existent CLI command.
+    lab.tick(7)
+    assert lab.posted == {}
+    assert runner.status(agent_id) == "running"
+    assert [c for c in _calls(state_dir) if "-p" in c["argv"]] == []
+
+    # Past qa.timeout_minutes, stop() treats already-ended as clean and releases the lane.
+    lab.tick(4)
+    assert [row[3:5] for row in lab.lanes()] == [("timed-out", "no-result-in-time")]
+    assert runner.status(agent_id) == "ended"
+    assert lab.header()["result"] == "BLOCKED"
+    assert len([c for c in _calls(state_dir) if "-p" in c["argv"]]) == 1
+
+
 @pytest.mark.parametrize(
     ("recorded_output", "expected_error"),
     [

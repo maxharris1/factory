@@ -911,6 +911,18 @@ class ClaudeCloudRunner:
             return launched
 
     def status(self, agent_id: str) -> AgentStatus:
+        """Return the locally recorded session state.
+
+        Claude Code 2.1.322 exposes no non-interactive CLI command or flag to
+        query the live status of a ``--cloud`` session (#780; ``claude cloud``
+        and ``claude sessions`` do not exist, and ``attach``/``logs``/``stop``/
+        ``rm``/``respawn`` apply to background sessions only). ``status()``
+        therefore reflects the session marker written by ``launch()`` and
+        flipped to ``"ended"`` once ``stop()`` succeeds or observes an
+        already-ended session. Silent remote exits that never upload a result
+        are reclaimed by the worker's ``qa.timeout_minutes`` deadline, which
+        invokes ``stop()`` and records ``timed-out``.
+        """
         saved = _read_json(self._session_marker(agent_id))
         if saved.get("state") == "ended":
             return "ended"

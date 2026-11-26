@@ -258,6 +258,10 @@ class ClaudeCloudCliAdapter:
         self._runner.stop(agent_id)
 
     def end(self, agent_id: str) -> None:
+        # Claude Code 2.1.322 has no non-interactive cloud status CLI command (#780),
+        # so the runner's status() reads the persisted session marker (and real
+        # silent remote exits rely on qa.timeout_minutes). The coordinator's
+        # ended-without-result tests simulate an ended state via the marker.
         marker = self._runner._session_marker(agent_id)
         data = json.loads(marker.read_text(encoding="utf-8")) if marker.exists() else {"agent_id": agent_id}
         data["state"] = "ended"
