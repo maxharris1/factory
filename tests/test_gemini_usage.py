@@ -88,13 +88,11 @@ def test_the_claude_and_gpt_group_gives_no_reading() -> None:
 
 @pytest.mark.parametrize("reset", ["1970-01-01T00:00:00Z", "2099-01-01T00:00:00Z", "not a time",
                                    "2026-11-26T17:01:47", None, 1795712507, ...])
-def test_a_reset_time_out_of_horizon_or_invalid_is_dropped(reset: object) -> None:
+def test_a_reset_time_out_of_horizon_or_invalid_is_an_explicit_no_reading(reset: object) -> None:
     bucket = _bucket("5h", 0.75, reset)
     if reset is ...:
         del bucket["reset_time"]
-    five = _by_window(_probe(_payload(bucket)))["five_hour"]
-    assert five.resets_at is None
-    assert five.used == pytest.approx(0.25)
+    assert _by_window(_probe(_payload(bucket)))["five_hour"] == usage_readings.missing("five_hour", NOW, 0, NOW)
 
 
 @pytest.mark.parametrize("fraction", [..., None, "0.5", True, False, -0.1, 1.5, float("nan"), float("inf"), [0.5]])
@@ -147,6 +145,33 @@ def test_the_reply_may_follow_a_warning_line() -> None:
     assert _by_window(_probe(b"warning: cache is cold\n" + PAYLOAD))["five_hour"].resets_at == FIVE_HOUR_RESET
 
 
+def _bare(reply: dict) -> dict:
+    """The reply with only the keys the parser reads, and no bucket descriptions."""
+    bare = {"status": reply["status"], "command": json.loads(json.dumps(reply["command"]))}
+    for group in bare["command"]["data"]["groups"]:
+        for bucket in group["buckets"]:
+            bucket.pop("description", None)
+    return bare
+
+
+def test_the_fixture_has_the_real_replys_extra_keys_and_they_are_ignored() -> None:
+    reply = json.loads(PAYLOAD)
+    assert {"conversation_id", "response", "usage"} <= set(reply)
+    assert all("description" in bucket for group in reply["command"]["data"]["groups"]
+               for bucket in group["buckets"])
+    assert _probe(PAYLOAD) == _probe(_bare(reply)) == _probe(json.dumps(_bare(reply)).encode())
+
+
+@pytest.mark.parametrize("prefix", [b"warning: cache is cold\n", b"W1126 16:00:00 agy: update available\n\n"])
+def test_a_leading_warning_line_gives_the_same_readings(prefix: bytes) -> None:
+    readings = _probe(prefix + PAYLOAD)
+    assert readings == _probe(PAYLOAD)
+    assert {r.window: (r.used, r.resets_at) for r in readings} == {
+        "five_hour": (pytest.approx(0.276696, abs=1e-6), FIVE_HOUR_RESET),
+        "seven_day": (pytest.approx(0.171652, abs=1e-6), SEVEN_DAY_RESET),
+    }
+
+
 def test_a_reply_larger_than_the_reply_cap_is_not_read() -> None:
     padded = json.loads(PAYLOAD)
     padded["pad"] = "x" * usage_readings.MAX_REPLY_BYTES
@@ -180,6 +205,23 @@ def test_a_device_declared_gemini_account_gets_its_bot_devices_and_readings(tmp_
     assert entry["state"] == "ok"
     assert entry["five_hour"]["used"] == pytest.approx(0.276696, abs=1e-6)
     assert entry["seven_day"]["resets_at"] == SEVEN_DAY_RESET
+
+
+def test_a_dropped_reset_is_stored_as_a_no_reading_that_reads_back(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    session = _session(db)
+    session.add_usage(_probe(_payload(_bucket("5h", 0.75, "1970-01-01T00:00:00Z"), _bucket("weekly", 0.5))))
+    session.finish(0)
+    with sqlite3.connect(db) as connection:
+        rows = {row[0]: row for row in connection.execute(
+            "SELECT window, used, resets_at, observed_at, absent FROM usage_readings").fetchall()}
+        entry = next(e for e in dashboard_usage.read_usage(connection, NOW + 60, None)["accounts"]
+                     if e["harness"] == "gemini")
+    assert rows["five_hour"][1:3] == (None, None), "never a used fraction without its reset"
+    assert usage_readings.from_row(*rows["five_hour"]) == usage_readings.missing("five_hour", NOW, 0)
+    assert usage_readings.from_row(*rows["seven_day"]) is not None
+    assert entry["five_hour"]["used"] is None and entry["five_hour"]["observed_at"] == NOW
+    assert entry["seven_day"]["used"] == pytest.approx(0.5)
 
 
 def _session(db: Path, *, account: str | None = None) -> telemetry.Session:
@@ -374,6 +416,83 @@ def test_a_failed_gemini_probe_logs_one_line_and_never_fails_the_job(tmp_path: P
     run, _, db = _gemini_box_run(tmp_path, mode)
     assert run.returncode == 0, run.stderr
     assert _probe_lines(run) == [f"orch job run: {line}"]
+    with sqlite3.connect(db) as connection:
+        assert "usage_readings" not in usage_readings.tables(connection) or connection.execute(
+            "SELECT count(*) FROM usage_readings").fetchone() == (0,)
+
+
+REMOTE_MACHINES = """\
+devices:
+  - name: box
+    local: true
+    enabled: false
+    slot_max: 3
+    harnesses: {{gemini: gemini-bot}}
+  - name: pc
+    tailscale_name: pc.example.ts.net
+    slot_max: 3
+    harnesses: {{gemini: gemini-bot}}
+    workdir_root: {root}/remote/{{bot}}/work
+    ssh_alias: fakepc-{{bot}}
+    factory_root: /srv/factory
+"""
+
+
+def _gemini_remote_run(tmp_path: Path, mode: str) -> tuple[subprocess.CompletedProcess, Path, Path]:
+    from tests.test_remote_start import Ssh
+
+    machines = tmp_path / "machines.yml"
+    machines.write_text(REMOTE_MACHINES.format(root=tmp_path), encoding="utf-8")
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=time.time)
+    queue.enqueue(
+        JobRequest(repo="acme/widgets", ticket_id="12", action="build", recipient="gemini",
+                   source_comment_id="1", timeout_seconds=600),
+        dedupe_key=f"k-{time.monotonic_ns()}",
+    )
+    job = pool_claim(queue, "gemini", machines)
+    ssh = Ssh(tmp_path)
+    (ssh.hosts / "fakepc-gemini-bot").write_text("gemini-bot", encoding="utf-8")
+    worker_bin = tmp_path / "worker-bin"
+    worker_bin.mkdir()
+    agy = worker_bin / "agy"
+    agy.write_text(FAKE_AGY.format(python=sys.executable, fixture=str(FIXTURE),
+                                   stream=str(ROOT / "tests" / "fixtures" / "telemetry" / "agy_stream.jsonl")),
+                   encoding="utf-8")
+    agy.chmod(0o755)
+    (worker_bin / "usage-mode").write_text(mode, encoding="utf-8")
+    home = tmp_path / "worker-home"
+    home.mkdir()
+    (home / ".bash_profile").write_text(
+        "".join(f"export {name}=SYNTHETIC\n" for name in DROPPED)
+        + f"export PATH={shlex.quote(str(worker_bin))}:$PATH\n", encoding="utf-8")
+    run = _orch(
+        "job", "run", "gemini-bot", job.id, "--machines", str(machines), "--db", str(queue.path),
+        "--interval", "0.2", "--", "agy", "-p", "hi",
+        env={"HOME": str(tmp_path), **ssh.env(), "FAKE_SSH_HOME": str(home)},
+    )
+    probes = [call for call in ssh.calls() if "/usage" in call["script"]]
+    assert [call["user"] for call in probes] == ["gemini-bot"]
+    return run, worker_bin, queue.path
+
+
+def test_a_remote_gemini_job_probes_agy_usage_on_its_device_over_ssh(tmp_path: Path) -> None:
+    run, worker_bin, db = _gemini_remote_run(tmp_path, "reply")
+    assert run.returncode == 0, run.stderr
+    calls = [json.loads(line) for line in (worker_bin / "usage-calls").read_text(encoding="utf-8").splitlines()]
+    assert [call["argv"] for call in calls] == [["-p", "/usage", "--output-format", "json"]]
+    assert not set(DROPPED) & set(calls[0]["env"]), "the login profile's Google overrides are unset"
+    assert _probe_lines(run) == []
+    with sqlite3.connect(db) as connection:
+        rows = connection.execute(
+            "SELECT harness, bot, device, window, round(used, 4) FROM usage_readings ORDER BY window").fetchall()
+    assert rows == [("gemini", "gemini-bot", "pc", "five_hour", 0.2767),
+                    ("gemini", "gemini-bot", "pc", "seven_day", 0.1717)]
+
+
+def test_a_remote_gemini_probe_that_fails_logs_one_line_and_never_fails_the_job(tmp_path: Path) -> None:
+    run, _, db = _gemini_remote_run(tmp_path, "exit")
+    assert run.returncode == 0, run.stderr
+    assert _probe_lines(run) == ["orch job run: usage probe: failed (ssh exit 1)"]
     with sqlite3.connect(db) as connection:
         assert "usage_readings" not in usage_readings.tables(connection) or connection.execute(
             "SELECT count(*) FROM usage_readings").fetchone() == (0,)
