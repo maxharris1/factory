@@ -203,9 +203,10 @@ def test_require_auth_reads_allows_auth_js_only_before_signin(tmp_path: Path) ->
     handler = object.__new__(mod.SnapshotHandler)
     cfg = mod.ActionsConfig("synthetic", "human", frozenset(), require_auth_reads=True)
     handler.server = SimpleNamespace(
-        actions=SimpleNamespace(config=cfg, current=lambda _: None),
+        actions=SimpleNamespace(config=cfg, current_with_renewal=lambda *_: (None, False)),
         root_fd=mod.open_root(site),
     )
+    handler.client_address = ("127.0.0.1", 0)
     handler._cookie = lambda _: None
     out: list[tuple[int, str, bytes]] = []
     handler._send = lambda code, data, ctype, **kw: out.append((code, ctype, data))

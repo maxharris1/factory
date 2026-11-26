@@ -260,6 +260,7 @@ def test_server_refuses_a_root_that_is_a_symlink(tmp_path: Path) -> None:
 # GitHub actions (issue #563). The real server runs on loopback with an
 # ActionsConfig pointing at FakeGitHub below, never at github.com.
 
+import errno
 import json
 import re
 import sys
@@ -2495,6 +2496,28 @@ def test_persistent_session_rejects_tampering_wrong_key_wrong_ip_symlink_and_exp
         store.close()
 
 
+def test_persistent_session_mac_covers_every_envelope_metadata_key(
+    serve_actions, fake_github: FakeGitHub, session_store: Path
+) -> None:
+    client = serve_actions(session_store=session_store)
+    assert client.sign_in(fake_github, MAX_TOKEN) == "signed-in"
+    session_id, _, key_b64 = client.cookies["factory_session"].partition(".")
+    key = server_module._b64d(key_b64)
+    (stored_file,) = list(session_store.iterdir())
+    original = json.loads(stored_file.read_bytes())
+
+    store = server_module.SessionStore(session_store)
+    try:
+        assert store.load(session_id, key, client_ip="127.0.0.1") is not None
+        for field in sorted(set(original) - {"salt", "ct", "tag"}):
+            value = original[field]
+            tampered = {**original, field: value + 1 if isinstance(value, int) else ""}
+            stored_file.write_text(json.dumps(tampered), encoding="utf-8")
+            assert store.load(session_id, key, client_ip="127.0.0.1") is None, field
+    finally:
+        store.close()
+
+
 def test_sign_out_removes_only_calling_device_and_sign_out_all_clears_store(
     actions_site: Path, fake_github: FakeGitHub, session_store: Path
 ) -> None:
@@ -2595,7 +2618,126 @@ def test_session_store_evicts_oldest_beyond_max_sessions(
     assert clients[-1].session()["signed_in"] is True
 
 
-def test_load_config_session_store_and_days(site: Path, session_store: Path, capsys) -> None:
+def test_re_signin_on_a_full_store_keeps_every_other_device(
+    serve_actions, fake_github: FakeGitHub, session_store: Path
+) -> None:
+    first = serve_actions(session_store=session_store)
+    devices = [first] + [Client(first.port) for _ in range(server_module.MAX_SESSIONS - 1)]
+    for device in devices:
+        assert device.sign_in(fake_github, MAX_TOKEN) == "signed-in"
+    assert len(list(session_store.iterdir())) == server_module.MAX_SESSIONS
+
+    assert devices[-1].sign_in(fake_github, MAX_TOKEN) == "signed-in"
+
+    assert len(list(session_store.iterdir())) == server_module.MAX_SESSIONS
+    assert [device.session()["signed_in"] for device in devices] == [True] * len(devices)
+
+
+def test_sign_out_fails_when_the_session_store_cannot_revoke(
+    serve_actions, fake_github: FakeGitHub, session_store: Path, monkeypatch
+) -> None:
+    client = serve_actions(session_store=session_store)
+    assert client.sign_in(fake_github, MAX_TOKEN) == "signed-in"
+    real_unlink = os.unlink
+
+    def read_only_unlink(path, *args, **kwargs):
+        if server_module.SESSION_FILE.fullmatch(os.fsdecode(path)):
+            raise OSError(errno.EROFS, "Read-only file system")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(server_module.os, "unlink", read_only_unlink)
+    for payload in ({}, {"all": True}):
+        assert client.post("/api/signout", payload) == (500, {"error": "session-store"})
+        assert "factory_session" in client.cookies
+        assert client.session()["signed_in"] is True
+    assert len(list(session_store.iterdir())) == 1
+
+
+@pytest.fixture
+def advance_clock(monkeypatch) -> Callable[[float], None]:
+    real = server_module.time
+    offset = [0.0]
+    monkeypatch.setattr(server_module, "time", SimpleNamespace(
+        time=lambda: real.time() + offset[0],
+        time_ns=lambda: real.time_ns() + int(offset[0] * 1_000_000_000),
+        monotonic=lambda: real.monotonic() + offset[0],
+        strftime=real.strftime,
+        gmtime=real.gmtime,
+    ))
+
+    def advance(seconds: float) -> None:
+        offset[0] += seconds
+
+    return advance
+
+
+def _session_set_cookies(client: Client, since: int) -> list[str]:
+    return [
+        value for _, headers, _ in client.seen[since:] for key, value in headers
+        if key.lower() == "set-cookie" and value.startswith("factory_session=")
+    ]
+
+
+@pytest.mark.parametrize("route", ["GET /", "HEAD /", "POST /api/head"])
+def test_every_session_lookup_slides_the_browser_cookie(
+    serve_actions, fake_github: FakeGitHub, session_store: Path, advance_clock, route: str
+) -> None:
+    client = serve_actions(session_store=session_store, require_auth_reads=True)
+    assert client.sign_in(fake_github, MAX_TOKEN) == "signed-in"
+    raw_cookie = client.cookies["factory_session"]
+    advance_clock(2 * 86400)
+
+    seen = len(client.seen)
+    if route == "POST /api/head":
+        assert client.post("/api/head", {"repo": REPO, "pr": 34}) == (200, {"head": HEAD})
+    else:
+        method, path = route.split()
+        assert client.raw(method, path)[0] == 200
+    (renewed,) = _session_set_cookies(client, seen)
+    assert renewed.startswith(f"factory_session={raw_cookie};")
+    assert f"Max-Age={90 * 86400}" in renewed and "Path=/;" in renewed
+
+    seen = len(client.seen)
+    assert client.session()["signed_in"] is True
+    assert _session_set_cookies(client, seen) == []
+
+
+def test_sign_out_due_for_renewal_only_clears_the_cookie(
+    serve_actions, fake_github: FakeGitHub, session_store: Path, advance_clock
+) -> None:
+    client = serve_actions(session_store=session_store)
+    assert client.sign_in(fake_github, MAX_TOKEN) == "signed-in"
+    advance_clock(2 * 86400)
+
+    seen = len(client.seen)
+    assert client.post("/api/signout") == (200, {})
+    (cleared,) = _session_set_cookies(client, seen)
+    assert cleared.startswith("factory_session=;") and "Max-Age=0" in cleared
+
+
+def test_a_one_day_session_slides_while_the_device_is_active(
+    serve_actions, fake_github: FakeGitHub, session_store: Path, advance_clock
+) -> None:
+    client = serve_actions(session_store=session_store, session_seconds=86400)
+    assert client.sign_in(fake_github, MAX_TOKEN) == "signed-in"
+    (stored_file,) = list(session_store.iterdir())
+    signed_in_expiry = json.loads(stored_file.read_text(encoding="utf-8"))["expires_at"]
+
+    advance_clock(43200)
+    seen = len(client.seen)
+    assert client.session()["signed_in"] is True
+    assert json.loads(stored_file.read_text(encoding="utf-8"))["expires_at"] >= signed_in_expiry + 43200
+    (renewed,) = _session_set_cookies(client, seen)
+    assert "Max-Age=86400" in renewed
+
+    advance_clock(43200)
+    assert client.session()["signed_in"] is True
+
+
+def test_load_config_session_store_and_days(
+    site: Path, session_store: Path, capsys, monkeypatch
+) -> None:
+    monkeypatch.setattr(server_module, "current_user", lambda: "factory-dash")
     env = _env(site, **ACTIONS_ENV, USER="factory-dash", DASHBOARD_SESSION_STORE=str(session_store))
     *_, actions = server_module.load_config(env, process_user="factory-dash")
     assert actions.session_store == session_store
@@ -2626,10 +2768,12 @@ def test_load_config_session_store_and_days(site: Path, session_store: Path, cap
     ("symlink", "symlink"),
     ("group-readable", "0700"),
     ("world-readable", "0700"),
+    ("owner-read-only", "0700"),
+    ("other-owner", "owned by"),
     ("without-actions", "needs GitHub actions"),
 ])
 def test_load_config_refuses_unsafe_session_store(
-    site: Path, session_store: Path, case: str, needle: str
+    site: Path, session_store: Path, case: str, needle: str, monkeypatch
 ) -> None:
     (session_store.parent / "plain-file").write_text("x", encoding="utf-8")
     (session_store.parent / "store-link").symlink_to(session_store, target_is_directory=True)
@@ -2637,6 +2781,11 @@ def test_load_config_refuses_unsafe_session_store(
         session_store.chmod(0o750)
     elif case == "world-readable":
         session_store.chmod(0o705)
+    elif case == "owner-read-only":
+        session_store.chmod(0o500)
+    elif case == "other-owner":
+        uid = os.geteuid() + 1
+        monkeypatch.setattr(server_module.os, "geteuid", lambda: uid)
     value = {
         "relative": "sessions",
         "missing": str(session_store.parent / "nope"),

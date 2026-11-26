@@ -66,7 +66,8 @@ esac
 FAKE_GETENT = """#!/usr/bin/env bash
 dir="$(dirname "$0")"
 if [[ "$1 $2" == "passwd factory-dash" && -f "$dir/factory-dash.exists" ]]; then
-    echo "factory-dash:x:999:999::/nonexistent:/usr/sbin/nologin"
+    uid="$(cat "$dir/factory-dash.exists")"
+    echo "factory-dash:x:${uid:-999}:999::/nonexistent:/usr/sbin/nologin"
     exit 0
 fi
 exit 2
@@ -631,6 +632,8 @@ def test_install_drop_in_binds_only_the_paths_http_env_sets(
         tmp_path: Path, node: Node, app: HTTPServer) -> None:
     spool, relay, audit = tmp_path / "spool", tmp_path / "relay", tmp_path / "audit" / "acts.jsonl"
     sessions = tmp_path / "sessions"
+    sessions.mkdir(mode=0o700)
+    sessions.chmod(0o700)
     port = app.server_address[1]
     node.write_env(port, DASHBOARD_SETTINGS_SPOOL=str(spool), DASHBOARD_SIGNIN_RELAY=str(relay),
                    DASHBOARD_ACTIONS_AUDIT=str(audit), DASHBOARD_SESSION_STORE=str(sessions))
@@ -668,6 +671,53 @@ def test_install_refuses_a_bind_that_would_unprotect_the_system(
     assert result.returncode == 78, result.stdout + result.stderr
     assert key in result.stderr
     node.assert_untouched()
+
+
+def _session_store(tmp_path: Path, node: Node, case: str) -> Path:
+    store = tmp_path / "sessions"
+    if case == "missing":
+        return store
+    if case == "symlink":
+        target = tmp_path / "real-sessions"
+        target.mkdir(mode=0o700)
+        target.chmod(0o700)
+        store.symlink_to(target)
+        return store
+    store.mkdir(mode=0o700)
+    store.chmod(0o755 if case == "mode-0755" else 0o700)
+    if case == "other-owner":
+        (node.bin / "factory-dash.exists").touch()
+    return store
+
+
+@pytest.mark.parametrize("case", ["mode-0755", "missing", "symlink", "other-owner"])
+def test_install_refuses_an_unsafe_session_store_before_any_change(
+        tmp_path: Path, node: Node, app: HTTPServer, case: str) -> None:
+    store = _session_store(tmp_path, node, case)
+    node.write_env(app.server_address[1], DASHBOARD_SESSION_STORE=str(store))
+    result = node.install()
+    assert result.returncode == 78, result.stdout + result.stderr
+    assert "DASHBOARD_SESSION_STORE" in result.stderr
+    node.assert_untouched()
+
+
+def test_install_rerun_refuses_a_session_store_opened_to_others(
+        tmp_path: Path, node: Node, app: HTTPServer) -> None:
+    store = tmp_path / "sessions"
+    store.mkdir(mode=0o700)
+    store.chmod(0o700)
+    node.write_env(app.server_address[1], DASHBOARD_SESSION_STORE=str(store))
+    assert node.install().returncode == 0
+    (node.bin / "factory-dash.exists").write_text(str(os.getuid()), encoding="utf-8")
+    assert node.install().returncode == 0
+    calls = node.units.calls()
+    store.chmod(0o755)
+    result = node.install()
+    assert result.returncode == 78, result.stdout + result.stderr
+    assert "DASHBOARD_SESSION_STORE" in result.stderr
+    assert "0700" in result.stderr
+    assert node.units.calls() == calls
+    assert node.units.state(HTTP_UNIT) == ("active", "enabled")
 
 
 def _installed(node: Node, app: HTTPServer, env_port: int) -> None:

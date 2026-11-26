@@ -402,10 +402,12 @@ def check_session_store(value: str) -> Path:
         raise ConfigError("DASHBOARD_SESSION_STORE must not be a symlink")
     if not stat.S_ISDIR(info.st_mode):
         raise ConfigError(f"DASHBOARD_SESSION_STORE is not a directory: {value}")
-    if info.st_mode & 0o077:
+    if stat.S_IMODE(info.st_mode) != 0o700:
         raise ConfigError(
-            "DASHBOARD_SESSION_STORE must give group and world no access (mode 0700)"
+            "DASHBOARD_SESSION_STORE must be mode 0700: owner read, write and search only"
         )
+    if info.st_uid != os.geteuid():
+        raise ConfigError("DASHBOARD_SESSION_STORE must be owned by the service user")
     return Path(value)
 
 
@@ -645,7 +647,7 @@ class Session(NamedTuple):
     expires_at: float
     client_ip: str = ""
     key_digest: bytes | None = None
-    created_at: int = 0
+    created_ns: int = 0
     wall_expires_at: int = 0
 
 
@@ -703,15 +705,15 @@ def _xor_keystream(enc_key: bytes, data: bytes) -> bytes:
 
 
 def _session_aad(
-    id_hash: str, login: str, client_ip: str, created_at: int, expires_at: int
+    id_hash: str, login: str, client_ip: str, created_ns: int, expires_at: int
 ) -> bytes:
     return json.dumps(
         {
             "v": 1,
             "id": id_hash,
             "login": login,
-            "ip": client_ip,
-            "created_at": created_at,
+            "client_ip": client_ip,
+            "created_ns": created_ns,
             "expires_at": expires_at,
         },
         sort_keys=True,
@@ -737,24 +739,25 @@ class SessionStore:
         token: str,
         csrf: str,
         client_ip: str,
-        created_at: int,
+        created_ns: int,
         expires_at: int,
         now: float | None = None,
-    ) -> None:
+        replaces: str | None = None,
+    ) -> set[str]:
         slot = _session_slot(session_id)
+        replaced = None if replaces is None else _session_slot(replaces)
         id_hash = _session_id_hash(session_id)
         salt = secrets.token_bytes(16)
         enc_key, mac_key = _derive_session_keys(cookie_key, salt)
         plaintext = json.dumps({"token": token, "csrf": csrf}, separators=(",", ":")).encode("utf-8")
         ciphertext = _xor_keystream(enc_key, plaintext)
-        aad = _session_aad(id_hash, login, client_ip, created_at, expires_at)
+        aad = _session_aad(id_hash, login, client_ip, created_ns, expires_at)
         tag = hmac.new(mac_key, aad + b"\x00" + salt + ciphertext, hashlib.sha256).digest()
         envelope = {
             "v": 1,
             "login": login,
             "client_ip": client_ip,
-            "created_at": created_at,
-            "created_ns": time.time_ns(),
+            "created_ns": created_ns,
             "expires_at": expires_at,
             "salt": _b64e(salt),
             "ct": _b64e(ciphertext),
@@ -765,7 +768,7 @@ class SessionStore:
         temp = f".{slot}.{secrets.token_hex(6)}.tmp"
         wall = time.time() if now is None else now
         with self.lock:
-            evicted = self._prune_locked(wall, keep_slot=slot)
+            evicted = self._prune_locked(wall, keep={slot, replaced})
             try:
                 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | NOFOLLOW
                 with os.fdopen(os.open(temp, flags, 0o600, dir_fd=self.fd), "wb") as handle:
@@ -779,6 +782,9 @@ class SessionStore:
                 with contextlib.suppress(OSError):
                     os.unlink(temp, dir_fd=self.fd)
                 raise
+            if replaced is not None and replaced != slot:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(f"{replaced}.json", dir_fd=self.fd)
         return evicted
 
     def load(
@@ -813,7 +819,7 @@ class SessionStore:
                 return None
             login = envelope.get("login")
             stored_ip = envelope.get("client_ip")
-            created_at = envelope.get("created_at")
+            created_ns = envelope.get("created_ns")
             expires_at = envelope.get("expires_at")
             salt = _b64d(envelope.get("salt"))
             ciphertext = _b64d(envelope.get("ct"))
@@ -821,8 +827,8 @@ class SessionStore:
             if (
                 not isinstance(login, str)
                 or not isinstance(stored_ip, str)
-                or isinstance(created_at, bool)
-                or not isinstance(created_at, int)
+                or isinstance(created_ns, bool)
+                or not isinstance(created_ns, int)
                 or isinstance(expires_at, bool)
                 or not isinstance(expires_at, int)
                 or salt is None
@@ -841,7 +847,7 @@ class SessionStore:
             return None
         id_hash = _session_id_hash(session_id)
         enc_key, mac_key = _derive_session_keys(cookie_key, salt)
-        aad = _session_aad(id_hash, login, stored_ip, created_at, expires_at)
+        aad = _session_aad(id_hash, login, stored_ip, created_ns, expires_at)
         expected_tag = hmac.new(mac_key, aad + b"\x00" + salt + ciphertext, hashlib.sha256).digest()
         if not hmac.compare_digest(tag, expected_tag):
             return None
@@ -856,28 +862,34 @@ class SessionStore:
         csrf = secret_box.get("csrf")
         if not isinstance(token, str) or not token or not isinstance(csrf, str) or not csrf:
             return None
-        return login, token, csrf, created_at, expires_at
+        return login, token, csrf, created_ns, expires_at
 
     def delete(self, session_id: str) -> None:
         name = f"{_session_slot(session_id)}.json"
         with self.lock:
-            with contextlib.suppress(OSError):
+            with contextlib.suppress(FileNotFoundError):
                 os.unlink(name, dir_fd=self.fd)
 
     def clear(self) -> None:
+        failed: OSError | None = None
         with self.lock:
             for name in os.listdir(self.fd):
-                if SESSION_FILE.fullmatch(name):
-                    with contextlib.suppress(OSError):
-                        os.unlink(name, dir_fd=self.fd)
+                if not SESSION_FILE.fullmatch(name):
+                    continue
+                try:
+                    os.unlink(name, dir_fd=self.fd)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    failed = exc
+        if failed is not None:
+            raise failed
 
-    def _prune_locked(self, now: float, *, keep_slot: str | None = None) -> set[str]:
+    def _prune_locked(self, now: float, *, keep: set[str | None]) -> set[str]:
         evicted: set[str] = set()
-        entries: list[tuple[int, int, str]] = []
+        entries: list[tuple[int, str]] = []
         for name in os.listdir(self.fd):
-            if not SESSION_FILE.fullmatch(name):
-                continue
-            if keep_slot is not None and name == f"{keep_slot}.json":
+            if not SESSION_FILE.fullmatch(name) or name[:-5] in keep:
                 continue
             fd = open_under(self.fd, (name,))
             if fd is None:
@@ -892,7 +904,6 @@ class SessionStore:
             except ValueError:
                 data = None
             expires_at = data.get("expires_at") if isinstance(data, dict) else None
-            created_at = data.get("created_at") if isinstance(data, dict) else None
             created_ns = data.get("created_ns") if isinstance(data, dict) else None
             if (
                 isinstance(expires_at, bool)
@@ -903,17 +914,12 @@ class SessionStore:
                     os.unlink(name, dir_fd=self.fd)
                 evicted.add(name[:-5])
                 continue
-            order_s = created_at if isinstance(created_at, int) and not isinstance(created_at, bool) else 0
-            order_ns = (
-                created_ns
-                if isinstance(created_ns, int) and not isinstance(created_ns, bool)
-                else order_s * 1_000_000_000
-            )
-            entries.append((order_s, order_ns, name))
-        limit = MAX_SESSIONS - 1 if keep_slot is not None else MAX_SESSIONS
+            valid_ns = isinstance(created_ns, int) and not isinstance(created_ns, bool)
+            entries.append((created_ns if valid_ns else 0, name))
+        limit = MAX_SESSIONS - 1
         if len(entries) > limit:
             entries.sort()
-            for _, _, victim in entries[: len(entries) - limit]:
+            for _, victim in entries[: len(entries) - limit]:
                 with contextlib.suppress(OSError):
                     os.unlink(victim, dir_fd=self.fd)
                 evicted.add(victim[:-5])
@@ -1058,12 +1064,6 @@ class Actions:
         except ValueError:
             return False
 
-    def current(
-        self, raw_cookie: str | None, client_ip: str = ""
-    ) -> Session | None:
-        session, _ = self.current_with_renewal(raw_cookie, client_ip)
-        return session
-
     def current_with_renewal(
         self, raw_cookie: str | None, client_ip: str = ""
     ) -> tuple[Session | None, bool]:
@@ -1079,8 +1079,7 @@ class Actions:
             session = self.sessions.get(session_id)
             if session is not None and session.expires_at <= now_mono:
                 self.sessions.pop(session_id, None)
-                if self.store is not None:
-                    self.store.delete(session_id)
+                self._discard_stored(session_id)
                 session = None
 
         if session is not None:
@@ -1095,17 +1094,17 @@ class Actions:
             loaded = self.store.load(session_id, cookie_key, client_ip=client_ip, now=now_wall)
             if loaded is None:
                 return None, False
-            login, token, csrf, created_at, wall_expires_at = loaded
+            login, token, csrf, created_ns, wall_expires_at = loaded
             if (
                 OAUTH_APP_TOKEN.fullmatch(token) is None
                 or login.casefold() != self.config.approver.casefold()
                 or is_bot_login(login)
             ):
-                self.store.delete(session_id)
+                self._discard_stored(session_id)
                 return None, False
             remaining = wall_expires_at - now_wall
             if remaining <= 0:
-                self.store.delete(session_id)
+                self._discard_stored(session_id)
                 return None, False
             session = Session(
                 session_id,
@@ -1115,7 +1114,7 @@ class Actions:
                 now_mono + remaining,
                 client_ip=client_ip,
                 key_digest=hashlib.sha256(cookie_key).digest(),
-                created_at=created_at,
+                created_ns=created_ns,
                 wall_expires_at=wall_expires_at,
             )
             with self.lock:
@@ -1131,7 +1130,9 @@ class Actions:
             self.store is not None
             and cookie_key is not None
             and session.wall_expires_at > 0
-            and session.wall_expires_at - now_wall <= self.config.session_seconds - SESSION_RENEW_SECONDS
+            and session.wall_expires_at - now_wall
+            <= self.config.session_seconds
+            - min(SESSION_RENEW_SECONDS, self.config.session_seconds // 2)
         ):
             new_wall_expires = int(now_wall) + self.config.session_seconds
             try:
@@ -1142,7 +1143,7 @@ class Actions:
                     token=session.token,
                     csrf=session.csrf,
                     client_ip=session.client_ip or client_ip,
-                    created_at=session.created_at or int(now_wall),
+                    created_ns=session.created_ns,
                     expires_at=new_wall_expires,
                     now=now_wall,
                 )
@@ -1160,6 +1161,11 @@ class Actions:
                 renewed = True
 
         return session, renewed
+
+    def _discard_stored(self, session_id: str) -> None:
+        if self.store is not None:
+            with contextlib.suppress(OSError):
+                self.store.delete(session_id)
 
     def _prune_memory_locked(self, now_mono: float) -> None:
         expired = [sid for sid, item in self.sessions.items() if item.expires_at <= now_mono]
@@ -1255,12 +1261,14 @@ class Actions:
         csrf = secrets.token_urlsafe(32)
         now_mono = time.monotonic()
         now_wall = time.time()
-        created_at = int(now_wall)
-        wall_expires_at = created_at + self.config.session_seconds
+        created_ns = time.time_ns()
+        wall_expires_at = int(now_wall) + self.config.session_seconds
         cookie_key: bytes | None = None
         key_digest: bytes | None = None
         cookie_value = session_id
         evicted_slots: set[str] = set()
+        prev = _parse_session_cookie(previous_cookie)
+        replaces = prev[0] if prev is not None and prev[0] != session_id else None
         if self.store is not None:
             cookie_key = secrets.token_bytes(32)
             key_digest = hashlib.sha256(cookie_key).digest()
@@ -1273,9 +1281,10 @@ class Actions:
                     token=token,
                     csrf=csrf,
                     client_ip=client_ip,
-                    created_at=created_at,
+                    created_ns=created_ns,
                     expires_at=wall_expires_at,
                     now=now_wall,
+                    replaces=replaces,
                 )
             except OSError:
                 raise ApiError(500, "session-store") from None
@@ -1287,37 +1296,34 @@ class Actions:
             now_mono + self.config.session_seconds,
             client_ip=client_ip,
             key_digest=key_digest,
-            created_at=created_at,
+            created_ns=created_ns,
             wall_expires_at=wall_expires_at,
         )
-        prev = _parse_session_cookie(previous_cookie)
         with self.lock:
             if evicted_slots:
                 for sid in [k for k in self.sessions if _session_slot(k) in evicted_slots]:
                     self.sessions.pop(sid, None)
-            if prev is not None and prev[0] != session_id:
-                self.sessions.pop(prev[0], None)
-                if self.store is not None:
-                    self.store.delete(prev[0])
+            if replaces is not None:
+                self.sessions.pop(replaces, None)
             self._prune_memory_locked(now_mono)
             while len(self.sessions) >= MAX_SESSIONS:
-                victim = next(iter(self.sessions))
-                self.sessions.pop(victim, None)
-                if self.store is not None:
-                    self.store.delete(victim)
+                self.sessions.pop(next(iter(self.sessions)))
             self.sessions[session_id] = session
         return "signed-in", session, cookie_value
 
     def sign_out(self, session_id: str | None = None, *, all_sessions: bool = False) -> None:
         with self.lock:
-            if all_sessions or session_id is None:
-                self.sessions.clear()
-                if self.store is not None:
-                    self.store.clear()
-            else:
-                self.sessions.pop(session_id, None)
-                if self.store is not None:
-                    self.store.delete(session_id)
+            try:
+                if all_sessions or session_id is None:
+                    self.sessions.clear()
+                    if self.store is not None:
+                        self.store.clear()
+                else:
+                    self.sessions.pop(session_id, None)
+                    if self.store is not None:
+                        self.store.delete(session_id)
+            except OSError:
+                raise ApiError(500, "session-store") from None
 
     def post_as_approver(self, session: Session, target: Target, body: str) -> str:
         try:
@@ -1861,6 +1867,7 @@ class SnapshotHandler(BaseHTTPRequestHandler):
     server_version = "factory-dashboard"
     sys_version = ""
     timeout = 15  # a client that stalls mid-request is dropped
+    _renewal_cookies: list[str]
 
     def log_message(self, format: str, *args: object) -> None:
         pass
@@ -1882,14 +1889,32 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         )
 
     def do_GET(self) -> None:
+        self._renewal_cookies = []
         if self._api_get():
             return
         self._serve(body=True)
 
     def do_HEAD(self) -> None:
+        self._renewal_cookies = []
         self._serve(body=False)
 
+    def _current(self, actions: Actions) -> Session | None:
+        raw_cookie = self._cookie("factory_session")
+        session, renewed = actions.current_with_renewal(raw_cookie, self._action_client())
+        if renewed and raw_cookie:
+            self._renewal_cookies.append(
+                cookie(
+                    "factory_session",
+                    raw_cookie,
+                    actions.config.session_seconds,
+                    secure=self._is_https(),
+                    path="/" if actions.config.require_auth_reads else "/api",
+                )
+            )
+        return session
+
     def do_POST(self) -> None:
+        self._renewal_cookies = []
         actions: Actions | None = self.server.actions  # type: ignore[attr-defined]
         if actions is None:
             self.send_error(501, f"Unsupported method ({self.command!r})")
@@ -1918,28 +1943,13 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         if not actions.allows(client_ip):
             self._json(404, {"error": "not-found"})
         elif path == "/api/session":
-            raw_cookie = self._cookie("factory_session")
-            session, renewed = actions.current_with_renewal(raw_cookie, client_ip)
+            session = self._current(actions)
             signin = {"account_signin": relay is not None}
             if session is None:
                 self._json(200, {"signed_in": False, **signin})
             else:
-                cookies: list[str] = []
-                if renewed and raw_cookie:
-                    session_path = "/" if actions.config.require_auth_reads else "/api"
-                    cookies.append(
-                        cookie(
-                            "factory_session",
-                            raw_cookie,
-                            actions.config.session_seconds,
-                            secure=self._is_https(),
-                            path=session_path,
-                        )
-                    )
                 self._json(
-                    200,
-                    {"signed_in": True, "login": session.login, "csrf": session.csrf, **signin},
-                    cookies,
+                    200, {"signed_in": True, "login": session.login, "csrf": session.csrf, **signin}
                 )
         elif path == "/api/accounts/signin" and relay is not None:
             self._signin_status(actions, relay)
@@ -1985,7 +1995,7 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         return payload
 
     def _session(self, actions: Actions) -> Session:
-        session = actions.current(self._cookie("factory_session"), self._action_client())
+        session = self._current(actions)
         if session is None:
             raise ApiError(401, "no-session")
         sent = self.headers.get("X-Factory-CSRF", "")
@@ -2032,6 +2042,7 @@ class SnapshotHandler(BaseHTTPRequestHandler):
     def _signout(self, actions: Actions, session: Session | None, payload: dict):
         assert session is not None
         actions.sign_out(session.session_id, all_sessions=payload.get("all") is True)
+        self._renewal_cookies = []
         session_path = "/" if actions.config.require_auth_reads else "/api"
         return 200, {}, [cookie("factory_session", "", 0, secure=self._is_https(), path=session_path)]
 
@@ -2263,7 +2274,7 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         for key, value in SECURITY_HEADERS.items():
             self.send_header(key, value)
-        for value in cookies or []:
+        for value in [*self._renewal_cookies, *(cookies or [])]:
             self.send_header("Set-Cookie", value)
         self.end_headers()
         self.wfile.write(data)
@@ -2279,7 +2290,7 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         if (
             actions is not None
             and actions.config.require_auth_reads
-            and actions.current(self._cookie("factory_session"), self._action_client()) is None
+            and self._current(actions) is None
         ):
             if path in JSON_READS or path.startswith(QA_RUNS) or path in STATIC_ROUTES:
                 self._json(401, {"error": "no-session"})
@@ -2337,6 +2348,8 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(length))
         for key, value in headers.items():
             self.send_header(key, value)
+        for value in self._renewal_cookies:
+            self.send_header("Set-Cookie", value)
         self.end_headers()
 
 
