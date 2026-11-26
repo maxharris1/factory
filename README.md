@@ -1865,10 +1865,12 @@ CLI's own output, captured by `orch job run` for every job and stored in
   --output-format json` (on the job's device, as gemini-bot, with the same
   Google/Gemini overrides the account doctor unsets; agy answers the slash
   command with no model turn). Only the `Gemini Models` group is read: its
-  `5h` and `weekly` buckets are `five_hour` and `seven_day`, `used` is
-  `1 - remaining_fraction`, and a `reset_time` more than 30 days from now
-  (the unused third-party pool reports `1970-01-01T00:00:00Z`) is dropped.
-  A failed or empty probe logs one line and never fails the job.
+  `5h` and `weekly` buckets are `five_hour` and `seven_day`, and `used` is
+  `1 - remaining_fraction`. A bucket whose `reset_time` is missing, not an
+  ISO time with its zone, or not within 30 days of now (the unused
+  third-party pool reports `1970-01-01T00:00:00Z`) reads that window as
+  `no reading`, as Claude and Codex do. A failed or empty probe logs one
+  line and never fails the job.
 
 A window that a reply with other limits leaves null or out, in 3 fresh
 readings in a row for the account on any of its devices (none more than 24
