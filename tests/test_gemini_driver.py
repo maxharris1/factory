@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import get_args
 
 import pytest
+import yaml
 
 from lib import (
     account_doctor,
@@ -18,6 +19,7 @@ from lib import (
     factory_md,
     harness_env,
     harnesses,
+    lane_limit,
     orch_yml,
     pstack_models,
     pstack_pin,
@@ -184,8 +186,6 @@ def test_an_agy_run_killed_before_its_result_still_reports_step_usage(tmp_path: 
 
 
 def test_an_agy_error_result_is_an_error_and_its_quota_message_a_lane_limit() -> None:
-    from lib import lane_limit
-
     assert lane_limit.error_text("gemini", AGY_QUOTA) == AGY_QUOTA["result"]["error"]
     assert lane_limit.detect("gemini", AGY_QUOTA, NOW) is not None
     assert lane_limit.error_text("gemini", AGY_EVENTS[-1]) is None
@@ -196,8 +196,6 @@ def test_an_agy_error_result_is_an_error_and_its_quota_message_a_lane_limit() ->
 
 
 def test_upstream_gemini_events_are_no_longer_read() -> None:
-    from lib import lane_limit
-
     upstream_result = {"type": "result", "response": "ORCH-HANDOFF: 1"}
     assert GeminiDriver().handoff_marker(upstream_result) is None
     assert telemetry.final_message(upstream_result) is None
@@ -209,8 +207,6 @@ def test_upstream_gemini_events_are_no_longer_read() -> None:
 
 
 def test_the_waiter_example_runs_agy_unattended_on_the_brief() -> None:
-    import yaml
-
     command = yaml.safe_load((ROOT / "config" / "waiter-gemini-bot.example.yml").read_text(encoding="utf-8"))["command"]
     assert command[0] == "agy"
     assert "--dangerously-skip-permissions" in command
