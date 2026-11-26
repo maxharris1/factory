@@ -239,11 +239,59 @@ def test_the_snapshot_carries_the_shipped_matrix(base: dict) -> None:
     assert base["routing"] == role_matrix()
 
 
+def test_the_snapshot_carries_the_waiter_values_but_no_argv(tmp_path: Path) -> None:
+    waiters = {"claude": CLAUDE_WAITER}
+    snapshot = snapshot_for(tmp_path, waiters=waiters)
+    assert snapshot["routing"] == role_matrix(waiters=waiters)
+    assert snapshot["routing"]["waiters"] == {"claude": "ok"}
+    dumped = json.dumps(snapshot)
+    assert '"-p"' not in dumped and '"--effort"' not in dumped
+
+
+def test_waiter_argv_reads_only_the_waiter_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = tmp_path / ".config" / "factory"
+    config.mkdir(parents=True)
+    config.chmod(0o700)
+    waiter = config / "waiter-claude-bot.yml"
+    waiter.write_text("bot: claude-bot\ncommand: [claude, -p]\n", encoding="utf-8")
+    waiter.chmod(0o600)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    opened: list[str] = []
+    real_open, real_os_open = builtins.open, os.open
+
+    def spy_open(file, *args, **kwargs):
+        opened.append(str(file))
+        return real_open(file, *args, **kwargs)
+
+    def spy_os_open(path, *args, **kwargs):
+        opened.append(str(path))
+        return real_os_open(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "open", spy_open)
+        patch.setattr(os, "open", spy_os_open)
+        found = dashboard.waiter_argv()
+    assert found == {"claude": ("claude", "-p"), "codex": None, "cursor": None, "gemini": None}
+    assert opened and all(re.search(r"/waiter-[a-z]+-bot\.yml$", path) for path in opened), opened
+
+
+WAITER_CASES = {
+    "routed": {"claude": CLAUDE_WAITER},
+    "unrouted": {"claude": CLAUDE_WAITER, "gemini": GEMINI_WAITER},
+    "missing-waiter": {"claude": None},
+    "wrapped": {"claude": WRAPPED_WAITER},
+}
+
+
 @needs_node
-@pytest.mark.parametrize("text", [ROUTING, None, ROUTING.replace("harness: gemini", "harness: grok")],
-                         ids=["ok", "missing", "invalid"])
-def test_server_and_script_draw_the_same_panel(tmp_path: Path, base: dict, text: str | None) -> None:
-    matrix = role_matrix(tmp_path / "absent.yml") if text is None else _matrix(tmp_path, text)
+@pytest.mark.parametrize(("text", "waiters"), [
+    (ROUTING, None), (None, None), (ROUTING.replace("harness: gemini", "harness: grok"), None),
+    *((ROUTING, waiters) for waiters in WAITER_CASES.values()),
+], ids=["ok", "missing", "invalid", *WAITER_CASES])
+def test_server_and_script_draw_the_same_panel(
+    tmp_path: Path, base: dict, text: str | None, waiters: dict | None
+) -> None:
+    matrix = role_matrix(tmp_path / "absent.yml", waiters) if text is None else _matrix(tmp_path, text, waiters)
     snapshot = _with(base, matrix)
     assert _panel(tmp_path, snapshot, "script") == _panel(tmp_path, snapshot, "server")
 
@@ -268,8 +316,46 @@ def test_panel_marks_a_clamped_effort_with_its_configured_value(tmp_path: Path, 
 def test_panel_lists_candidates_in_preference_order(tmp_path: Path, base: dict, render: str) -> None:
     build = _role(_panel(tmp_path, _with(base, _matrix(tmp_path)), render), "build")
     assert '<ol class="rt-pool">' in build
-    assert [_text(li) for li in re.findall(r"<li>(.*?)</li>", build)] == [
+    assert [_text(li) for li in re.findall(r"<li>(.*?)<div", build)] == [
         "claude · claude-opus-4-6 · max → high", "codex · gpt-5.4 · low", "gemini · gemini-2.5-pro"]
+
+
+def _runs(panel: str, role: str) -> list[str]:
+    return [_text(line) for line in re.findall(r'<div class="rt-runs">(.*?)</div>', _role(panel, role))]
+
+
+@pytest.mark.parametrize("render", BOTH)
+def test_each_candidate_says_what_runs_and_where_each_value_comes_from(
+    tmp_path: Path, base: dict, render: str
+) -> None:
+    routed = _panel(tmp_path, _with(base, _matrix(tmp_path, waiters=WAITER_CASES["routed"])), render)
+    assert '<span class="rt-v">high</span><span class="rt-src">routing.yml</span>' in _role(routed, "build")
+    assert _runs(routed, "build")[0] == "runs claude-opus-4-6 routing.yml · high routing.yml waiter medium replaced"
+    unrouted = _panel(tmp_path, _with(base, _matrix(tmp_path, waiters=WAITER_CASES["unrouted"])), render)
+    assert '<span class="rt-v default">CLI default</span>' in _role(unrouted, "build")
+    assert _runs(unrouted, "build")[2] == "runs gemini-2.5-pro routing.yml · CLI default"
+    assert _runs(unrouted, "plan") == ["runs claude-sonnet-4-6 routing.yml · medium waiter-claude-bot.yml"]
+    missing = _panel(tmp_path, _with(base, _matrix(tmp_path, waiters=WAITER_CASES["missing-waiter"])), render)
+    assert _runs(missing, "plan") == ["runs claude-sonnet-4-6 routing.yml · unknown"]
+    wrapped = _panel(tmp_path, _with(base, _matrix(tmp_path, waiters=WAITER_CASES["wrapped"])), render)
+    assert _runs(wrapped, "build")[0] == (
+        "runs claude-haiku-4-5 waiter-claude-bot.yml · CLI default routing.yml flags not added by this waiter")
+
+
+@pytest.mark.parametrize("render", BOTH)
+def test_an_empty_slot_lists_each_waiter_it_falls_back_to(tmp_path: Path, base: dict, render: str) -> None:
+    waited = _panel(tmp_path, _with(base, _matrix(tmp_path, waiters=WAITER_CASES["unrouted"])), render)
+    qa = _role(waited, "qa")
+    assert '<ul class="rt-fallback">' in qa
+    assert [_text(li) for li in re.findall(r"<li>(.*?)</li>", qa)] == [
+        "claude: CLI default · medium waiter-claude-bot.yml", "gemini: CLI default · CLI default"]
+    assert "rt-fallback" not in _panel(tmp_path, _with(base, _matrix(tmp_path)), render)
+
+
+@pytest.mark.parametrize("render", BOTH)
+def test_the_note_says_what_a_runs_line_means(tmp_path: Path, base: dict, render: str) -> None:
+    assert ("Each runs line is the model and effort a new job gets once the bot&#x27;s waiter-&lt;bot&gt;.yml argv "
+            "is applied; CLI default means the harness picks.") in _panel(tmp_path, _with(base, _matrix(tmp_path)), render)
 
 
 @pytest.mark.parametrize("render", BOTH)
