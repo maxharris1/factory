@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import http.server
 import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,7 @@ from lib.qa_runners import Lane, LaunchFailed, RunnerOutage, UsageLimit
 from lib.qa_runners.claude_cloud import (
     BINARY_ENV,
     CONFIG_DIR_ENV,
+    ENVIRONMENTS_ENV,
     LAUNCH_TIMEOUT_ENV,
     REPO_CACHE_ENV,
     REPO_URL_TEMPLATE_ENV,
@@ -28,6 +31,7 @@ from lib.qa_runners.claude_cloud import (
     ClaudeCloudRunner,
     parse_launch_output,
 )
+from tests.test_qa_cloud import Lab
 
 HEAD_SHA = "a" * 40
 BASE_SHA = "b" * 40
@@ -64,7 +68,7 @@ def _write_fake_claude(bin_dir: Path, state_dir: Path, script_body: str | None =
     exe = bin_dir / "claude"
     if script_body is None:
         script_body = f"""#!{sys.executable}
-import json, os, pathlib, subprocess, sys
+import json, os, pathlib, subprocess, sys, time
 
 state = pathlib.Path({str(state_dir)!r})
 calls_file = state / "calls.jsonl"
@@ -129,6 +133,13 @@ if "--cloud" in argv:
             "and would silently ignore --cloud. Drop --cloud, or run from a TTY.\\n"
         )
         sys.exit(1)
+    if "--environment" in argv:
+        env_val = argv[argv.index("--environment") + 1]
+        if not env_val.startswith("ccpool_"):
+            sys.stderr.write(f'--environment expects a self-hosted environment id (ccpool_...), got "{{env_val}}"\\n')
+            sys.exit(1)
+    if mode.get("launch_delay"):
+        time.sleep(float(mode["launch_delay"]))
     if mode.get("trust_prompt"):
         sys.stdout.write(
             "\\x1b[1mAccessing workspace\\x1b[0m\\n"
@@ -137,7 +148,6 @@ if "--cloud" in argv:
             "  2. Yes, I trust this folder\\n"
         )
         sys.stdout.flush()
-        import time
         time.sleep(30)
         sys.exit(124)
     if mode.get("launch_error"):
@@ -176,9 +186,11 @@ def _runner(
     bin_dir: Path | None = None,
     config_dir: Path | None = None,
     extra_env: dict[str, str] | None = None,
+    environments: dict[str, str] | None = None,
+    repo_url_template: str | None = None,
     launch_timeout: int = 30,
 ) -> tuple[ClaudeCloudRunner, Path]:
-    if source is None:
+    if source is None and repo_url_template is None:
         source, _ = _source_repo(tmp_path)
     state_dir = tmp_path / "cli-state"
     if bin_dir is None:
@@ -198,7 +210,10 @@ def _runner(
         repo_cache_root=tmp_path / "repos",
         claude_binary="claude",
         launch_timeout_seconds=launch_timeout,
-        repo_url_template=str(source),
+        repo_url_template=repo_url_template or str(source),
+        environments={"qa-prod": "ccpool_qa_prod_01", "qa-cleffy": "ccpool_qa_cleffy_01"}
+        if environments is None
+        else environments,
     )
     return ClaudeCloudRunner(cfg, home=tmp_path / "home", environ=env), state_dir
 
@@ -314,7 +329,7 @@ def test_launch_runs_in_base_branch_checkout_with_pty_env_model_and_config_dir(t
         assert call["gh_token"] is None
         assert call["aws_secret"] is None
         assert call["argv"] == [
-            "--environment", "qa-cleffy",
+            "--environment", "ccpool_qa_cleffy_01",
             "--model", "claude-opus-4-7",
             "--cloud", lane.brief,
         ]
@@ -328,12 +343,48 @@ def test_launch_runs_in_base_branch_checkout_with_pty_env_model_and_config_dir(t
         secret_file.chmod(0o600)
 
 
-def test_launch_omits_model_when_none_and_updates_checkout_when_base_advances(tmp_path: Path) -> None:
+def test_environment_resolution_honors_claude_cli_ccpool_contract(tmp_path: Path) -> None:
+    source, _ = _source_repo(tmp_path)
+    dedicated_env_dir = tmp_path / "claude-hosted-env"
+    dedicated_env_dir.mkdir()
+    runner, state_dir = _runner(
+        tmp_path,
+        source=source,
+        environments={"hosted-qa": str(dedicated_env_dir)},
+    )
+
+    # 1. Direct ccpool_... id passes straight through to --environment.
+    direct = runner.launch(_lane("lane-direct", environment="ccpool_direct_99", model=None))
+    assert direct.agent_id == "session_01TestClaude0001"
+
+    # 2. Dedicated /remote-env config directory launches without --environment and stops with the same config dir.
+    hosted = runner.launch(_lane("lane-hosted", environment="hosted-qa", model=None))
+    runner.stop(hosted.agent_id)
+
+    # 3. Unmapped non-ccpool_ logical name fails closed instead of sending an invalid flag to claude.
+    with pytest.raises(LaunchFailed, match="ccpool_"):
+        runner.launch(_lane("lane-unmapped", environment="qa-unmapped", model=None))
+
+    calls = _calls(state_dir)
+    assert len(calls) == 3
+    assert calls[0]["argv"][:2] == ["--environment", "ccpool_direct_99"]
+    assert "--environment" not in calls[1]["argv"]
+    assert calls[1]["claude_config_dir"] == str(dedicated_env_dir)
+    assert calls[2]["argv"] == ["-p", "stop", "--cloud", hosted.agent_id, "--output-format", "json"]
+    assert calls[2]["claude_config_dir"] == str(dedicated_env_dir)
+
+
+def test_launch_omits_model_when_none_and_recovers_dirty_checkout_when_base_advances(tmp_path: Path) -> None:
     source, _ = _source_repo(tmp_path, branch="main")
     runner, state_dir = _runner(tmp_path, source=source)
 
     first = runner.launch(_lane("lane-1", model=None))
-    (source / "new.txt").write_text("updated\n", encoding="utf-8")
+    checkout = runner.checkout_path_for("acme/widgets", "main")
+    # Introduce local drift on the same tracked file that advances upstream (f-6).
+    (checkout / "README.md").write_text("dirty local drift\n", encoding="utf-8")
+    (checkout / "untracked.tmp").write_text("junk\n", encoding="utf-8")
+
+    (source / "README.md").write_text("updated upstream\n", encoding="utf-8")
     _git("add", ".", cwd=source)
     _git("commit", "-m", "advance base", cwd=source)
     new_sha = _git("rev-parse", "main", cwd=source)
@@ -345,6 +396,8 @@ def test_launch_omits_model_when_none_and_updates_checkout_when_base_advances(tm
     assert "--model" not in calls[0]["argv"]
     assert calls[1]["head"] == new_sha
     assert calls[0]["cwd"] == calls[1]["cwd"]
+    assert (checkout / "README.md").read_text(encoding="utf-8") == "updated upstream\n"
+    assert not (checkout / "untracked.tmp").exists()
 
 
 def test_stop_queues_json_stop_message_and_second_stop_is_noop(tmp_path: Path) -> None:
@@ -373,6 +426,27 @@ def test_stop_treats_remote_already_ended_session_as_not_an_error(tmp_path: Path
     assert runner.status("session_01Ended") == "ended"
 
 
+def test_stop_tls_certificate_expired_remains_retryable_until_delivery_succeeds(tmp_path: Path) -> None:
+    runner, state_dir = _runner(tmp_path)
+    launched = runner.launch(_lane())
+
+    (state_dir / "mode.json").write_text(
+        json.dumps({"stop_error": {"code": 1, "text": "TLS connection failed: certificate has expired"}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(RunnerOutage):
+        runner.stop(launched.agent_id)
+    assert runner.status(launched.agent_id) == "running"
+
+    # Restore healthy CLI and retry stop: it must deliver the stop message and mark ended.
+    (state_dir / "mode.json").write_text("{}", encoding="utf-8")
+    runner.stop(launched.agent_id)
+    assert runner.status(launched.agent_id) == "ended"
+
+    stop_calls = [c for c in _calls(state_dir) if "-p" in c["argv"]]
+    assert len(stop_calls) == 2
+
+
 @pytest.mark.parametrize(
     ("recorded_output", "expected_error"),
     [
@@ -387,6 +461,10 @@ def test_stop_treats_remote_already_ended_session_as_not_an_error(tmp_path: Path
         (
             "Error: Out of extra usage. Your usage limit has been reached.",
             UsageLimit,
+        ),
+        (
+            "Unable to connect to API. Check your internet connection",
+            RunnerOutage,
         ),
         (
             "Error: fetch failed: getaddrinfo ENOTFOUND api.anthropic.com",
@@ -430,6 +508,82 @@ def test_recorded_cli_failures_map_to_runner_errors_without_leaking_urls(
     assert "LEAK_ME" not in str(exc_info.value)
 
 
+def test_git_http_503_raises_runner_outage_and_triggers_coordinator_fallback(tmp_path: Path) -> None:
+    class _Always503(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(503)
+            self.end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Always503)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        runner, _ = _runner(
+            tmp_path / "runner",
+            repo_url_template=f"http://127.0.0.1:{port}/{{repo}}.git",
+            environments={"full-stack": "ccpool_full_stack"},
+        )
+        with pytest.raises(RunnerOutage):
+            runner.launch(_lane(environment="full-stack"))
+
+        lab = Lab(tmp_path / "lab", lanes=1, runners=("claude-cloud", "cursor-cloud"))
+        lab.fakes["claude-cloud"] = runner
+        lab.worker = lab.new_worker()
+        lab.enqueue(ids=1)
+        lab.tick(3)
+        assert lab.header()["runner"] == "cursor-cloud"
+        assert lab.header()["result"] == "PASS"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_restart_adopts_session_when_only_session_marker_survived_crash(tmp_path: Path) -> None:
+    source, _ = _source_repo(tmp_path)
+    runner, state_dir = _runner(tmp_path, source=source)
+    lane = _lane("lane-crash-between-markers")
+
+    # Simulate a crash right after the session marker was written and before the lane marker was written.
+    first = runner.launch(lane)
+    lane_marker = runner._lane_marker(lane.lane_id)
+    assert lane_marker.exists()
+    lane_marker.unlink()
+
+    restarted, _ = _runner(tmp_path, source=source, bin_dir=tmp_path / "bin")
+    adopted = restarted.launch(lane)
+    assert adopted == first
+    assert len(_calls(state_dir)) == 1
+    assert restarted._lane_marker(lane.lane_id).exists()
+
+
+def test_concurrent_same_lane_launches_return_single_session(tmp_path: Path) -> None:
+    source, _ = _source_repo(tmp_path)
+    runner, state_dir = _runner(tmp_path, source=source)
+    (state_dir / "mode.json").write_text(json.dumps({"launch_delay": 0.25}), encoding="utf-8")
+    lane = _lane("lane-concurrent")
+
+    results: list[object] = []
+    barrier = threading.Barrier(2)
+
+    def _call() -> None:
+        barrier.wait()
+        results.append(runner.launch(lane))
+
+    threads = [threading.Thread(target=_call), threading.Thread(target=_call)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+
+    assert len(results) == 2
+    assert results[0] == results[1]
+    assert len(_calls(state_dir)) == 1
+
+
 def test_unaccepted_workspace_trust_prompt_fails_fast_as_launch_failed(tmp_path: Path) -> None:
     runner, state_dir = _runner(tmp_path, launch_timeout=15)
     (state_dir / "mode.json").write_text(json.dumps({"trust_prompt": True}), encoding="utf-8")
@@ -446,6 +600,7 @@ def test_missing_config_dir_and_missing_binary_raise_expected_errors(tmp_path: P
             work_root=tmp_path / "work",
             repo_cache_root=tmp_path / "repos",
             repo_url_template=str(source),
+            environments={"qa-prod": "ccpool_qa_prod_01"},
         ),
         home=tmp_path / "home",
         environ=GIT_ENV,
@@ -462,6 +617,7 @@ def test_missing_config_dir_and_missing_binary_raise_expected_errors(tmp_path: P
             repo_cache_root=tmp_path / "repos2",
             claude_binary=str(tmp_path / "does-not-exist-claude"),
             repo_url_template=str(source),
+            environments={"qa-prod": "ccpool_qa_prod_01"},
         ),
         home=tmp_path / "home",
         environ=GIT_ENV,
@@ -506,6 +662,7 @@ def test_refuses_protected_host_paths_and_credentialed_repo_urls(tmp_path: Path)
             config_dir=tmp_path / "cfg",
             work_root=home / ".ssh" / "qa",
             repo_cache_root=tmp_path / "repos",
+            environments={"qa-prod": "ccpool_qa_prod_01"},
         ),
         home=home,
         environ=GIT_ENV,
@@ -519,6 +676,7 @@ def test_refuses_protected_host_paths_and_credentialed_repo_urls(tmp_path: Path)
             work_root=tmp_path / "work",
             repo_cache_root=tmp_path / "repos",
             repo_url_template="https://token:secret@github.com/{repo}.git",
+            environments={"qa-prod": "ccpool_qa_prod_01"},
         ),
         home=home,
         environ=GIT_ENV,
@@ -531,6 +689,7 @@ def test_config_from_env_reads_documented_host_settings(tmp_path: Path) -> None:
     cfg = ClaudeCloudConfig.from_env(
         {
             CONFIG_DIR_ENV: str(tmp_path / "claude-dir"),
+            ENVIRONMENTS_ENV: json.dumps({"qa-prod": "ccpool_01", "qa-hosted": "/srv/claude-hosted"}),
             WORK_ROOT_ENV: str(tmp_path / "work"),
             REPO_CACHE_ENV: str(tmp_path / "cache"),
             BINARY_ENV: "/opt/bin/claude",
@@ -540,6 +699,7 @@ def test_config_from_env_reads_documented_host_settings(tmp_path: Path) -> None:
         }
     )
     assert cfg.config_dir == tmp_path / "claude-dir"
+    assert dict(cfg.environments) == {"qa-prod": "ccpool_01", "qa-hosted": "/srv/claude-hosted"}
     assert cfg.work_root == tmp_path / "work"
     assert cfg.repo_cache_root == tmp_path / "cache"
     assert cfg.claude_binary == "/opt/bin/claude"
@@ -547,9 +707,13 @@ def test_config_from_env_reads_documented_host_settings(tmp_path: Path) -> None:
     assert cfg.stop_timeout_seconds == 45
     assert cfg.repo_url_template == "git@github.com:{repo}.git"
 
+    kv_cfg = ClaudeCloudConfig.from_env({ENVIRONMENTS_ENV: "qa-a=ccpool_a,qa-b=/srv/b"})
+    assert dict(kv_cfg.environments) == {"qa-a": "ccpool_a", "qa-b": "/srv/b"}
+
     spec = (Path(__file__).resolve().parents[1] / "docs" / "SPEC.md").read_text(encoding="utf-8")
     for env_name in (
         CONFIG_DIR_ENV,
+        ENVIRONMENTS_ENV,
         WORK_ROOT_ENV,
         REPO_CACHE_ENV,
         BINARY_ENV,

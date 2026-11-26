@@ -27,7 +27,7 @@ from lib.qa_cloud import (
     Decision, LaneRow, QaWorker, Stale, audited, decide, newest, plan_slices, qa_id, render_comment, s_id, save_name,
 )
 from lib.qa_evidence import collect, record_evidence_dir, run_dir
-from lib.qa_runners import AgentInfo, AgentStatus, Lane, Launched, LaunchError, LaunchFailed, RunnerOutage, UsageLimit
+from lib.qa_runners import AgentInfo, AgentStatus, Lane, Launched, LaunchFailed, RunnerOutage, UsageLimit
 from lib.qa_runners.claude_cloud import ClaudeCloudConfig, ClaudeCloudRunner
 from lib.qa_runners.fake import FakeRunner
 from lib.poll_source import HTTPResult
@@ -107,6 +107,19 @@ if [ ! -t 1 ]; then
     echo "Error: --cloud requires an interactive terminal." >&2
     exit 1
 fi
+prev=""
+for arg in "$@"; do
+    if [ "$prev" = "--environment" ]; then
+        case "$arg" in
+            ccpool_*) ;;
+            *)
+                printf '%s\\n' "--environment expects a self-hosted environment id (ccpool_...), got \\"$arg\\"" >&2
+                exit 1
+                ;;
+        esac
+    fi
+    prev="$arg"
+done
 if [ -f "$state/next_launch_err" ]; then
     cat "$state/next_launch_err" >&2
     rm -f "$state/next_launch_err"
@@ -186,6 +199,7 @@ class ClaudeCloudCliAdapter:
                 repo_cache_root=tmp_path / "claude-repos",
                 claude_binary="claude",
                 repo_url_template=str(source),
+                environments={"full-stack": "ccpool_full_stack"},
             ),
             home=tmp_path / "claude-home",
             environ=env,

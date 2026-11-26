@@ -1,18 +1,24 @@
 """The Claude Code cloud QA runner (#785).
 
-Implements lib.qa_runners.Runner against the behavior measured in
-docs/plans/qa-cloud-lane-measurements.md (#780):
-- Launch runs `claude [--environment <env>] [--model <model>] --cloud <brief>`
+Implements lib.qa_runners.Runner against the behavior measured in #780
+(docs/plans/qa-cloud-lane-measurements.md):
+- Launch runs `claude [--environment <ccpool_id>] [--model <model>] --cloud <brief>`
   in a PTY from a deterministic, clean base-branch checkout whose `origin`
-  points to the project's remote URL. Pre-accepted folder trust for that
-  checkout path is a one-time host step; an interactive trust prompt fails fast
-  with LaunchFailed and is never accepted automatically.
+  points to the project's remote URL. Claude Code 2.1.323 only accepts self-hosted
+  `ccpool_...` pool IDs via `--environment`; logical environment names from
+  `factory.md` (`qa.claude_cloud.environment`) are resolved via
+  ORCH_QA_CLAUDE_ENVIRONMENTS to either a `ccpool_...` ID or a dedicated
+  per-environment CLAUDE_CONFIG_DIR pre-configured with `/remote-env`. Unmapped
+  non-`ccpool_` names fail closed with LaunchFailed.
+- Pre-accepted folder trust for the checkout path is a one-time host step; an
+  interactive trust prompt fails fast with LaunchFailed and is never accepted
+  automatically.
 - Stop queues a non-interactive stop message with
   `claude -p "stop" --cloud <session-id> --output-format json`.
-- The runner passes ORCH_QA_CLAUDE_CONFIG_DIR to the CLI via CLAUDE_CONFIG_DIR
-  (dropping ambient API/OAuth token env vars) and never reads or lists files
-  inside that directory. No brief text, upload link, or credential is logged or
-  written to disk markers.
+- The runner passes CLAUDE_CONFIG_DIR under an allowlisted child environment
+  (dropping ambient API/OAuth tokens and worker secrets) and never opens, reads,
+  or lists files inside that directory. No brief text, upload link, or
+  credential is logged or written to disk markers.
 """
 
 from __future__ import annotations
@@ -31,11 +37,13 @@ import struct
 import subprocess
 import tempfile
 import termios
+import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from urllib.parse import unquote
 
 from lib.harness_env import account_environ
@@ -53,6 +61,7 @@ from lib.worktrees import WorktreeError, check_remote_url
 
 RUNNER_NAME = "claude-cloud"
 CONFIG_DIR_ENV = "ORCH_QA_CLAUDE_CONFIG_DIR"
+ENVIRONMENTS_ENV = "ORCH_QA_CLAUDE_ENVIRONMENTS"
 WORK_ROOT_ENV = "ORCH_QA_CLAUDE_WORK_ROOT"
 REPO_CACHE_ENV = "ORCH_QA_CLAUDE_REPO_CACHE"
 BINARY_ENV = "ORCH_QA_CLAUDE_BINARY"
@@ -89,6 +98,7 @@ _SAFE_REPO = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 _SAFE_REF = re.compile(r"^[A-Za-z0-9._/-]{1,128}$")
 _SIMPLE_SLUG = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _SAFE_OPTION_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$")
+_CCPOOL_ID = re.compile(r"^ccpool_[A-Za-z0-9._-]{1,120}$")
 _SAFE_AGENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _URL_SCHEME = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*)://(.*)$", re.DOTALL)
@@ -142,23 +152,43 @@ _OUTAGE_PATTERNS = (
     re.compile(r"\b(?:overloaded_error|api_error|service unavailable|bad gateway|gateway timeout)\b", re.IGNORECASE),
     re.compile(r"\b(?:internal server error|temporarily unavailable|server error|upstream connect error)\b", re.IGNORECASE),
     re.compile(r"(?:^|\b)(?:http|status|error:?)\s*(?:500|502|503|504|529)\b", re.IGNORECASE),
+    re.compile(r"the requested url returned error:\s*(?:500|502|503|504|529)\b", re.IGNORECASE),
     re.compile(
         r"\b(?:econnrefused|econnreset|etimedout|enotfound|eai_again|ehostunreach|enetunreach|epipe)\b",
         re.IGNORECASE,
     ),
     re.compile(
         r"\b(?:connection refused|connection reset|connection timed out|could not resolve host|"
-        r"getaddrinfo|fetch failed|network error|socket hang up|tls handshake|request timed out)\b",
+        r"getaddrinfo|fetch failed|network error|socket hang up|tls handshake|tls connection failed|"
+        r"ssl handshake|ssl error|certificate has expired|x509:|request timed out|"
+        r"unable to connect to (?:the )?api|check your internet connection|"
+        r"failed to connect|could not connect|network is unreachable|"
+        r"temporary failure in name resolution|unable to access|"
+        r"early eof|remote end hung up unexpectedly)\b",
         re.IGNORECASE,
     ),
 )
 _ALREADY_ENDED_PATTERNS = (
     re.compile(
-        r"\b(?:already ended|already stopped|already completed|already archived|session (?:has )?ended|"
-        r"session is not running|session not found|not found|archived|expired|no longer active|terminated)\b",
+        r"\b(?:session(?:\s+[A-Za-z0-9._-]+)?\s+(?:has\s+)?(?:already\s+)?(?:ended|stopped|completed|archived|expired|terminated)|"
+        r"session(?:\s+[A-Za-z0-9._-]+)?\s+(?:is\s+)?(?:not\s+running|not\s+found|no\s+longer\s+active|already\s+closed)|"
+        r"cannot\s+message\s+(?:an?\s+)?(?:ended|archived|completed|stopped)\s+session)\b",
         re.IGNORECASE,
     ),
 )
+
+_THREAD_LOCKS_GUARD = threading.Lock()
+_THREAD_LOCKS: dict[Path, threading.Lock] = {}
+
+
+def _thread_lock_for(lock_path: Path) -> threading.Lock:
+    key = lock_path.resolve()
+    with _THREAD_LOCKS_GUARD:
+        lock = _THREAD_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _THREAD_LOCKS[key] = lock
+        return lock
 
 
 class _TrustPromptError(Exception):
@@ -190,19 +220,31 @@ def _sanitize_error_text(text: str, *, max_len: int = 160) -> str:
     return summary[:max_len]
 
 
-def _classify_cli_failure(prefix: str, text: str, returncode: int) -> LaunchFailed | RunnerOutage | UsageLimit:
+def _is_usage_limit(text: str) -> bool:
     plain = _strip_ansi(text)
-    detail = _sanitize_error_text(plain) or f"exit {returncode}"
-    if any(pattern.search(plain) for pattern in _USAGE_LIMIT_PATTERNS):
-        return UsageLimit(f"{prefix}: {detail}")
-    if any(pattern.search(plain) for pattern in _OUTAGE_PATTERNS):
-        return RunnerOutage(f"{prefix}: {detail}")
-    return LaunchFailed(f"{prefix}: {detail}")
+    return any(pattern.search(plain) for pattern in _USAGE_LIMIT_PATTERNS)
+
+
+def _is_outage(text: str) -> bool:
+    plain = _strip_ansi(text)
+    return any(pattern.search(plain) for pattern in _OUTAGE_PATTERNS)
 
 
 def _is_already_ended(text: str) -> bool:
     plain = _strip_ansi(text)
+    if _is_usage_limit(plain) or _is_outage(plain):
+        return False
     return any(pattern.search(plain) for pattern in _ALREADY_ENDED_PATTERNS)
+
+
+def _classify_cli_failure(prefix: str, text: str, returncode: int) -> LaunchFailed | RunnerOutage | UsageLimit:
+    plain = _strip_ansi(text)
+    detail = _sanitize_error_text(plain) or f"exit {returncode}"
+    if _is_usage_limit(plain):
+        return UsageLimit(f"{prefix}: {detail}")
+    if _is_outage(plain):
+        return RunnerOutage(f"{prefix}: {detail}")
+    return LaunchFailed(f"{prefix}: {detail}")
 
 
 def _assert_safe_host_path(path: Path, *, home: Path) -> Path:
@@ -247,8 +289,12 @@ def _branch_slug(base_ref: str) -> str:
     return f"{cleaned[:48]}-{digest}"
 
 
+def _lane_marker_stem(lane_id: str) -> str:
+    return hashlib.sha256(lane_id.encode("utf-8")).hexdigest()[:24]
+
+
 def _lane_marker_name(lane_id: str) -> str:
-    return f"{hashlib.sha256(lane_id.encode('utf-8')).hexdigest()[:24]}.json"
+    return f"{_lane_marker_stem(lane_id)}.json"
 
 
 def _read_json(path: Path) -> dict:
@@ -284,6 +330,30 @@ def _parse_int_env(env: Mapping[str, str], name: str, default: int) -> int:
     if raw.isdigit() and int(raw) > 0:
         return int(raw)
     return default
+
+
+def _parse_environments_env(raw: str) -> Mapping[str, str]:
+    text = raw.strip()
+    if not text:
+        return MappingProxyType({})
+    parsed: dict[str, str] = {}
+    if text.startswith("{"):
+        try:
+            obj = json.loads(text)
+        except ValueError:
+            return MappingProxyType({})
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if isinstance(key, str) and isinstance(value, str) and key.strip() and value.strip():
+                    parsed[key.strip()] = value.strip()
+        return MappingProxyType(parsed)
+    for entry in text.split(","):
+        if "=" not in entry:
+            continue
+        key, value = entry.split("=", 1)
+        if key.strip() and value.strip():
+            parsed[key.strip()] = value.strip()
+    return MappingProxyType(parsed)
 
 
 def _default_run(
@@ -467,6 +537,7 @@ class ClaudeCloudConfig:
     stop_timeout_seconds: int = DEFAULT_STOP_TIMEOUT_SECONDS
     repo_url_template: str = DEFAULT_REPO_URL_TEMPLATE
     stop_message: str = DEFAULT_STOP_MESSAGE
+    environments: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> ClaudeCloudConfig:
@@ -479,6 +550,7 @@ class ClaudeCloudConfig:
         launch_timeout = _parse_int_env(env, LAUNCH_TIMEOUT_ENV, DEFAULT_LAUNCH_TIMEOUT_SECONDS)
         stop_timeout = _parse_int_env(env, STOP_TIMEOUT_ENV, DEFAULT_STOP_TIMEOUT_SECONDS)
         url_template = env.get(REPO_URL_TEMPLATE_ENV) or DEFAULT_REPO_URL_TEMPLATE
+        environments = _parse_environments_env(env.get(ENVIRONMENTS_ENV, ""))
         return cls(
             config_dir=config_dir,
             work_root=work_root,
@@ -487,6 +559,7 @@ class ClaudeCloudConfig:
             launch_timeout_seconds=launch_timeout,
             stop_timeout_seconds=stop_timeout,
             repo_url_template=url_template,
+            environments=environments,
         )
 
 
@@ -520,37 +593,72 @@ class ClaudeCloudRunner:
             home=self._home,
         )
 
+    def _lane_lock(self, lane_id: str) -> Path:
+        return _assert_safe_host_path(
+            self._work_root() / "lanes" / f"{_lane_marker_stem(lane_id)}.lock",
+            home=self._home,
+        )
+
+    def _sessions_dir(self) -> Path:
+        return _assert_safe_host_path(self._work_root() / "sessions", home=self._home)
+
     def _session_marker(self, agent_id: str) -> Path:
         if not _SAFE_AGENT_ID.fullmatch(agent_id) or ".." in agent_id:
             raise LaunchFailed(f"unsafe agent_id: {agent_id!r}")
         return _assert_safe_host_path(
-            self._work_root() / "sessions" / f"{agent_id}.json",
+            self._sessions_dir() / f"{agent_id}.json",
             home=self._home,
         )
+
+    def _validate_config_dir(self, value: str, label: str) -> str:
+        raw = value.strip()
+        if not raw or "\x00" in raw or "\n" in raw or "\r" in raw:
+            raise LaunchFailed(f"{label} is invalid")
+        return raw
 
     def _config_dir(self) -> str:
         if self.config.config_dir is None:
             raise LaunchFailed(f"{CONFIG_DIR_ENV} is not set")
-        raw = str(self.config.config_dir).strip()
-        if not raw or "\x00" in raw or "\n" in raw or "\r" in raw:
-            raise LaunchFailed(f"{CONFIG_DIR_ENV} is invalid")
-        return raw
+        return self._validate_config_dir(str(self.config.config_dir), CONFIG_DIR_ENV)
 
-    def _cli_env(self) -> dict[str, str]:
+    def _cli_env(self, config_dir: str | None = None) -> dict[str, str]:
+        resolved = self._config_dir() if config_dir is None else self._validate_config_dir(config_dir, CONFIG_DIR_ENV)
         base = {
             name: value
             for name, value in self._environ.items()
             if name in _CLI_ENV_ALLOWLIST or name.startswith("LC_")
         }
-        return account_environ(base, "claude", self._config_dir())
+        return account_environ(base, "claude", resolved)
+
+    def _resolve_environment(self, lane: Lane) -> tuple[str | None, str]:
+        """Resolve lane.environment_name to (cli --environment ccpool_id | None, CLAUDE_CONFIG_DIR)."""
+        name = (lane.environment_name or "").strip()
+        if not name:
+            raise LaunchFailed("qa.claude_cloud.environment is empty")
+        if not _SAFE_OPTION_VALUE.fullmatch(name):
+            raise LaunchFailed(f"unsafe environment name: {lane.environment_name!r}")
+        mapped = self.config.environments.get(name)
+        if mapped is not None:
+            target = mapped.strip()
+            if _CCPOOL_ID.fullmatch(target):
+                return target, self._config_dir()
+            if Path(target).is_absolute():
+                return None, self._validate_config_dir(target, f"{ENVIRONMENTS_ENV}[{name}]")
+            raise LaunchFailed(
+                f"invalid {ENVIRONMENTS_ENV} target for {name!r}: expected a ccpool_... id or absolute config directory path"
+            )
+        if _CCPOOL_ID.fullmatch(name):
+            return name, self._config_dir()
+        raise LaunchFailed(
+            f"Claude Code --environment expects a self-hosted environment id (ccpool_...), got {name!r}; "
+            f"map {name!r} in {ENVIRONMENTS_ENV} to a ccpool_... id or a dedicated /remote-env config directory"
+        )
 
     def _validate_lane(self, lane: Lane) -> str:
         if not _SAFE_REPO.fullmatch(lane.repo) or ".." in lane.repo:
             raise LaunchFailed(f"unsafe repository name: {lane.repo!r}")
         if not _SAFE_REF.fullmatch(lane.base_ref) or ".." in lane.base_ref or lane.base_ref.startswith("-"):
             raise LaunchFailed(f"unsafe base_ref: {lane.base_ref!r}")
-        if lane.environment_name and not _SAFE_OPTION_VALUE.fullmatch(lane.environment_name):
-            raise LaunchFailed(f"unsafe environment name: {lane.environment_name!r}")
         if lane.model is not None and not _SAFE_OPTION_VALUE.fullmatch(lane.model):
             raise LaunchFailed(f"unsafe model name: {lane.model!r}")
         for sha in lane.commits:
@@ -572,12 +680,14 @@ class ClaudeCloudRunner:
     @contextmanager
     def _lock(self, lock_path: Path) -> Iterator[None]:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with lock_path.open("a+", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        thread_lock = _thread_lock_for(lock_path)
+        with thread_lock:
+            with lock_path.open("a+", encoding="utf-8") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def _git(
         self,
@@ -597,8 +707,11 @@ class ClaudeCloudRunner:
     def _git_ok(self, *args: str, cwd: Path | None = None, timeout: int = DEFAULT_GIT_TIMEOUT_SECONDS) -> str:
         proc = self._git(*args, cwd=cwd, timeout=timeout)
         if proc.returncode != 0:
-            err = _sanitize_error_text(proc.stderr or proc.stdout or "")
-            raise LaunchFailed(f"git {args[0]} failed: {err or f'exit {proc.returncode}'}")
+            combined = "\n".join(part for part in (proc.stderr, proc.stdout) if part)
+            err = _sanitize_error_text(combined) or f"exit {proc.returncode}"
+            if _is_outage(combined):
+                raise RunnerOutage(f"git {args[0]} failed: {err}")
+            raise LaunchFailed(f"git {args[0]} failed: {err}")
         return (proc.stdout or "").strip()
 
     def _prepare_checkout(self, lane: Lane, remote_url: str) -> Path:
@@ -607,7 +720,7 @@ class ClaudeCloudRunner:
         repo_cache = _assert_safe_host_path(cache_root / f"{owner}__{name}.git", home=self._home)
         cache_lock = cache_root / f"{owner}__{name}.lock"
         checkout = self.checkout_path_for(lane.repo, lane.base_ref)
-        temp_ref = f"refs/factory-qa/{_lane_marker_name(lane.lane_id).removesuffix('.json')}/base"
+        temp_ref = f"refs/factory-qa/{_lane_marker_stem(lane.lane_id)}/base"
 
         with self._lock(cache_lock):
             if not repo_cache.exists():
@@ -640,6 +753,10 @@ class ClaudeCloudRunner:
                 self._git("update-ref", "-d", temp_ref, cwd=repo_cache)
 
         self._git_ok("remote", "set-url", "origin", remote_url, cwd=checkout)
+        # Clean any local drift before checkout so advancing base_ref never collides with dirty tracked files.
+        if self._git("rev-parse", "--verify", "HEAD", cwd=checkout).returncode == 0:
+            self._git_ok("reset", "--hard", "--quiet", "HEAD", cwd=checkout)
+        self._git_ok("clean", "-fdx", "-q", cwd=checkout)
         if is_branch or not _SHA.fullmatch(lane.base_ref):
             self._git_ok("checkout", "--quiet", "-B", lane.base_ref, base_sha, cwd=checkout)
             self._git_ok("config", f"branch.{lane.base_ref}.remote", "origin", cwd=checkout)
@@ -650,10 +767,10 @@ class ClaudeCloudRunner:
         self._git_ok("clean", "-fdx", "-q", cwd=checkout)
         return checkout
 
-    def build_launch_argv(self, lane: Lane) -> list[str]:
+    def build_launch_argv(self, lane: Lane, *, cli_environment: str | None = None) -> list[str]:
         argv = [self.config.claude_binary]
-        if lane.environment_name:
-            argv.extend(["--environment", lane.environment_name])
+        if cli_environment:
+            argv.extend(["--environment", cli_environment])
         if lane.model:
             argv.extend(["--model", lane.model])
         argv.extend(["--cloud", lane.brief])
@@ -672,84 +789,37 @@ class ClaudeCloudRunner:
 
     def _saved_lane(self, lane_id: str) -> Launched | None:
         saved = _read_json(self._lane_marker(lane_id))
-        if saved.get("lane_id") != lane_id:
-            return None
-        agent_id = saved.get("agent_id")
-        url = saved.get("url")
-        if isinstance(agent_id, str) and isinstance(url, str) and agent_id and url:
-            return Launched(agent_id=agent_id, url=url)
+        if saved.get("lane_id") == lane_id:
+            agent_id = saved.get("agent_id")
+            url = saved.get("url")
+            if isinstance(agent_id, str) and isinstance(url, str) and agent_id and url:
+                return Launched(agent_id=agent_id, url=url)
+        sessions_dir = self._sessions_dir()
+        if sessions_dir.is_dir():
+            for marker in sorted(sessions_dir.glob("*.json")):
+                record = _read_json(marker)
+                if record.get("lane_id") != lane_id:
+                    continue
+                agent_id = record.get("agent_id")
+                url = record.get("url")
+                if isinstance(agent_id, str) and isinstance(url, str) and agent_id and url:
+                    adopted = Launched(agent_id=agent_id, url=url)
+                    _write_json_atomic(
+                        self._lane_marker(lane_id),
+                        {"agent_id": adopted.agent_id, "lane_id": lane_id, "url": adopted.url},
+                    )
+                    return adopted
         return None
 
-    def launch(self, lane: Lane) -> Launched:
-        if lane.lane_id in self._by_lane:
-            return self._by_lane[lane.lane_id]
-        saved = self._saved_lane(lane.lane_id)
-        if saved is not None:
-            self._by_lane[lane.lane_id] = saved
-            return saved
-
-        remote_url = self._validate_lane(lane)
-        cli_env = self._cli_env()
-        checkout = self.checkout_path_for(lane.repo, lane.base_ref)
-        checkout_lock = checkout.parent / f"{checkout.name}.lock"
-
-        with self._lock(checkout_lock):
-            saved = self._saved_lane(lane.lane_id)
-            if saved is not None:
-                self._by_lane[lane.lane_id] = saved
-                return saved
-
-            self._prepare_checkout(lane, remote_url)
-            argv = self.build_launch_argv(lane)
-            try:
-                proc = self._run_pty(
-                    argv,
-                    cwd=checkout,
-                    env=cli_env,
-                    timeout=self.config.launch_timeout_seconds,
-                )
-            except _TrustPromptError:
-                raise LaunchFailed(
-                    f"claude workspace trust is not accepted for {checkout}; "
-                    "pre-trust this folder once with the QA worker's Claude config directory"
-                ) from None
-            except FileNotFoundError:
-                raise RunnerOutage("claude binary is not installed") from None
-            except subprocess.TimeoutExpired:
-                raise RunnerOutage("claude --cloud launch timed out") from None
-            except OSError as exc:
-                raise RunnerOutage(f"claude invocation failed: {exc}") from None
-
-        combined = "\n".join(part for part in (proc.stdout, proc.stderr) if part)
-        if _looks_like_trust_prompt(combined):
-            raise LaunchFailed(
-                f"claude workspace trust is not accepted for {checkout}; "
-                "pre-trust this folder once with the QA worker's Claude config directory"
-            )
-        if proc.returncode != 0:
-            raise _classify_cli_failure("claude --cloud failed", combined, proc.returncode)
-        stripped = _strip_ansi(combined).strip()
-        if stripped.startswith("{"):
-            try:
-                payload = json.loads(stripped)
-            except ValueError:
-                payload = None
-            if isinstance(payload, dict) and payload.get("ok") is False:
-                err_text = str(payload.get("error") or payload.get("message") or combined)
-                raise _classify_cli_failure("claude --cloud failed", err_text, proc.returncode)
-
-        launched, machine = parse_launch_output(combined)
-        _write_json_atomic(
-            self._session_marker(launched.agent_id),
-            {
-                "agent_id": launched.agent_id,
-                "checkout": str(checkout),
-                "lane_id": lane.lane_id,
-                "machine": machine,
-                "state": "running",
-                "url": launched.url,
-            },
-        )
+    def _persist_markers(
+        self,
+        lane: Lane,
+        launched: Launched,
+        *,
+        checkout: Path,
+        machine: str,
+        config_dir: str,
+    ) -> None:
         _write_json_atomic(
             self._lane_marker(lane.lane_id),
             {
@@ -758,8 +828,87 @@ class ClaudeCloudRunner:
                 "url": launched.url,
             },
         )
-        self._by_lane[lane.lane_id] = launched
-        return launched
+        _write_json_atomic(
+            self._session_marker(launched.agent_id),
+            {
+                "agent_id": launched.agent_id,
+                "checkout": str(checkout),
+                "config_dir": config_dir,
+                "lane_id": lane.lane_id,
+                "machine": machine,
+                "state": "running",
+                "url": launched.url,
+            },
+        )
+
+    def launch(self, lane: Lane) -> Launched:
+        if lane.lane_id in self._by_lane:
+            return self._by_lane[lane.lane_id]
+
+        with self._lock(self._lane_lock(lane.lane_id)):
+            if lane.lane_id in self._by_lane:
+                return self._by_lane[lane.lane_id]
+            saved = self._saved_lane(lane.lane_id)
+            if saved is not None:
+                self._by_lane[lane.lane_id] = saved
+                return saved
+
+            remote_url = self._validate_lane(lane)
+            cli_environment, resolved_config_dir = self._resolve_environment(lane)
+            cli_env = self._cli_env(resolved_config_dir)
+            checkout = self.checkout_path_for(lane.repo, lane.base_ref)
+            checkout_lock = checkout.parent / f"{checkout.name}.lock"
+
+            with self._lock(checkout_lock):
+                self._prepare_checkout(lane, remote_url)
+                argv = self.build_launch_argv(lane, cli_environment=cli_environment)
+                try:
+                    proc = self._run_pty(
+                        argv,
+                        cwd=checkout,
+                        env=cli_env,
+                        timeout=self.config.launch_timeout_seconds,
+                    )
+                except _TrustPromptError:
+                    raise LaunchFailed(
+                        f"claude workspace trust is not accepted for {checkout}; "
+                        "pre-trust this folder once with the QA worker's Claude config directory"
+                    ) from None
+                except FileNotFoundError:
+                    raise RunnerOutage("claude binary is not installed") from None
+                except subprocess.TimeoutExpired:
+                    raise RunnerOutage("claude --cloud launch timed out") from None
+                except OSError as exc:
+                    raise RunnerOutage(f"claude invocation failed: {exc}") from None
+
+            combined = "\n".join(part for part in (proc.stdout, proc.stderr) if part)
+            if _looks_like_trust_prompt(combined):
+                raise LaunchFailed(
+                    f"claude workspace trust is not accepted for {checkout}; "
+                    "pre-trust this folder once with the QA worker's Claude config directory"
+                )
+            if proc.returncode != 0:
+                raise _classify_cli_failure("claude --cloud failed", combined, proc.returncode)
+            stripped = _strip_ansi(combined).strip()
+            if stripped.startswith("{"):
+                try:
+                    payload = json.loads(stripped)
+                except ValueError:
+                    payload = None
+                if isinstance(payload, dict) and payload.get("ok") is False:
+                    err_text = str(payload.get("error") or payload.get("message") or combined)
+                    raise _classify_cli_failure("claude --cloud failed", err_text, proc.returncode)
+
+            launched, machine = parse_launch_output(combined)
+            self._persist_markers(
+                lane,
+                launched,
+                checkout=checkout,
+                machine=machine,
+                config_dir=resolved_config_dir,
+            )
+            self._by_lane[lane.lane_id] = launched
+            return launched
 
     def status(self, agent_id: str) -> AgentStatus:
         saved = _read_json(self._session_marker(agent_id))
@@ -779,7 +928,8 @@ class ClaudeCloudRunner:
         if saved.get("state") == "ended":
             return
 
-        cli_env = self._cli_env()
+        saved_config = saved.get("config_dir")
+        cli_env = self._cli_env(saved_config if isinstance(saved_config, str) and saved_config else None)
         checkout_raw = saved.get("checkout")
         cwd: Path | None = None
         if isinstance(checkout_raw, str) and checkout_raw:
