@@ -329,23 +329,35 @@ def _inline_settings(value: str | None) -> dict:
 
 _PROFILE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*")
 _PROBE = r"""
-m=$1 launch=$2 configs=$3 codex_cd=$4 profile=$5 root=$6 h=$7
+m=$1 launch=$2 configs=$3 codex_cd=$4 profile=$5 root=$6 ticks=$7
 shift 7
-version() (
+version() {
   if [ -n "$launch" ] && ! cd -- "$launch" 2>/dev/null; then
-    bare=
-    for w in "$1" "$h"; do
-      case $w in /*) ;; */*) exit 1 ;; *) bare=1 ;; esac
-    done
-    if [ -n "$bare" ]; then
-      set -f; p=; IFS=:
-      for e in $PATH; do case $e in /*) p=$p${p:+:}$e ;; esac; done
-      [ -n "$p" ] || exit 1
-      PATH=$p
-    fi
+    [ ! -e "$launch.cleanup" ] || exit 1
+    case "$*:$PATH" in *..*) exit 1 ;; esac
+    command -p mkdir -- "$tmp/launch" && cd -- "$tmp/launch" || exit 1
   fi
   exec "$@" --version
-)
+}
+bounded_version() {
+  tmp=$(command -p mktemp -d) || return 1
+  version "$@" >"$tmp/out" 2>/dev/null </dev/null &
+  v=$!
+  (
+    n=0
+    while kill -0 "$v" 2>/dev/null; do
+      [ "$n" -lt "$ticks" ] || { kill -KILL "$v"; exit 0; }
+      command -p sleep 0.1
+      n=$((n + 1))
+    done
+  ) >/dev/null 2>&1 &
+  w=$!
+  wait "$v" && command -p cat -- "$tmp/out"
+  s=$?
+  wait "$w"
+  command -p rm -rf -- "$tmp"
+  return "$s"
+}
 revision() (
   exec git -C "$root" rev-parse HEAD
 )
@@ -372,9 +384,9 @@ section() {
   name=$1; shift
   out=$("$name" "$@") && printf '%s %s\n%s\n' "$m" "$name" "$out"
 }
-[ $# -eq 0 ] || section version "$@"
-[ -z "$root" ] || section revision
 [ -z "$configs" ] || section codex_configs
+[ -z "$root" ] || section revision
+[ $# -eq 0 ] || section bounded_version "$@"
 exit 0
 """
 
@@ -411,10 +423,10 @@ def _probe(
     cd, profile = (configs_of.cd or "", configs_of.profile or "") if configs_of is not None else ("", "")
     text = shell(_PROBE, (
         marker, launch_dir or "", "1" if configs_of is not None else "", cd, profile, root or "",
-        launcher[-1] if launcher else "", *launcher,
+        str(int(TIMEOUT_SECONDS / 2 / 0.1)), *launcher,
     ))
     sections = _sections(text, marker)
-    lines = [line.strip() for line in sections.get("version", []) if line.strip()]
+    lines = [line.strip() for line in sections.get("bounded_version", []) if line.strip()]
     first = lines[0][:VERSION_LIMIT].rstrip() if lines else ""
     revision = "\n".join(sections.get("revision", [])).strip()
     configs = sections.get("codex_configs")

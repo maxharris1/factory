@@ -462,6 +462,37 @@ def test_a_version_that_hangs_is_unknown(tmp_path: Path, monkeypatch: pytest.Mon
     assert time.monotonic() - started < 5
 
 
+def _hangs_on_version(directory: Path) -> Path:
+    return _script(directory, "fixture", '[ "$1" = --version ] && exec sleep 30; exit 0')
+
+
+def test_a_version_that_hangs_keeps_the_config_and_the_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(exposure, "TIMEOUT_SECONDS", 2.0)
+    home = _codex_home(tmp_path, {"config.toml": BASE + 'model_reasoning_effort = "high"\n'})
+    factory = tmp_path / "factory"
+    factory.mkdir()
+    subprocess.run(["git", "init", "-q", str(factory)], check=True)
+    subprocess.run(["git", "-C", str(factory), "-c", "user.name=t", "-c", "user.email=t@t",
+                    "commit", "-q", "--allow-empty", "-m", "c"], check=True)
+    head = subprocess.run(["git", "-C", str(factory), "rev-parse", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    started = time.monotonic()
+    found = exposure.gather(
+        argv=[str(_hangs_on_version(tmp_path)), "exec"], harness="codex", brief=None, host="box",
+        factory_root=str(factory),
+        shell=exposure.local_shell({"PATH": "/usr/bin:/bin", "CODEX_HOME": str(home)}), launch_dir=None,
+    )
+    assert time.monotonic() - started < exposure.TIMEOUT_SECONDS
+    assert (found.model, found.effort, found.factory_revision, found.cli_version) == (
+        "default-model", "high", head, exposure.UNKNOWN
+    )
+
+
 def test_a_version_that_exits_non_zero_or_is_missing_is_unknown(tmp_path: Path) -> None:
     binary = _script(tmp_path, "fake", "echo fake-cli 1.0; exit 3")
     shell = exposure.local_shell({"PATH": "/usr/bin:/bin"})
@@ -587,6 +618,62 @@ def test_the_remote_shell_reads_a_relative_binary_in_the_job_directory_it_may_no
     Path(target.job_dir).parent.mkdir(parents=True)
     job.rename(target.job_dir)
     assert exposure.cli_version("./harness", shell, target.job_dir) == "harness-cli 2.0.0"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+@pytest.mark.parametrize(
+    "wrapper",
+    [
+        ["/usr/bin/env", "PATH=bin:{tools}:/usr/bin:/bin", "fixture"],
+        ["/usr/bin/env", "PATH=:{tools}:/usr/bin:/bin", "fixture"],
+        ["/usr/bin/env", "-C", "bin", "fixture"],
+        ["/usr/bin/env", "--chdir=bin", "{tools}/fixture"],
+        ["bin/fixture"],
+    ],
+)
+def test_a_job_directory_not_made_yet_records_the_version_its_launch_will_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wrapper: list[str]
+) -> None:
+    login, tools = tmp_path / "home", tmp_path / "tools"
+    (login / "bin").mkdir(parents=True)
+    tools.mkdir()
+    _script(login / "bin", "fixture", "echo fixture 1.0")
+    _script(tools, "fixture", "echo fixture 2.0")
+    monkeypatch.chdir(login)
+    target = RemoteTarget("pc", "pc-codex-bot", "codex-bot", str(tmp_path / "work"), "job1")
+    argv = [word.format(tools=tools) for word in wrapper]
+    recorded = exposure.gather(
+        argv=[*argv, "exec", "-m", "flag-model", "-c", "model_reasoning_effort=high"], harness="codex",
+        brief=None, host="pc", factory_root=None,
+        shell=exposure.remote_shell(_Transport(env={"HOME": str(login), "PATH": "/usr/bin:/bin"}), target),
+        launch_dir=target.job_dir,
+    )
+    Path(target.job_dir).mkdir(parents=True)
+    launched = subprocess.run(["/bin/sh", "-c", 'exec "$@" --version', "sh", *argv], cwd=target.job_dir,
+                              capture_output=True, text=True,
+                              env={"PATH": "/usr/bin:/bin"})
+    assert recorded.cli_version == (launched.stdout.strip() if launched.returncode == 0 else exposure.UNKNOWN)
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+@pytest.mark.parametrize("found_by", ["cleanup", "parent"])
+def test_a_job_directory_not_made_yet_is_unknown_when_its_launch_may_not_start_empty_or_looks_outside(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, found_by: str
+) -> None:
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    _script(tools, "fixture", "echo fixture 2.0")
+    target = RemoteTarget("pc", "pc-codex-bot", "codex-bot", str(tmp_path / "work"), "job1")
+    beside = Path(f"{target.job_dir}.cleanup") if found_by == "cleanup" else Path(target.job_dir).parent
+    (beside / "bin").mkdir(parents=True)
+    _script(beside / "bin", "fixture", "echo fixture 3.0")
+    entry = "bin" if found_by == "cleanup" else "../bin"
+    monkeypatch.chdir(tmp_path)
+    shell = exposure.remote_shell(_Transport(env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"}), target)
+    argv = ["/usr/bin/env", f"PATH={entry}:{tools}:/usr/bin:/bin", "fixture", "exec"]
+    found = exposure.gather(argv=argv, harness="codex", brief=None, host="pc", factory_root=None,
+                            shell=shell, launch_dir=target.job_dir)
+    assert found.cli_version == exposure.UNKNOWN
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
