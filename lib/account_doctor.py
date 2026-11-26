@@ -132,7 +132,7 @@ _CURSOR_STATES: dict[str, tuple[bool, str]] = {
     "error": (False, EXIT_NONZERO),
 }
 GEMINI_SIGNED_OUT = "Please sign in to view available models"
-_GEMINI_MODEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._:/-]*[A-Za-z0-9])?")
+_GEMINI_MODEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._:/-]*[A-Za-z0-9])?(?:\s+\S.*)?")
 _GEMINI_UNSET = (*GEMINI_AUTH_OVERRIDES, "GEMINI_CLI_HOME")
 
 

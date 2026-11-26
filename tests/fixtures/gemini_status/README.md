@@ -5,9 +5,12 @@ A missing stream is empty. The replies come from the #1639 live check of
 Antigravity `agy` 1.5.15:
 
 - `signed-in`: the device's `gemini-bot` login is signed in, so `agy models`
-  exits 0 and lists the models on stdout. The check recorded only that shape,
-  so these model names were written from it and not captured. A later live
-  capture can replace them.
+  exits 0 and lists the models on stdout, one row each, the model ID then the
+  display name. The rows follow Google's documented output
+  (https://antigravity.google/docs/cli/headless/#select-a-model-effort-or-agent)
+  and were not captured. A later live capture can replace them.
+- `one-model`: exit 0 with one row whose display name follows the model ID
+  after a single space, which the doctor reads as signed in.
 - `signed-out`: no login, exit 1 with the CLI's exact sign-in error.
 - `no-models`: exit 0 with no output, which the doctor does not read as signed in.
 - `cache-warning`: exit 0 with a warning only, which the doctor does not read as

@@ -4,6 +4,7 @@ import io
 import json
 import re
 import sqlite3
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import get_args
@@ -331,6 +332,7 @@ def gemini_status(name: str) -> tuple[int, bytes, bytes]:
 @pytest.mark.parametrize("name, logged_in, detail", [
     ("signed-in", True, ""),
     ("models-with-warning", True, ""),
+    ("one-model", True, ""),
     ("signed-out", False, account_doctor.NOT_LOGGED_IN),
     ("no-models", False, account_doctor.NOT_UNDERSTOOD),
     ("cache-warning", False, account_doctor.NOT_UNDERSTOOD),
@@ -439,12 +441,19 @@ def test_an_exit_0_reply_with_no_model_list_on_stdout_keeps_the_gemini_hold(
         assert list(connection.execute("SELECT account, device FROM signin_holds")) == [("gemini-ultra", "pc")]
 
 
-def test_an_exit_0_model_list_with_a_warning_on_stderr_reads_signed_in(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("name", ["signed-in", "one-model", "models-with-warning"])
+def test_an_exit_0_model_list_reads_signed_in_and_clears_the_gemini_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
     devices = gemini_devices(tmp_path, monkeypatch)
-    devices.agy.answer("models-with-warning")
+    with sqlite3.connect(devices.db) as connection:
+        account_doctor.hold(
+            connection, "gemini-ultra", "pc", "runtime", account_doctor.AUTHENTICATION_FAILED, time.time() - 60
+        )
+    devices.agy.answer(name)
     assert run_doctor(devices)[("gemini-ultra", "pc")] == ("ok", "")
+    with sqlite3.connect(devices.db) as connection:
+        assert list(connection.execute("SELECT account, device FROM signin_holds")) == []
 
 
 def test_running_the_doctor_on_a_gemini_device_login_prepares_no_account_folder(
