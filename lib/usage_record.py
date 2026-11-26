@@ -3,7 +3,8 @@
 No factory process can read Grok's or Cursor's usage, so an operator or a
 Grok Bot routine reports it by hand. Only accounts machines.yml declares
 with `harness: external`, or with a harness that has no automatic source
-(NOT_TRACKED: cursor), are accepted; Claude, Codex and Gemini are read at
+(NOT_TRACKED: cursor), are accepted; an implicit `<harness>-default` account
+that machines.yml does not list is refused; Claude, Codex and Gemini are read at
 each job's start and are refused. The reading is stored in usage_readings
 under the account's own harness (`external` or `cursor`), bot the account
 id and the reserved device `external`, keyed by the account id, and in
@@ -78,7 +79,7 @@ def parse(
     observed_at: str | None,
     now: float,
 ) -> ExternalReading:
-    declared = machines.account(account)
+    declared = next((item for item in machines.accounts if item.id == account), None)
     if declared is None:
         raise Refused("the account is not declared in machines.yml")
     if declared.harness != EXTERNAL_HARNESS and declared.harness not in NOT_TRACKED:
