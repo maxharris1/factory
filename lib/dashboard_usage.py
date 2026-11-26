@@ -47,7 +47,7 @@ from lib.usage_readings import (
     window_state,
 )
 
-HARNESSES = ("claude", "codex", "cursor")
+HARNESSES = ("claude", "codex", "cursor", "gemini")
 ROW_HARNESSES = (*HARNESSES, EXTERNAL)
 ROW_LIMIT = 500
 UNCHECKED = "unchecked"

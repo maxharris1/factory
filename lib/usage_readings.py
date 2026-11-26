@@ -16,6 +16,13 @@ Sources, chosen by Max (PR #234, 2026-11-14):
   own session rollout (lib/codex_rollout.py). `parse_codex` maps each of
   `primary` and `secondary` to a window by `window_minutes` (300, 10080),
   never by position, and keeps `used_percent` and the reset time.
+* Gemini: the reply to `agy -p /usage --output-format json`, which `orch
+  job run` runs once at a gemini job's start (lib/usage_probe.py) with no
+  model turn. `parse_agy_usage` keeps only the `Gemini Models` group: its
+  `5h` and `weekly` buckets are `five_hour` and `seven_day`, `used` is
+  `1 - remaining_fraction`, and `reset_time` is kept only within
+  RESET_HORIZON_SECONDS of now (the unused third-party pool reports
+  `1970-01-01T00:00:00Z`).
 
 Only the window, the used fraction and the reset time are kept, as numbers.
 A missing or invalid used value stays None, never 0. A source that answers
@@ -69,15 +76,17 @@ if TYPE_CHECKING:
 
 TABLE = "usage_readings"
 WINDOWS = ("five_hour", "seven_day")
-SOURCES = {"claude": "get_usage", "codex": "rollout", "external": "external"}
+SOURCES = {"claude": "get_usage", "codex": "rollout", "gemini": "agy /usage", "external": "external"}
 # Checked on Cursor CLI 2026.11.22. The factory never reads a credential
 # (docs/ACCOUNTS.md), so a harness listed here stays unread.
 NOT_TRACKED: Mapping[str, str] = MappingProxyType({
     "cursor": "the Cursor CLI reports no usage without reading its login token, "
               "and the usage of the shared Ultra pool is on the external account",
-    "gemini": "the Gemini CLI has no non-interactive quota command",
 })
 CODEX_WINDOW_MINUTES = {300: "five_hour", 10080: "seven_day"}
+AGY_GROUP = "Gemini Models"
+AGY_WINDOWS = {"5h": "five_hour", "weekly": "seven_day"}
+AGY_BUCKET_IDS = {"gemini-5h": "five_hour", "gemini-weekly": "seven_day"}
 GET_USAGE_ID = "orch-usage"
 RESET_HORIZON_SECONDS = 30 * 24 * 3600
 CLOCK_SKEW_SECONDS = 300
@@ -482,6 +491,70 @@ def parse_codex(found: object, now: float) -> list[Reading]:
     return [
         readings.get(window) or missing(window, observed, 1 if readings else 0, emitted) for window in WINDOWS
     ]
+
+
+def parse_agy_usage(payload: object, now: float) -> list[Reading]:
+    """The 5-hour and weekly readings in agy's `/usage` reply.
+
+    `payload` is the reply's stdout (bytes, the JSON document after any
+    warning lines) or the parsed document. Only the `Gemini Models` group
+    is read; each bucket maps to a window by `window`, else by `id`. A
+    remaining fraction outside 0-1 leaves `used` None, and a reset time
+    that is not an ISO time within RESET_HORIZON_SECONDS of now is dropped.
+    A window the group leaves out is a no-reading. A reply that is not a
+    successful `usage` command, or has no `Gemini Models` group, is no
+    observation at all."""
+    reply = _agy_reply(payload)
+    command = reply.get("command") if isinstance(reply, dict) and reply.get("status") == "SUCCESS" else None
+    data = command.get("data") if isinstance(command, dict) and command.get("name") == "usage" else None
+    groups = data.get("groups") if isinstance(data, dict) else None
+    if not isinstance(groups, list):
+        return []
+    group = next((g for g in groups if isinstance(g, dict) and g.get("name") == AGY_GROUP), None)
+    buckets = group.get("buckets") if group is not None else None
+    if not isinstance(buckets, list):
+        return []
+    readings: dict[str, Reading] = {}
+    for bucket in buckets:
+        if not isinstance(bucket, dict):
+            continue
+        key, ident = bucket.get("window"), bucket.get("id")
+        window = (AGY_WINDOWS.get(key) if isinstance(key, str) else None) or (
+            AGY_BUCKET_IDS.get(ident) if isinstance(ident, str) else None
+        )
+        if window is None or window in readings:
+            continue
+        remaining = used_fraction(bucket.get("remaining_fraction"))
+        resets = iso_time(bucket.get("reset_time"))
+        readings[window] = Reading(
+            window,
+            None if remaining is None else round(1.0 - remaining, 6),
+            None if resets is None else reset_time(int(resets), now),
+            now,
+            0,
+            now,
+        )
+    return [readings.get(window) or missing(window, now, 0, now) for window in WINDOWS]
+
+
+def _agy_reply(payload: object) -> object:
+    if not isinstance(payload, (bytes, bytearray)):
+        return payload
+    text = bytes(payload)
+    if len(text) > MAX_REPLY_BYTES:
+        return None
+    start = 0
+    while start < len(text):
+        if text[start:].lstrip()[:1] == b"{":
+            try:
+                return json.loads(text[start:])
+            except ValueError:
+                pass
+        newline = text.find(b"\n", start)
+        if newline < 0:
+            return None
+        start = newline + 1
+    return None
 
 
 def store(

@@ -14,6 +14,15 @@
   probe without numbers logs one fixed line: its exit, a timeout, no
   reply, or a login without rate limits. The job's own `rate_limit_event`
   lines fill in the numbers when `get_usage` has none (lib/usage_readings.py).
+* Gemini: at a gemini print-mode job's start, `orch job run` runs
+  `agy -p /usage --output-format json` (the job command's own first word
+  on the box, `agy` from the bot's login PATH on a remote device) as the
+  job's bot, with every Google/Gemini override the account doctor unsets
+  (GEMINI_UNSET) dropped. agy answers from its slash command: no prompt,
+  no model turn, no permission flag. It runs on the same background
+  thread as the Claude probe, logs the same one line when it gives no
+  numbers, and only the placed account (the device's gemini-bot login,
+  the one gemini account a device has) is read.
 * Codex on a remote device: when the run ends, lib/codex_rollout.py's own
   source runs there under `python3 -I -S -c` for the job's thread id and
   prints its rate limits and token totals. On the box the session
@@ -47,6 +56,7 @@ from pathlib import Path
 
 from lib import codex_rollout, telemetry
 from lib.harness_env import ACCOUNT_ISOLATION
+from lib.harnesses.gemini import AUTH_OVERRIDES
 from lib.job_token import PROOF_ENV
 from lib.machines_yml import MachinesConfig
 from lib.remote import LOGIN_SHELL, TAG_ENV, ByteTransport, RemoteTarget, Transport, ssh_argv
@@ -54,6 +64,7 @@ from lib.usage_readings import (
     GET_USAGE_ID,
     MAX_REPLY_BYTES,
     Reading,
+    parse_agy_usage,
     parse_get_usage,
 )
 
@@ -68,6 +79,8 @@ REQUEST = (
     ).encode()
     + b"\n"
 )
+GEMINI_ARGS = ("-p", "/usage", "--output-format", "json")
+GEMINI_UNSET = (*AUTH_OVERRIDES, "GEMINI_CLI_HOME")
 TIMEOUT_SECONDS = 30.0
 LOGIN_NAME = "orch-usage"
 
@@ -76,6 +89,11 @@ Run = Callable[..., subprocess.CompletedProcess]
 
 def claude_binary(flags: telemetry.StreamFlags) -> str | None:
     return flags.argv[0] if flags.harness == "claude" else None
+
+
+def gemini_binary(flags: telemetry.StreamFlags) -> str | None:
+    """agy (or its wrapper) for a gemini job whose stream flags were added."""
+    return flags.argv[0] if flags.harness == "gemini" and flags.added else None
 
 
 class ProbeFailed(Exception):
@@ -89,11 +107,33 @@ def claude_local(
     run: Run = subprocess.run,
     timeout: float = TIMEOUT_SECONDS,
 ) -> bytes:
-    env = {name: value for name, value in environ.items() if name not in (PROOF_ENV, TAG_ENV)}
+    return _local([binary, *CLAUDE_ARGS], REQUEST, environ, (), run, timeout)
+
+
+def gemini_local(
+    binary: str,
+    environ: Mapping[str, str],
+    *,
+    run: Run = subprocess.run,
+    timeout: float = TIMEOUT_SECONDS,
+) -> bytes:
+    return _local([binary, *GEMINI_ARGS], b"", environ, GEMINI_UNSET, run, timeout)
+
+
+def _local(
+    argv: list[str],
+    data: bytes,
+    environ: Mapping[str, str],
+    dropped: Sequence[str],
+    run: Run,
+    timeout: float,
+) -> bytes:
+    unset = {PROOF_ENV, TAG_ENV, *dropped}
+    env = {name: value for name, value in environ.items() if name not in unset}
     try:
         completed = run(
-            [binary, *CLAUDE_ARGS],
-            input=REQUEST,
+            argv,
+            input=data,
             capture_output=True,
             timeout=timeout,
             env=env,
@@ -124,6 +164,11 @@ def claude_remote_script(home: str | None = None) -> str:
     if home is None:
         return _login('cd && exec claude "$@"', CLAUDE_ARGS)
     return _login(f'cd && exec {_as_account("claude")} claude "${{@:2}}"', (home, *CLAUDE_ARGS))
+
+
+def gemini_remote_script() -> str:
+    dropped = "".join(f"-u {name} " for name in GEMINI_UNSET)
+    return _login(f'cd && exec /usr/bin/env {dropped}agy "$@"', GEMINI_ARGS)
 
 
 def codex_remote_script(thread_id: str | None, home: str | None = None) -> str:
@@ -157,6 +202,15 @@ def claude_remote(
     timeout: float = TIMEOUT_SECONDS,
 ) -> bytes:
     return _exchange(transport, ssh_argv(target, claude_remote_script(home)), REQUEST, timeout)
+
+
+def gemini_remote(
+    transport: Transport,
+    target: RemoteTarget,
+    *,
+    timeout: float = TIMEOUT_SECONDS,
+) -> bytes:
+    return _exchange(transport, ssh_argv(target, gemini_remote_script()), b"", timeout)
 
 
 def codex_remote(
@@ -201,6 +255,7 @@ def start_claude(
     probe: Callable[[], bytes],
     log: Callable[[str], None],
     label: str = "usage probe",
+    parse: Callable[[bytes, float], list[Reading]] = parse_get_usage,
 ) -> threading.Thread:
     """The readings are observed when the probe was asked, so a
     `rate_limit_event` the job streams meanwhile stays the newer reading."""
@@ -215,7 +270,7 @@ def start_claude(
         except Exception as exc:
             log(f"{label}: failed ({type(exc).__name__})")
             return
-        readings = parse_get_usage(out, asked)
+        readings = parse(out, asked)
         if not readings:
             log(f"{label}: no reply")
         elif all(r.used is None and r.resets_at is None for r in readings):
@@ -225,6 +280,15 @@ def start_claude(
     thread = threading.Thread(target=work, name="orch-usage", daemon=True)
     thread.start()
     return thread
+
+
+def start_gemini(
+    add: Callable[[list[Reading]], None],
+    clock: Callable[[], float],
+    probe: Callable[[], bytes],
+    log: Callable[[str], None],
+) -> threading.Thread:
+    return start_claude(add, clock, probe, log, parse=parse_agy_usage)
 
 
 def start_pass(
