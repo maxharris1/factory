@@ -352,7 +352,7 @@ paths_conf() {
         return 78
     fi
     echo "[Service]"
-    for key in DASHBOARD_DIR DASHBOARD_SETTINGS_SPOOL DASHBOARD_SIGNIN_RELAY DASHBOARD_ACTIONS_AUDIT; do
+    for key in DASHBOARD_DIR DASHBOARD_SETTINGS_SPOOL DASHBOARD_SIGNIN_RELAY DASHBOARD_ACTIONS_AUDIT DASHBOARD_SESSION_STORE; do
         value="$(env_value "$key")"
         [[ -n "$value" ]] || continue
         bind="$value"

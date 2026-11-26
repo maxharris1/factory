@@ -13,6 +13,8 @@
 #   DASHBOARD_ACTIONS_AUDIT=<absolute path of the JSONL audit file for /api/act>
 #   DASHBOARD_SETTINGS_SPOOL=<absolute path of the settings request spool>
 #   DASHBOARD_SIGNIN_RELAY=<absolute path of the account sign-in relay>
+#   DASHBOARD_SESSION_STORE=<absolute 0700 dir owned by factory-dash for persistent per-device sessions>
+#   DASHBOARD_SESSION_DAYS=<optional 1-365; default 90 when DASHBOARD_SESSION_STORE is set>
 #
 # Never run it as cursor-bot or another bot account: a bot that shares the
 # process's user could read the in-memory GitHub token.

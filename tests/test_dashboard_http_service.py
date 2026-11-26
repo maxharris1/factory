@@ -630,13 +630,14 @@ def test_install_adds_factory_dash_only_when_missing(
 def test_install_drop_in_binds_only_the_paths_http_env_sets(
         tmp_path: Path, node: Node, app: HTTPServer) -> None:
     spool, relay, audit = tmp_path / "spool", tmp_path / "relay", tmp_path / "audit" / "acts.jsonl"
+    sessions = tmp_path / "sessions"
     port = app.server_address[1]
     node.write_env(port, DASHBOARD_SETTINGS_SPOOL=str(spool), DASHBOARD_SIGNIN_RELAY=str(relay),
-                   DASHBOARD_ACTIONS_AUDIT=str(audit))
+                   DASHBOARD_ACTIONS_AUDIT=str(audit), DASHBOARD_SESSION_STORE=str(sessions))
     assert node.install().returncode == 0
     assert node.drop_in.read_text(encoding="utf-8").splitlines() == [
         "[Service]", f"BindReadOnlyPaths={node.dashboard}", f"BindPaths={spool}",
-        f"BindPaths={relay}", f"BindPaths={audit.parent}"]
+        f"BindPaths={relay}", f"BindPaths={audit.parent}", f"BindPaths={sessions}"]
 
     node.write_env(port, DASHBOARD_SETTINGS_SPOOL=str(spool), DASHBOARD_ACTIONS_AUDIT=str(audit))
     assert node.install().returncode == 0
@@ -657,7 +658,9 @@ def test_install_drop_in_binds_only_the_paths_http_env_sets(
     ("DASHBOARD_SIGNIN_RELAY", "/srv/../etc"),
     ("DASHBOARD_SETTINGS_SPOOL", "/srv/./spool"),
     ("DASHBOARD_ACTIONS_AUDIT", "/acts.jsonl"),
-], ids=["dir-root", "spool-root", "dotdot", "dot", "audit-in-root"])
+    ("DASHBOARD_SESSION_STORE", "/"),
+    ("DASHBOARD_SESSION_STORE", "/var/lib/../etc"),
+], ids=["dir-root", "spool-root", "dotdot", "dot", "audit-in-root", "sessions-root", "sessions-dotdot"])
 def test_install_refuses_a_bind_that_would_unprotect_the_system(
         node: Node, app: HTTPServer, key: str, value: str) -> None:
     node.write_env(app.server_address[1], **{key: value})

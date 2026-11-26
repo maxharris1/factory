@@ -438,7 +438,9 @@ class Client:
             if key.lower() == "set-cookie":
                 name, _, rest = value.partition("=")
                 cookie_value = rest.split(";")[0]
-                assert "HttpOnly" in value and "SameSite=Strict" in value and "Path=/api" in value
+                assert "HttpOnly" in value and "SameSite=Strict" in value and (
+                    "Path=/api" in value or "Path=/;" in value
+                )
                 if cookie_value:
                     self.cookies[name] = cookie_value
                 else:
@@ -497,7 +499,19 @@ def serve_actions(actions_site: Path, fake_github: FakeGitHub):
 
     def start(clients: tuple[str, ...] = ("127.0.0.1",), spool: Path | None = None,
               approver: str = "maxharris1", audit: Path | None = None,
-              relay: Path | None = None, own_address: str | None = None) -> Client:
+              relay: Path | None = None, own_address: str | None = None,
+              session_store: Path | None = None,
+              session_seconds: int | None = None,
+              require_auth_reads: bool = False) -> Client:
+        seconds = (
+            session_seconds
+            if session_seconds is not None
+            else (
+                server_module.DEFAULT_PERSISTENT_SESSION_DAYS * 86400
+                if session_store is not None
+                else server_module.SESSION_SECONDS
+            )
+        )
         config = server_module.ActionsConfig(
             client_id="Ov23liTESTCLIENT",
             approver=approver,
@@ -508,6 +522,9 @@ def serve_actions(actions_site: Path, fake_github: FakeGitHub):
             audit=audit,
             signin_relay=relay,
             own_address=own_address,
+            require_auth_reads=require_auth_reads,
+            session_store=session_store,
+            session_seconds=seconds,
         )
         server = server_module.make_server("127.0.0.1", 0, actions_site, config)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -810,11 +827,25 @@ def test_sign_out_ends_the_session(max_client: Client, fake_github) -> None:
     assert fake_github.posts == []
 
 
-def test_a_new_sign_in_ends_the_old_session(max_client: Client, serve_actions, fake_github):
+def test_multiple_devices_stay_signed_in_and_re_signin_replaces_own_cookie(
+    max_client: Client, serve_actions, fake_github
+) -> None:
     laptop = Client(max_client.port)
     assert laptop.sign_in(fake_github, MAX_TOKEN) == "signed-in"
-    assert max_client.session() == {"signed_in": False, "account_signin": False}
-    assert comment(max_client)[0] == 401
+    assert max_client.session()["signed_in"] is True
+    assert laptop.session()["signed_in"] is True
+    assert comment(max_client)[0] == 201
+    assert comment(laptop)[0] == 201
+
+    old_cookie = max_client.cookies["factory_session"]
+    old_csrf = max_client.csrf
+    assert max_client.sign_in(fake_github, MAX_TOKEN) == "signed-in"
+    stale = Client(max_client.port)
+    stale.cookies["factory_session"] = old_cookie
+    stale.csrf = old_csrf
+    assert stale.session() == {"signed_in": False, "account_signin": False}
+    assert comment(stale)[0] == 401
+    assert comment(max_client)[0] == 201
     assert comment(laptop)[0] == 201
 
 
@@ -2302,4 +2333,324 @@ def test_load_config_refuses_an_unsafe_signin_relay(
     if case not in ("without-spool", "without-actions"):
         env["DASHBOARD_SETTINGS_SPOOL"] = str(spool)
     with pytest.raises(server_module.ConfigError, match=needle):
+        server_module.load_config(env, process_user="factory-dash")
+
+
+# --- Persistent once-per-device sessions (DASHBOARD_SESSION_STORE) -----------
+
+
+@pytest.fixture
+def session_store(tmp_path: Path) -> Path:
+    store = tmp_path / "sessions"
+    store.mkdir(mode=0o700)
+    store.chmod(0o700)
+    return store
+
+
+def _start_persistent(
+    actions_site: Path,
+    fake_github: FakeGitHub,
+    session_store: Path,
+    *,
+    session_seconds: int = 90 * 86400,
+    require_auth_reads: bool = False,
+):
+    config = server_module.ActionsConfig(
+        client_id="Ov23liTESTCLIENT",
+        approver="maxharris1",
+        clients=frozenset({server_module.ipaddress.IPv4Address("127.0.0.1")}),
+        api_base=fake_github.base,
+        web_base=fake_github.base,
+        require_auth_reads=require_auth_reads,
+        session_store=session_store,
+        session_seconds=session_seconds,
+    )
+    server = server_module.make_server("127.0.0.1", 0, actions_site, config)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+def _stop_server(server, thread: threading.Thread) -> None:
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
+
+
+def test_persistent_sessions_survive_server_restart_for_multiple_devices(
+    actions_site: Path, fake_github: FakeGitHub, session_store: Path
+) -> None:
+    srv1, t1 = _start_persistent(actions_site, fake_github, session_store, require_auth_reads=True)
+    try:
+        phone = Client(srv1.server_address[1])
+        laptop = Client(srv1.server_address[1])
+        assert phone.raw("GET", "/")[0] == 401
+        assert phone.sign_in(fake_github, MAX_TOKEN) == "signed-in"
+        assert laptop.sign_in(fake_github, MAX_TOKEN) == "signed-in"
+        phone_csrf, laptop_csrf = phone.csrf, laptop.csrf
+
+        set_cookies = [
+            v for _, hdrs, _ in phone.seen for k, v in hdrs
+            if k.lower() == "set-cookie" and v.startswith("factory_session=")
+        ]
+        assert any(f"Max-Age={90 * 86400}" in c and "Path=/;" in c for c in set_cookies)
+        assert phone.raw("GET", "/")[0] == 200
+        assert laptop.raw("GET", "/")[0] == 200
+        assert len(list(session_store.iterdir())) == 2
+    finally:
+        _stop_server(srv1, t1)
+
+    srv2, t2 = _start_persistent(actions_site, fake_github, session_store, require_auth_reads=True)
+    try:
+        assert srv2.actions.sessions == {}
+        phone.port = srv2.server_address[1]
+        laptop.port = srv2.server_address[1]
+
+        assert phone.raw("GET", "/")[0] == 200
+        assert laptop.raw("GET", "/")[0] == 200
+        assert phone.session() == {
+            "signed_in": True, "login": "maxharris1", "csrf": phone_csrf, "account_signin": False,
+        }
+        assert laptop.session() == {
+            "signed_in": True, "login": "maxharris1", "csrf": laptop_csrf, "account_signin": False,
+        }
+        assert comment(phone, "from phone after reboot")[0] == 201
+        assert comment(laptop, "from laptop after reboot")[0] == 201
+        assert [p[2] for p in fake_github.posts] == [
+            "from phone after reboot",
+            "from laptop after reboot",
+        ]
+    finally:
+        _stop_server(srv2, t2)
+
+
+def test_session_store_never_writes_plaintext_token_csrf_or_cookie_key(
+    serve_actions, fake_github: FakeGitHub, session_store: Path
+) -> None:
+    client = serve_actions(session_store=session_store)
+    assert client.sign_in(fake_github, MAX_TOKEN) == "signed-in"
+    raw_cookie = client.cookies["factory_session"]
+    session_id, _, key_b64 = raw_cookie.partition(".")
+    assert session_id and key_b64
+
+    files = list(session_store.iterdir())
+    assert len(files) == 1
+    path = files[0]
+    assert path.stat().st_mode & 0o7777 == 0o600
+    assert session_id not in path.name
+    content = path.read_text(encoding="utf-8")
+    for secret in (MAX_TOKEN, client.csrf, session_id, key_b64):
+        assert secret not in content
+    assert not GITHUB_CREDENTIAL.search(content)
+
+
+def test_persistent_session_rejects_tampering_wrong_key_wrong_ip_symlink_and_expiry(
+    actions_site: Path, fake_github: FakeGitHub, session_store: Path, tmp_path: Path
+) -> None:
+    srv1, t1 = _start_persistent(actions_site, fake_github, session_store)
+    try:
+        client = Client(srv1.server_address[1])
+        assert client.sign_in(fake_github, MAX_TOKEN) == "signed-in"
+        valid_cookie = client.cookies["factory_session"]
+        session_id, _, key_b64 = valid_cookie.partition(".")
+        (stored_file,) = list(session_store.iterdir())
+        original_bytes = stored_file.read_bytes()
+    finally:
+        _stop_server(srv1, t1)
+
+    store = server_module.SessionStore(session_store)
+    try:
+        wrong_key = b"\x55" * 32
+        assert store.load(session_id, wrong_key, client_ip="127.0.0.1") is None
+
+        valid_key = server_module._b64d(key_b64)
+        assert valid_key is not None
+        assert store.load(session_id, valid_key, client_ip="100.64.0.99") is None
+        assert store.load(session_id, valid_key, client_ip="") is None
+
+        for field, bad_value in (
+            ("expires_at", int(time.time()) + 999999999),
+            ("client_ip", "100.64.0.99"),
+            ("login", "attacker"),
+            ("ct", server_module._b64e(b"tampered-ciphertext")),
+        ):
+            tampered = json.loads(original_bytes)
+            tampered[field] = bad_value
+            stored_file.write_text(json.dumps(tampered), encoding="utf-8")
+            assert store.load(session_id, valid_key, client_ip="127.0.0.1") is None
+
+        outside = tmp_path / "outside.json"
+        outside.write_bytes(original_bytes)
+        stored_file.unlink()
+        stored_file.symlink_to(outside)
+        assert store.load(session_id, valid_key, client_ip="127.0.0.1") is None
+        stored_file.unlink()
+
+        stored_file.write_bytes(original_bytes)
+        loaded = store.load(session_id, valid_key, client_ip="127.0.0.1")
+        assert loaded is not None and loaded[1] == MAX_TOKEN
+        assert store.load(session_id, valid_key, client_ip="127.0.0.1", now=loaded[4] + 1) is None
+        assert not stored_file.exists()
+    finally:
+        store.close()
+
+
+def test_sign_out_removes_only_calling_device_and_sign_out_all_clears_store(
+    actions_site: Path, fake_github: FakeGitHub, session_store: Path
+) -> None:
+    srv1, t1 = _start_persistent(actions_site, fake_github, session_store)
+    try:
+        phone = Client(srv1.server_address[1])
+        laptop = Client(srv1.server_address[1])
+        assert phone.sign_in(fake_github, MAX_TOKEN) == "signed-in"
+        assert laptop.sign_in(fake_github, MAX_TOKEN) == "signed-in"
+        assert len(list(session_store.iterdir())) == 2
+
+        assert phone.post("/api/signout") == (200, {})
+        assert phone.session() == {"signed_in": False, "account_signin": False}
+        assert laptop.session()["signed_in"] is True
+        assert len(list(session_store.iterdir())) == 1
+    finally:
+        _stop_server(srv1, t1)
+
+    srv2, t2 = _start_persistent(actions_site, fake_github, session_store)
+    try:
+        laptop.port = srv2.server_address[1]
+        tablet = Client(srv2.server_address[1])
+        assert tablet.sign_in(fake_github, MAX_TOKEN) == "signed-in"
+        assert laptop.session()["signed_in"] is True
+        assert len(list(session_store.iterdir())) == 2
+
+        assert laptop.post("/api/signout", {"all": True}) == (200, {})
+        assert laptop.session() == {"signed_in": False, "account_signin": False}
+        assert tablet.session() == {"signed_in": False, "account_signin": False}
+        assert list(session_store.iterdir()) == []
+    finally:
+        _stop_server(srv2, t2)
+
+
+def test_persistent_session_renews_sliding_expiry_after_24h_with_fresh_salt(
+    serve_actions, fake_github: FakeGitHub, session_store: Path
+) -> None:
+    client = serve_actions(session_store=session_store, session_seconds=90 * 86400)
+    assert client.sign_in(fake_github, MAX_TOKEN) == "signed-in"
+    (stored_file,) = list(session_store.iterdir())
+    before = json.loads(stored_file.read_text(encoding="utf-8"))
+
+    seen_before = len(client.seen)
+    assert client.session()["signed_in"] is True
+    assert json.loads(stored_file.read_text(encoding="utf-8"))["salt"] == before["salt"]
+    assert not any(
+        k.lower() == "set-cookie"
+        for _, hdrs, _ in client.seen[seen_before:]
+        for k, _ in hdrs
+    )
+
+    sid = client.server.actions.session.session_id
+    cur = client.server.actions.sessions[sid]
+    client.server.actions.sessions[sid] = cur._replace(wall_expires_at=cur.wall_expires_at - 2 * 86400)
+
+    seen_before = len(client.seen)
+    assert client.session()["signed_in"] is True
+    after = json.loads(stored_file.read_text(encoding="utf-8"))
+    assert after["salt"] != before["salt"]
+    assert after["expires_at"] >= before["expires_at"]
+    refreshed_cookies = [
+        v for _, hdrs, _ in client.seen[seen_before:] for k, v in hdrs
+        if k.lower() == "set-cookie" and v.startswith("factory_session=")
+    ]
+    assert len(refreshed_cookies) == 1
+    assert f"Max-Age={90 * 86400}" in refreshed_cookies[0]
+
+
+def test_revoked_github_token_401_clears_persisted_session(
+    serve_actions, fake_github: FakeGitHub, session_store: Path
+) -> None:
+    client = serve_actions(session_store=session_store)
+    assert client.sign_in(fake_github, MAX_TOKEN) == "signed-in"
+    assert len(list(session_store.iterdir())) == 1
+
+    sid = client.server.actions.session.session_id
+    cur = client.server.actions.sessions[sid]
+    client.server.actions.sessions[sid] = cur._replace(token="gho_revoked_token")
+    assert comment(client) == (401, {"error": "no-session"})
+    assert client.session() == {"signed_in": False, "account_signin": False}
+    assert list(session_store.iterdir()) == []
+
+
+def test_session_store_evicts_oldest_beyond_max_sessions(
+    serve_actions, fake_github: FakeGitHub, session_store: Path
+) -> None:
+    first = serve_actions(session_store=session_store)
+    clients = [first]
+    assert first.sign_in(fake_github, MAX_TOKEN) == "signed-in"
+    for _ in range(server_module.MAX_SESSIONS + 1):
+        device = Client(first.port)
+        assert device.sign_in(fake_github, MAX_TOKEN) == "signed-in"
+        clients.append(device)
+
+    assert len(list(session_store.iterdir())) == server_module.MAX_SESSIONS
+    assert len(first.server.actions.sessions) == server_module.MAX_SESSIONS
+    assert clients[0].session() == {"signed_in": False, "account_signin": False}
+    assert clients[-1].session()["signed_in"] is True
+
+
+def test_load_config_session_store_and_days(site: Path, session_store: Path, capsys) -> None:
+    env = _env(site, **ACTIONS_ENV, USER="factory-dash", DASHBOARD_SESSION_STORE=str(session_store))
+    *_, actions = server_module.load_config(env, process_user="factory-dash")
+    assert actions.session_store == session_store
+    assert actions.session_seconds == 90 * 86400
+
+    env_30 = _env(
+        site, **ACTIONS_ENV, USER="factory-dash",
+        DASHBOARD_SESSION_STORE=str(session_store), DASHBOARD_SESSION_DAYS="30",
+    )
+    *_, actions_30 = server_module.load_config(env_30, process_user="factory-dash")
+    assert actions_30.session_seconds == 30 * 86400
+
+    orig = dict(os.environ)
+    try:
+        os.environ.clear()
+        os.environ.update(env_30)
+        assert server_module.main(["--check"]) == 0
+    finally:
+        os.environ.clear()
+        os.environ.update(orig)
+    assert f"sessions persisted in {session_store} (30d)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("case,needle", [
+    ("relative", "absolute"),
+    ("missing", "does not exist"),
+    ("file", "not a directory"),
+    ("symlink", "symlink"),
+    ("group-readable", "0700"),
+    ("world-readable", "0700"),
+    ("without-actions", "needs GitHub actions"),
+])
+def test_load_config_refuses_unsafe_session_store(
+    site: Path, session_store: Path, case: str, needle: str
+) -> None:
+    (session_store.parent / "plain-file").write_text("x", encoding="utf-8")
+    (session_store.parent / "store-link").symlink_to(session_store, target_is_directory=True)
+    if case == "group-readable":
+        session_store.chmod(0o750)
+    elif case == "world-readable":
+        session_store.chmod(0o705)
+    value = {
+        "relative": "sessions",
+        "missing": str(session_store.parent / "nope"),
+        "file": str(session_store.parent / "plain-file"),
+        "symlink": str(session_store.parent / "store-link"),
+    }.get(case, str(session_store))
+    actions = {} if case == "without-actions" else ACTIONS_ENV
+    env = _env(site, **actions, USER="factory-dash", DASHBOARD_SESSION_STORE=value)
+    with pytest.raises(server_module.ConfigError, match=needle):
+        server_module.load_config(env, process_user="factory-dash")
+
+
+@pytest.mark.parametrize("bad_days", ["0", "366", "-5", "abc", "30.5"])
+def test_load_config_refuses_invalid_session_days(site: Path, bad_days: str) -> None:
+    env = _env(site, **ACTIONS_ENV, USER="factory-dash", DASHBOARD_SESSION_DAYS=bad_days)
+    with pytest.raises(server_module.ConfigError, match="DASHBOARD_SESSION_DAYS"):
         server_module.load_config(env, process_user="factory-dash")
