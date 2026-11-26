@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from lib import cli
+from lib import cli, usage_record
+from lib.machines_yml import MachinesConfig
 from lib.usage_readings import (
     ACCOUNT_READINGS,
     ACCOUNT_READINGS_DDL,
@@ -327,7 +328,9 @@ def test_an_external_account_still_records_beside_a_declared_cursor_account(db: 
     ]
 
 
-@pytest.mark.parametrize("account", ["claude-a", "codex-a", "gemini-a", "claude-default", "not-declared"])
+@pytest.mark.parametrize(
+    "account", ["claude-a", "codex-a", "gemini-a", "claude-default", "cursor-default", "not-declared"]
+)
 def test_an_account_with_an_automatic_source_or_unknown_is_refused(
     db: Path, cursor_machines: Path, capsys, account: str
 ) -> None:
@@ -337,3 +340,29 @@ def test_an_account_with_an_automatic_source_or_unknown_is_refused(
 
     assert len(capsys.readouterr().err.strip().splitlines()) == 1
     assert dump(db) == before
+
+
+@pytest.mark.parametrize("account", ["claude-default", "codex-default", "gemini-default", "cursor-default"])
+def test_an_undeclared_default_account_is_refused_when_no_cursor_account_is_declared(
+    db: Path, machines: Path, capsys, account: str
+) -> None:
+    before = dump(db)
+
+    assert record(db, machines, account=account) == 2
+
+    assert len(capsys.readouterr().err.strip().splitlines()) == 1
+    assert dump(db) == before
+
+
+@pytest.mark.parametrize("account", ["claude-default", "codex-default", "gemini-default", "cursor-default"])
+def test_parse_refuses_an_implicit_default_account_with_no_declared_accounts(account: str) -> None:
+    with pytest.raises(usage_record.Refused):
+        usage_record.parse(
+            MachinesConfig(),
+            account=account,
+            window="weekly",
+            used="0.01",
+            resets_at=str(RESETS),
+            observed_at=None,
+            now=float(NOW),
+        )
