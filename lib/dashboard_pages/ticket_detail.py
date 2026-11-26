@@ -22,6 +22,7 @@ from lib.dashboard_pages.journey_canvas import TINT
 from lib.dashboard_pages.lanes import TILE_STATE
 from lib.dashboard_pages.tickets import WAITING, _px
 from lib.dashboard_static import read_asset
+from lib.exposure import UNKNOWN
 
 
 VERBS = {name: spec["verbs"] for name, spec in TILE_STATE.items() if "verbs" in spec}
@@ -39,9 +40,9 @@ PHONE = "(max-width:699.98px)"
 COL_GAP, RUNLOG_BASIS, RIGHT_BASIS = 16, 300, 1032
 SIDE_BY_SIDE = RUNLOG_BASIS + COL_GAP + RIGHT_BASIS - 0.02
 PHONE_ORDER = ("liverun", "summary", "journey", "runlog", "next", "exposure", "ended", "chart")
-EXPOSURE_FIELDS = (("model", "model", ""), ("effort", "effort", ""), ("harness", "harness", ""),
-                   ("cli_version", "CLI version", ""), ("brief_sha256", "brief sha256", ""),
-                   ("skill_paths", "skill paths", ", "), ("host", "host", ""),
+EXPOSURE_FIELDS = (("round", "review round", ""), ("model", "model", ""), ("effort", "effort", ""),
+                   ("harness", "harness", ""), ("cli_version", "CLI version", ""),
+                   ("brief_sha256", "brief sha256", ""), ("skill_paths", "skill paths", ", "), ("host", "host", ""),
                    ("factory_revision", "factory revision", ""))
 EXPOSURE_SUB = "what this job runs under"
 LIVE_KINDS = ("running", "queued")
@@ -475,6 +476,13 @@ def _runlog_row(key: str, visit: dict, model: dict) -> str:
     )
 
 
+def _runlog_job(job: dict) -> str:
+    found = job["exposure"]
+    number = "" if found["round"] == UNKNOWN else _span("rnd", f'round {found["round"]}')
+    return (f'<span class="exp-job">{_span("job", job["job"])}{_span("act", job["action"])}{number}'
+            f'{_span("model", model_effort(found) or "unknown")}</span>')
+
+
 def _runlog_jobs(key: str, visit: dict) -> str:
     jobs = visit.get("jobs") or []
     if not jobs:
@@ -484,11 +492,7 @@ def _runlog_jobs(key: str, visit: dict) -> str:
         f'<tbody>{_exposure_rows(job["exposure"])}</tbody></table>'
         for job in jobs
     )
-    line = "".join(
-        f'<span class="exp-job">{_span("job", job["job"])}{_span("act", job["action"])}'
-        f'{_span("model", model_effort(job["exposure"]) or "unknown")}</span>'
-        for job in jobs
-    )
+    line = "".join(_runlog_job(job) for job in jobs)
     label = f'{len(jobs)} job{"" if len(jobs) == 1 else "s"} · metadata'
     return f'<div class="exp-jobs">{line}</div><details class="exp-more" data-key="runlog-jobs:{_e(key)}:{visit["index"]}"><summary>{label}</summary>{tables}</details>'
 

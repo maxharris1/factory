@@ -1784,6 +1784,7 @@ def test_tickets_json_carries_a_finished_job_s_exposure(tmp_path: Path) -> None:
         "action": "build",
         "recipient": "claude",
         "exposure": {
+            "round": "unknown",
             "model": "opus",
             "effort": "high",
             "harness": "claude",

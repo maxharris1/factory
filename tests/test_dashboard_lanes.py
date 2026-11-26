@@ -247,10 +247,13 @@ def test_the_page_script_draws_the_same_model_and_effort(tmp_path: Path) -> None
     _assert_model_tiles(_run_page(tmp_path, snapshot, "main", BAR + ["hud", "lanes"])["html"]["lanes"])
 
 
-def test_a_tile_with_no_exposure_row_still_renders_its_lines(tmp_path: Path) -> None:
+@pytest.mark.parametrize("omitted", [False, True], ids=["unknown", "no-key"])
+def test_a_tile_with_no_exposure_row_still_renders_its_lines(tmp_path: Path, omitted: bool) -> None:
     snapshot = _base(tmp_path)
     row = snapshot["running"][0]
     assert row["exposure"]["model"] == "unknown" and row["exposure"]["effort"] == "unknown"
+    if omitted:
+        del row["exposure"]
     renders = [_no_script(render_pages(snapshot)["index.html"])]
     if NODE:
         renders.append(_run_page(tmp_path, snapshot, "main", BAR + ["hud", "lanes"])["html"]["lanes"])

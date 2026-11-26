@@ -546,11 +546,12 @@ def test_running_job_carries_its_flow(tmp_path: Path) -> None:
     keys = ("state", "who", "started_at", "duration_seconds", "time_known", "off_chart",
             "reason", "current", "jobs")
     unknown = dict.fromkeys(
-        ("model", "effort", "harness", "cli_version", "brief_sha256", "skill_paths", "host", "factory_revision"),
+        ("round", "model", "effort", "harness", "cli_version", "brief_sha256", "skill_paths", "host",
+         "factory_revision"),
         "unknown")
 
-    def ran(job: str, action: str, recipient: str) -> list[dict]:
-        return [{"job": job, "action": action, "recipient": recipient, "exposure": unknown}]
+    def ran(job: str, action: str, recipient: str, number: str = "unknown") -> list[dict]:
+        return [{"job": job, "action": action, "recipient": recipient, "exposure": {**unknown, "round": number}}]
     assert job["flow"] == {
         "state": "review",
         "path": ["intake", "building", "review", "fixing", "review"],
@@ -563,13 +564,13 @@ def test_running_job_carries_its_flow(tmp_path: Path) -> None:
             ("building", "claude", NOW - 5000, 1000, True, True, flow.OFF_CHART, False,
              ran("h-build", "build", "claude")),
             ("review", "codex", NOW - 4000, 1000, True, False, "ready, CI green", False,
-             ran("h-review", "review", "codex")),
+             ran("h-review", "review", "codex", "1")),
             ("fixing", "claude", NOW - 3000, 1000, True, False,
              "APPROVE on red CI, CI fix or REVISE, under the round cap"
              " or trusted kind=rebase, rebase-only fix", False,
              ran("h-fix", "fix", "claude")),
             ("review", "codex", NOW - 2000, 2000, True, False, "ready, CI green", True,
-             ran("h-review", "review", "codex")),
+             ran("h-review", "review", "codex", "2")),
         )],
         "hops_to_shipped": 2,
         "all_durations_known": False,

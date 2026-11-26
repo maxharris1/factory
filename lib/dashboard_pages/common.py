@@ -156,7 +156,9 @@ def _span(cls: str | None, text: object) -> str:
     return f"<span{attr}>{_e(text)}</span>"
 
 
-def model_effort(found: dict) -> str:
+def model_effort(found: dict | None) -> str:
+    if found is None:
+        return ""
     return " · ".join(v for v in (found["model"], found["effort"]) if v != UNKNOWN)
 
 

@@ -2432,9 +2432,9 @@ REAL = Exposure("gpt-5.5-codex", "codex-cli 0.98.0", hashlib.sha256(b"brief").he
 UNKNOWN = Exposure("unknown", "unknown", "unknown", None, "unknown", "unknown", "unknown", "unknown")
 
 
-def _shown(found: Exposure) -> list[tuple[str, str]]:
+def _shown(found: Exposure, number: str = "unknown") -> list[tuple[str, str]]:
     paths = "unknown" if found.skill_paths is None else ", ".join(found.skill_paths)
-    return [("model", found.model), ("effort", found.effort), ("harness", found.harness),
+    return [("review round", number), ("model", found.model), ("effort", found.effort), ("harness", found.harness),
             ("CLI version", found.cli_version), ("brief sha256", found.brief_sha256),
             ("skill paths", paths), ("host", found.host), ("factory revision", found.factory_revision)]
 
@@ -2466,18 +2466,18 @@ def _exposure_facts(markup: str) -> list[tuple[str, str]]:
 
 
 @pytest.mark.parametrize("found", [INDEPENDENT, REAL, UNKNOWN], ids=["independent", "real", "unknown"])
-def test_a_running_job_s_ticket_page_shows_its_eight_exposure_fields(tmp_path: Path, found: Exposure) -> None:
+def test_a_running_job_s_ticket_page_shows_its_nine_exposure_fields(tmp_path: Path, found: Exposure) -> None:
     from lib.dashboard import write_snapshot_pages
 
     snapshot = _exposed(tmp_path, found)
     (row,) = snapshot["running"]
-    assert set(row["exposure"]) == EIGHT
+    assert set(row["exposure"]) == NINE
     status = write_snapshot_pages(tmp_path / "out", snapshot)[0]
     assert json.loads(status.read_text(encoding="utf-8"))["running"][0]["exposure"] == row["exposure"]
     assert _exposure_facts(_ticket_server(snapshot, EXPOSURE_ADDRESS)) == _shown(found)
 
 
-EIGHT = {"model", "effort", "harness", "cli_version", "brief_sha256", "skill_paths", "host", "factory_revision"}
+NINE = {"round", "model", "effort", "harness", "cli_version", "brief_sha256", "skill_paths", "host", "factory_revision"}
 
 
 def _run_log_exposures(markup: str) -> dict[str, list[tuple[str, list[tuple[str, str]]]]]:
@@ -2507,9 +2507,10 @@ def _run_log_models(markup: str) -> dict[str, list[tuple[str, str, str]]]:
             continue
         assert item.index("</button>") < jobs.start() < item.index('<details class="exp-more"'), state
         found[state].extend(
-            (html.unescape(job), html.unescape(action), html.unescape(model)) for job, action, model in re.findall(
+            (html.unescape(job), html.unescape(action), html.unescape(" · ".join(filter(None, (number, model)))))
+            for job, action, number, model in re.findall(
                 r'<span class="exp-job"><span class="job">([^<]*)</span><span class="act">([^<]*)</span>'
-                r'<span class="model">([^<]*)</span></span>', jobs.group(1))
+                r'(?:<span class="rnd">([^<]*)</span>)?<span class="model">([^<]*)</span></span>', jobs.group(1))
         )
     return found
 
@@ -2561,14 +2562,14 @@ def test_the_run_log_shows_each_job_s_exposure(tmp_path: Path) -> None:
     assert all(not jobs for state, jobs in models.items() if state not in ("planning", "building"))
     jobs = _record_jobs(snapshot)
     assert set(jobs) == {ids["plan"][:8], ids["build"][:8]}
-    assert all(set(job["exposure"]) == EIGHT for job in jobs.values())
+    assert all(set(job["exposure"]) == NINE for job in jobs.values())
     assert jobs[ids["plan"][:8]]["exposure"]["brief_sha256"] == [REAL.brief_sha256[i:i + 16] for i in range(0, 64, 16)]
 
 
 @pytest.mark.parametrize("table", [True, False], ids=["no-row", "no-table"])
-def test_a_job_with_no_exposure_row_shows_eight_unknowns(tmp_path: Path, table: bool) -> None:
+def test_a_job_with_no_exposure_row_shows_nine_unknowns(tmp_path: Path, table: bool) -> None:
     snapshot, ids = _ticket_jobs(tmp_path, {"plan": None, "build": None}, table=table)
-    assert set(snapshot["running"][0]["exposure"]) == EIGHT
+    assert set(snapshot["running"][0]["exposure"]) == NINE
     markup = _ticket_server(snapshot, EXPOSURE_ADDRESS)
     assert _exposure_facts(markup) == _shown(UNKNOWN)
     shown = _run_log_exposures(markup)
@@ -2577,7 +2578,7 @@ def test_a_job_with_no_exposure_row_shows_eight_unknowns(tmp_path: Path, table: 
     models = _run_log_models(markup)
     assert models["planning"] == [(ids["plan"][:8], "plan", "unknown")]
     assert models["building"] == [(ids["build"][:8], "build", "unknown")]
-    assert all(set(job["exposure"]) == EIGHT and set(job["exposure"].values()) == {"unknown"}
+    assert all(set(job["exposure"]) == NINE and set(job["exposure"].values()) == {"unknown"}
                for job in _record_jobs(snapshot).values())
 
 
@@ -2697,7 +2698,7 @@ def test_a_qa_job_keeps_its_exposure_on_the_run_log_after_it_finishes(tmp_path: 
         assert [row["job"] for row in snapshot["running"]] == ([job_id[:8]] if phase == "running" else [])
         assert _run_log_exposures(_ticket_server(snapshot, EXPOSURE_ADDRESS))["ship"] == [caption], phase
         assert set(_record_jobs(snapshot)) == {job_id[:8]}, phase
-        assert set(_record_jobs(snapshot)[job_id[:8]]["exposure"]) == EIGHT
+        assert set(_record_jobs(snapshot)[job_id[:8]]["exposure"]) == NINE
 
 
 @needs_node
@@ -2897,3 +2898,64 @@ def test_tickets_whose_shown_repos_cut_alike_keep_their_own_ok_outcomes(tmp_path
         for render, view in _both(out, snapshot, repo + "#1").items():
             chips = re.findall(r'<span class="chip muted ok">([^<]*)</span>', view)
             assert chips == ["ok: " + outcome], (render, repo)
+
+
+def _two_qa_rounds(tmp_path: Path) -> tuple[Path, dict[int, str]]:
+    from lib import exposure
+    from tests.qa_support import HEAD_A, HEAD_B, Harness, qa_config, qa_report, ready, scenarios, verdict
+
+    run = Harness(tmp_path, qa_config())
+    run.post("r1", ready(HEAD_A, body=scenarios("qa-1")), head=HEAD_A)
+    run.poll()
+    run.finish("codex", "v1")
+    run.post("q1", qa_report(HEAD_A, "PASS"))
+    run.finish("qa", "q1")
+    run.poll()
+    run.post("v1", verdict(HEAD_A, "REVISE"))
+    run.poll()
+    run.finish("claude", "r2")
+    run.post("r2", ready(HEAD_B, "2/3", body=scenarios("qa-1")), head=HEAD_B)
+    run.poll()
+    rounds = dict(run.rows("SELECT round, job_id FROM qa_runs WHERE arm = 'primary' ORDER BY round"))
+    assert sorted(rounds) == [1, 2]
+    with run.queue.connect() as connection:
+        exposure.ensure_table(connection)
+        for number, job_id in rounds.items():
+            exposure.write(connection, job_id, Exposure(f"qa-model-{number}", "cli", "a" * 64, (), "host", "b" * 40,
+                                                        "high", "claude"), NOW)
+    claimed = run.queue.claim("qa")
+    assert claimed is not None and claimed.id == rounds[2]
+    return run.queue.path, rounds
+
+
+def _qa_round_views(tmp_path: Path, db: Path, *, script: bool) -> list[str]:
+    from lib.dashboard import collect_snapshot
+
+    snapshot = collect_snapshot(db, tmp_path / "missing.log", now=1_800_000_003.0, alive=None)
+    if not script:
+        return [_ticket_server(snapshot, "maxharris1/factory#763")]
+    views = _both(tmp_path, snapshot, "maxharris1/factory#763")
+    assert views["script"] == views["server"]
+    return list(views.values())
+
+
+def _assert_qa_rounds(markup: str, rounds: dict[int, str], *, running: bool) -> None:
+    shown = [job for jobs in _run_log_models(markup).values() for job in jobs]
+    qa = sorted((job, model) for job, action, model in shown if action == "qa")
+    assert qa == sorted((rounds[n][:8], f"round {n} · qa-model-{n} · high") for n in (1, 2))
+    if running:
+        facts = dict(_exposure_facts(markup))
+        assert (facts["review round"], facts["model"], facts["effort"]) == ("2", "qa-model-2", "high")
+
+
+@pytest.mark.parametrize("script", [False, pytest.param(True, marks=needs_node)], ids=["server", "script"])
+def test_each_qa_job_s_model_names_its_review_round(tmp_path: Path, script: bool) -> None:
+    from lib.queue import SQLiteJobQueue
+
+    (tmp_path / "db").mkdir()
+    db, rounds = _two_qa_rounds(tmp_path / "db")
+    for markup in _qa_round_views(tmp_path / "running", db, script=script):
+        _assert_qa_rounds(markup, rounds, running=True)
+    SQLiteJobQueue(db, clock=lambda: 1_800_000_002.0).finish(rounds[2], owner="qa", handoff_comment_id="q2")
+    for markup in _qa_round_views(tmp_path / "finished", db, script=script):
+        _assert_qa_rounds(markup, rounds, running=False)

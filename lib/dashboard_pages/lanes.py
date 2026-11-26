@@ -174,7 +174,7 @@ def _slot(row: dict, seed: int = 1) -> str:
     name = px_state(row)
     spec = TILE_STATE.get(name, TILE_STATE["unknown"])
     who = row["recipient"] if row["recipient"] in ("claude", "codex", "cursor", "grok") else "other"
-    model = model_effort(row["exposure"])
+    model = model_effort(row.get("exposure"))
     title = (
         f"{_ticket(row, full=True)} · {row['action']}"
         + (f" · round {row['round']}" if row.get("round") else "")
