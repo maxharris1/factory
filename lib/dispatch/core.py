@@ -24,10 +24,9 @@ from lib.dispatch.helpers import (
     _family_errors,
     _matching_head,
     _normalize_trusted_logins,
-    _route,
     _route_go,
     _route_picks,
-    _review_pick,
+    _route_unpinned,
     _router_picks,
     trusted_bots,
 )
@@ -441,12 +440,17 @@ class DispatcherBase:
                     f"{ticket.repo}#{ticket.ticket_id} routing: {error}",
                     ticket.comments[-1].id if ticket.comments else "",
                 ) from error
-            return ticket if picks is None else _route_picks(ticket, picks)
+            if picks is not None:
+                return _route_picks(ticket, picks)
+            if built_by is None:
+                return ticket
+            routed = _route_unpinned(
+                ticket, built_by, ticket.factory.reviewer_harness, self.refused_harnesses
+            )
+            return ticket if routed.router_picks is None else routed
         builder, reviewer, picks = routing
-        if picks is None and ticket.factory.routing is None:
-            picks = _review_pick(ticket.factory, self.refused_harnesses, builder, reviewer)
         routed = (
-            _route(ticket, builder, reviewer)
+            _route_unpinned(ticket, builder, reviewer, self.refused_harnesses)
             if picks is None
             else _route_picks(ticket, picks)
         )

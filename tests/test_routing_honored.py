@@ -7,6 +7,7 @@ import pytest
 from lib.dispatcher import CIResult, ReviewShipper, RouteError, ShipError, ShipRequest
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import SQLiteJobQueue
+from lib.role_router import routing_argv_for_detail
 from tests.test_dispatcher import comment, factory, setup, ticket
 from tests.merge_queue_support import Board, sha
 from tests.test_rounds_and_caps import Flow
@@ -55,12 +56,7 @@ def test_go_naming_builder_and_reviewer_queues_those(tmp_path: Path) -> None:
     build = queue.claim("codex")
     assert build is not None and build.request.action == "build"
     detail = json.loads(build.request.detail)
-    assert detail["routing"] == {
-        "builder": "codex",
-        "reviewer": "claude",
-        "reviewer_model": "claude-opus-5-5",
-        "reviewer_effort": "medium",
-    }
+    assert detail["routing"] == {"builder": "codex", "reviewer": "claude"}
     assert detail["reviewer_harness"] == "claude"
     queue.finish(build.id, owner="codex", handoff_comment_id="ready-1")
 
@@ -92,9 +88,57 @@ def test_go_naming_builder_and_reviewer_queues_those(tmp_path: Path) -> None:
     assert json.loads(fix.request.detail)["routing"] == {
         "builder": "codex",
         "reviewer": "claude",
-        "reviewer_model": "claude-opus-5-5",
-        "reviewer_effort": "medium",
     }
+
+
+def test_go_naming_a_claude_reviewer_keeps_the_waiters_review_argv(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    go = comment("go-1", _go("builder=codex reviewer=claude "), author="grok-login")
+    dispatcher.process(ticket(go))
+    build = queue.claim("codex")
+    assert build is not None
+    queue.finish(build.id, owner="codex", handoff_comment_id="ready-1")
+    ready = comment("ready-1", _ready("codex"), author="codex-login", created_at=2)
+    dispatcher.process(ticket(go, ready, head=HEAD, ci={HEAD: CIResult("success")}))
+    review = queue.claim("claude")
+    assert review is not None and review.request.action == "review"
+
+    waiter = ["claude", "-p", "--model", "claude-sonnet-5-5", "--effort", "high"]
+    assert (
+        routing_argv_for_detail(waiter, harness="claude", detail=review.request.detail)
+        == waiter
+    )
+
+
+def test_go_naming_a_codex_reviewer_keeps_the_waiters_build_model(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    manifest = replace(factory(), builder_model="claude-sonnet-5-5")
+    go = comment("go-1", _go("builder=claude reviewer=codex "), author="grok-login")
+    dispatcher.process(ticket(go, factory_config=manifest))
+    build = queue.claim("claude")
+    assert build is not None and build.request.action == "build"
+
+    waiter = ["claude", "-p", "--model", "claude-opus-5-5"]
+    assert (
+        routing_argv_for_detail(waiter, harness="claude", detail=build.request.detail)
+        == waiter
+    )
+    queue.finish(build.id, owner="claude", handoff_comment_id="ready-1")
+    ready = comment("ready-1", _ready("claude"), author="claude-login", created_at=2)
+    dispatcher.process(
+        ticket(go, ready, head=HEAD, ci={HEAD: CIResult("success")}, factory_config=manifest)
+    )
+    review = queue.claim("codex")
+    assert review is not None and review.request.action == "review"
+    assert routing_argv_for_detail(
+        ["codex", "exec", "--model", "gpt-6.2-astra", "-"],
+        harness="codex",
+        detail=review.request.detail,
+    ) == ["codex", "exec", "--model", "gpt-6.2-sol", "-c", "model_reasoning_effort=high", "-"]
 
 
 def test_ready_from_the_factory_builder_is_refused_after_routing(
@@ -166,12 +210,7 @@ def test_go_without_routing_keeps_factory_harnesses(tmp_path: Path) -> None:
             "builder=codex reviewer=claude ",
             "queued-fix",
             "codex",
-            {
-                "builder": "codex",
-                "reviewer": "claude",
-                "reviewer_model": "claude-opus-5-5",
-                "reviewer_effort": "medium",
-            },
+            {"builder": "codex", "reviewer": "claude"},
         ),
         ("builder=codex reviewer=codex ", "rejected-go-same-family", None, None),
     ],
@@ -567,12 +606,7 @@ def test_answer_after_a_late_retry_resumes_the_current_step(tmp_path: Path) -> N
     assert (row["action"], row["recipient"]) == ("plan", "codex")
     detail = json.loads(row["detail"])
     assert detail["reviewer_harness"] == "claude"
-    assert detail["routing"] == {
-        "builder": "codex",
-        "reviewer": "claude",
-        "reviewer_model": "claude-opus-5-5",
-        "reviewer_effort": "medium",
-    }
+    assert detail["routing"] == {"builder": "codex", "reviewer": "claude"}
 
 
 def _override_config():

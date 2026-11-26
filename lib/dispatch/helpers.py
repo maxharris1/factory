@@ -384,9 +384,7 @@ def _router_picks(
 ) -> RouterPicks | None:
     base = ticket.factory_md or ticket.factory
     if base.routing is None:
-        if builder_only is None:
-            return None
-        return _review_pick(base, refused, builder_only, reviewer_only)
+        return None
     central = central_routing()
     brief = ticket.brief_comment
     build_role = build_role_for_ticket_type(None if brief is None else ticket_type_of(brief.body))
@@ -427,32 +425,34 @@ def _router_picks(
     return RouterPicks(builder, reviewer, _plan_pick(central, base, refused, on=builder.harness))
 
 
-def _review_pick(
-    base: FactoryConfig,
-    refused: frozenset[str],
-    builder_only: str,
-    reviewer_only: str | None,
-) -> RouterPicks | None:
-    """factory.md's harnesses with routing.yml's review model and effort, for
-    a manifest with no routing block that pins no reviewer model."""
-    reviewer = reviewer_only or base.reviewer_harness
-    if reviewer == base.reviewer_harness and base.reviewer_model is not None:
-        return None
-    builder = Candidate(
-        builder_only,
-        base.builder_model if builder_only == base.builder_harness else None,
-    )
+def _route_unpinned(
+    ticket: TrackedTicket, builder: str, reviewer: str, refused: frozenset[str]
+) -> TrackedTicket:
+    """_route, plus routing.yml's review model and effort for a Codex reviewer
+    that a manifest with no routing block leaves unpinned. Every other launch
+    setting stays the waiter's."""
+    routed = _route(ticket, builder, reviewer)
+    config = routed.factory
+    pinned = (ticket.factory_md or ticket.factory).routing is not None
+    if pinned or reviewer != "codex" or config.reviewer_model is not None:
+        return routed
     try:
         slot = resolve_slot(
             "review",
             routing=central_routing(),
-            built_by=(builder.harness, builder.model),
+            built_by=(builder, config.builder_model),
             refused_harnesses=refused,
             unavailable_harnesses=set(KNOWN_HARNESSES) - {reviewer},
         )
     except RoutingError:
-        return None
-    return RouterPicks(builder, Candidate(slot.harness, slot.model, slot.effort))
+        return routed
+    return replace(
+        routed,
+        router_picks=RouterPicks(
+            Candidate(builder), Candidate(slot.harness, slot.model, slot.effort)
+        ),
+        factory=replace(config, reviewer_model=slot.model),
+    )
 
 
 def _plan_pick(
@@ -494,10 +494,11 @@ def _route_go(
     elif not named:
         return replace(ticket, factory=base, factory_md=None, router_picks=None)
     else:
-        routed = _route(
+        routed = _route_unpinned(
             ticket,
             fields.get("builder", base.builder_harness),
             fields.get("reviewer", base.reviewer_harness),
+            refused,
         )
     return None if _family_errors(routed.factory) else routed
 

@@ -374,7 +374,10 @@ def test_every_other_detail_key_matches_job_detail(tmp_path: Path) -> None:
     del detail["evidence"]
     assert detail == json.loads(
         flow.dispatcher._job_detail(
-            flow.snapshot(), action="review", head=HEADS[1], round_number=1
+            flow.dispatcher._routed(flow.snapshot()),
+            action="review",
+            head=HEADS[1],
+            round_number=1,
         )
     )
 
