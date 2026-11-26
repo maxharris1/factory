@@ -367,7 +367,7 @@ db-spill-detail [--db PATH] [--vacuum]
   --vacuum, which needs the database to itself.
 
 wait <bot> [--db PATH] [--machines PATH] [--orch PATH]
-  <bot> is claude-bot, codex-bot, or cursor-bot. Blocks until the
+  <bot> is claude-bot, codex-bot, cursor-bot, or gemini-bot. Blocks until the
   dispatcher database has a queued job for that bot and a device in
   machines.yml (--machines, default the checkout's) has a free slot for
   its harness, claims both, prints one JSON line (with "device" and

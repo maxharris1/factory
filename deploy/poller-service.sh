@@ -380,7 +380,7 @@ ensure_waiters() {
     for flag in "${CONFIG}"/waiter-autostart-*; do
         [[ -f "$flag" ]] || continue
         bot="${flag##*/waiter-autostart-}"
-        case "$bot" in claude-bot | codex-bot | cursor-bot) ;; *) continue ;; esac
+        case "$bot" in claude-bot | codex-bot | cursor-bot | gemini-bot) ;; *) continue ;; esac
         status=0
         "$WAITER_SERVICE" "$bot" ensure >>"${STATE}/waiter-${bot}-service.log" 2>&1 </dev/null 9>&- || status=$?
         ((status == 0)) || say "waiter-service.sh ${bot} ensure exited ${status}" >&2
