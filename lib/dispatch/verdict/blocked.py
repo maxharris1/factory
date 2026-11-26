@@ -22,6 +22,8 @@ class BlockedMixin:
         BLOCKED comment with its link. It consumes no round.
         """
         if not self._trusted_reviewer(ticket, comment, fields):
+            if self._rerouted_reviewer(ticket, comment, fields) == "running":
+                return False, "verdict-awaiting-registration"
             return True, "rejected-blocked-author"
         reported_round = _round_number(fields.get("round"))
         reported_head = fields.get("head") or ""

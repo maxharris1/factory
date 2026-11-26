@@ -560,15 +560,14 @@ class CommentsMixin:
             )
 
     def _remember_verdicts(self, ticket: TrackedTicket, comments: Sequence[Comment]) -> None:
-        reviewer = f"{ticket.factory.reviewer_harness}-bot"
         rows = []
         for comment in comments:
             try:
                 fields = parse_comment(comment.body).as_dict()
             except HandoffError:
                 continue
-            if fields.get("kind") == "verdict" and self._trusted(
-                ticket, comment, fields, reviewer, role="reviewer"
+            if fields.get("kind") == "verdict" and self._trusted_reviewer(
+                ticket, comment, fields
             ):
                 head = fields.get("head") or ""
                 rows.append(

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable, Collection, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 from lib.dispatch.bookkeeping import LockLedger
 from lib.dispatch.cycle_clock import cycle_alarms
@@ -31,6 +33,7 @@ from lib.dispatch.helpers import (
     trusted_bots,
 )
 from lib.dispatch.transitions import write_workflow_state
+from lib.factory_md import family_findings
 from lib.role_router import RoutingError
 from lib.dispatch.types import (
     BaseCheck,
@@ -203,13 +206,64 @@ class DispatcherBase:
         comment: Comment,
         fields: Mapping[str, str],
     ) -> bool:
-        return self._trusted(
-            ticket,
-            comment,
-            fields,
-            f"{ticket.factory.reviewer_harness}-bot",
-            role="reviewer",
+        return (
+            self._trusted(
+                ticket,
+                comment,
+                fields,
+                f"{ticket.factory.reviewer_harness}-bot",
+                role="reviewer",
+            )
+            or self._rerouted_reviewer(ticket, comment, fields) == "done"
         )
+
+    def _rerouted_reviewer(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        fields: Mapping[str, str],
+    ) -> Literal["done", "running"] | None:
+        sender = fields.get("from") or ""
+        harness = sender.removesuffix("-bot")
+        if (
+            harness == sender
+            or harness in self.refused_harnesses
+            or not self._trusted(ticket, comment, fields, sender, role="reviewer")
+            or any(
+                finding.severity == "error"
+                for finding in family_findings(
+                    ticket.factory.builder_harness,
+                    ticket.factory.builder_model,
+                    reviewer_harness=harness,
+                    reviewer_model=None,
+                )
+            )
+        ):
+            return None
+        return self._reviewer_job(ticket, comment, harness)
+
+    def _reviewer_job(
+        self, ticket: TrackedTicket, comment: Comment, harness: str
+    ) -> Literal["done", "running"] | None:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT state, handoff_comment_id, recipient, head, detail FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
+                  AND recipient = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, harness),
+            ).fetchall()
+        if any(
+            row["state"] == "done" and row["handoff_comment_id"] == comment.id for row in rows
+        ):
+            return "done"
+        if any(
+            row["state"] == "running" and self._can_register(row, comment, "verdict")
+            for row in rows
+        ):
+            return "running"
+        return None
 
     def _counted_verdict(
         self,
@@ -442,6 +496,14 @@ class DispatcherBase:
                 ) from error
             return ticket if picks is None else _route_picks(ticket, picks)
         builder, reviewer, picks = routing
+        if reviewer in self.refused_harnesses:
+            try:
+                fresh = _router_picks(ticket, self.refused_harnesses, builder_only=builder)
+            except RoutingError:
+                fresh = None
+            if fresh is not None:
+                reviewer = fresh.reviewer.harness
+                picks = None if picks is None else replace(picks, reviewer=fresh.reviewer)
         routed = (
             _route(ticket, builder, reviewer)
             if picks is None

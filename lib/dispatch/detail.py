@@ -876,6 +876,15 @@ class DetailMixin:
             or REBASE_REJECTION_NOTES.get(outcome)
             or APPROVE_REJECTION_NOTES.get(outcome)
         )
+        if outcome in _VERDICT_AUTHOR_REJECTIONS:
+            try:
+                sender = parse_comment(comment.body).as_dict().get("from")
+            except HandoffError:
+                sender = None
+            note = (
+                f"expected a verdict from {ticket.factory.reviewer_harness}-bot (reviewer of"
+                f" record); this one is from={sender} by login {comment.author}"
+            )
         if note is not None:
             detail["note"] = note
         self.wake_grok_once(
@@ -926,6 +935,10 @@ class DetailMixin:
         self._hold_done_wake(ticket, comment, detail)
         self._park_followups(ticket)
 
+
+_VERDICT_AUTHOR_REJECTIONS = frozenset(
+    {"rejected-approve-author", "rejected-revise-author", "rejected-blocked-author"}
+)
 
 def _skip_marker(reason: str, once_key: str) -> str:
     return f"<!-- orch-wake-skip {reason}:{once_key} -->"

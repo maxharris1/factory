@@ -28,7 +28,7 @@ from lib.brief import render_brief
 from lib.dispatch.helpers import _scope
 from lib.device_pool import DevicePool
 from lib.evidence.criteria import canonical_brief
-from lib.factory_md import FactoryConfig
+from lib.factory_md import FactoryConfig, FactoryRouting
 from lib.github_actions import GhResult, GitHubReviewActions
 from lib.handoff import parse_comment
 from lib.job_state import LAGGING_BACKOFF_SECONDS, LAGGING_WAIT_SECONDS, fail_lagging
@@ -8703,3 +8703,189 @@ def test_705_ac2_a_ready_whose_fresh_read_is_at_the_base_is_rejected(tmp_path: P
     assert _outcomes(queue)["ready-base"] == "rejected-ready-at-base"
     assert _jobs_705(queue) == [("build", "done", 1), ("build", "queued", 1)]
     assert _stuck_705(queue) == (0, None)
+
+
+REROUTE_HEAD = "e" * 40
+REROUTE_GO = comment("go-reroute", GO.format(state="building"), author="grok-login")
+REROUTE_READY = comment(
+    "ready-reroute", READY.format(head=REROUTE_HEAD), author="claude-login", created_at=2
+)
+
+
+def gemini_first_review_pool() -> FactoryConfig:
+    return replace(
+        factory(),
+        routing=FactoryRouting(
+            slots={
+                "build": (("claude", "claude-opus-4-6", "high"),),
+                "review": (("gemini", "gemini-2.5-pro", "high"), ("codex", "gpt-5.4", "high")),
+            }
+        ),
+    )
+
+
+def reroute_ticket(*comments: Comment) -> TrackedTicket:
+    return ticket(
+        REROUTE_GO,
+        *comments,
+        head=REROUTE_HEAD,
+        ci={REROUTE_HEAD: CIResult("success")},
+        factory_config=gemini_first_review_pool(),
+    )
+
+
+def reroute_verdict(
+    comment_id: str,
+    *,
+    verdict: str = "APPROVE",
+    sender: str = "codex-bot",
+    author: str = "codex-login",
+) -> Comment:
+    body = VERDICT.format(round="1/3", head=REROUTE_HEAD, verdict=verdict, risk="high")
+    return comment(
+        comment_id, body.replace("from=codex-bot", f"from={sender}"), author=author, created_at=3
+    )
+
+
+def build_with_gemini_reviewer(dispatcher: Dispatcher, queue: SQLiteJobQueue) -> None:
+    dispatcher.process(ticket(REROUTE_GO, factory_config=gemini_first_review_pool()))
+    build = queue.claim("claude")
+    assert build is not None and build.request.action == "build"
+    assert json.loads(build.request.detail)["routing"]["reviewer"] == "gemini"
+    queue.finish(build.id, owner="claude", handoff_comment_id="ready-reroute")
+
+
+def review_rerouted_to_codex(dispatcher: Dispatcher, queue: SQLiteJobQueue) -> Job:
+    build_with_gemini_reviewer(dispatcher, queue)
+    dispatcher.refused_harnesses = frozenset({"gemini"})
+    dispatcher.process(reroute_ticket(REROUTE_READY))
+    assert queue.claim("gemini") is None
+    review = queue.claim("codex")
+    assert review is not None and review.request.action == "review"
+    assert json.loads(review.request.detail)["routing"]["reviewer"] == "codex"
+    return review
+
+
+def test_refused_reviewer_reroutes_review_and_accepts_verdict(tmp_path: Path) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    review = review_rerouted_to_codex(dispatcher, queue)
+    queue.finish(review.id, owner="codex", handoff_comment_id="verdict-codex")
+
+    dispatcher.process(reroute_ticket(REROUTE_READY, reroute_verdict("verdict-codex")))
+
+    assert handled_outcome(queue, "verdict-codex") != "rejected-approve-author"
+    assert len(actions.merges) == 1
+
+
+def test_verdict_from_done_review_job_harness_accepted(tmp_path: Path) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    review = review_rerouted_to_codex(dispatcher, queue)
+    queue.finish(review.id, owner="codex", handoff_comment_id="verdict-codex")
+    dispatcher.refused_harnesses = frozenset()
+
+    dispatcher.process(reroute_ticket(REROUTE_READY, reroute_verdict("verdict-codex")))
+
+    assert handled_outcome(queue, "verdict-codex") != "rejected-approve-author"
+    assert len(actions.merges) == 1
+
+
+def test_verdict_from_unrelated_bot_still_rejected(tmp_path: Path) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    review = review_rerouted_to_codex(dispatcher, queue)
+    queue.finish(review.id, owner="codex", handoff_comment_id="verdict-codex")
+    dispatcher.refused_harnesses = frozenset()
+
+    grok = reroute_verdict("verdict-grok", sender="grok-bot", author="grok-login")
+    dispatcher.process(reroute_ticket(REROUTE_READY, grok))
+    other = reroute_verdict("verdict-codex-other")
+    dispatcher.process(reroute_ticket(REROUTE_READY, other))
+
+    assert handled_outcome(queue, "verdict-grok") == "rejected-approve-author"
+    assert handled_outcome(queue, "verdict-codex-other") == "rejected-approve-author"
+    assert actions.merges == []
+
+
+def test_verdict_before_review_job_done_waits(tmp_path: Path) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    review = review_rerouted_to_codex(dispatcher, queue)
+    dispatcher.refused_harnesses = frozenset()
+    snapshot = reroute_ticket(REROUTE_READY, reroute_verdict("verdict-codex"))
+
+    dispatcher.process(snapshot)
+
+    with queue.connect() as connection:
+        assert connection.execute(
+            "SELECT 1 FROM handled_comments WHERE comment_id = 'verdict-codex'"
+        ).fetchone() is None
+    assert actions.merges == []
+
+    queue.finish(review.id, owner="codex", handoff_comment_id="verdict-codex")
+    dispatcher.process(snapshot)
+
+    assert len(actions.merges) == 1
+
+
+def test_trusted_reviewer_rejects_refused_job_harness(tmp_path: Path) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    review = review_rerouted_to_codex(dispatcher, queue)
+    queue.finish(review.id, owner="codex", handoff_comment_id="verdict-codex")
+    dispatcher.refused_harnesses = frozenset({"codex"})
+
+    dispatcher.process(reroute_ticket(REROUTE_READY, reroute_verdict("verdict-codex")))
+
+    assert handled_outcome(queue, "verdict-codex") == "rejected-approve-author"
+    assert actions.merges == []
+
+
+def test_trusted_reviewer_rejects_same_family_job_harness(tmp_path: Path) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    build_with_gemini_reviewer(dispatcher, queue)
+    queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="review",
+            recipient="claude",
+            source_comment_id="ready-reroute",
+            timeout_seconds=5400,
+            head=REROUTE_HEAD,
+        ),
+        dedupe_key="same-family-review",
+    )
+    review = queue.claim("claude")
+    assert review is not None
+    queue.finish(review.id, owner="claude", handoff_comment_id="verdict-claude")
+
+    verdict = reroute_verdict("verdict-claude", sender="claude-bot", author="claude-login")
+    dispatcher.process(reroute_ticket(REROUTE_READY, verdict))
+
+    assert handled_outcome(queue, "verdict-claude") == "rejected-approve-author"
+    assert actions.merges == []
+
+
+@pytest.mark.parametrize(
+    ("verdict", "outcome"),
+    [("APPROVE", "rejected-approve-author"), ("REVISE", "rejected-revise-author")],
+)
+def test_author_rejection_notice_names_expected_and_actual(
+    tmp_path: Path, verdict: str, outcome: str
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    build_with_gemini_reviewer(dispatcher, queue)
+    dispatcher.process(reroute_ticket(REROUTE_READY))
+
+    stray = reroute_verdict("verdict-stray", verdict=verdict)
+    dispatcher.process(reroute_ticket(REROUTE_READY, stray))
+
+    assert handled_outcome(queue, "verdict-stray") == outcome
+    [facts] = skip_facts(queue, "rejected")
+    assert facts["outcome"] == outcome
+    assert "gemini-bot" in facts["note"]
+    assert "codex-bot" in facts["note"]
+    assert "codex-login" in facts["note"]

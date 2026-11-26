@@ -31,6 +31,8 @@ class T3Mixin:
         fields: Mapping[str, str],
     ) -> tuple[bool, str]:
         if not self._trusted_reviewer(ticket, comment, fields):
+            if self._rerouted_reviewer(ticket, comment, fields) == "running":
+                return False, "verdict-awaiting-registration"
             return True, "rejected-revise-author"
         registration = self._registration(ticket, comment, "verdict")
         if registration is Registration.UNREGISTERED:
