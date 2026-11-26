@@ -45,6 +45,7 @@ from lib.dashboard import (
     EVALS,
     DashboardError,
     collect_snapshot,
+    waiter_argv,
     write_snapshot_pages,
 )
 from lib.dashboard_config import DashboardConfig, REFRESH_MAX, REFRESH_MIN
@@ -253,6 +254,7 @@ def _snapshot(
         poll_seconds=poll_seconds,
         orch=orch,
         publish_seconds=publish_seconds,
+        waiters=waiter_argv(),
     )
     snapshot[EVALS] = collect_weekly(_evals_dir(args))
     return write_snapshot_pages(_out(args), snapshot)
