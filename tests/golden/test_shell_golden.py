@@ -28,7 +28,7 @@ CSS_ORDER = (
 SCRIPT_ORDER = (
     (common, "SCRIPT_HEAD"), (shell, "SCRIPT"), (lanes, "SCRIPT"), (ci, "SCRIPT"), (activity, "SCRIPT"),
     (tickets, "SCRIPT_TICKETS"), (system, "SCRIPT_LOG"), (system, "SCRIPT_HEALTH"),
-    (efficiency, "SCRIPT"), (routing, "SCRIPT"), (common, "SCRIPT_GITHUB"), (cockpit, "SCRIPT"),
+    (efficiency, "SCRIPT"), (evals, "SCRIPT"), (routing, "SCRIPT"), (common, "SCRIPT_GITHUB"), (cockpit, "SCRIPT"),
     (ticket_detail, "SCRIPT"), (settings, "SCRIPT"), (common, "SCRIPT_TELEMETRY"),
     (system, "SCRIPT_COMPONENTS"), (common, "SCRIPT_TAIL"),
 )
@@ -47,7 +47,7 @@ GOLDEN = {
     "shell.SCRIPT": "efb4170fdde2f3d4fe762ed57ea6465c6539ceee9beefba62aff48d455943407",
     "common.SCRIPT_GITHUB": "edc87172edd1e0dc13ac7fa537cca320bf04274753f4120709c8b286fc7e2713",
     "common.SCRIPT_TELEMETRY": "7d2a9166e208474d94a535dbbd9fbe8f2d78ad33591f287685a38bb0814bd34f",
-    "common.SCRIPT_TAIL": "09b6df6592e157b47e37f5bd0fe366c9cecec5948e93d4f65fca046f22956111",
+    "common.SCRIPT_TAIL": "9389817ca32d8cf9401a751c82cb0aafab597a2b68237b15c00885f1d83113fa",
     "PX_SCRIPT": "777ae1a8b65aa0d735a696c3e6ba885f3e5e086f61c26784d9e5efcb5bc5bef5",
     "__PIXELSTRIP__": "5eec0f40428daccb97fb1763e5316bd900c435f1f6535d3f7cf0b814847cd065",
     "__SHELL__": "c7afcd2bb9b13281221e4788582e90bc3447a057669a44fc7ae27b64d1289e84",

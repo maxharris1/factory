@@ -1498,7 +1498,8 @@ def test_html_is_self_contained(tmp_path: Path) -> None:
     # #563: the only https:// text is a link to github.com, never an asset.
     assert set(re.findall(r"https://[^/'\"]*/", html)) <= {"https://github.com/"}
     assert set(re.findall(r"https://[^/'\"]*/", script)) <= {"https://github.com/"}
-    assert re.findall(r"fetch\(([^,)]+)", script) == ["path", "'/api/session'", "'tickets.json'", "STATUS_URL"]
+    assert re.findall(r"fetch\(([^,)]+)", script) == [
+        "'evals.json'", "path", "'/api/session'", "'tickets.json'", "STATUS_URL"]
     assert all(path.startswith("/api/") for path in re.findall(r"ghPost\('([^']*)'", script))
     assert "var STATUS_URL = 'status.json';" in script
 
