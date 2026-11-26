@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import get_args
 
 import pytest
-import yaml
 
 from lib import (
     account_doctor,
@@ -206,8 +205,13 @@ def test_upstream_gemini_events_are_no_longer_read() -> None:
     assert lane_limit.error_text("gemini", {"type": "error", "message": "x"}) is None
 
 
-def test_the_waiter_example_runs_agy_unattended_on_the_brief() -> None:
-    command = yaml.safe_load((ROOT / "config" / "waiter-gemini-bot.example.yml").read_text(encoding="utf-8"))["command"]
+def test_the_waiter_example_runs_agy_unattended_on_the_brief(tmp_path: Path) -> None:
+    folder = tmp_path / "factory"
+    folder.mkdir(mode=0o700)
+    config = folder / "waiter-gemini-bot.yml"
+    config.write_text((ROOT / "config" / "waiter-gemini-bot.example.yml").read_text(encoding="utf-8"), encoding="utf-8")
+    config.chmod(0o600)
+    command = list(waiter.load_harness_command(config, "gemini-bot").command)
     assert command[0] == "agy"
     assert "--dangerously-skip-permissions" in command
     assert "--yolo" not in command
