@@ -2425,11 +2425,11 @@ def test_under_reduced_motion_a_resize_refits_and_repaints_the_journey(tmp_path:
 
 EXPOSURE_ADDRESS = "maxharris1/factory#1014"
 INDEPENDENT = Exposure("independent-model", "independent-cli 1.2.3", "a" * 64, ("/review/SKILL.md",),
-                       "independent-host", "b" * 40)
+                       "independent-host", "b" * 40, "high", "claude")
 REAL = Exposure("gpt-5.5-codex", "codex-cli 0.98.0", hashlib.sha256(b"brief").hexdigest(),
                 ("/skills/factory-reviewer/SKILL.md", "/skills/poteto-mode/SKILL.md"), "mac-mini-2",
-                "d60fba4d163ee847997dad6036db1f19e26b2e4a")
-UNKNOWN = Exposure("unknown", "unknown", "unknown", None, "unknown", "unknown")
+                "d60fba4d163ee847997dad6036db1f19e26b2e4a", "high", "codex")
+UNKNOWN = Exposure("unknown", "unknown", "unknown", None, "unknown", "unknown", "unknown", "unknown")
 
 
 def _shown(found: Exposure) -> list[tuple[str, str]]:

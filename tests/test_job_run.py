@@ -1334,9 +1334,12 @@ def _brief_file(tmp_path: Path, action: str, factory_root: Path) -> tuple[Path, 
     return path, router
 
 
+@pytest.mark.parametrize("wrapper", [(), ("/usr/bin/env", "--")], ids=["direct", "env"])
 @pytest.mark.parametrize("telemetry", ["on", "off"])
 @pytest.mark.parametrize("action", ["plan", "build", "fix", "review"])
-def test_cli_job_run_records_what_the_job_ran_under(tmp_path: Path, action: str, telemetry: str) -> None:
+def test_cli_job_run_records_what_the_job_ran_under(
+    tmp_path: Path, action: str, telemetry: str, wrapper: tuple[str, ...]
+) -> None:
     factory = tmp_path / "factory"
     factory.mkdir()
     _git("init", "-q", str(factory))
@@ -1349,7 +1352,8 @@ def test_cli_job_run_records_what_the_job_ran_under(tmp_path: Path, action: str,
     with brief.open("rb") as stdin:
         proc = _orch(
             "job", "run", "codex-bot", job.id, "--machines", str(machines), "--db", str(tmp_path / "orch.db"),
-            "--", str(_fake_harness(tmp_path, "echo fake-cli 9.9.9")), "--model", "test-model-1",
+            "--", *wrapper, str(_fake_harness(tmp_path, "echo fake-cli 9.9.9")), "--model", "test-model-1",
+            "-c", "model_reasoning_effort=high",
             env={"ORCH_JOB_BRIEF": str(brief), "ORCH_TELEMETRY": telemetry},
             stdin=stdin,
         )
@@ -1365,6 +1369,8 @@ def test_cli_job_run_records_what_the_job_ran_under(tmp_path: Path, action: str,
         skill_paths=router.paths,
         host="box",
         factory_revision=revision,
+        effort="high",
+        harness="codex",
     )
     assert stderr.count("exposure: recorded (") == 1
 
@@ -1393,7 +1399,8 @@ def test_cli_job_run_records_unknown_and_still_runs_when_it_cannot_tell(tmp_path
     with queue.connect() as connection:
         recorded = exposure.read(connection, job.id)
     assert recorded == exposure.Exposure(
-        exposure.UNKNOWN, exposure.UNKNOWN, exposure.UNKNOWN, None, "box", exposure.UNKNOWN
+        exposure.UNKNOWN, exposure.UNKNOWN, exposure.UNKNOWN, None, "box", exposure.UNKNOWN, exposure.UNKNOWN,
+        "codex",
     )
 
 

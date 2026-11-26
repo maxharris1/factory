@@ -1770,7 +1770,7 @@ def test_tickets_json_carries_a_finished_job_s_exposure(tmp_path: Path) -> None:
     brief, revision = "c" * 64, "d" * 40
     with sqlite3.connect(db) as connection:
         exposure.write(connection, job.id, exposure.Exposure(
-            "opus", "claude 2.1.0", brief, ("/skills/a/SKILL.md",), "pc", revision), NOW)
+            "opus", "claude 2.1.0", brief, ("/skills/a/SKILL.md",), "pc", revision, "high", "claude"), NOW)
     queue.finish(job.id, owner="claude", handoff_comment_id="h1")
 
     snapshot = collect_snapshot(db, tmp_path / "missing.log", now=NOW)

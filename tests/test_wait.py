@@ -2,6 +2,7 @@ import ast
 import io
 import json
 import os
+import re
 import select
 import signal
 import sqlite3
@@ -626,7 +627,9 @@ def test_job_run_execs_exactly_the_bots_command_and_only_git_besides(
     started = [argv for argv in started if argv not in probes]
     harness_probes = [argv for argv in probes if command[0] in argv[4:]]
     assert len(harness_probes) == 1, probes
-    assert harness_probes[0][2].rstrip().endswith('exec "$1" --version') and harness_probes[0][4] == command[0]
+    script, args = harness_probes[0][2], harness_probes[0][4:]
+    fixed = int(re.search(r"^shift (\d+)$", script, re.MULTILINE).group(1))
+    assert 'exec "$@" --version' in script and args[fixed:] == [command[0]]
 
     def ungated(argv: list[str]) -> list[str]:
         if argv[0] == "systemd-run":
