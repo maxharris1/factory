@@ -131,7 +131,7 @@ bin/orch check-config --orch orch.yml --machines machines.yml --factory factory.
 
 ## 3. Separate OS Users on `box` (Drop Shared `ssh_user: box`)
 
-Currently `machines.yml` runs all harnesses on `box` through a single `ssh_user: box`, which lets any harness process read peer credentials and tokens on `box`.
+In the legacy shared-login setup, `machines.yml` ran all harnesses on `box` through a single `ssh_user: box`, which let any harness process read peer credentials and tokens on `box`. The shipped `machines.yml` now omits `ssh_user` so each harness logs in as its own bot user (`claude-bot`, `codex-bot`, `cursor-bot`) via `box-{bot}`.
 
 ### 3.1 Provision Dedicated Bot Users on `box`
 
