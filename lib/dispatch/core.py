@@ -27,6 +27,7 @@ from lib.dispatch.helpers import (
     _route,
     _route_go,
     _route_picks,
+    _review_pick,
     _router_picks,
     trusted_bots,
 )
@@ -442,6 +443,8 @@ class DispatcherBase:
                 ) from error
             return ticket if picks is None else _route_picks(ticket, picks)
         builder, reviewer, picks = routing
+        if picks is None and ticket.factory.routing is None:
+            picks = _review_pick(ticket.factory, self.refused_harnesses, builder, reviewer)
         routed = (
             _route(ticket, builder, reviewer)
             if picks is None

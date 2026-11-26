@@ -36,6 +36,7 @@ from lib.machines_yml import Device, MachinesConfig
 from lib.orch_yml import Approvals, load_orch_yml
 from lib.poll_source import IntakeRisks
 from lib.queue import Job, JobRequest, QueueError, SQLiteJobQueue
+from lib.role_router import routing_argv_for_detail
 from tests.test_hooks import DECLINE, VerdictTemplate, approve, in_review, say
 from tests.test_hooks import skip_facts
 from tests.test_hooks import setup as setup_with_hooks
@@ -509,6 +510,90 @@ def test_t1_reads_kind_go_and_queues_the_builder(
     assert job.request.source_comment_id == "go-1"
     # The production default: 60 minutes of no heartbeat (Factory, Nov 11).
     assert job.request.timeout_seconds == 60 * 60
+
+
+@pytest.mark.parametrize(
+    ("reviewer_model", "review_argv"),
+    [
+        (
+            None,
+            ["codex", "exec", "--model", "gpt-6.2-sol", "-c", "model_reasoning_effort=high", "-"],
+        ),
+        ("gpt-6.2-astra", None),
+    ],
+    ids=["unpinned", "pinned"],
+)
+def test_review_without_a_routing_block_runs_routing_yml_review_pick(
+    tmp_path: Path,
+    reviewer_model: str | None,
+    review_argv: list[str] | None,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    manifest = replace(factory(), reviewer_model=reviewer_model)
+    go = comment("go-1", GO.format(state="building"), author="grok-login")
+    dispatcher.process(ticket(go, factory_config=manifest))
+    build = queue.claim("claude")
+    assert build is not None
+    queue.finish(build.id, owner="claude", handoff_comment_id="ready-1")
+    dispatcher.process(
+        ticket(
+            go,
+            comment("ready-1", READY.format(head="abc"), author="claude-login"),
+            head="abc",
+            ci={"abc": CIResult("success")},
+            factory_config=manifest,
+        )
+    )
+    review = queue.claim("codex")
+    assert review is not None
+    assert review.request.action == "review"
+
+    build_routing = json.loads(build.request.detail or "{}").get("routing", {})
+    assert not {key for key in build_routing if key.startswith(("builder_", "plan"))}
+    assert routing_argv_for_detail(
+        ["claude", "-p"], harness="claude", detail=build.request.detail
+    ) == ["claude", "-p"]
+    for waiter in (["codex", "exec", "--model", "gpt-6.2-astra", "-"], ["codex", "exec", "-"]):
+        assert routing_argv_for_detail(
+            waiter, harness="codex", detail=review.request.detail
+        ) == (review_argv or waiter)
+
+
+def test_review_after_a_build_routed_without_picks_runs_routing_yml_review_pick(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    head = "a" * 40
+    queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="build",
+            recipient="claude",
+            source_comment_id="go-1",
+            timeout_seconds=5400,
+            detail=json.dumps({"routing": {"builder": "claude", "reviewer": "codex"}}),
+        ),
+        dedupe_key="seed-build",
+    )
+    build = queue.claim("claude")
+    assert build is not None
+    queue.finish(build.id, owner="claude", handoff_comment_id="ready-1")
+    dispatcher.process(
+        ticket(
+            comment("ready-1", READY.format(head=head), author="claude-login"),
+            head=head,
+            ci={head: CIResult("success")},
+        )
+    )
+    review = queue.claim("codex")
+    assert review is not None and review.request.action == "review"
+
+    assert routing_argv_for_detail(
+        ["codex", "exec", "--model", "gpt-6.2-astra", "-"],
+        harness="codex",
+        detail=review.request.detail,
+    ) == ["codex", "exec", "--model", "gpt-6.2-sol", "-c", "model_reasoning_effort=high", "-"]
 
 
 def test_t1_job_detail_contains_tracker_pr_and_review_context(

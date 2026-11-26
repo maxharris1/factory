@@ -55,7 +55,12 @@ def test_go_naming_builder_and_reviewer_queues_those(tmp_path: Path) -> None:
     build = queue.claim("codex")
     assert build is not None and build.request.action == "build"
     detail = json.loads(build.request.detail)
-    assert detail["routing"] == {"builder": "codex", "reviewer": "claude"}
+    assert detail["routing"] == {
+        "builder": "codex",
+        "reviewer": "claude",
+        "reviewer_model": "claude-opus-5-5",
+        "reviewer_effort": "medium",
+    }
     assert detail["reviewer_harness"] == "claude"
     queue.finish(build.id, owner="codex", handoff_comment_id="ready-1")
 
@@ -87,6 +92,8 @@ def test_go_naming_builder_and_reviewer_queues_those(tmp_path: Path) -> None:
     assert json.loads(fix.request.detail)["routing"] == {
         "builder": "codex",
         "reviewer": "claude",
+        "reviewer_model": "claude-opus-5-5",
+        "reviewer_effort": "medium",
     }
 
 
@@ -159,7 +166,12 @@ def test_go_without_routing_keeps_factory_harnesses(tmp_path: Path) -> None:
             "builder=codex reviewer=claude ",
             "queued-fix",
             "codex",
-            {"builder": "codex", "reviewer": "claude"},
+            {
+                "builder": "codex",
+                "reviewer": "claude",
+                "reviewer_model": "claude-opus-5-5",
+                "reviewer_effort": "medium",
+            },
         ),
         ("builder=codex reviewer=codex ", "rejected-go-same-family", None, None),
     ],
@@ -313,6 +325,8 @@ def test_old_builder_retry_does_not_replace_new_plan_route(tmp_path: Path) -> No
     assert json.loads(build.request.detail)["routing"] == {
         "builder": "claude",
         "reviewer": "codex",
+        "reviewer_model": "gpt-6.2-sol",
+        "reviewer_effort": "high",
     }
     queue.finish(build.id, owner="claude", handoff_comment_id="new-ready")
     now[0] = 140
@@ -553,7 +567,12 @@ def test_answer_after_a_late_retry_resumes_the_current_step(tmp_path: Path) -> N
     assert (row["action"], row["recipient"]) == ("plan", "codex")
     detail = json.loads(row["detail"])
     assert detail["reviewer_harness"] == "claude"
-    assert detail["routing"] == {"builder": "codex", "reviewer": "claude"}
+    assert detail["routing"] == {
+        "builder": "codex",
+        "reviewer": "claude",
+        "reviewer_model": "claude-opus-5-5",
+        "reviewer_effort": "medium",
+    }
 
 
 def _override_config():

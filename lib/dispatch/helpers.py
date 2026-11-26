@@ -384,7 +384,9 @@ def _router_picks(
 ) -> RouterPicks | None:
     base = ticket.factory_md or ticket.factory
     if base.routing is None:
-        return None
+        if builder_only is None:
+            return None
+        return _review_pick(base, refused, builder_only, reviewer_only)
     central = central_routing()
     brief = ticket.brief_comment
     build_role = build_role_for_ticket_type(None if brief is None else ticket_type_of(brief.body))
@@ -423,6 +425,34 @@ def _router_picks(
         built_by=(builder.harness, builder.model),
     )
     return RouterPicks(builder, reviewer, _plan_pick(central, base, refused, on=builder.harness))
+
+
+def _review_pick(
+    base: FactoryConfig,
+    refused: frozenset[str],
+    builder_only: str,
+    reviewer_only: str | None,
+) -> RouterPicks | None:
+    """factory.md's harnesses with routing.yml's review model and effort, for
+    a manifest with no routing block that pins no reviewer model."""
+    reviewer = reviewer_only or base.reviewer_harness
+    if reviewer == base.reviewer_harness and base.reviewer_model is not None:
+        return None
+    builder = Candidate(
+        builder_only,
+        base.builder_model if builder_only == base.builder_harness else None,
+    )
+    try:
+        slot = resolve_slot(
+            "review",
+            routing=central_routing(),
+            built_by=(builder.harness, builder.model),
+            refused_harnesses=refused,
+            unavailable_harnesses=set(KNOWN_HARNESSES) - {reviewer},
+        )
+    except RoutingError:
+        return None
+    return RouterPicks(builder, Candidate(slot.harness, slot.model, slot.effort))
 
 
 def _plan_pick(
