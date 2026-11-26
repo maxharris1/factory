@@ -493,23 +493,26 @@ device with the command under "A Cursor card row" above. Settings cannot
 sign a device login out; run `cursor-agent logout` as `cursor-bot` on the
 device instead.
 
-For a Gemini account, run:
+For a Gemini account there is no account folder either. Only a different
+`HOME` moves the Antigravity `agy` login, so the account is the
+`gemini-bot` login on each device, named inline in `machines.yml` on every
+device that runs it (`gemini: {bot: gemini-bot, account: <id>}`). Sign
+`gemini-bot` in on each device with interactive `agy`:
 
 ```sh
-env -u GEMINI_API_KEY -u GOOGLE_API_KEY -u GOOGLE_CLOUD_ACCESS_TOKEN -u GOOGLE_APPLICATION_CREDENTIALS -u GOOGLE_GENAI_USE_GCA -u GOOGLE_GENAI_USE_VERTEXAI -u GEMINI_CLI_USE_COMPUTE_ADC -u CLOUD_SHELL -u GOOGLE_GEMINI_BASE_URL -u GEMINI_CLI_CUSTOM_HEADERS GEMINI_CLI_HOME=$HOME/.factory-accounts/<id> NO_BROWSER=true gemini
+env -u GEMINI_API_KEY -u GOOGLE_API_KEY -u GOOGLE_CLOUD_ACCESS_TOKEN -u GOOGLE_APPLICATION_CREDENTIALS -u GOOGLE_GENAI_USE_GCA -u GOOGLE_GENAI_USE_VERTEXAI -u GEMINI_CLI_USE_COMPUTE_ADC -u CLOUD_SHELL -u GOOGLE_GEMINI_BASE_URL -u GEMINI_CLI_CUSTOM_HEADERS -u GEMINI_CLI_HOME agy
 ```
 
 The `-u` flags keep every API key and token override out of the login, so
-the sign-in lands in the folder. Choose Sign in with Google, open the link it
-prints, sign in with the Gemini Code Assist account and paste the code back.
-Then type `/quit`. The `gemini` CLI has no `auth` subcommand.
+no key in the login profile stands in for it. Sign in with the Google
+account, then quit `agy`.
 
-The doctor runs `env NO_BROWSER=true NO_COLOR=1 gemini </dev/null` in the
-folder with the same variables unset. A cached sign-in loads, then the CLI
-exits 42 with `No input provided via stdin`, and the doctor reads `ok`. No
-prompt reaches a model. Exit 41, an auth error, reads `signed-out`. Any
-other reply reads `signed-out` with `status reply not understood`. Gemini
-quota stays `not tracked`.
+The doctor runs `agy models` with the same variables unset. A model list
+reads `ok`. Exit 1 with `Please sign in to view available models` reads
+`signed-out`. Any other reply reads `signed-out` with `status reply not
+understood`. No prompt reaches a model. Gemini quota is tracked: each
+gemini job's start reads `agy -p /usage --output-format json` under the
+same rule, as "Gemini starts refused" above describes.
 
 ## 3. Check every sign-in
 
