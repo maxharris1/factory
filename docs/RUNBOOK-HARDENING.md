@@ -267,6 +267,8 @@ sudo tailscale serve --bg --https=443 "http://${TAILNET_IP}:8090"
 tailscale serve status
 ```
 
+The dashboard trusts `X-Forwarded-For` only from root-owned sockets on `TAILNET_IP` (tailscaled), so serve must proxy to `http://${TAILNET_IP}:8090`, not `127.0.0.1`, and tailscaled must run as root.
+
 Verify `Set-Cookie` carries `; Secure; HttpOnly; SameSite=Strict` over `https://pc-wsl-bots.tail68624b.ts.net/`.
 
 ---

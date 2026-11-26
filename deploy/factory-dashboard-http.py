@@ -47,10 +47,12 @@ GitHub actions (comments and the hold OK as the approver) are off unless
 DASHBOARD_GITHUB_CLIENT_ID is set. Then DASHBOARD_APPROVER (a GitHub login)
 and DASHBOARD_ACTION_CLIENTS (a comma list of tailnet IPv4 addresses, never
 this node's own) are required, the process must not run as a bot account,
-and POST is answered under /api only, to those clients only. When the TCP
-peer is this node's TAILNET_IP or loopback (tailscale serve's backend), the
-last X-Forwarded-For hop is used as the client; X-Forwarded-For from any
-other peer is ignored. Sign-in is
+and POST is answered under /api only, to those clients only. The last
+X-Forwarded-For hop is used as the client only when the TCP peer is this
+node's TAILNET_IP and the kernel's socket table (/proc/net/tcp) shows that
+peer socket owned by root, which is tailscaled (tailscale serve's backend).
+Bot accounts are not root, so their forged X-Forwarded-For is ignored;
+X-Forwarded-For from any other peer is ignored too. Sign-in is
 GitHub's OAuth device flow; the token stays in this process's memory and is
 never sent to a browser, written to disk or logged. Comments and OKs go
 only to tickets in the served status.json. With actions off, /api/* is 404
@@ -311,8 +313,8 @@ class ActionsConfig(NamedTuple):
     https: bool = False
     oauth_scope: str = "repo"
     require_auth_reads: bool = False
-    # This node's TAILNET_IP. Used only to recognise a local tailscale
-    # serve proxy so X-Forwarded-For can be trusted from that peer.
+    # This node's TAILNET_IP. X-Forwarded-For is trusted only from a peer at
+    # this address whose socket /proc/net/tcp lists as root's (tailscaled).
     own_address: str | None = None
 
 
@@ -637,26 +639,43 @@ class GitHubClient:
                           token=token, payload={"body": body})
 
 
-_LOOPBACK_PEERS = frozenset({"127.0.0.1", "::1"})
+# tailscaled runs as root; bots and factory-dash do not.
+PROXY_UID = 0
 
 
-def action_client(peer: str, forwarded_for: str, own_address: str | None) -> str:
-    """IP used for DASHBOARD_ACTION_CLIENTS.
+def tcp_socket_uid(
+    peer: tuple[str, int], local: tuple[str, int], table: Path = Path("/proc/net/tcp")
+) -> int | None:
+    """Owner uid of the peer's end of the IPv4 TCP connection peer <-> local."""
+    def encode(ip: str, port: int) -> str:
+        return f"{int.from_bytes(ipaddress.IPv4Address(ip).packed, sys.byteorder):08X}:{port:04X}"
 
-    tailscale serve on :8443 connects to this server from the node's own
-    TAILNET_IP. Only then — or when the peer is loopback — is the last
-    X-Forwarded-For hop used, and only when it is a dotted IPv4 address.
-    X-Forwarded-For from any other peer is ignored.
-    """
-    if peer not in _LOOPBACK_PEERS and (not own_address or peer != own_address):
-        return peer
-    hop = forwarded_for.split(",")[-1].strip() if forwarded_for else ""
-    if not hop or re.fullmatch(r"[0-9.]{7,15}", hop) is None:
-        return peer
+    want = (encode(*peer), encode(*local))
+    try:
+        lines = table.read_text().splitlines()[1:]
+    except OSError:
+        return None
+    for line in lines:
+        cols = line.split()
+        if len(cols) > 7 and (cols[1], cols[2]) == want:
+            return int(cols[7])
+    return None
+
+
+def action_client(
+    peer: tuple[str, int], local: tuple[str, int], forwarded_for: str, own_address: str | None
+) -> str:
+    """IP used for DASHBOARD_ACTION_CLIENTS: the last X-Forwarded-For hop when
+    the peer is tailscaled on this node's TAILNET_IP, else the TCP peer."""
+    if not own_address or peer[0] != own_address:
+        return peer[0]
+    hop = forwarded_for.rsplit(",", 1)[-1].strip()
     try:
         ipaddress.IPv4Address(hop)
     except ValueError:
-        return peer
+        return peer[0]
+    if tcp_socket_uid(peer, local) != PROXY_UID:
+        return peer[0]
     return hop
 
 
@@ -1317,7 +1336,10 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         actions: Actions | None = self.server.actions  # type: ignore[attr-defined]
         own = actions.config.own_address if actions is not None else None
         return action_client(
-            self.client_address[0], self.headers.get("X-Forwarded-For") or "", own
+            self.client_address[:2],
+            self.connection.getsockname()[:2],
+            self.headers.get("X-Forwarded-For") or "",
+            own,
         )
 
     def do_GET(self) -> None:
