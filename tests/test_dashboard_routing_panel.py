@@ -49,7 +49,7 @@ budget_overrides:
 
 
 CLAUDE_WAITER = ("claude", "-p", "--effort", "medium")
-GEMINI_WAITER = ("gemini", "-p", "", "--yolo")
+GEMINI_WAITER = ("gemini", "--yolo")
 WRAPPED_WAITER = ("env", "FOO=1", "claude", "-p", "--model", "claude-haiku-4-5")
 
 

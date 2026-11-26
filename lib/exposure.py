@@ -509,11 +509,11 @@ def chosen(argv: Sequence[str], harness: str | None, shell: Shell, launch_dir: s
     return _chosen(command, selected, _probe(shell, launch_dir, configs_of=selected if wanted else None))
 
 
-
 def parsed(argv: Sequence[str], harness: str | None) -> Chosen:
     """The model and effort `argv` itself names. Reads no file and runs nothing."""
     command, selected, _ = _parsed_command(argv, harness)
     return _chosen(command, selected, _Probed())
+
 
 def cli_version(binary: str, shell: Shell, launch_dir: str | None = None) -> str:
     return _probe(shell, launch_dir, launcher=(binary,)).version
