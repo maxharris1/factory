@@ -188,7 +188,7 @@ fi
 for factory_waiter_flag in "\${HOME}/.config/factory"/waiter-autostart-*; do
     [ -f "\$factory_waiter_flag" ] || continue
     factory_waiter_bot="\${factory_waiter_flag##*/waiter-autostart-}"
-    case "\$factory_waiter_bot" in claude-bot | codex-bot | cursor-bot) ;; *) continue ;; esac
+    case "\$factory_waiter_bot" in claude-bot | codex-bot | cursor-bot | gemini-bot) ;; *) continue ;; esac
     [ -x "${ROOT}/deploy/waiter-service.sh" ] || continue
     ("${ROOT}/deploy/waiter-service.sh" "\$factory_waiter_bot" ensure >>"${STATE}/waiter-\${factory_waiter_bot}-service.log" 2>&1 &)
 done

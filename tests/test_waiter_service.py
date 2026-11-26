@@ -72,7 +72,7 @@ def _make_home(home: Path) -> Path:
 
 def _cleanup(home: Path) -> None:
     try:
-        for bot in ("claude-bot", "codex-bot"):
+        for bot in ("claude-bot", "codex-bot", "gemini-bot"):
             _service(home, bot, "stop")
     finally:
         for pid in _all_starts(home):
@@ -123,7 +123,7 @@ def _starts(home: Path, bot: str = "claude-bot") -> list[int]:
 
 
 def _all_starts(home: Path) -> list[int]:
-    return [pid for bot in ("claude-bot", "codex-bot") for pid in _starts(home, bot)]
+    return [pid for bot in ("claude-bot", "codex-bot", "gemini-bot") for pid in _starts(home, bot)]
 
 
 def _wait_for(predicate, seconds: float = 15.0):
@@ -742,6 +742,49 @@ def test_install_profile_hook_ensures_each_autostarted_waiter(tmp_path: Path) ->
     assert sorted(marker.read_text().splitlines()) == ["claude-bot ensure", "codex-bot ensure"]
     assert "bogus" not in marker.read_text()
 
+
+
+def test_service_starts_and_stops_the_gemini_bot_waiter(home: Path) -> None:
+    try:
+        started = _service(home, "gemini-bot", "start")
+        assert started.returncode == 0, started.stderr
+        _wait_for(lambda: _starts(home, "gemini-bot"))
+        assert _service(home, "gemini-bot", "status").returncode == 0
+    finally:
+        stopped = _service(home, "gemini-bot", "stop")
+    assert stopped.returncode == 0, stopped.stderr
+    assert _service(home, "gemini-bot", "status").returncode == 3
+
+
+def test_service_usage_names_every_bot_and_refuses_an_unknown_one(home: Path) -> None:
+    result = _service(home, "grok-bot", "start")
+    assert result.returncode == 2
+    assert "{claude-bot|codex-bot|cursor-bot|gemini-bot}" in result.stderr
+    assert _starts(home, "grok-bot") == []
+
+
+def test_install_profile_hook_ensures_the_gemini_bot_waiter(tmp_path: Path) -> None:
+    from tests.test_deploy import _install, _install_environment
+
+    environment = _install_environment(tmp_path, "venv")
+    assert _install(environment).returncode == 0
+    home = Path(environment["HOME"])
+    profile = (home / ".config/factory/profile.sh").read_text(encoding="utf-8")
+    marker = home / "ensured"
+    fake = tmp_path / "fake-service.sh"
+    fake.write_text(f"#!/bin/sh\necho \"$1 $2\" >> {marker}\n", encoding="utf-8")
+    fake.chmod(0o755)
+    patched = profile.replace(str(ROOT / "deploy" / "waiter-service.sh"), str(fake))
+    (home / ".config/factory/waiter-autostart-gemini-bot").touch()
+    (home / ".config/factory/waiter-autostart-grok-bot").touch()
+    (home / ".config/factory/self-heal-autostart").unlink()
+    try:
+        subprocess.run(["sh", "-c", patched + "\nwait\nsleep 0.3\n"],
+                       env=sandbox_env(home, PATH="/usr/bin:/bin"), check=True, timeout=30)
+        _wait_for(lambda: marker.exists() and marker.read_text().strip())
+    finally:
+        reap_home(home)
+    assert marker.read_text().splitlines() == ["gemini-bot ensure"]
 
 @pytest.mark.parametrize("command", ["start", "restart", "ensure", "_supervise"])
 def test_a_retired_host_starts_no_waiter(home: Path, command: str) -> None:

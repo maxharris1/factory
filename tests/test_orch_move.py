@@ -30,7 +30,7 @@ from tests.test_waiter import FakeSpawn, enqueue, make_waiter
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "deploy" / "orch-move.sh"
-BOTS = ("claude-bot", "codex-bot", "cursor-bot")
+BOTS = ("claude-bot", "codex-bot", "cursor-bot", "gemini-bot")
 
 FAKE_SERVICE = """#!/bin/sh
 retired=no
@@ -643,6 +643,24 @@ def test_import_places_the_export_and_starts_the_poller_first(tmp_path: Path) ->
     [stage] = (pc.home / ".local/share/factory/orch-move").glob("import-*")
     assert (stage / "machines.box.yml").read_text(encoding="utf-8") == "# machines of box\n"
     assert (stage / "machines.pc.yml").read_text(encoding="utf-8") == "# machines of pc\n"
+
+
+def test_import_starts_the_gemini_bot_waiter_when_it_autostarts(tmp_path: Path) -> None:
+    box, pc = Host(tmp_path, "box"), Host(tmp_path, "pc")
+    _seed(tmp_path, box.db)
+    export = _export(tmp_path, box, "pc")
+    pc.retired.write_text("box 2026-11-01T00:00:00Z\n", encoding="utf-8")
+    (pc.config / "waiter-autostart-gemini-bot").touch()
+
+    result = pc.move("import", str(export))
+
+    assert result.returncode == 0, result.stderr
+    assert pc.calls() == [
+        "poller-service.sh start retired=no",
+        "waiter-service.sh gemini-bot start retired=no",
+        "self-heal.sh start retired=no",
+        "linear-webhook-service.sh start retired=no",
+    ]
 
 
 def _flip_a_byte(export: Path) -> None:
@@ -1371,7 +1389,7 @@ elif sys.argv[1:3] == ["heal", "--health-json"]:
     while not (home / f"cleanup-{{n}}-go").exists():
         time.sleep(0.01)
     heal(report, facts=Facts(device="box", owned=frozenset("waiter:" + b for b in
-         ("claude-bot", "codex-bot", "cursor-bot"))), state_dir=Path(sys.argv[5]),
+         ("claude-bot", "codex-bot", "cursor-bot", "gemini-bot"))), state_dir=Path(sys.argv[5]),
          deploy=home / "unused", webhook=Webhook(), environ={{}}, now=time.time())
 """
 

@@ -7,16 +7,16 @@
 #
 # export runs on the host giving orch.db up. It refuses (exit 79) on a host
 # already retired as the orch host (~/.config/factory/orch-retired). It
-# writes waiter-<bot>.drain ("orch-move") for claude-bot, codex-bot and
-# cursor-bot, so no waiter claims a job; every self-heal pass skips while
-# they read orch-move. It first runs `self-heal.sh wait-idle` once, so a
-# pass already under way finishes, and writes the drain files again before
-# that wait lets a new pass start. Then every ORCH_MOVE_POLL_SEC seconds
-# (default 30) it writes the drain files again,
+# writes waiter-<bot>.drain ("orch-move") for claude-bot, codex-bot,
+# cursor-bot and gemini-bot, so no waiter claims a job; every self-heal
+# pass skips while they read orch-move. It first runs `self-heal.sh
+# wait-idle` once, so a pass already under way finishes, and writes the
+# drain files again before that wait lets a new pass start. Then every
+# ORCH_MOVE_POLL_SEC seconds (default 30) it writes the drain files again,
 # copies orch.db to <export>/probe.db with `orch backup-db` and asks
 # `orch move-db drained` whether a job still runs or a device slot is held.
 # Once none is, it writes orch-retired ("<host> <UTC time>"), and only then
-# stops the poller, the three waiters, self-heal and the installed Linear
+# stops the poller, the four waiters, self-heal and the installed Linear
 # listener through their service scripts, which refuse to start again while
 # orch-retired exists (exit 79; for self-heal also the timer's `once` pass).
 # After stopping self-heal it runs `self-heal.sh wait-idle`, which waits up
@@ -80,7 +80,7 @@ MOVES="${HOME}/.local/share/factory/orch-move"
 ORCH="${HOME}/.local/bin/orch"
 LINEAR="${HOME}/.local/share/factory/linear-webhook-service.sh"
 MACHINES="${HERE}/../machines.yml"
-BOTS=(claude-bot codex-bot cursor-bot)
+BOTS=(claude-bot codex-bot cursor-bot gemini-bot)
 DRAIN_MARK=orch-move
 POLL="${ORCH_MOVE_POLL_SEC:-30}"
 DRAIN_TIMEOUT="${ORCH_MOVE_DRAIN_TIMEOUT:-9000}"

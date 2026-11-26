@@ -14,7 +14,7 @@
 #   waiter-service.sh <bot> install-autostart enable autostart (see below)
 #   waiter-service.sh <bot> remove-autostart  disable it
 #
-# <bot> is claude-bot, codex-bot or cursor-bot. Run it as that bot's own user,
+# <bot> is claude-bot, codex-bot, cursor-bot or gemini-bot. Run it as that bot's own user,
 # with that bot's harness login: the waiter starts that bot's harness, with the
 # command in ~/.config/factory/waiter-<bot>.yml (config/waiter.example.yml).
 # On a host retired as the orch host (~/.config/factory/orch-retired),
@@ -59,13 +59,13 @@
 set -euo pipefail
 
 usage() {
-    echo "usage: $(basename "$0") {claude-bot|codex-bot|cursor-bot} {start|stop|restart|status|ensure|install-autostart|remove-autostart}" >&2
+    echo "usage: $(basename "$0") {claude-bot|codex-bot|cursor-bot|gemini-bot} {start|stop|restart|status|ensure|install-autostart|remove-autostart}" >&2
     exit 2
 }
 
 BOT="${1:-}"
 case "$BOT" in
-    claude-bot | codex-bot | cursor-bot) ;;
+    claude-bot | codex-bot | cursor-bot | gemini-bot) ;;
     *) usage ;;
 esac
 COMMAND="${2:-}"
