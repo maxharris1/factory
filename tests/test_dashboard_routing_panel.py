@@ -1,13 +1,19 @@
+import builtins
+import json
+import os
 import re
 from pathlib import Path
 
 import pytest
 
+from lib import dashboard
 from lib.dashboard import render_pages
 from lib.role_router import (
-    BUDGETS, ROLE_SLOTS, ROUTING_PATH, RoutingError, parse_routing_yml, resolve_slot, role_matrix,
+    BUDGETS, KNOWN_HARNESSES, ROLE_SLOTS, ROUTING_PATH, WAITER_BOTS, RoutingError, parse_routing_yml, resolve_slot,
+    role_matrix,
 )
 from lib.pstack_pin import ROOT
+from lib.wait import OWNING_BOTS
 from tests.test_dashboard import snapshot_for
 from tests.test_dashboard_efficiency import _inner
 from tests.test_dashboard_layout import _run_page, _text, needs_node
@@ -28,6 +34,9 @@ roles:
     - harness: codex
       model: gpt-5.4
       effort: high
+  plan:
+    - harness: claude
+      model: claude-sonnet-4-6
   qa: inherit
 budget_overrides:
   small:
@@ -39,10 +48,25 @@ budget_overrides:
 """
 
 
-def _matrix(tmp_path: Path, text: str = ROUTING) -> dict:
+CLAUDE_WAITER = ("claude", "-p", "--effort", "medium")
+GEMINI_WAITER = ("gemini", "-p", "", "--yolo")
+WRAPPED_WAITER = ("env", "FOO=1", "claude", "-p", "--model", "claude-haiku-4-5")
+
+
+def _matrix(tmp_path: Path, text: str = ROUTING, waiters: dict | None = None) -> dict:
     path = tmp_path / "routing.yml"
     path.write_text(text, encoding="utf-8")
-    return role_matrix(path)
+    return role_matrix(path, waiters)
+
+
+def _routed(model: str | None, effort: str | None) -> dict:
+    return {"model": model, "model_source": "unknown" if model is None else "routing.yml",
+            "effort": effort, "effort_source": "unknown" if effort is None else "routing.yml",
+            "replaced": {}, "applied": True}
+
+
+def _effective(matrix: dict, role: str, rank: int) -> dict:
+    return _row(matrix, role)["candidates"][rank - 1]["effective"]
 
 
 def _row(matrix: dict, role: str) -> dict:
@@ -54,10 +78,11 @@ def test_matrix_clamps_effort_to_the_budget_ceiling_and_keeps_the_configured_val
     assert (matrix["state"], matrix["budget"], matrix["ceiling"]) == ("ok", "medium", "high")
     assert _row(matrix, "build") == {"role": "build", "source": "roles", "candidates": [
         {"rank": 1, "harness": "claude", "model": "claude-opus-4-6", "family": "anthropic",
-         "effort": "high", "configured": "max"},
-        {"rank": 2, "harness": "codex", "model": "gpt-5.4", "family": "openai", "effort": "low", "configured": "low"},
+         "effort": "high", "configured": "max", "effective": _routed("claude-opus-4-6", "high")},
+        {"rank": 2, "harness": "codex", "model": "gpt-5.4", "family": "openai", "effort": "low", "configured": "low",
+         "effective": _routed("gpt-5.4", "low")},
         {"rank": 3, "harness": "gemini", "model": "gemini-2.5-pro", "family": "google",
-         "effort": None, "configured": None},
+         "effort": None, "configured": None, "effective": _routed("gemini-2.5-pro", None)},
     ]}
 
 
@@ -73,16 +98,16 @@ def test_matrix_takes_the_tier_override_unclamped(tmp_path: Path) -> None:
     for role in ("build", "build:perf"):
         assert _row(matrix, role) == {"role": role, "source": "budget_overrides", "candidates": [
             {"rank": 1, "harness": "claude", "model": "claude-sonnet-4-6", "family": "anthropic",
-             "effort": "high", "configured": "high"},
+             "effort": "high", "configured": "high", "effective": _routed("claude-sonnet-4-6", "high")},
         ]}
 
 
 def test_matrix_shows_inherit_and_unset_slots_with_no_candidates(tmp_path: Path) -> None:
     medium = _matrix(tmp_path)
-    assert _row(medium, "qa") == {"role": "qa", "source": "inherit", "candidates": []}
-    assert _row(medium, "helper:panel") == {"role": "helper:panel", "source": "unset", "candidates": []}
+    assert _row(medium, "qa") == {"role": "qa", "source": "inherit", "candidates": [], "fallback": []}
+    assert _row(medium, "helper:panel") == {"role": "helper:panel", "source": "unset", "candidates": [], "fallback": []}
     small = _matrix(tmp_path, ROUTING.replace("budget: medium", "budget: small"))
-    assert _row(small, "review") == {"role": "review", "source": "inherit", "candidates": []}
+    assert _row(small, "review") == {"role": "review", "source": "inherit", "candidates": [], "fallback": []}
 
 
 def test_matrix_has_one_row_per_role_in_order(tmp_path: Path) -> None:
@@ -90,14 +115,78 @@ def test_matrix_has_one_row_per_role_in_order(tmp_path: Path) -> None:
 
 
 def test_matrix_of_a_missing_file_is_missing(tmp_path: Path) -> None:
-    assert role_matrix(tmp_path / "routing.yml") == {"state": "missing", "roles": []}
+    assert role_matrix(tmp_path / "routing.yml") == {"state": "missing", "roles": [], "waiters": {}}
+    assert role_matrix(tmp_path / "routing.yml", {"claude": None})["waiters"] == {"claude": "missing"}
 
 
 def test_matrix_of_a_broken_file_is_invalid_with_the_parser_errors(tmp_path: Path) -> None:
     matrix = _matrix(tmp_path, ROUTING.replace("harness: gemini", "harness: grok"))
-    assert matrix["state"] == "invalid" and matrix["roles"] == []
+    assert matrix["state"] == "invalid" and matrix["roles"] == [] and matrix["waiters"] == {}
     assert [e for e in matrix["errors"] if "roles.build[2].harness" in e], matrix["errors"]
     assert _matrix(tmp_path, "budget: [")["state"] == "invalid"
+
+
+def test_a_routed_value_replaces_the_one_the_waiter_pins(tmp_path: Path) -> None:
+    matrix = _matrix(tmp_path, waiters={"claude": CLAUDE_WAITER})
+    assert _effective(matrix, "build", 1) == {
+        "model": "claude-opus-4-6", "model_source": "routing.yml", "effort": "high", "effort_source": "routing.yml",
+        "replaced": {"effort": "medium"}, "applied": True}
+    assert matrix["waiters"] == {"claude": "ok"}
+
+
+def test_an_unrouted_value_comes_from_the_waiter_or_the_cli(tmp_path: Path) -> None:
+    matrix = _matrix(tmp_path, waiters={"claude": CLAUDE_WAITER, "gemini": GEMINI_WAITER})
+    assert _effective(matrix, "build", 3) == {
+        "model": "gemini-2.5-pro", "model_source": "routing.yml", "effort": None, "effort_source": "CLI default",
+        "replaced": {}, "applied": True}
+    assert _effective(matrix, "plan", 1) == {
+        "model": "claude-sonnet-4-6", "model_source": "routing.yml",
+        "effort": "medium", "effort_source": "waiter-claude-bot.yml", "replaced": {}, "applied": True}
+
+
+def test_a_routed_gemini_effort_never_reaches_the_cli(tmp_path: Path) -> None:
+    text = ROUTING.replace("      model: gemini-2.5-pro\n", "      model: gemini-2.5-pro\n      effort: high\n", 1)
+    matrix = _matrix(tmp_path, text, {"gemini": GEMINI_WAITER})
+    assert (_effective(matrix, "build", 3)["effort"], _effective(matrix, "build", 3)["effort_source"]) == (
+        None, "CLI default")
+
+
+def test_a_missing_waiter_leaves_only_what_routing_names(tmp_path: Path) -> None:
+    matrix = _matrix(tmp_path, waiters={"claude": None})
+    assert _effective(matrix, "build", 1) == _routed("claude-opus-4-6", "high")
+    assert _effective(matrix, "plan", 1) == _routed("claude-sonnet-4-6", None)
+    assert matrix["waiters"] == {"claude": "missing"}
+
+
+def test_a_wrapped_waiter_gets_no_routing_flags(tmp_path: Path) -> None:
+    matrix = _matrix(tmp_path, waiters={"claude": WRAPPED_WAITER})
+    assert _effective(matrix, "build", 1) == {
+        "model": "claude-haiku-4-5", "model_source": "waiter-claude-bot.yml",
+        "effort": None, "effort_source": "CLI default", "replaced": {}, "applied": False}
+
+
+def test_a_slot_with_no_candidates_falls_back_to_each_readable_waiter(tmp_path: Path) -> None:
+    matrix = _matrix(tmp_path, waiters={"gemini": GEMINI_WAITER, "codex": None, "claude": CLAUDE_WAITER})
+    assert _row(matrix, "qa")["fallback"] == [
+        {"harness": "claude", "model": None, "model_source": "CLI default",
+         "effort": "medium", "effort_source": "waiter-claude-bot.yml"},
+        {"harness": "gemini", "model": None, "model_source": "CLI default", "effort": None, "effort_source": "CLI default"},
+    ]
+    assert "fallback" not in _row(matrix, "build")
+    assert matrix["waiters"] == {"gemini": "ok", "codex": "missing", "claude": "ok"}
+
+
+def test_no_waiters_looked_at_means_routing_alone(tmp_path: Path) -> None:
+    matrix = _matrix(tmp_path)
+    assert matrix["waiters"] == {}
+    for row in matrix["roles"]:
+        for cand in row["candidates"]:
+            assert cand["effective"] == _routed(cand["model"], cand["effort"]), row["role"]
+
+
+def test_waiter_bots_are_the_owning_bots_inverted() -> None:
+    assert dict(WAITER_BOTS) == {harness: bot for bot, harness in OWNING_BOTS.items()}
+    assert tuple(WAITER_BOTS) == KNOWN_HARNESSES
 
 
 def test_matrix_of_the_shipped_file_is_ok_for_every_role() -> None:
