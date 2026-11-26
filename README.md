@@ -201,10 +201,12 @@ box as a remote device (all three harnesses, 6 slots), then the Mac. Slots are
 generic, so they are not one per bot. The PC's `workdir_root` is
 `/home/{bot}/factory-work` (for example `/home/codex-bot/factory-work`), off
 `/mnt/c`, and its `ssh_alias` is `pc-wsl-{bot}`, the aliases
-`pc-wsl-claude-bot`, `pc-wsl-codex-bot` and `pc-wsl-cursor-bot`. The box sets
-`ssh_user: box`, so every bot logs in as `box` through its own `box-{bot}`
-alias and works in `/home/box/factory-work` from `/home/box/factory`; the bot
-user stays the job's identity. The Mac ships `enabled: false` and stays
+`pc-wsl-claude-bot`, `pc-wsl-codex-bot` and `pc-wsl-cursor-bot`. On the box,
+each bot logs in as its own user (`claude-bot`, `codex-bot` or `cursor-bot`)
+through its `box-{bot}` alias; the shipped file keeps `workdir_root` at
+`/home/box/factory-work` and `factory_root` at `/home/box/factory` (overridden
+per host in `machines.local.yml`), and the bot user stays the job's identity.
+The Mac ships `enabled: false` and stays
 disabled until Max turns it on; it has no bot users and no SSH yet, and its
 `workdir_root` and `ssh_alias` are still `REPLACE_WITH_` placeholders. Nothing
 assumes a device is reachable: the poller checks it (below).
