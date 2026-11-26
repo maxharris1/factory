@@ -329,9 +329,11 @@ def stream_json_reply(bot: str, token: str) -> str:
 
 def gemini_delta_reply(bot: str, token: str) -> str:
     chunks = [f"started-by: {bot}\nskill: factory-builder\ntoken: ", token[:20], token[20:], "\n"]
-    events = [{"type": "init", "model": "gemini-3.1-pro"}]
-    events += [{"type": "message", "role": "assistant", "content": chunk, "delta": True} for chunk in chunks]
-    events += [{"type": "result", "status": "success", "stats": {}}]
+    step = {"step_index": 1, "step_type": "agent_response"}
+    events = [{"event": "init", "init": {"model": "gemini-3.1-pro"}}]
+    events += [{"event": "step_update", "step_update": {**step, "state": "ACTIVE", "text_delta": c}} for c in chunks]
+    events += [{"event": "step_update", "step_update": {**step, "state": "DONE"}}]
+    events += [{"event": "result", "result": {"status": "SUCCESS", "response": "".join(chunks)}}]
     return "".join(json.dumps(event) + "\n" for event in events)
 
 
@@ -604,3 +606,125 @@ def test_live_refuses_the_offline_flags(flag: list[str], capsys) -> None:
 def test_live_flags_need_live(flag: list[str], capsys) -> None:
     assert cli.main(["doctor", *flag]) == 2
     assert "--live" in capsys.readouterr().err
+
+
+# The shipped gemini waiter command reads the prompt from $ORCH_JOB_BRIEF, not
+# stdin (#1666 f-3): the canary must reach every harness both ways, as the
+# waiter gives a job its brief.
+
+
+def installed_waiter(tmp_path: Path, bot: str, example: str) -> list[str]:
+    folder = tmp_path / "waiter-config"
+    folder.mkdir(mode=0o700, exist_ok=True)
+    path = folder / f"waiter-{bot}.yml"
+    path.write_text((ROOT / "config" / example).read_text(encoding="utf-8"), encoding="utf-8")
+    path.chmod(0o600)
+    from lib.waiter import load_harness_command
+
+    return list(load_harness_command(path, bot).command)
+
+
+def fake_agy(folder: Path, token: str) -> Path:
+    """An `agy` that never reads stdin: it answers from the file $ORCH_JOB_BRIEF names."""
+    folder.mkdir(parents=True, exist_ok=True)
+    agy = folder / "agy"
+    agy.write_text(
+        "#!/bin/sh\n"
+        "exec < /dev/null\n"
+        'case "$2" in *\'$ORCH_JOB_BRIEF\'*) ;; *) echo "the prompt does not name the brief"; exit 4 ;; esac\n'
+        '[ -f "$ORCH_JOB_BRIEF" ] || { echo "no brief at ${ORCH_JOB_BRIEF:-(unset)}"; exit 3; }\n'
+        "grep '^started-by: ' \"$ORCH_JOB_BRIEF\"\n"
+        f"printf 'skill: factory-builder\\ntoken: %s\\n' {shlex.quote(token)}\n",
+        encoding="utf-8",
+    )
+    agy.chmod(0o755)
+    return agy
+
+
+STDIN_REPLY = (
+    "import sys\n"
+    "bot = [l for l in sys.stdin.read().splitlines() if l.startswith('started-by: ')][0]\n"
+    "sys.stdout.write(bot + '\\nskill: factory-builder\\ntoken: ' + sys.argv[1] + '\\n')\n"
+)
+
+
+def stdin_harness(bot: str) -> list[str]:
+    return [sys.executable, "-c", STDIN_REPLY, pinned_token(ROOT)]
+
+
+def test_every_canary_launch_gets_its_prompt_on_stdin_and_in_orch_job_brief(tmp_path: Path) -> None:
+    rows = canary_rows(tmp_path)
+    seen: list[tuple[str, str]] = []
+
+    def run(argv, *, stdin, log, cwd, env, timeout):
+        row = next(r for r in rows if launch_argv(r.launch)[0] == argv[0]
+                   and (argv[0] != "ssh" or argv[argv.index("--") + 1] == f"mac-{r.bot}")
+                   and (argv[0] == "ssh" or argv == launch_argv(r.launch)))
+        target = f"{row.harness}@{row.device}"
+        brief = f"{row.launch.run_dir}.brief.md"
+        assert asked_bot(stdin) == row.bot, target
+        if argv[0] == "ssh":
+            assert f"ORCH_JOB_BRIEF={brief}" in argv[-1], target
+        else:
+            assert env["ORCH_JOB_BRIEF"] == brief, target
+            assert Path(brief).read_bytes() == stdin, target
+            assert Path(brief).stat().st_mode & 0o777 == 0o600, target
+        seen.append((target, brief))
+        log.write_text(plain_reply(row.bot, pinned_token(ROOT)), encoding="utf-8")
+        return 0
+
+    lines, errors = live(tmp_path, run)
+    assert errors == []
+    assert sorted(target for target, _brief in seen) == sorted(EVERY_TARGET)
+    for target, brief in seen:
+        if target.endswith("@box"):
+            assert not Path(brief).exists(), f"{target} left its brief behind"
+
+
+def test_live_doctor_runs_the_shipped_agy_command_on_the_box(tmp_path: Path, monkeypatch) -> None:
+    command = installed_waiter(tmp_path, "gemini-bot", "waiter-gemini-bot.example.yml")
+    assert command[0] == "agy"
+    fake_agy(tmp_path / "bin", pinned_token(ROOT))
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.delenv("ORCH_JOB_BRIEF", raising=False)
+    lines: list[str] = []
+    errors = live_canary(
+        local_box("gemini", "claude"), (), pinned_token(ROOT), harnesses=None, timeout=20,
+        work=tmp_path / "work", run_id="doctor-0000",
+        load=lambda bot: command if bot == "gemini-bot" else stdin_harness(bot),
+        out=lines.append,
+    )
+    assert errors == []
+    assert sorted(lines) == ["claude@box: ok", "gemini@box: ok"]
+    assert not list((tmp_path / "work").glob("*.brief.md")), "the canary left a brief on the box"
+
+
+def test_live_doctor_runs_the_shipped_agy_command_on_a_remote_device(
+    tmp_path: Path, monkeypatch
+) -> None:
+    ssh = Ssh(tmp_path)
+    use_fake_ssh(monkeypatch, ssh)
+    (ssh.hosts / "fakepc-gemini-bot").write_text("gemini-bot", encoding="utf-8")
+    home = tmp_path / "device-home"
+    home.mkdir()
+    fake_agy(home / "bin", pinned_token(ROOT))
+    (home / ".bash_profile").write_text(
+        f"export PATH={shlex.quote(str(home / 'bin'))}:$PATH\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("FAKE_SSH_HOME", str(home))
+    command = installed_waiter(tmp_path, "gemini-bot", "waiter-gemini-bot.example.yml")
+    machines = MachinesConfig((Device(
+        "remote", 2, {"claude": "claude-bot", "gemini": "gemini-bot"},
+        workdir_root=str(tmp_path / "remote"), ssh_alias="fakepc-{bot}",
+    ),))
+    lines: list[str] = []
+    errors = live_canary(
+        machines, (), pinned_token(ROOT), harnesses=None, timeout=30,
+        work=tmp_path / "work", run_id="doctor-0000",
+        load=lambda bot: command if bot == "gemini-bot" else stdin_harness(bot),
+        out=lines.append,
+    )
+    assert errors == []
+    assert sorted(lines) == ["claude@remote: ok", "gemini@remote: ok"]
+    for brief in (tmp_path / "remote" / "jobs").glob("*.brief.md"):
+        assert brief.stat().st_mode & 0o777 == 0o600, brief

@@ -65,6 +65,9 @@ class CodexDriver:
             reason,
         )
 
+    def event_kind(self, event: Mapping[str, Any]) -> object:
+        return event.get("type")
+
     def handles_event(self, kind: object) -> bool:
         return isinstance(kind, str) and kind in CODEX_EVENTS
 

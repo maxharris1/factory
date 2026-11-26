@@ -1,8 +1,14 @@
-# Example waiter config for gemini-bot (~/.config/factory/waiter-gemini-bot.yml).
-# The waiter passes the brief on stdin and injects `--output-format stream-json`
-# automatically when `-p` / `--prompt` is present without an explicit format.
+# Example waiter config for gemini-bot. Copy it to
+# ~/.config/factory/waiter-gemini-bot.yml in gemini-bot's own home, as that
+# user, and chmod 600 (see config/waiter.example.yml).
+# The harness is Google's Antigravity CLI, `agy`. The waiter passes the brief on
+# stdin with its path in ORCH_JOB_BRIEF, and injects `--output-format stream-json`
+# when `-p`, `--print` or `--prompt` is present without an explicit format.
+# The command runs with no shell, so `$ORCH_JOB_BRIEF` reaches agy as written and
+# names the variable the agent reads.
+bot: gemini-bot
 command:
-  - gemini
+  - agy
   - -p
-  - ""
-  - --yolo
+  - Read the brief at $ORCH_JOB_BRIEF and follow it.
+  - --dangerously-skip-permissions

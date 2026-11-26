@@ -6,7 +6,7 @@ from typing import Any
 
 from lib.harnesses import AccountIsolation, StreamFlags, register
 
-GEMINI_EVENTS = frozenset({"init", "message", "tool_use", "tool_result", "error", "result"})
+GEMINI_EVENTS = frozenset({"init", "step_update", "result"})
 AUTH_OVERRIDES = (
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
@@ -42,7 +42,7 @@ class GeminiDriver:
         return ()
 
     def matches_binary(self, basename: str) -> bool:
-        return basename == "gemini"
+        return basename == "agy"
 
     def stream_flags(self, argv: Sequence[str], bot_harness: str | None = None) -> StreamFlags:
         cmd = list(argv)
@@ -54,11 +54,11 @@ class GeminiDriver:
         harness = None if wrapper else "gemini"
         if wrapper and not (rest and rest[0].startswith("-")):
             return StreamFlags(cmd, None, False, "wrapper does not pass harness options")
-        has_prompt = any(
-            part in ("-p", "--prompt") or part.startswith("--prompt=")
+        print_mode = any(
+            part in ("-p", "--print", "--prompt") or part.startswith(("--print=", "--prompt="))
             for part in rest
         )
-        if not has_prompt:
+        if not print_mode:
             return StreamFlags(cmd, harness, False, "not print mode")
         if any(
             part in ("-o", "--output-format") or part.startswith("--output-format=")
@@ -73,6 +73,9 @@ class GeminiDriver:
             "gemini wrapper" if wrapper else "gemini",
         )
 
+    def event_kind(self, event: Mapping[str, Any]) -> object:
+        return event.get("event")
+
     def handles_event(self, kind: object) -> bool:
         return isinstance(kind, str) and kind in GEMINI_EVENTS
 
@@ -80,22 +83,15 @@ class GeminiDriver:
         summary._gemini(kind, event, now)
 
     def probe_usage(self, payload: object, now: float) -> list[Any]:
-        # Gemini CLI `/stats model` is interactive REPL-only; there is no
-        # non-interactive quota command that avoids reading credential files (#1412).
+        # agy has no non-interactive quota command (#1412).
         return []
 
     def handoff_marker(self, event: Mapping[str, Any]) -> str | None:
-        kind = event.get("type")
-        if kind == "result":
-            for key in ("response", "result"):
-                text = event.get(key)
-                if isinstance(text, str):
-                    return text
+        if event.get("event") != "result":
             return None
-        if kind == "message" and event.get("role") == "assistant":
-            text = event.get("content")
-            return text if isinstance(text, str) else None
-        return None
+        payload = event.get("result")
+        text = payload.get("response") if isinstance(payload, dict) else None
+        return text if isinstance(text, str) else None
 
 
 DRIVER = GeminiDriver()

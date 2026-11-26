@@ -18,6 +18,7 @@ from lib import (
     factory_md,
     harness_env,
     harnesses,
+    lane_limit,
     orch_yml,
     pstack_models,
     pstack_pin,
@@ -84,6 +85,11 @@ def test_the_docs_name_a_gemini_account_as_the_devices_gemini_bot_login(path: st
     assert not re.search(r"`GEMINI_CLI_HOME` \(Gemini\) set to `<home>/\.factory-accounts", text)
 
 
+AGY_STREAM = Path(__file__).parent / "fixtures" / "telemetry" / "agy_stream.jsonl"
+AGY_EVENTS = [json.loads(line) for line in AGY_STREAM.read_text(encoding="utf-8").splitlines()]
+AGY_QUOTA = {"event": "result", "result": {"status": "ERROR", "error": "Individual quota limit reached for this model; try again in 2h"}}
+
+
 def _gemini_session(tmp_path: Path) -> tuple[telemetry.Session, io.BytesIO]:
     out = io.BytesIO()
     clock = iter(range(2000, 100000))
@@ -93,7 +99,7 @@ def _gemini_session(tmp_path: Path) -> tuple[telemetry.Session, io.BytesIO]:
         bot="gemini-bot",
         repo="acme/widgets",
         harness="gemini",
-        flags=harnesses.get("gemini").stream_flags(["gemini", "-p", "hi"]),
+        flags=harnesses.get("gemini").stream_flags(["agy", "-p", "hi"]),
         raw_log=None,
         scrub=telemetry.Scrubber({}),
         log=lambda message: None,
@@ -103,115 +109,51 @@ def _gemini_session(tmp_path: Path) -> tuple[telemetry.Session, io.BytesIO]:
     return session, out
 
 
-def _assistant(text: str) -> dict[str, object]:
-    return {"type": "message", "role": "assistant", "content": text, "delta": True}
-
-
 def _stream(*events: dict[str, object]) -> io.BytesIO:
     return io.BytesIO(b"".join(json.dumps(event).encode() + b"\n" for event in events))
 
 
-def test_a_handoff_marker_split_across_streamed_deltas_reaches_stdout(tmp_path: Path) -> None:
-    session, out = _gemini_session(tmp_path)
-    session.consume(_stream(
-        {"type": "init", "model": "gemini-3.1-pro"},
-        _assistant("ORCH-HANDOFF: 1"),
-        {"type": "tool_use", "tool_name": "run_shell_command", "tool_id": "t1", "parameters": {"command": "ls"}},
-        {"type": "tool_result", "tool_id": "t1", "status": "success", "output": "x"},
-        _assistant("Done.\nORCH-"),
-        _assistant("HANDOFF: "),
-        _assistant("4242424242\n"),
-        {"type": "result", "status": "success", "stats": {}},
-    ))
-    session.finish(0)
-
-    assert out.getvalue() == b"ORCH-HANDOFF: 4242424242\n"
-    assert waiter.handoff_marker(out.getvalue().decode()) == "4242424242"
+def _agy_flags(argv: list[str], harness: str | None, added: bool, reason: str) -> StreamFlags:
+    injected = [argv[0], "--output-format", "stream-json", *argv[1:]] if added else argv
+    return StreamFlags(injected, harness, added, reason)
 
 
 @pytest.mark.parametrize(
     ("argv", "bot_harness", "expected"),
     [
+        (["agy", "-p", "hi"], "gemini", _agy_flags(["agy", "-p", "hi"], "gemini", True, "gemini")),
+        (["/x/agy", "--print", "hi"], None, _agy_flags(["/x/agy", "--print", "hi"], "gemini", True, "gemini")),
+        (["agy", "--prompt=hi"], None, _agy_flags(["agy", "--prompt=hi"], "gemini", True, "gemini")),
+        (["agy", "--print=hi"], None, _agy_flags(["agy", "--print=hi"], "gemini", True, "gemini")),
         (
-            ["gemini", "-p", "hello"],
+            ["agy", "-p", "--output-format", "stream-json", "hi"],
             "gemini",
-            StreamFlags(["gemini", "--output-format", "stream-json", "-p", "hello"], "gemini", True, "gemini"),
+            _agy_flags(["agy", "-p", "--output-format", "stream-json", "hi"], "gemini", False, "output format already set"),
         ),
+        (["agy", "models"], "gemini", _agy_flags(["agy", "models"], "gemini", False, "not print mode")),
         (
-            ["/usr/local/bin/gemini", "--prompt=hi"],
-            None,
-            StreamFlags(
-                ["/usr/local/bin/gemini", "--output-format", "stream-json", "--prompt=hi"],
-                "gemini",
-                True,
-                "gemini",
-            ),
-        ),
-        (
-            ["gemini", "-p", "--output-format", "stream-json", "hi"],
+            ["/srv/bin/wrap-agy", "-p", ""],
             "gemini",
-            StreamFlags(
-                ["gemini", "-p", "--output-format", "stream-json", "hi"],
-                "gemini",
-                False,
-                "output format already set",
-            ),
+            _agy_flags(["/srv/bin/wrap-agy", "-p", ""], "gemini", True, "gemini wrapper"),
         ),
-        (
-            ["gemini", "models", "list"],
-            "gemini",
-            StreamFlags(["gemini", "models", "list"], "gemini", False, "not print mode"),
-        ),
-        (
-            ["/srv/bin/wrap-gemini", "-p", ""],
-            "gemini",
-            StreamFlags(
-                ["/srv/bin/wrap-gemini", "--output-format", "stream-json", "-p", ""],
-                "gemini",
-                True,
-                "gemini wrapper",
-            ),
-        ),
+        (["gemini", "-p", "hi"], None, StreamFlags(["gemini", "-p", "hi"], None, False, "not a known harness")),
     ],
 )
-def test_gemini_stream_flags(argv: list[str], bot_harness: str | None, expected: StreamFlags) -> None:
+def test_agy_stream_flags(argv: list[str], bot_harness: str | None, expected: StreamFlags) -> None:
     assert telemetry.stream_flags(argv, bot_harness) == expected
 
 
-def test_gemini_summary_parses_stream_events_and_handoff() -> None:
-    summary = telemetry.Summary("gemini", lambda value, limit=40: str(value))
-    summary.feed({"type": "init", "model": "gemini-3.1-pro"}, NOW)
-    summary.feed({"type": "message", "role": "assistant", "content": "working"}, NOW + 1)
-    summary.feed(
-        {
-            "type": "tool_use",
-            "tool_id": "g1",
-            "tool_name": "run_shell_command",
-            "parameters": {"command": "pytest tests/test_a.py"},
-        },
-        NOW + 2,
-    )
-    summary.feed(
-        {"type": "tool_result", "tool_id": "g1", "status": "success", "output": "5 passed in 0.4s"},
-        NOW + 3,
-    )
-    summary.feed(
-        {
-            "type": "tool_use",
-            "tool_id": "g2",
-            "tool_name": "write_file",
-            "parameters": {"file_path": "lib/harnesses/gemini.py"},
-        },
-        NOW + 4,
-    )
-    summary.feed({"type": "tool_result", "tool_id": "g2", "status": "success", "output": ""}, NOW + 5)
-    result_event = {
-        "type": "result",
-        "status": "success",
-        "stats": {"input_tokens": 500, "output_tokens": 120, "cached": 100},
-        "response": 'Done.\nORCH-HANDOFF: {"kind": "ready"}',
-    }
-    summary.feed(result_event, NOW + 6)
+def test_the_driver_matches_only_the_agy_binary() -> None:
+    driver = GeminiDriver()
+    assert driver.matches_binary("agy")
+    assert not driver.matches_binary("gemini")
+
+
+def test_an_agy_stream_fills_the_summary_and_relays_the_handoff(tmp_path: Path) -> None:
+    session, out = _gemini_session(tmp_path)
+    session.consume(_stream(*AGY_EVENTS))
+    session.finish(0)
+    summary = session.summary
 
     assert summary.model == "gemini-3.1-pro"
     assert summary.turns == 1
@@ -219,9 +161,62 @@ def test_gemini_summary_parses_stream_events_and_handoff() -> None:
     assert summary.test_runs == 1
     assert (summary.tests_passed, summary.tests_failed) == (5, 0)
     assert summary.files_touched == 1
-    assert (summary.tokens_in, summary.tokens_cached, summary.tokens_out) == (500, 100, 120)
+    assert dict(summary.tool_calls) == {"run_command": 1, "write_to_file": 1, "view_file": 1}
+    assert [(step["kind"], step["label"], step["status"]) for step in summary.steps] == [
+        ("command", "command", "ok"),
+        ("tool", "write_to_file", "ok"),
+        ("tool", "view_file", "error"),
+    ]
+    assert (summary.tokens_in, summary.tokens_cached, summary.tokens_out) == (10418, 8113, 589)
+    assert summary.usage_seen
     assert summary.cli_reason == "success"
-    assert telemetry.final_message(result_event) == result_event["response"]
+    assert out.getvalue() == b"ORCH-HANDOFF: 4242424242\n"
+    assert waiter.handoff_marker(out.getvalue().decode()) == "4242424242"
+
+
+def test_an_agy_run_killed_before_its_result_still_reports_step_usage(tmp_path: Path) -> None:
+    session, _ = _gemini_session(tmp_path)
+    session.consume(_stream(*(event for event in AGY_EVENTS if event["event"] != "result")))
+    summary = session.summary
+
+    assert summary.usage_seen
+    assert (summary.tokens_in, summary.tokens_cached, summary.tokens_out) == (10302 + 116, 8113, 582 + 7)
+    assert summary.cli_reason is None
+
+
+def test_an_agy_error_result_is_an_error_and_its_quota_message_a_lane_limit() -> None:
+    assert lane_limit.error_text("gemini", AGY_QUOTA) == AGY_QUOTA["result"]["error"]
+    assert lane_limit.detect("gemini", AGY_QUOTA, NOW) is not None
+    assert lane_limit.error_text("gemini", AGY_EVENTS[-1]) is None
+    summary = telemetry.Summary("gemini", lambda value, limit=40: str(value))
+    summary.feed(AGY_QUOTA, NOW)
+    assert summary.cli_reason == "error"
+    assert [step["status"] for step in summary.steps] == ["error"]
+
+
+def test_upstream_gemini_events_are_no_longer_read() -> None:
+    upstream_result = {"type": "result", "response": "ORCH-HANDOFF: 1"}
+    assert GeminiDriver().handoff_marker(upstream_result) is None
+    assert telemetry.final_message(upstream_result) is None
+    summary = telemetry.Summary("gemini", lambda value, limit=40: str(value))
+    summary.feed({"type": "tool_use", "tool_id": "t1", "tool_name": "run_shell_command", "parameters": {"command": "ls"}}, NOW)
+    summary.feed({"type": "message", "role": "assistant", "content": "hi"}, NOW)
+    assert (dict(summary.tool_calls), summary.turns, summary.commands) == ({}, 0, 0)
+    assert lane_limit.error_text("gemini", {"type": "error", "message": "x"}) is None
+
+
+def test_the_waiter_example_runs_agy_unattended_on_the_brief(tmp_path: Path) -> None:
+    folder = tmp_path / "factory"
+    folder.mkdir(mode=0o700)
+    config = folder / "waiter-gemini-bot.yml"
+    config.write_text((ROOT / "config" / "waiter-gemini-bot.example.yml").read_text(encoding="utf-8"), encoding="utf-8")
+    config.chmod(0o600)
+    command = list(waiter.load_harness_command(config, "gemini-bot").command)
+    assert command[0] == "agy"
+    assert "--dangerously-skip-permissions" in command
+    assert "--yolo" not in command
+    assert "ORCH_JOB_BRIEF" in command[command.index("-p") + 1]
+    assert telemetry.stream_flags(command, "gemini").added
 
 
 def test_google_family_cross_family_review_and_contradiction_rules(tmp_path: Path) -> None:

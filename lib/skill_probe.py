@@ -7,8 +7,14 @@ the model's context and never from what the model says.
 
 * Launch: the bot's own argv from its waiter config (`load_harness_command`),
   unchanged on the box and made device-neutral by `for_device` elsewhere,
-  with only `harness_env` added and the prompt on stdin. A remote device is
-  reached through `remote.start_script` over the bot's own SSH alias.
+  with only `harness_env` added. The prompt goes in as the waiter gives a
+  job its brief: on stdin, and in a mode-600 file beside the run directory
+  (`<run-dir>.brief.md`) whose path is in ORCH_JOB_BRIEF, so a command that
+  reads `$ORCH_JOB_BRIEF` (the shipped `agy` one) gets it too. The box's
+  file is removed when the run ends. A remote device is reached through
+  `remote.start_script` over the bot's own SSH alias; there the start first
+  writes stdin to the brief file, then runs the harness with that file as
+  its stdin.
 * Read = yes only when a line from the body of `SKILL.md` (the canary, never
   frontmatter, which Claude lists without opening the file) shows up in a
   record the model did not write: a tool result that is not an error, or an
@@ -62,6 +68,7 @@ from lib.remote import (
     RUNNING,
     RemoteError,
     RemoteTarget,
+    START_REFUSED,
     SshTransport,
     Transport,
     check_worker,
@@ -70,7 +77,7 @@ from lib.remote import (
     start_script,
     stop_worker,
 )
-from lib.waiter import WaiterError, default_harness_config, load_harness_command
+from lib.waiter import BRIEF_ENV, WaiterError, default_harness_config, load_harness_command
 
 Harness = Literal["claude", "codex"]
 Outcome = Literal["yes", "no", "missing", "n/a", "unknown"]
@@ -161,6 +168,11 @@ class Launch:
     @property
     def name(self) -> str:
         return f"{self.device}-{self.harness}-{self.style.value}"
+
+    @property
+    def brief(self) -> str:
+        """The prompt's file on the launch's device, beside its run directory."""
+        return f"{self.run_dir}.brief.md"
 
 
 @dataclass(frozen=True)
@@ -561,18 +573,25 @@ def with_plugin_dir(argv: Sequence[str], plugin_dir: str) -> tuple[str, ...]:
 def launch_argv(launch: Launch) -> list[str]:
     if launch.remote is None:
         return list(launch.argv)
-    return ssh_argv(
+    start = start_script(
         launch.remote,
-        start_script(
-            launch.remote,
-            launch.argv,
-            launch.env,
-            guarded_dirs=launch.guarded_dirs,
-            insert_at=launch.insert_at,
-            cd=launch.cd,
-            unset=account_tokens(launch.harness, launch.account_home),
-        ),
+        launch.argv,
+        {**launch.env, BRIEF_ENV: launch.brief},
+        guarded_dirs=launch.guarded_dirs,
+        insert_at=launch.insert_at,
+        cd=launch.cd,
+        unset=account_tokens(launch.harness, launch.account_home),
     )
+    return ssh_argv(launch.remote, from_brief(launch.brief, start))
+
+
+def from_brief(brief: str, start: str) -> str:
+    """Under POSIX sh, write stdin to brief (mode 600), then exec start with brief as its stdin."""
+    script = (
+        'b=$1; { mkdir -p -- "${b%/*}" && (umask 077 && cat > "$b"); } '
+        f'|| exit {START_REFUSED}; {start} < "$b"'
+    )
+    return f"exec sh -c {shlex.quote(script)} orch-brief {shlex.quote(brief)}"
 
 
 def claude_slug(path: str) -> str:
@@ -727,16 +746,26 @@ def start_launch(
     Killing the local ssh client leaves a remote harness running, so a timed-out
     remote launch is stopped on its device; RemoteError if it is not confirmed gone.
     """
+    data = prompt.encode("utf-8")
+    env = {**account_environ(os.environ, launch.harness, launch.account_home), **launch.env}
+    brief = None
     if launch.remote is None:
         Path(launch.run_dir).mkdir(parents=True, exist_ok=False)
-    code = run(
-        launch_argv(launch),
-        stdin=prompt.encode("utf-8"),
-        log=log_path,
-        cwd=launch.run_dir if launch.remote is None else None,
-        env={**account_environ(os.environ, launch.harness, launch.account_home), **launch.env},
-        timeout=timeout,
-    )
+        brief = Path(launch.brief)
+        _write_brief(brief, data)
+        env[BRIEF_ENV] = launch.brief
+    try:
+        code = run(
+            launch_argv(launch),
+            stdin=data,
+            log=log_path,
+            cwd=launch.run_dir if launch.remote is None else None,
+            env=env,
+            timeout=timeout,
+        )
+    finally:
+        if brief is not None:
+            brief.unlink(missing_ok=True)
     if code is None and launch.remote is not None:
         status = stop_remote(launch.remote, transport or SshTransport())
         if status != GONE:
@@ -745,6 +774,13 @@ def start_launch(
                 f"was not confirmed stopped ({status})"
             )
     return code
+
+
+def _write_brief(path: Path, data: bytes) -> None:
+    """A new mode-600 file; never follows or reuses one already there."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
 
 
 def run_launch(

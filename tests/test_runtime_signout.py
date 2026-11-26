@@ -36,9 +36,11 @@ CODEX_PERMANENT = (
     "another account. Please sign in again.",
 )
 GEMINI_SIGNED_OUT = {
-    "type": "result",
-    "status": "error",
-    "error": {"message": "Error: Please sign in to view available models. Launch the CLI without arguments to sign in."},
+    "event": "result",
+    "result": {
+        "status": "ERROR",
+        "error": "Error: Please sign in to view available models. Launch the CLI without arguments to sign in.",
+    },
 }
 CODEX_TRANSIENT = {"type": "turn.failed", "error": {"message": "Failed to refresh token: 503 Service Unavailable"}}
 
@@ -124,10 +126,10 @@ def _no_retry_rows(db: Path) -> bool:
     ("codex", {"type": "turn.failed", "error": {"message": CODEX_REFRESH}}),
     *(("codex", {"type": "turn.failed", "error": {"message": m}}) for m in CODEX_PERMANENT),
     ("gemini", GEMINI_SIGNED_OUT),
-    ("gemini", {"type": "error", "message": GEMINI_SIGNED_OUT["error"]["message"]}),
+    ("gemini", {"event": "result", "result": {"status": "ERROR", "error": "authentication required"}}),
 ], ids=["claude-error-field", "claude-oauth-result", "claude-not-logged-in", "codex-not-logged-in",
         "codex-401", "codex-refresh-token", "codex-refresh-reused", "codex-refresh-revoked",
-        "codex-refresh-unknown", "codex-refresh-account-changed", "gemini-result", "gemini-error"])
+        "codex-refresh-unknown", "codex-refresh-account-changed", "gemini-result", "gemini-auth-required"])
 def test_detect_signout_reads_each_harness_auth_failure(harness: str, event: dict) -> None:
     assert account_doctor.detect_signout(harness, event)
 
@@ -143,8 +145,11 @@ def test_detect_signout_reads_each_harness_auth_failure(harness: str, event: dic
     ("codex", CODEX_TRANSIENT),
     ("codex", {"type": "error", "message": "Failed to refresh token: 500 Internal Server Error"}),
     ("cursor", {"type": "error", "message": "stream disconnected before completion"}),
-    ("gemini", {**GEMINI_SIGNED_OUT, "error": {"message": "Quota exceeded for this model. Try again later."}}),
-    ("gemini", {"type": "message", "role": "assistant", "content": GEMINI_SIGNED_OUT["error"]["message"]}),
+    ("gemini", {"event": "result", "result": {"status": "ERROR", "error": "Quota exceeded for this model. Try again later."}}),
+    ("gemini", {"event": "step_update", "step_update": {
+        "step_index": 2, "state": "ACTIVE", "step_type": "agent_response",
+        "text_delta": GEMINI_SIGNED_OUT["result"]["error"],
+    }}),
     ("unknown", {"type": "error", "message": "Not logged in"}),
 ], ids=["claude-usage-limit", "claude-not-error", "claude-500", "claude-other-error", "claude-plain-text",
         "codex-disconnect", "codex-agent-text", "codex-refresh-503", "codex-refresh-500", "cursor-disconnect",

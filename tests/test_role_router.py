@@ -375,18 +375,101 @@ def _plan_detail(
             ["cursor-agent", "-p", "--model", "gpt-5.4", "-"],
         ),
         (
-            "gemini",
-            ["/usr/local/bin/gemini", "-p", "-"],
-            "gemini-2.5-pro",
-            ["/usr/local/bin/gemini", "--model", "gemini-2.5-pro", "-p", "-"],
+            "cursor",
+            ["/usr/local/bin/agent", "-p", "-"],
+            "gpt-5.4",
+            ["/usr/local/bin/agent", "-p", "--model", "gpt-5.4", "-"],
         ),
     ],
 )
-def test_routed_model_reaches_cursor_and_gemini_argv_without_an_effort_flag(
+def test_routed_model_reaches_cursor_argv_without_an_effort_flag(
     harness: str, command: list[str], model: str, expected: list[str]
 ) -> None:
     detail = _build_detail(harness, model, effort="high")
     assert routing_argv_for_detail(command, harness=harness, detail=detail) == expected
+
+
+def _shipped_waiter_command(tmp_path: Path, name: str, bot: str) -> list[str]:
+    from lib import waiter
+
+    folder = tmp_path / "config"
+    folder.mkdir(mode=0o700)
+    path = folder / f"waiter-{bot}.yml"
+    path.write_text((ROOT / "config" / name).read_text(encoding="utf-8"), encoding="utf-8")
+    path.chmod(0o600)
+    return list(waiter.load_harness_command(path, bot).command)
+
+
+@pytest.mark.parametrize(
+    ("harness", "binary"),
+    [
+        ("claude", "claude"),
+        ("codex", "codex"),
+        ("cursor", "cursor-agent"),
+        ("cursor", "agent"),
+        ("gemini", "agy"),
+    ],
+)
+def test_routing_recognizes_every_binary_its_harness_driver_runs(harness: str, binary: str) -> None:
+    from lib.harnesses import get
+
+    assert get(harness).matches_binary(binary)
+    detail = _build_detail(harness, "model-x")
+    for path in (binary, f"/opt/bin/{binary}"):
+        routed = routing_argv_for_detail([path, "--flag"], harness=harness, detail=detail)
+        assert routed[0] == path and "model-x" in routed, routed
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex", "cursor", "gemini"])
+def test_routing_leaves_a_binary_its_harness_driver_does_not_run_alone(harness: str) -> None:
+    from lib.harnesses import all_drivers, get
+
+    detail = _build_detail(harness, "model-x", effort="high")
+    others = {"claude", "codex", "cursor-agent", "agent", "agy", "gemini"}
+    for binary in sorted(others):
+        if get(harness).matches_binary(binary):
+            continue
+        assert routing_argv_for_detail([binary, "-p"], harness=harness, detail=detail) == [binary, "-p"]
+    assert {driver.name for driver in all_drivers()} == {"claude", "codex", "cursor", "gemini"}
+
+
+def test_the_shipped_gemini_waiter_command_gets_the_routed_model_and_effort(tmp_path: Path) -> None:
+    command = _shipped_waiter_command(tmp_path, "waiter-gemini-bot.example.yml", "gemini-bot")
+    detail = json.dumps({
+        "action": "build",
+        "routing": {"builder": "gemini", "builder_model": "gemini-4-neon", "builder_effort": "high"},
+    })
+    assert routing_argv_for_detail(command, harness="gemini", detail=detail) == [
+        *command, "--model", "gemini-4-neon", "--effort", "high",
+    ]
+
+
+@pytest.mark.parametrize("prompt_option", ["-p", "--print", "--prompt"])
+@pytest.mark.parametrize("binary", ["agy", "/usr/local/bin/agy"])
+def test_routed_agy_flags_never_split_a_prompt_option_from_its_stdin_value(
+    prompt_option: str, binary: str
+) -> None:
+    detail = _build_detail("gemini", "gemini-4-neon", effort="high")
+    assert routing_argv_for_detail([binary, prompt_option, "-"], harness="gemini", detail=detail) == [
+        binary, "--model", "gemini-4-neon", "--effort", "high", prompt_option, "-",
+    ]
+    assert apply_argv_flags(
+        [binary, prompt_option, "-"], harness="gemini", model="gemini-4-neon", effort=None
+    ) == [binary, "--model", "gemini-4-neon", prompt_option, "-"]
+
+
+@pytest.mark.parametrize(
+    "pinned",
+    [["--model", "gemini-3.1-pro"], ["-m", "gemini-3.1-pro"], ["--model=gemini-3.1-pro"],
+     ["--effort", "low"], ["--effort=low"]],
+)
+def test_a_waiter_pinned_agy_model_or_effort_yields_to_the_routed_one(pinned: list[str]) -> None:
+    detail = _build_detail("gemini", "gemini-4-neon", effort="high")
+    command = ["agy", *pinned, "-p", "go", "--dangerously-skip-permissions"]
+    assert routing_argv_for_detail(command, harness="gemini", detail=detail) == [
+        "agy", "-p", "go", "--dangerously-skip-permissions",
+        "--model", "gemini-4-neon", "--effort", "high",
+    ]
 
 
 def test_codex_prompt_mentioning_reasoning_effort_still_gets_routed_effort() -> None:

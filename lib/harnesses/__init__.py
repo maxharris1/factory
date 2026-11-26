@@ -61,8 +61,12 @@ class HarnessDriver(Protocol):
         """Return ``StreamFlags`` with structured JSON stream flags injected if applicable."""
         ...
 
+    def event_kind(self, event: Mapping[str, Any]) -> object:
+        """The stream event's kind as this harness names it."""
+        ...
+
     def handles_event(self, kind: object) -> bool:
-        """True when a parsed stream-JSON event ``type`` belongs to this driver."""
+        """True when a stream event of this ``event_kind`` belongs to this driver."""
         ...
 
     def parse_event(self, summary: Any, kind: str, event: dict[str, Any], now: float) -> None:

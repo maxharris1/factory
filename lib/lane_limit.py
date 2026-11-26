@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from lib import usage_readings
+from lib import harnesses, usage_readings
 
 TABLE = "lane_limits"
 DEFAULT_LIMIT_SECONDS = 3600
@@ -140,7 +140,8 @@ def detect(harness: str, event: dict, now: float) -> UsageLimit | None:
 
 
 def error_text(harness: str, event: dict) -> str | None:
-    kind = event.get("type")
+    driver = harnesses.find(harness)
+    kind = None if driver is None else driver.event_kind(event)
     if harness == "codex":
         if kind == "error":
             message = event.get("message")
@@ -161,13 +162,10 @@ def error_text(harness: str, event: dict) -> str | None:
         else:
             return None
     elif harness == "gemini":
-        if kind == "error":
-            message = event.get("message")
-        elif kind == "result" and (event.get("is_error") or event.get("status") == "error"):
-            err = event.get("error")
-            message = err.get("message") if isinstance(err, dict) else event.get("result")
-        else:
+        payload = event.get("result")
+        if kind != "result" or not isinstance(payload, dict) or payload.get("status") == "SUCCESS":
             return None
+        message = payload.get("error")
     else:
         return None
     return message if isinstance(message, str) else None
