@@ -9,8 +9,11 @@ atomically (temp file in the same directory, fsync, then rename), as one
 set: a failed rename puts back every file already renamed. Each page's inline script fetches status.json every 1 to 2
 seconds and updates in place. The Evals table is not in status.json; the
 page fetches evals.json for each new status.json, again on later polls
-until its generated_at_epoch catches up, and redraws it from any valid
-bundle newer than the table on the page.
+until its generated_at_epoch catches up, and redraws it from any bundle
+newer than the table on the page. A malformed bundle (a missing or unknown
+field, a value of a type or form collect_weekly never writes, more than KEEP
+weeks or weeks out of order, or a state that disagrees with its weeks or
+skipped count) leaves the table as it is.
 Without script (or when status.json cannot
 be fetched) the server-rendered page reloads every refresh_seconds (15 to
 30). The job page's diagram is model/chart.mmd (lib/dashboard_flow.py).

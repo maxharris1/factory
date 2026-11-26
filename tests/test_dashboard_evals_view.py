@@ -618,20 +618,26 @@ TIES = {
     "wasted-cost-usd": 0.125,
 }
 TIES_BEFORE = {"productive-cost-usd": 0, "poll-errors": 0, "cycle-time-p50-hours": 0, "wasted-cost-usd": 0}
+def week(name: object, metrics: object, since: object = None, until: object = None) -> dict:
+    return {"week": name, "since": since, "until": until, "metrics": metrics}
+
+
+def without(item: dict, key: str) -> dict:
+    return {k: v for k, v in item.items() if k != key}
+
+
 PARITY = {
     "no dir": {"schema": 1, "state": "no dir", "weeks": [], "skipped": 0},
     "no snapshots, skipped": {"schema": 1, "state": "no snapshots", "weeks": [], "skipped": 2},
-    "one week": {"schema": 1, "state": "ok", "skipped": 1, "weeks": [
-        {"week": "2026-11-23", "metrics": NEWEST}]},
+    "one week": {"schema": 1, "state": "ok", "skipped": 1, "weeks": [week("2026-11-23", NEWEST, SINCE, UNTIL)]},
     "several weeks": {"schema": 1, "state": "ok", "skipped": 0, "weeks": [
-        {"week": "2026-11-23", "metrics": NEWEST}, {"week": "2026-11-16", "metrics": MIDDLE},
-        {"week": "2026-11-09", "metrics": OLDEST}]},
+        week("2026-11-23", NEWEST, SINCE, UNTIL), week("2026-11-16", MIDDLE), week("2026-11-09", OLDEST)]},
     "rounding and thousands": {"schema": 1, "state": "ok", "skipped": 0, "weeks": [
-        {"week": "2026-11-23", "metrics": ROUNDING}, {"week": "2026-11-16", "metrics": ROUNDING_BEFORE}]},
+        week("2026-11-23", ROUNDING), week("2026-11-16", ROUNDING_BEFORE)]},
     "past float precision and range": {"schema": 1, "state": "ok", "skipped": 0, "weeks": [
-        {"week": "2026-11-23", "metrics": HUGE}, {"week": "2026-11-16", "metrics": HUGE_BEFORE}]},
+        week("2026-11-23", HUGE), week("2026-11-16", HUGE_BEFORE)]},
     "ties at the last digit": {"schema": 1, "state": "ok", "skipped": 0, "weeks": [
-        {"week": "2026-11-23", "metrics": TIES}, {"week": "2026-11-16", "metrics": TIES_BEFORE}]},
+        week("2026-11-23", TIES), week("2026-11-16", TIES_BEFORE)]},
 }
 
 
@@ -702,9 +708,9 @@ POLLING = (
              "realSetTimeout(async () => {\n  await act(JSON.parse(actionsText));")
 )
 
-NOV_16 = {"schema": 1, "state": "ok", "skipped": 0, "weeks": [{"week": "2026-11-16", "metrics": MIDDLE}]}
+NOV_16 = {"schema": 1, "state": "ok", "skipped": 0, "weeks": [week("2026-11-16", MIDDLE)]}
 BOTH_WEEKS = {"schema": 1, "state": "ok", "skipped": 0, "weeks": [
-    {"week": "2026-11-23", "metrics": NEWEST}, {"week": "2026-11-16", "metrics": MIDDLE}]}
+    week("2026-11-23", NEWEST, SINCE, UNTIL), week("2026-11-16", MIDDLE)]}
 
 
 def polled(tmp_path: Path, actions: list, first: dict) -> tuple[dict, float]:
@@ -768,6 +774,49 @@ def test_a_held_fetch_for_an_older_snapshot_leaves_the_newer_one_to_load(tmp_pat
     assert out["evals"] == 2
 
 
+PRECISE = 1800000001.1238
+GENERATED = re.compile(r'<body data-page="evals" data-generated="([^"]*)"')
+
+
+def published(tmp_path: Path, epoch: float) -> tuple[Path, dict]:
+    root = tmp_path / repr(epoch)
+    (root / "evals").mkdir(parents=True)
+    write_week(root / "evals", BAD, report(MIDDLE))
+    write_week(root / "evals", GOOD, report(NEWEST))
+    bundle = collect_weekly(root / "evals")
+    snapshot = {**snapshot_for(root / "db"), "generated_at_epoch": epoch, EVALS: bundle}
+    write_snapshot_pages(root / "site", snapshot)
+    return root / "site", bundle
+
+
+def polled_published(tmp_path: Path, page: Path, site: Path) -> dict:
+    attribute = GENERATED.search((page / "evals.html").read_text(encoding="utf-8")).group(1)
+    stock = "body.attrs['data-generated'] = '1800000000.000';"
+    assert stock in POLLING
+    harness = POLLING.replace(stock, f"body.attrs['data-generated'] = {json.dumps(attribute)};", 1)
+    status, bundle = (json.loads((site / name).read_text(encoding="utf-8")) for name in ("status.json", "evals.json"))
+    return layout.run_harness(
+        tmp_path / "page", harness, (site / "app.js").read_text(encoding="utf-8"), status, "evals", EVALS_IDS,
+        [["poll", {}]] * 4, evals={"status": 200, "body": bundle},
+    )
+
+
+@needs_node
+def test_a_bundle_published_at_a_sub_millisecond_epoch_is_fetched_once_and_drawn(tmp_path: Path) -> None:
+    site, bundle = published(tmp_path, PRECISE)
+    out = polled_published(tmp_path, site, site)
+    assert out["evals"] == 1
+    assert out["html"]["evals"] == section_inner(bundle)
+
+
+@needs_node
+def test_a_bundle_as_new_as_the_snapshot_is_fetched_once_when_the_page_is_newer(tmp_path: Path) -> None:
+    site, _ = published(tmp_path, PRECISE)
+    page, _ = published(tmp_path, PRECISE + 30)
+    out = polled_published(tmp_path, page, site)
+    assert out["evals"] == 1
+
+
 def test_numbers_past_float_precision_and_range_render_as_a_float_would() -> None:
     rows = table(panel(PARITY["past float precision and range"]))
     assert {label: cells[0] for label, cells in rows.items()} == {
@@ -786,13 +835,14 @@ def test_numbers_past_float_precision_and_range_render_as_a_float_would() -> Non
     }
 
 
+DROP = object()
 MALFORMED = {
-    "week without a name": {"weeks": [{"metrics": {}}]},
-    "week name not text": {"weeks": [{"week": 7, "metrics": {}}]},
+    "week without a name": {"weeks": [without(week("2026-11-23", {}), "week")]},
+    "week name not text": {"weeks": [week(7, {})]},
     "week not an object": {"weeks": [None]},
     "week a list": {"weeks": [["2026-11-23"]]},
-    "metrics a list": {"weeks": [{"week": "2026-11-23", "metrics": []}]},
-    "metrics null": {"weeks": [{"week": "2026-11-23", "metrics": None}]},
+    "metrics a list": {"weeks": [week("2026-11-23", [])]},
+    "metrics null": {"weeks": [week("2026-11-23", None)]},
     "skipped negative": {"skipped": -1},
     "skipped a fraction": {"skipped": 1.5},
     "skipped text": {"skipped": "2"},
@@ -800,18 +850,23 @@ MALFORMED = {
     "unknown schema": {"schema": 2},
     "no epoch": {"generated_at_epoch": None},
     "a list": None,
-    "week name empty": {"weeks": [{"week": "", "metrics": {}}]},
-    "week name not a date": {"weeks": [{"week": "2026-02-30", "metrics": {}}]},
-    "week name hostile": {"weeks": [{"week": '<img src=x onerror="y">&\'', "metrics": {}}]},
-    "weeks oldest first": {"weeks": [{"week": "2026-11-16", "metrics": {}}, {"week": "2026-11-23", "metrics": {}}]},
-    "a week twice": {"weeks": [{"week": "2026-11-23", "metrics": {}}, {"week": "2026-11-23", "metrics": {}}]},
+    "week name empty": {"weeks": [week("", {})]},
+    "week name not a date": {"weeks": [week("2026-02-30", {})]},
+    "week name hostile": {"weeks": [week('<img src=x onerror="y">&\'', {})]},
+    "weeks oldest first": {"weeks": [week("2026-11-16", {}), week("2026-11-23", {})]},
+    "a week twice": {"weeks": [week("2026-11-23", {}), week("2026-11-23", {})]},
     "more weeks than kept": {"weeks": [
-        {"week": (date(2026, 11, 23) - timedelta(weeks=n)).isoformat(), "metrics": {}} for n in range(KEEP + 1)]},
-    "metric text": {"weeks": [{"week": "2026-11-23", "metrics": {"poll-errors": "<b>"}}]},
-    "metric true": {"weeks": [{"week": "2026-11-23", "metrics": {"stuck-jobs": True}}]},
-    "metric unknown": {"weeks": [{"week": "2026-11-23", "metrics": {"poll-error": 1}}]},
-    "since not a time": {"weeks": [{"week": "2026-11-23", "since": "monday", "metrics": {}}]},
-    "until not text": {"weeks": [{"week": "2026-11-23", "until": 5, "metrics": {}}]},
+        week((date(2026, 11, 23) - timedelta(weeks=n)).isoformat(), {}) for n in range(KEEP + 1)]},
+    "metric text": {"weeks": [week("2026-11-23", {"poll-errors": "<b>"})]},
+    "metric true": {"weeks": [week("2026-11-23", {"stuck-jobs": True})]},
+    "metric unknown": {"weeks": [week("2026-11-23", {"poll-error": 1})]},
+    "since not a time": {"weeks": [week("2026-11-23", {}, since="monday")]},
+    "until not text": {"weeks": [week("2026-11-23", {}, until=5)]},
+    "week without since": {"weeks": [without(BOTH_WEEKS["weeks"][0], "since"), BOTH_WEEKS["weeks"][1]]},
+    "week without until": {"weeks": [without(BOTH_WEEKS["weeks"][0], "until"), BOTH_WEEKS["weeks"][1]]},
+    "week with an unknown key": {"weeks": [{**BOTH_WEEKS["weeks"][0], "note": "x"}, BOTH_WEEKS["weeks"][1]]},
+    "bundle with an unknown key": {"note": "x"},
+    "bundle without skipped": {"skipped": DROP},
     "no dir with weeks": {"state": "no dir"},
     "no snapshots with weeks": {"state": "no snapshots"},
     "ok without weeks": {"weeks": []},
@@ -823,7 +878,7 @@ MALFORMED = {
 @pytest.mark.parametrize("change", MALFORMED.values(), ids=MALFORMED)
 def test_a_malformed_bundle_keeps_the_drawn_table(tmp_path: Path, change: dict | None) -> None:
     def bad(epoch: float) -> dict:
-        body = {**served(BOTH_WEEKS, epoch + 30)["body"], **(change or {})}
+        body = {k: v for k, v in {**served(BOTH_WEEKS, epoch + 30)["body"], **(change or {})}.items() if v is not DROP}
         return {"status": 200, "body": [body] if change is None else body}
 
     out, _ = polled(tmp_path, lambda epoch: [

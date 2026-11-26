@@ -2102,10 +2102,11 @@ snapshot and redraws the table from any bundle newer than the table on the
 page. While the bundle's `generated_at_epoch` is older than the snapshot's
 (a publish still under way, or a live push that sent `status.json` alone),
 it fetches again on each later poll. When that fetch fails (a 401 when
-signed out, any other error, or a malformed bundle: anything
-`collect_weekly` could not have written) the table already on the page
-stays. If `status.json`
-cannot be fetched at all, the server-rendered page stays and reloads as
+signed out, any other error, or a malformed bundle, meaning a missing or
+unknown field, a value of a type or form `collect_weekly` never writes,
+more than `KEEP` weeks or weeks out of order, or a state that disagrees
+with its weeks or skipped count) the table already on the page stays.
+If `status.json` cannot be fetched at all, the server-rendered page stays and reloads as
 without script. Everything is inline: no external asset, font or CDN, so it
 works offline on the tailnet. The look follows Omarchy (omarchy.org): the
 Tokyo Night palette, square corners, 1px elevation rings, Geist for text

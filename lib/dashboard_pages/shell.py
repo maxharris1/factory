@@ -583,7 +583,7 @@ def _page(snapshot: dict, name: str) -> str:
             f"<title>factory mission control · {label.lower()}</title>",
             '<link rel="stylesheet" href="/app.css"></head>',
             f'<body data-page="{page}" '
-            f'data-generated="{float(snapshot["generated_at_epoch"]):.3f}" '
+            f'data-generated="{float(snapshot["generated_at_epoch"])!r}" '
             f'data-refresh="{refresh}">',
             '<a class="skip" id="skip" href="#hud">Skip to content</a>',
             _topbar(snapshot, name),
