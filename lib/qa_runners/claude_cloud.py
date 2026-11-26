@@ -105,8 +105,10 @@ _URL_SCHEME = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*)://(.*)$", re.DOTALL)
 _REMOTE_SCHEMES = frozenset({"https", "http", "ssh", "git", "git+ssh", "ssh+git"})
 
 _ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|.)", re.DOTALL)
-_VIEW_URL = re.compile(r"(?:^|\s)View:\s*(https://[^\s]+)", re.MULTILINE)
-_TELEPORT_ID = re.compile(r"claude\s+--teleport\s+([A-Za-z0-9][A-Za-z0-9._-]{0,127})")
+_VIEW_URL = re.compile(r"^[ \t]*View:[ \t]*(https://\S+)", re.MULTILINE)
+_RESUME_ID = re.compile(
+    r"^[ \t]*Resume with:[ \t]*claude[ \t]+--teleport[ \t]+([A-Za-z0-9][A-Za-z0-9._-]{0,127})", re.MULTILINE
+)
 _SESSION_FROM_URL = re.compile(r"/code/(session_[A-Za-z0-9._-]+)")
 _MACHINE_LINE = re.compile(r"(?:^|\n)Machine:\s*([A-Za-z0-9][A-Za-z0-9._-]{0,63})\b")
 _VERSION_TOKEN = re.compile(r"\b(\d+\.\d+(?:\.\d+)?(?:[-+][A-Za-z0-9._-]+)?)\b")
@@ -158,23 +160,35 @@ _OUTAGE_PATTERNS = (
         re.IGNORECASE,
     ),
     re.compile(
-        r"\b(?:connection refused|connection reset|connection timed out|could not resolve host|"
+        r"\b(?:connection refused|connection reset|connection timed out|could not resolve host(?:name)?|"
         r"getaddrinfo|fetch failed|network error|socket hang up|tls handshake|tls connection failed|"
         r"ssl handshake|ssl error|certificate has expired|x509:|request timed out|"
         r"unable to connect to (?:the )?api|check your internet connection|"
         r"failed to connect|could not connect|network is unreachable|"
-        r"temporary failure in name resolution|unable to access|"
-        r"early eof|remote end hung up unexpectedly)\b",
+        r"temporary failure in name resolution|name or service not known|"
+        r"nodename nor servname provided|no route to host|operation timed out|connection closed by|"
+        r"kex_exchange_identification|early eof|remote end hung up unexpectedly)\b",
+        re.IGNORECASE,
+    ),
+)
+_ACCESS_DENIED_PATTERNS = (
+    re.compile(r"returned error:\s*(?:401|403|404|407)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:permission denied|authentication failed|repository not found|access denied|"
+        r"could not read (?:username|password)|terminal prompts disabled|host key verification failed)\b",
         re.IGNORECASE,
     ),
 )
 _ALREADY_ENDED_PATTERNS = (
     re.compile(
         r"\b(?:session(?:\s+[A-Za-z0-9._-]+)?\s+(?:has\s+)?(?:already\s+)?(?:ended|stopped|completed|archived|expired|terminated)|"
-        r"session(?:\s+[A-Za-z0-9._-]+)?\s+(?:is\s+)?(?:not\s+running|not\s+found|no\s+longer\s+active|already\s+closed)|"
+        r"session(?:\s+[A-Za-z0-9._-]+)?\s+(?:is\s+)?(?:not\s+running|no\s+longer\s+active|already\s+closed)|"
         r"cannot\s+message\s+(?:an?\s+)?(?:ended|archived|completed|stopped)\s+session)\b",
         re.IGNORECASE,
     ),
+)
+_SESSION_NOT_FOUND_PATTERNS = (
+    re.compile(r"\bsession(?:\s+[A-Za-z0-9._-]+)?\s+(?:is\s+)?not\s+found\b", re.IGNORECASE),
 )
 
 _THREAD_LOCKS_GUARD = threading.Lock()
@@ -230,11 +244,18 @@ def _is_outage(text: str) -> bool:
     return any(pattern.search(plain) for pattern in _OUTAGE_PATTERNS)
 
 
-def _is_already_ended(text: str) -> bool:
+def _is_access_denied(text: str) -> bool:
+    plain = _strip_ansi(text)
+    return any(pattern.search(plain) for pattern in _ACCESS_DENIED_PATTERNS)
+
+
+def _is_already_ended(text: str, *, under_launch_account: bool) -> bool:
     plain = _strip_ansi(text)
     if _is_usage_limit(plain) or _is_outage(plain):
         return False
-    return any(pattern.search(plain) for pattern in _ALREADY_ENDED_PATTERNS)
+    if any(pattern.search(plain) for pattern in _ALREADY_ENDED_PATTERNS):
+        return True
+    return under_launch_account and any(pattern.search(plain) for pattern in _SESSION_NOT_FOUND_PATTERNS)
 
 
 def _classify_cli_failure(prefix: str, text: str, returncode: int) -> LaunchFailed | RunnerOutage | UsageLimit:
@@ -242,6 +263,8 @@ def _classify_cli_failure(prefix: str, text: str, returncode: int) -> LaunchFail
     detail = _sanitize_error_text(plain) or f"exit {returncode}"
     if _is_usage_limit(plain):
         return UsageLimit(f"{prefix}: {detail}")
+    if _is_access_denied(plain):
+        return LaunchFailed(f"{prefix}: {detail}")
     if _is_outage(plain):
         return RunnerOutage(f"{prefix}: {detail}")
     return LaunchFailed(f"{prefix}: {detail}")
@@ -323,6 +346,10 @@ def _write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
         except OSError:
             pass
         raise
+
+
+def _lane_record(session_record: Mapping[str, object]) -> dict[str, object]:
+    return {key: value for key, value in session_record.items() if key != "state"}
 
 
 def _parse_int_env(env: Mapping[str, str], name: str, default: int) -> int:
@@ -503,9 +530,9 @@ def parse_launch_output(output: str) -> tuple[Launched, str]:
                 return _validated_launched(sid, url), machine
 
     view_match = _VIEW_URL.search(plain)
-    teleport_match = _TELEPORT_ID.search(plain)
+    resume_match = _RESUME_ID.search(plain)
     url = view_match.group(1).rstrip(".,;)") if view_match else None
-    agent_id = teleport_match.group(1) if teleport_match else None
+    agent_id = resume_match.group(1) if resume_match else None
     if agent_id is None and url is not None:
         from_url = _SESSION_FROM_URL.search(url)
         if from_url:
@@ -523,6 +550,9 @@ def _validated_launched(agent_id: str, url: str) -> Launched:
         raise LaunchFailed(f"claude --cloud returned an unsafe session id: {agent_id!r}")
     if not url.startswith("https://") or any(ch.isspace() for ch in url):
         raise LaunchFailed("claude --cloud returned an invalid session URL")
+    from_url = _SESSION_FROM_URL.search(url)
+    if from_url and from_url.group(1) != agent_id:
+        raise LaunchFailed("claude --cloud session link and session id disagree")
     return Launched(agent_id=agent_id, url=url)
 
 
@@ -709,7 +739,7 @@ class ClaudeCloudRunner:
         if proc.returncode != 0:
             combined = "\n".join(part for part in (proc.stderr, proc.stdout) if part)
             err = _sanitize_error_text(combined) or f"exit {proc.returncode}"
-            if _is_outage(combined):
+            if not _is_access_denied(combined) and _is_outage(combined):
                 raise RunnerOutage(f"git {args[0]} failed: {err}")
             raise LaunchFailed(f"git {args[0]} failed: {err}")
         return (proc.stdout or "").strip()
@@ -744,7 +774,8 @@ class ClaudeCloudRunner:
                         else:
                             shutil.rmtree(checkout)
                     checkout.parent.mkdir(parents=True, exist_ok=True)
-                    self._git_ok("clone", "--no-hardlinks", "--no-checkout", "--", str(repo_cache), str(checkout))
+                    self._git_ok("init", "--quiet", str(checkout))
+                    self._git_ok("remote", "add", "origin", remote_url, cwd=checkout)
                 self._git_ok(
                     "fetch", "--force", str(repo_cache), f"+{temp_ref}:refs/remotes/origin/{lane.base_ref}",
                     cwd=checkout,
@@ -793,6 +824,10 @@ class ClaudeCloudRunner:
             agent_id = saved.get("agent_id")
             url = saved.get("url")
             if isinstance(agent_id, str) and isinstance(url, str) and agent_id and url:
+                session_marker = self._session_marker(agent_id)
+                config_dir = saved.get("config_dir")
+                if not session_marker.exists() and isinstance(config_dir, str) and config_dir:
+                    _write_json_atomic(session_marker, {**saved, "state": "running"})
                 return Launched(agent_id=agent_id, url=url)
         sessions_dir = self._sessions_dir()
         if sessions_dir.is_dir():
@@ -804,10 +839,7 @@ class ClaudeCloudRunner:
                 url = record.get("url")
                 if isinstance(agent_id, str) and isinstance(url, str) and agent_id and url:
                     adopted = Launched(agent_id=agent_id, url=url)
-                    _write_json_atomic(
-                        self._lane_marker(lane_id),
-                        {"agent_id": adopted.agent_id, "lane_id": lane_id, "url": adopted.url},
-                    )
+                    _write_json_atomic(self._lane_marker(lane_id), _lane_record(record))
                     return adopted
         return None
 
@@ -820,26 +852,17 @@ class ClaudeCloudRunner:
         machine: str,
         config_dir: str,
     ) -> None:
-        _write_json_atomic(
-            self._lane_marker(lane.lane_id),
-            {
-                "agent_id": launched.agent_id,
-                "lane_id": lane.lane_id,
-                "url": launched.url,
-            },
-        )
-        _write_json_atomic(
-            self._session_marker(launched.agent_id),
-            {
-                "agent_id": launched.agent_id,
-                "checkout": str(checkout),
-                "config_dir": config_dir,
-                "lane_id": lane.lane_id,
-                "machine": machine,
-                "state": "running",
-                "url": launched.url,
-            },
-        )
+        record = {
+            "agent_id": launched.agent_id,
+            "checkout": str(checkout),
+            "config_dir": config_dir,
+            "lane_id": lane.lane_id,
+            "machine": machine,
+            "state": "running",
+            "url": launched.url,
+        }
+        _write_json_atomic(self._session_marker(launched.agent_id), record)
+        _write_json_atomic(self._lane_marker(lane.lane_id), _lane_record(record))
 
     def launch(self, lane: Lane) -> Launched:
         if lane.lane_id in self._by_lane:
@@ -941,7 +964,8 @@ class ClaudeCloudRunner:
             return
 
         saved_config = saved.get("config_dir")
-        cli_env = self._cli_env(saved_config if isinstance(saved_config, str) and saved_config else None)
+        under_launch_account = isinstance(saved_config, str) and bool(saved_config)
+        cli_env = self._cli_env(saved_config if under_launch_account else None)
         checkout_raw = saved.get("checkout")
         cwd: Path | None = None
         if isinstance(checkout_raw, str) and checkout_raw:
@@ -973,14 +997,14 @@ class ClaudeCloudRunner:
                     data = None
                 if isinstance(data, dict) and data.get("ok") is False:
                     err_text = str(data.get("error") or data.get("message") or combined)
-                    if _is_already_ended(err_text):
+                    if _is_already_ended(err_text, under_launch_account=under_launch_account):
                         self._mark_ended(agent_id, saved)
                         return
                     raise _classify_cli_failure("claude stop failed", err_text, proc.returncode)
             self._mark_ended(agent_id, saved)
             return
 
-        if _is_already_ended(combined):
+        if _is_already_ended(combined, under_launch_account=under_launch_account):
             self._mark_ended(agent_id, saved)
             return
         raise _classify_cli_failure("claude stop failed", combined, proc.returncode)

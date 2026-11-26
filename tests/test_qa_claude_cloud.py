@@ -115,6 +115,10 @@ if "-p" in argv and "--cloud" in argv:
         err = mode["stop_error"]
         sys.stderr.write(err["text"] + "\\n")
         sys.exit(err.get("code", 1))
+    owner = mode.get("session_config_dir")
+    if owner and os.environ.get("CLAUDE_CONFIG_DIR") != owner:
+        sys.stderr.write(f"Error: session {{sid}} not found\\n")
+        sys.exit(1)
     if mode.get("stop_json_error"):
         print(json.dumps({{"ok": False, "error": mode["stop_json_error"]}}))
         sys.exit(0)
@@ -164,7 +168,7 @@ if "--cloud" in argv:
         print(f"\\x1b[36mView:\\x1b[0m {{url}}")
         print(f"Resume with: \\x1b[1mclaude --teleport {{sid}}\\x1b[0m")
     else:
-        print(f"Created cloud session: QA run {{n}}")
+        print("Created cloud session: " + mode.get("title", f"QA run {{n}}"))
         if mode.get("machine"):
             print(f"Machine: {{mode['machine']}}")
         print(f"View: {{url}}")
@@ -800,3 +804,220 @@ def test_qa_smoke_checks_claude_cloud_runner_and_config_dir(
     passed = {check.name: check for check in qa_smoke.run(config, "acme/widgets", "claude-cloud")}
     assert all(check.ok for check in passed.values()), passed
     assert passed["runner"].detail == "claude-cloud 2.1.323"
+
+
+class _CrashAfterRename(BaseException):
+    pass
+
+
+def _project_account(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    project_config = tmp_path / "project-claude-config"
+    project_config.mkdir(exist_ok=True)
+    return project_config, {"project": str(project_config)}
+
+
+def _stop_accounts(state_dir: Path) -> list[str | None]:
+    return [call["claude_config_dir"] for call in _calls(state_dir) if "-p" in call["argv"]]
+
+
+def test_stop_after_crash_between_marker_writes_targets_the_launch_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, _ = _source_repo(tmp_path)
+    project_config, environments = _project_account(tmp_path)
+    runner, state_dir = _runner(tmp_path, source=source, environments=environments)
+    lane = _lane("lane-crash-after-first-rename", environment="project")
+    real_replace = os.replace
+
+    def _crash_after_first_rename(src: str, dst: str) -> None:
+        real_replace(src, dst)
+        raise _CrashAfterRename
+
+    monkeypatch.setattr(os, "replace", _crash_after_first_rename)
+    with pytest.raises(_CrashAfterRename):
+        runner.launch(lane)
+    monkeypatch.setattr(os, "replace", real_replace)
+
+    (state_dir / "mode.json").write_text(json.dumps({"session_config_dir": str(project_config)}), encoding="utf-8")
+    restarted, _ = _runner(tmp_path, source=source, bin_dir=tmp_path / "bin", environments=environments)
+    adopted = restarted.launch(lane)
+    restarted.stop(adopted.agent_id)
+
+    assert adopted.agent_id == "session_01TestClaude0001"
+    assert _stop_accounts(state_dir) == [str(project_config)]
+    assert restarted.status(adopted.agent_id) == "ended"
+
+
+@pytest.mark.parametrize("lost", ["lane", "session"])
+def test_adopted_lane_stops_under_the_launch_account_whichever_marker_survived(tmp_path: Path, lost: str) -> None:
+    source, _ = _source_repo(tmp_path)
+    project_config, environments = _project_account(tmp_path)
+    runner, state_dir = _runner(tmp_path, source=source, environments=environments)
+    lane = _lane(f"lane-lost-{lost}-marker", environment="project")
+    first = runner.launch(lane)
+    lost_marker = runner._lane_marker(lane.lane_id) if lost == "lane" else runner._session_marker(first.agent_id)
+    lost_marker.unlink()
+
+    (state_dir / "mode.json").write_text(json.dumps({"session_config_dir": str(project_config)}), encoding="utf-8")
+    restarted, _ = _runner(tmp_path, source=source, bin_dir=tmp_path / "bin", environments=environments)
+    adopted = restarted.launch(lane)
+    restarted.stop(adopted.agent_id)
+
+    assert adopted == first
+    assert len([call for call in _calls(state_dir) if "-p" not in call["argv"]]) == 1
+    assert _stop_accounts(state_dir) == [str(project_config)]
+    assert restarted.status(adopted.agent_id) == "ended"
+
+
+def test_stop_with_no_recorded_account_keeps_not_found_retryable(tmp_path: Path) -> None:
+    runner, state_dir = _runner(tmp_path)
+    (state_dir / "mode.json").write_text(
+        json.dumps({"session_config_dir": str(tmp_path / "some-other-account")}), encoding="utf-8"
+    )
+
+    with pytest.raises(LaunchFailed, match="not found"):
+        runner.stop("session_01UnknownAccount")
+    assert runner.status("session_01UnknownAccount") == "running"
+
+
+def test_launch_takes_the_session_id_from_link_and_resume_line_not_the_title(tmp_path: Path) -> None:
+    runner, state_dir = _runner(tmp_path)
+    (state_dir / "mode.json").write_text(
+        json.dumps({"title": "Fix claude --teleport retry behavior"}), encoding="utf-8"
+    )
+
+    launched = runner.launch(_lane())
+    runner.stop(launched.agent_id)
+
+    assert launched.agent_id == "session_01TestClaude0001"
+    assert launched.url == "https://claude.ai/code/session_01TestClaude0001?from=cli&m=0"
+    assert [call["argv"][3] for call in _calls(state_dir) if "-p" in call["argv"]] == ["session_01TestClaude0001"]
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "Created cloud session: see View: https://claude.ai/code/session_title\n"
+        "View: https://claude.ai/code/session_real?from=cli&m=0\n"
+        "Resume with: claude --teleport session_real\n",
+        "Created cloud session: try Resume with: claude --teleport session_title\n"
+        "View: https://claude.ai/code/session_real?from=cli&m=0\n"
+        "Resume with: claude --teleport session_real\n",
+    ],
+)
+def test_parse_launch_output_ignores_session_lookalikes_in_the_title(output: str) -> None:
+    launched, _ = parse_launch_output(output)
+    assert launched == qa_runners.Launched(
+        agent_id="session_real", url="https://claude.ai/code/session_real?from=cli&m=0"
+    )
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "Created cloud session: QA\n"
+        "View: https://claude.ai/code/session_one?from=cli&m=0\n"
+        "Resume with: claude --teleport session_two\n",
+        json.dumps({"session_id": "session_two", "url": "https://claude.ai/code/session_one?from=cli&m=0"}),
+    ],
+)
+def test_parse_launch_output_refuses_a_link_and_id_that_disagree(output: str) -> None:
+    with pytest.raises(LaunchFailed, match="disagree"):
+        parse_launch_output(output)
+
+
+@pytest.mark.parametrize(
+    "ssh_error",
+    [
+        "ssh: Could not resolve hostname repo.invalid: Name or service not known",
+        "ssh: Could not resolve hostname repo.invalid: nodename nor servname provided, or not known",
+        "ssh: connect to host repo.invalid port 22: Operation timed out",
+        "ssh: connect to host repo.invalid port 22: No route to host",
+        "kex_exchange_identification: Connection closed by remote host",
+    ],
+)
+def test_git_ssh_network_failure_raises_runner_outage_and_falls_back(tmp_path: Path, ssh_error: str) -> None:
+    fake_ssh = tmp_path / "fake-ssh"
+    fake_ssh.write_text(f"#!/bin/sh\necho {json.dumps(ssh_error)} >&2\necho 'fatal: Could not read from remote repository.' >&2\nexit 255\n")
+    fake_ssh.chmod(0o755)
+    runner, _ = _runner(
+        tmp_path / "runner",
+        repo_url_template="ssh://git@repo.invalid/{repo}.git",
+        environments={"full-stack": "ccpool_full_stack"},
+        extra_env={"GIT_SSH_COMMAND": str(fake_ssh)},
+    )
+    with pytest.raises(RunnerOutage):
+        runner.launch(_lane(environment="full-stack"))
+
+    lab = Lab(tmp_path / "lab", lanes=1, runners=("claude-cloud", "cursor-cloud"))
+    lab.fakes["claude-cloud"] = runner
+    lab.worker = lab.new_worker()
+    lab.enqueue(ids=1)
+    lab.tick(3)
+    assert lab.header()["runner"] == "cursor-cloud"
+    assert lab.header()["result"] == "PASS"
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+def test_git_http_access_denial_is_launch_failed_without_runner_backoff(tmp_path: Path, status: int) -> None:
+    class _Deny(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(status)
+            self.end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Deny)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        runner, _ = _runner(
+            tmp_path / "runner",
+            repo_url_template=f"http://127.0.0.1:{server.server_address[1]}/{{repo}}.git",
+            environments={"full-stack": "ccpool_full_stack"},
+            extra_env={"GIT_TERMINAL_PROMPT": "0"},
+        )
+        with pytest.raises(LaunchFailed):
+            runner.launch(_lane(environment="full-stack"))
+
+        lab = Lab(tmp_path / "lab", lanes=1, runners=("claude-cloud",))
+        lab.fakes["claude-cloud"] = runner
+        lab.worker = lab.new_worker()
+        lab.enqueue(ids=1)
+        lab.tick(3)
+        assert lab.run.rows("SELECT runner FROM qa_runner_backoff") == []
+        assert [row[3:5] for row in lab.lanes()] == [("gap", "launch-failed:LaunchFailed")]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_git_ssh_permission_denied_is_launch_failed(tmp_path: Path) -> None:
+    fake_ssh = tmp_path / "fake-ssh"
+    fake_ssh.write_text(
+        "#!/bin/sh\necho 'git@repo.invalid: Permission denied (publickey).' >&2\n"
+        "echo 'fatal: Could not read from remote repository.' >&2\nexit 255\n"
+    )
+    fake_ssh.chmod(0o755)
+    runner, _ = _runner(
+        tmp_path / "runner",
+        repo_url_template="ssh://git@repo.invalid/{repo}.git",
+        environments={"full-stack": "ccpool_full_stack"},
+        extra_env={"GIT_SSH_COMMAND": str(fake_ssh)},
+    )
+    with pytest.raises(LaunchFailed):
+        runner.launch(_lane(environment="full-stack"))
+
+
+@pytest.mark.parametrize(("old", "new"), [("release", "release/current"), ("release/current", "release")])
+def test_launch_works_on_a_base_branch_renamed_upstream(tmp_path: Path, old: str, new: str) -> None:
+    source, _ = _source_repo(tmp_path, branch=old)
+    runner, state_dir = _runner(tmp_path, source=source)
+    runner.launch(_lane("lane-before-rename", base_ref=old))
+    _git("branch", "-m", old, new, cwd=source)
+
+    runner.launch(_lane("lane-after-rename", base_ref=new))
+
+    assert _calls(state_dir)[-1]["branch"] == new
+    assert _calls(state_dir)[-1]["head"] == _git("rev-parse", new, cwd=source)
