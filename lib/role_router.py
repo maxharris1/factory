@@ -25,6 +25,7 @@ from typing import Literal
 
 import yaml
 
+from lib import harnesses
 from lib.factory_md import FactoryConfig, resolved_family
 from lib.load import Finding, load_yaml
 from lib.pstack_pin import ROOT
@@ -511,15 +512,6 @@ def resolve_pair(
     return builder, reviewer
 
 
-HARNESS_BINARIES: Mapping[str, frozenset[str]] = MappingProxyType(
-    {
-        "claude": frozenset({"claude"}),
-        "codex": frozenset({"codex"}),
-        "cursor": frozenset({"cursor-agent"}),
-        "gemini": frozenset({"gemini"}),
-    }
-)
-
 _CODEX_EFFORT_KEY = "model_reasoning_effort"
 
 
@@ -540,9 +532,13 @@ def _without_option(
     return [*kept, *argv[end:]]
 
 
+# Options whose value is the prompt, so `<option> -` stays one pair (agy's
+# -p/--print/--prompt each take the prompt as their value).
 _PROMPT_OPTIONS: Mapping[str, frozenset[str]] = MappingProxyType(
-    {"gemini": frozenset({"-p", "--prompt"})}
+    {"gemini": frozenset({"-p", "--print", "--prompt"})}
 )
+# Harnesses whose CLI takes `--effort <level>` (agy's levels are EFFORTS).
+_EFFORT_OPTION_HARNESSES = frozenset({"claude", "gemini"})
 
 
 def _insert_index(argv: Sequence[str], harness: str) -> int:
@@ -581,7 +577,7 @@ def apply_argv_flags(
     if effort is not None:
         if not isinstance(effort, str) or effort not in EFFORTS:
             raise RoutingError(f"invalid effort level {effort!r}")
-        if harness == "claude":
+        if harness in _EFFORT_OPTION_HARNESSES:
             argv = _without_option(argv, ("--effort",))
             extra.extend(["--effort", effort])
         elif harness == "codex":
@@ -601,12 +597,13 @@ def routing_argv_for_detail(
 ) -> list[str]:
     """Apply validated routing model/effort from a queued job's detail JSON, if present.
 
-    Only modifies argv when `command` is a recognized CLI invocation for
-    `harness` (never injecting flags into arbitrary shell or test wrappers).
+    Only modifies argv when `command` runs the binary `harness`'s driver
+    runs (never injecting flags into arbitrary shell or test wrappers).
     """
     if not detail or not command:
         return list(command)
-    if Path(command[0]).name not in HARNESS_BINARIES.get(harness, frozenset()):
+    driver = harnesses.find(harness)
+    if driver is None or not driver.matches_binary(Path(command[0]).name):
         return list(command)
     try:
         parsed = json.loads(detail)
