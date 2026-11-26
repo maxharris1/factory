@@ -930,7 +930,7 @@ def test_ci_status_names_the_checks_still_running() -> None:
 
 def concluded_run(status: str, conclusion: str | None) -> GhResult:
     page = json.loads((FIXTURES / "check-runs-in-progress-concluded.json").read_text())
-    page["check_runs"][0].update(status=status, conclusion=conclusion)
+    page["check_runs"][0].update(status=status, conclusion=conclusion, check_suite={"id": 77})
     return GhResult(0, json.dumps(page), "")
 
 

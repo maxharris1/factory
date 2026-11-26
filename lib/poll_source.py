@@ -2266,7 +2266,7 @@ class LivePollSource:
 
     def _with_run_created(self, repo: str, ci: CIResult) -> CIResult:
         def created(row: CheckRow) -> CheckRow:
-            if row.run_id is None:
+            if row.run_id is None or not row.gates:
                 return row
             key = (repo.lower(), row.run_id)
             if key not in self._run_created:

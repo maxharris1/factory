@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from lib.dispatch.ci_board import record
 from lib.dispatch.types import ci_required
 from lib.github_actions import GhResult
 from lib.poll_source import LivePollSource
@@ -18,6 +20,7 @@ from tests.test_github_actions import (
     adapter,
     served,
 )
+from tests.test_ci_board import Board
 from tests.test_live_poll import FACTORY, FakeGh, config
 
 
@@ -59,8 +62,14 @@ def wf_run(
     created_at: str | None = None,
     *,
     workflow_id: int | None = None,
+    run_number: int | None = None,
 ) -> dict[str, Any]:
-    item: dict[str, Any] = {"id": run_id, "event": event}
+    item: dict[str, Any] = {
+        "id": run_id,
+        "event": event,
+        "check_suite_id": 900 + run_id,
+        "run_number": run_id if run_number is None else run_number,
+    }
     if path is not None:
         item["path"] = path
     if workflow_id is not None:
@@ -122,11 +131,12 @@ def test_cleffy_166_replay_passes_with_or_without_required_checks(
     assert result.status == "success"
     assert result.failed == ()
     assert ci_required(result, required).status == "success"
-    if "probe" in required:
-        probe_rows = [row for row in result.checks if row.name == "probe"]
-        assert [(row.run_id, row.conclusion) for row in probe_rows] == [("45529418050", "success")]
-    else:
-        assert all(row.name != "probe" for row in result.checks)
+    probe_rows = [row for row in result.checks if row.name == "probe"]
+    assert [(row.run_id, row.conclusion) for row in probe_rows] == [
+        ("45527270121", "failure"),
+        ("45527318860", "failure"),
+        ("45529418050", "success"),
+    ]
 
 
 @pytest.mark.parametrize("event", ["workflow_dispatch", "schedule"])
@@ -545,3 +555,88 @@ def test_last_read_cache_invalidates_when_required_checks_change() -> None:
     second = source._github_ticket(project, second_factory, "12", probed="fp-1")
     assert second.ci[gh.head].status == "failure"
     assert [c.name for c in second.ci[gh.head].failed] == ["probe"]
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "expected"),
+    [("failure", "success", "success"), ("success", "failure", "failure")],
+    ids=["later-run-passes", "later-run-fails"],
+)
+def test_later_workflow_run_supersedes_by_run_order_not_job_start_time(
+    first: str, second: str, expected: str
+) -> None:
+    actions, gh = adapter()
+    gh.route(
+        CHECKS,
+        checks_page(
+            check_run(10, "probe", first, "2026-11-25T01:40:20Z", 41),
+            check_run(20, "probe", second, "2026-11-25T01:40:05Z", 42),
+        ),
+    )
+    gh.route(STATUS, served("status-empty.json"))
+    gh.route(
+        WORKFLOW_RUNS,
+        wf_runs_page(
+            wf_run(41, "workflow_dispatch", ".github/workflows/uptime.yml", "2026-11-25T01:40:00Z"),
+            wf_run(42, "workflow_dispatch", ".github/workflows/uptime.yml", "2026-11-25T01:40:00Z"),
+        ),
+    )
+
+    result = ci_required(actions.ci_status("owner/repo", HEAD, required_checks=("probe",)), ("probe",))
+
+    assert result.status == expected
+
+
+def test_check_from_another_app_is_not_discarded_as_the_dispatch_run_it_links_to() -> None:
+    probe = check_run(20, "probe", "failure", "2026-11-25T01:40:00Z", 200)
+    report = {
+        **check_run(30, "quality-report", "failure", "2026-11-25T01:41:00Z", 200),
+        "app": {"slug": "quality-bot", "id": 777},
+        "check_suite": {"id": 5555},
+    }
+    actions, gh = adapter()
+    gh.route(
+        CHECKS,
+        checks_page(check_run(10, "test", "success", "2026-11-25T01:39:00Z", 100), probe, report),
+    )
+    gh.route(STATUS, served("status-empty.json"))
+    gh.route(
+        WORKFLOW_RUNS,
+        wf_runs_page(
+            wf_run(100, "pull_request", ".github/workflows/ci.yml", "2026-11-25T01:38:00Z"),
+            wf_run(200, "workflow_dispatch", ".github/workflows/uptime.yml", "2026-11-25T01:39:55Z"),
+        ),
+    )
+
+    result = actions.ci_status("owner/repo", HEAD)
+
+    assert result.status == "failure"
+    assert [check.name for check in result.failed] == ["quality-report"]
+
+
+def test_board_stops_showing_a_non_pr_probe_running_once_it_completes(tmp_path: Path) -> None:
+    queue = Board(tmp_path).queue
+    with queue.connect() as connection:
+        connection.execute("INSERT INTO tracked_tickets VALUES ('acme/widgets', '12', 'github', 0)")
+    workflows = [
+        wf_run(100, "pull_request", ".github/workflows/ci.yml", "2026-11-25T01:37:55Z"),
+        wf_run(200, "workflow_dispatch", ".github/workflows/uptime.yml", "2026-11-25T01:39:55Z"),
+    ]
+    green = check_run(10, "ci-ok", "success", "2026-11-25T01:38:00Z", 100)
+    plain = FACTORY.format(tickets="github", ship="merge")
+
+    def poll(probe: dict[str, Any], now: float) -> str:
+        gh = _DispatchPollGh(plain, [green, probe], workflows)
+        [ticket] = LivePollSource(config(), gh_runner=gh).github_candidates("orch:state/")
+        record(queue.connect, [ticket], now, run_jobs=None, job_log=None, log=None)
+        return ticket.ci[gh.head].status
+
+    poll(check_run(20, "probe", None, "2026-11-25T01:40:00Z", 200), 1000.0)
+    gate = poll(check_run(20, "probe", "failure", "2026-11-25T01:40:00Z", 200), 1060.0)
+
+    with queue.connect() as connection:
+        probe_row = connection.execute(
+            "SELECT status, conclusion FROM ci_jobs WHERE check_name = 'probe'"
+        ).fetchone()
+    assert gate == "success"
+    assert tuple(probe_row) == ("completed", "failure")

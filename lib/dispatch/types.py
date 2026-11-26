@@ -147,6 +147,7 @@ class CheckRow:
     job_id: str | None = None
     workflow: str = ""
     run_created_at: float | None = None
+    gates: bool = True
 
 
 @dataclass(frozen=True)
@@ -187,6 +188,10 @@ class CIResult:
     def __post_init__(self) -> None:
         if self.status not in CI_STATUSES:
             raise ValueError(f"unknown CI status {self.status!r}")
+
+    @property
+    def gate_checks(self) -> tuple[CheckRow, ...]:
+        return tuple(row for row in self.checks if row.gates)
 
     @property
     def clears(self) -> bool:
@@ -230,9 +235,9 @@ def _required_verdict(glob: str, checks: tuple[CheckRow, ...]) -> _RequiredVerdi
 
 
 def ci_required(result: CIResult, required: tuple[str, ...]) -> CIResult:
-    if not required or not result.reported or (result.status == "pending" and not result.checks):
+    if not required or not result.reported or (result.status == "pending" and not result.gate_checks):
         return result
-    verdicts = [_required_verdict(glob, result.checks) for glob in required]
+    verdicts = [_required_verdict(glob, result.gate_checks) for glob in required]
     failed_names = tuple(dict.fromkeys(name for verdict in verdicts for name in verdict.failed))
     if failed_names:
         gate = tuple(check for check in result.failed if check.name in failed_names)
@@ -276,8 +281,8 @@ def _gate_units(
 ) -> list[tuple[str, list[CheckRow]]]:
     globs = change.globs or required
     if globs:
-        return [(glob, [row for row in result.checks if fnmatchcase(row.name, glob)]) for glob in globs]
-    units = _named_units(result.checks) + _named_units(result.statuses)
+        return [(glob, [row for row in result.gate_checks if fnmatchcase(row.name, glob)]) for glob in globs]
+    units = _named_units(result.gate_checks) + _named_units(result.statuses)
     return units or [("CI", [])]
 
 
@@ -318,18 +323,18 @@ def _unreported(result: CIResult, changes: tuple[CIChange, ...]) -> tuple[CIChan
         if f"{change.globs[0]} (not reported)" in result.pending
         and all(
             row.conclusion is not None and (row.started_at or 0) <= change.at
-            for row in result.checks
+            for row in result.gate_checks
         )
     )
     names = {f"{change.globs[0]} (not reported)" for change in missing}
-    return missing if result.checks and set(result.pending) <= names else ()
+    return missing if result.gate_checks and set(result.pending) <= names else ()
 
 
 def _before_retarget(result: CIResult, changes: tuple[CIChange, ...]) -> CIResult:
     cuts = [change for change in changes if change.kind == "retarget"]
     if result.status != "failure" or not cuts:
         return result
-    runs = {row.run_id: row for row in result.checks if row.run_id is not None}
+    runs = {row.run_id: row for row in result.gate_checks if row.run_id is not None}
 
     def stale(check: FailedCheck) -> bool:
         row = runs.get(check.run_id) if check.run_id is not None else None
