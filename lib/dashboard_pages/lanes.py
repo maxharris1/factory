@@ -10,7 +10,7 @@ import math
 from lib.dashboard_pages.activity import _health_link
 from lib.dashboard_pages.common import (
     _JOB_STATE, _bot, _chip, duration, _e, github_links, _job_label, _panel,
-    _short, _span, _ticket, _tile_label, _when, ticket_page_href,
+    model_effort, _short, _span, _ticket, _tile_label, _when, ticket_page_href,
 )
 from lib.dashboard_static import read_asset
 
@@ -174,9 +174,11 @@ def _slot(row: dict, seed: int = 1) -> str:
     name = px_state(row)
     spec = TILE_STATE.get(name, TILE_STATE["unknown"])
     who = row["recipient"] if row["recipient"] in ("claude", "codex", "cursor", "grok") else "other"
+    model = model_effort(row["exposure"])
     title = (
         f"{_ticket(row, full=True)} · {row['action']}"
         + (f" · round {row['round']}" if row.get("round") else "")
+        + (f" · {model}" if model else "")
         + f" (job {row['job']})"
     )
     badge = _JOB_STATE.get(str(row.get("stale_cause"))) or (
@@ -208,6 +210,7 @@ def _slot(row: dict, seed: int = 1) -> str:
         )
     line3 = (
         ("" if name == "unknown" else _span("action", row["action"])) + pips
+        + (_span("model", model) if model else "")
         + f'<span class="t">T+ <b>{duration(row["elapsed_seconds"])}</b></span>'
     )
     hb = spec["hb"]

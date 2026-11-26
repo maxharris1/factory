@@ -209,6 +209,57 @@ def test_the_page_script_draws_the_same_line_one(tmp_path: Path) -> None:
     _assert_label_tiles(_run_page(tmp_path, snapshot, "main", BAR + ["hud", "lanes"])["html"]["lanes"])
 
 
+def _model_tiles(tmp_path: Path) -> dict:
+    snapshot = _tiles(tmp_path)
+    template = snapshot["running"][0]
+    assert set(template["exposure"].values()) == {"unknown"}
+    snapshot["running"] = [
+        _row(template, "build", job="t-full", exposure=dict(template["exposure"], model="claude-opus-5-5",
+                                                             effort="medium")),
+        _row(template, "build", job="t-model", exposure=dict(template["exposure"], model="claude-opus-5-5")),
+        _row(template, "build", job="t-none"),
+    ]
+    return snapshot
+
+
+def _assert_model_tiles(html: str) -> None:
+    full, model, none = (_job_tile(html, job) for job in ("t-full", "t-model", "t-none"))
+    assert _children(_line(full, 3)) == [
+        "span.action=build", "span.round=", "span.model=claude-opus-5-5 · medium", "span.t=T+ "
+    ]
+    assert "· round 2/3 · claude-opus-5-5 · medium (job t-full)\"" in full
+    assert _children(_line(model, 3)) == ["span.action=build", "span.round=", "span.model=claude-opus-5-5", "span.t=T+ "]
+    assert "· round 2/3 · claude-opus-5-5 (job t-model)\"" in model
+    assert _children(_line(none, 3)) == ["span.action=build", "span.round=", "span.t=T+ "]
+    assert 'class="model"' not in none and "· round 2/3 (job t-none)\"" in none
+    for tile in (full, model, none):
+        assert [c.split("=")[0] for c in _children(_line(tile, 1))] == ["span.bot claude", "span.ticket"]
+        assert 'class="verb live"' in _line(tile, 2) and 'class="hbt"' in _line(tile, 4)
+
+
+def test_a_running_tile_shows_its_model_and_effort(tmp_path: Path) -> None:
+    _assert_model_tiles(_no_script(render_pages(_model_tiles(tmp_path))["index.html"]))
+
+
+@needs_node
+def test_the_page_script_draws_the_same_model_and_effort(tmp_path: Path) -> None:
+    snapshot = _model_tiles(tmp_path)
+    _assert_model_tiles(_run_page(tmp_path, snapshot, "main", BAR + ["hud", "lanes"])["html"]["lanes"])
+
+
+def test_a_tile_with_no_exposure_row_still_renders_its_lines(tmp_path: Path) -> None:
+    snapshot = _base(tmp_path)
+    row = snapshot["running"][0]
+    assert row["exposure"]["model"] == "unknown" and row["exposure"]["effort"] == "unknown"
+    renders = [_no_script(render_pages(snapshot)["index.html"])]
+    if NODE:
+        renders.append(_run_page(tmp_path, snapshot, "main", BAR + ["hud", "lanes"])["html"]["lanes"])
+    for html in renders:
+        tile = _job_tile(html, row["job"])
+        assert 'class="model"' not in tile
+        assert [_line(tile, n) for n in (1, 2, 3, 4)] and '<span class="t">T+ <b>' in _line(tile, 3)
+
+
 @pytest.mark.parametrize("name", ["clarify", "update-from-main"])
 def test_clarify_and_update_from_main_draw_like_plan_and_fix(tmp_path: Path, name: str) -> None:
     verbs = {"clarify": ["Clarifying", "Untangling", "Answering"],
