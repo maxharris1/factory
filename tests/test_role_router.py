@@ -84,6 +84,9 @@ def test_role_slot_selection_across_ticket_types() -> None:
     assert (orch.harness, orch.family) == ("claude", "anthropic")
     assert (qa.harness, qa.effort) == ("claude", "medium")
 
+    rev = resolve_slot("review", routing=cfg, built_by=("claude", "claude-opus-4-6"))
+    assert (rev.harness, rev.model, rev.effort) == ("codex", "gpt-6.2-sol", "high")
+
 
 @pytest.mark.parametrize(
     ("built_by", "excluded_family", "expected_harness", "expected_family"),
@@ -137,6 +140,7 @@ def test_budget_ladder_overrides_and_effort_clamping() -> None:
 
     unlim_rev = resolve_slot("review", routing=cfg, budget="unlimited", built_by=("claude", "claude-opus-4-6"))
     assert unlim_rev.effort == "xhigh"
+    assert unlim_rev.model == "gpt-6.2-sol"
 
     small_build = resolve_slot("build", routing=cfg, budget="small")
     assert small_build.model == "claude-sonnet-5-5"

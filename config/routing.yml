@@ -96,7 +96,7 @@ roles:
 
   review:
     - harness: codex
-      model: gpt-6.2-astra
+      model: gpt-6.2-sol
       effort: high
     - harness: claude
       model: claude-opus-5-5
@@ -170,7 +170,7 @@ budget_overrides:
         effort: xhigh
     review:
       - harness: codex
-        model: gpt-6.2-astra
+        model: gpt-6.2-sol
         effort: xhigh
       - harness: claude
         model: claude-opus-5-5
