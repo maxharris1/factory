@@ -264,6 +264,7 @@ class _Selected:
     profile: str | None = None
     cd: str | None = None
     profile_overridden: bool = False
+    opaque: bool = False
 
 
 def _selected(args: Sequence[str], harness: str | None) -> _Selected:
@@ -308,23 +309,27 @@ def _selected(args: Sequence[str], harness: str | None) -> _Selected:
             # `profile` and `[profiles.<name>]` select a model only in some codex versions.
             overridden = overridden or key == "profile" or key.startswith("profiles.")
     inline = _inline_settings(settings)
-    model, chosen_effort = inline.get("model"), inline.get("effortLevel")
+    named = inline or {}
+    model, chosen_effort = named.get("model"), named.get("effortLevel")
     return _Selected(
         flag or config or (model if isinstance(model, str) else None),
         effort or config_effort or (chosen_effort if isinstance(chosen_effort, str) else None),
         profile,
         cd,
         overridden,
+        inline is None,
     )
 
 
-def _inline_settings(value: str | None) -> dict:
+def _inline_settings(value: str | None) -> dict | None:
     """Claude's `--settings` takes inline JSON or a file path; a file is not read."""
-    try:
-        parsed = json.loads(value) if value is not None else None
-    except ValueError:
+    if value is None:
         return {}
-    return parsed if isinstance(parsed, dict) else {}
+    try:
+        parsed = json.loads(value)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 _PROFILE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*")
@@ -509,9 +514,11 @@ def chosen(argv: Sequence[str], harness: str | None, shell: Shell, launch_dir: s
     return _chosen(command, selected, _probe(shell, launch_dir, configs_of=selected if wanted else None))
 
 
-def parsed(argv: Sequence[str], harness: str | None) -> Chosen:
-    """The model and effort `argv` itself names. Reads no file and runs nothing."""
+def parsed(argv: Sequence[str], harness: str | None) -> Chosen | None:
+    """The model and effort `argv` itself names, None when `argv` cannot be interpreted. Reads no file and runs nothing."""
     command, selected, _ = _parsed_command(argv, harness)
+    if command is None or selected.opaque:
+        return None
     return _chosen(command, selected, _Probed())
 
 

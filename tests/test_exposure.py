@@ -442,11 +442,15 @@ def test_an_env_wrapper_that_moves_the_codex_config_makes_the_config_unknown(
         (["codex", "exec", "-c", "model_reasoning_effort=high"], "codex", exposure.Chosen(exposure.UNKNOWN, "high")),
         (["claude", "-p", "--model", "x"], "claude", exposure.Chosen("x", exposure.UNKNOWN)),
         (["env", "-i", "claude", "-p", "--model", "x"], "claude", exposure.Chosen("x", exposure.UNKNOWN)),
-        (["env", "-S", "claude -p", "--model", "x"], "claude", exposure.Chosen(exposure.UNKNOWN, exposure.UNKNOWN)),
+        (["env", "-S", "claude -p", "--model", "x"], "claude", None),
+        (["claude", "-p", "--settings", "/etc/claude.json", "--model", "x"], "claude", None),
+        (["claude", "-p", "--settings", '{"effortLevel": "low"}'], "claude", exposure.Chosen(exposure.UNKNOWN, "low")),
         (["codex", "exec"], "codex", exposure.Chosen(exposure.UNKNOWN, exposure.UNKNOWN)),
     ],
 )
-def test_parsed_counts_only_what_the_argv_names(argv: list[str], harness: str, expected: exposure.Chosen) -> None:
+def test_parsed_counts_only_what_the_argv_names(
+    argv: list[str], harness: str, expected: exposure.Chosen | None
+) -> None:
     assert exposure.parsed(argv, harness) == expected
 
 

@@ -310,6 +310,33 @@ def _central_entry(
 
 Waiters = Mapping[str, Sequence[str] | None]
 
+ORCHESTRATOR_BOT = "orchestrator"
+WAITER_ORDER: tuple[str, ...] = (*WAITER_BOTS.values(), ORCHESTRATOR_BOT)
+_BOT_HARNESS: Mapping[str, str] = MappingProxyType({bot: harness for harness, bot in WAITER_BOTS.items()})
+
+DISPATCHER = "dispatcher"
+ORCHESTRATOR_WAITER = f"waiter-{ORCHESTRATOR_BOT}.yml"
+FACTORY_MD = "factory.md"
+LAUNCHERS: Mapping[str, str | None] = MappingProxyType({
+    "orchestrate": ORCHESTRATOR_WAITER,
+    "plan": DISPATCHER,
+    "build": DISPATCHER,
+    "build:feature": DISPATCHER,
+    "build:bug": DISPATCHER,
+    "build:refactor": DISPATCHER,
+    "build:perf": DISPATCHER,
+    "review": DISPATCHER,
+    "qa": FACTORY_MD,
+    "helper:deep": None,
+    "helper:standard": None,
+    "helper:fast": None,
+    "helper:panel": None,
+})
+_UNKNOWN_RUNS: Mapping[str, str | None] = MappingProxyType(
+    {"model": None, "model_source": "unknown", "effort": None, "effort_source": "unknown"})
+_QA_RUNS: Mapping[str, str | None] = MappingProxyType(
+    {"model": None, "model_source": FACTORY_MD, "effort": None, "effort_source": "runner default"})
+
 
 def _sourced(value: str, reached: str | None, waiter: str) -> tuple[str | None, str]:
     if value == exposure.UNKNOWN:
@@ -322,13 +349,30 @@ def _fields(found: dict[str, tuple[str | None, str]]) -> dict:
             for key, item in ((field, value), (f"{field}_source", source))}
 
 
+def _waiter_harness(bot: str, argv: Sequence[str]) -> str | None:
+    if bot in _BOT_HARNESS:
+        return _BOT_HARNESS[bot]
+    names = {Path(word).name for word in argv}
+    return next((harness for harness in KNOWN_HARNESSES if HARNESS_BINARIES[harness] & names), None)
+
+
+def _pinned(bot: str, argv: Sequence[str] | None) -> exposure.Chosen | None:
+    return None if argv is None else exposure.parsed(argv, _waiter_harness(bot, argv))
+
+
+def _own(pinned: exposure.Chosen | None, source: str) -> dict:
+    if pinned is None:
+        return dict(_UNKNOWN_RUNS)
+    return _fields({field: _sourced(getattr(pinned, field), None, source) for field in ("model", "effort")})
+
+
 def _effective(harness: str, model: str | None, effort: str | None, waiter: Sequence[str] | None) -> dict:
+    pinned = None if waiter is None else exposure.parsed(waiter, harness)
+    if pinned is None:
+        applied = None if waiter is None else routing_reaches(waiter, harness)
+        return {**_UNKNOWN_RUNS, "replaced": {}, "applied": applied}
     routed = {"model": model, "effort": effort if harness in EFFORT_FLAG_HARNESSES else None}
-    if waiter is None:
-        found = {field: (value, "unknown" if value is None else "routing.yml") for field, value in routed.items()}
-        return {**_fields(found), "replaced": {}, "applied": True}
     applied = routing_reaches(waiter, harness)
-    pinned = exposure.parsed(waiter, harness)
     runs = exposure.parsed(launched_argv(waiter, harness=harness, model=model, effort=effort), harness)
     source = f"waiter-{WAITER_BOTS[harness]}.yml"
     reached = routed if applied else {"model": None, "effort": None}
@@ -338,56 +382,67 @@ def _effective(harness: str, model: str | None, effort: str | None, waiter: Sequ
     return {**_fields(found), "replaced": replaced, "applied": applied}
 
 
-def _fallback(waiters: Waiters) -> list[dict]:
-    rows = []
-    for harness in KNOWN_HARNESSES:
-        waiter = waiters.get(harness)
-        if waiter is not None:
-            pinned = exposure.parsed(waiter, harness)
-            source = f"waiter-{WAITER_BOTS[harness]}.yml"
-            rows.append({"harness": harness, **_fields(
-                {field: _sourced(getattr(pinned, field), None, source) for field in ("model", "effort")})})
-    return rows
+def _status(argv: Sequence[str] | None, pinned: exposure.Chosen | None) -> str:
+    if argv is None:
+        return "missing"
+    return "opaque" if pinned is None else "ok"
+
+
+def _candidate(rank: int, cand: Candidate, effort: str | None) -> dict:
+    return {"rank": rank, "harness": cand.harness, "model": cand.model,
+            "family": family_for(cand.harness, cand.model)[0], "effort": effort, "configured": cand.effort}
+
+
+def _role_row(config: RoutingConfig, role: str, waiters: Waiters, pinned: Mapping[str, exposure.Chosen | None]) -> dict:
+    entry, source = _central_entry(config, role, config.budget)
+    launch = LAUNCHERS[role]
+    pool = () if entry is None or entry == "inherit" else entry
+    candidates = [_candidate(rank, cand, _clamp_effort(cand.effort, config.budget) if source == "roles" else cand.effort)
+                  for rank, cand in enumerate(pool, 1)]
+    row = {"role": role, "source": "unset" if entry is None else "inherit" if entry == "inherit" else source,
+           "launch": launch, "candidates": candidates}
+    if launch == DISPATCHER:
+        for cand in candidates:
+            waiter = waiters.get(WAITER_BOTS[cand["harness"]])
+            cand["effective"] = _effective(cand["harness"], cand["model"], cand["effort"], waiter)
+    elif launch == ORCHESTRATOR_WAITER:
+        row["runs"] = _own(pinned.get(ORCHESTRATOR_BOT), ORCHESTRATOR_WAITER)
+    elif launch == FACTORY_MD:
+        row["runs"] = dict(_QA_RUNS)
+    return row
+
+
+def _plan_on_builder(plan: dict, build: dict) -> None:
+    builder = build["candidates"][0]["harness"] if build["candidates"] else None
+    for cand in plan["candidates"]:
+        cand["on_builder"] = None if builder is None else cand["harness"] == builder
+    plan["builder"] = builder
+    plans = any(cand["on_builder"] for cand in plan["candidates"])
+    plan["plans"] = None if builder is None else "plan" if plans else "build"
 
 
 def role_matrix(path: Path = ROOT / ROUTING_PATH, waiters: Waiters | None = None) -> dict:
-    """Each role's candidates, and what a new job in it runs once its harness's waiter argv is applied.
+    """Each role's candidates, and what a new job in it runs given the launcher that starts it (`LAUNCHERS`).
 
-    `waiters` maps a harness to its waiter argv, or None when the waiter config is missing or unreadable;
-    None for the whole map means no waiter was looked at. No argv beyond the parsed model and effort
-    reaches the result.
+    `waiters` maps a bot (`WAITER_ORDER`) to its waiter argv, or None when the waiter config is missing or
+    unreadable; None for the whole map means no waiter was looked at. A value an unread or uninterpretable
+    waiter decides is unknown. No argv beyond the parsed model and effort reaches the result.
     """
     known = waiters or {}
-    status = {harness: "missing" if argv is None else "ok" for harness, argv in known.items()}
+    pinned = {bot: _pinned(bot, argv) for bot, argv in known.items()}
+    status = {bot: _status(known[bot], pinned[bot]) for bot in WAITER_ORDER if bot in known}
     if not path.is_file():
         return {"state": "missing", "roles": [], "waiters": status}
     config, findings = parse_routing_yml(path.read_text(encoding="utf-8"))
     if config is None:
         errors = [f.message for f in findings if f.severity == "error"]
         return {"state": "invalid", "errors": errors, "roles": [], "waiters": status}
-    budget = config.budget
-    rows = []
-    for role in ROLE_SLOTS:
-        entry, source = _central_entry(config, role, budget)
-        if entry is None or entry == "inherit":
-            rows.append({"role": role, "source": "unset" if entry is None else "inherit", "candidates": [],
-                         "fallback": _fallback(known)})
-            continue
-        candidates = []
-        for rank, cand in enumerate(entry, 1):
-            effort = _clamp_effort(cand.effort, budget) if source == "roles" else cand.effort
-            candidates.append({
-                "rank": rank,
-                "harness": cand.harness,
-                "model": cand.model,
-                "family": family_for(cand.harness, cand.model)[0],
-                "effort": effort,
-                "configured": cand.effort,
-                "effective": _effective(cand.harness, cand.model, effort, known.get(cand.harness)),
-            })
-        rows.append({"role": role, "source": source, "candidates": candidates})
-    return {"state": "ok", "budget": budget, "ceiling": EFFORT_CEILING_BY_BUDGET[budget], "roles": rows,
-            "waiters": status}
+    rows = {role: _role_row(config, role, known, pinned) for role in ROLE_SLOTS}
+    _plan_on_builder(rows["plan"], rows["build"])
+    unrouted = [{"harness": harness, **_own(pinned[bot], f"waiter-{bot}.yml")}
+                for harness, bot in WAITER_BOTS.items() if status.get(bot) == "ok"]
+    return {"state": "ok", "budget": config.budget, "ceiling": EFFORT_CEILING_BY_BUDGET[config.budget],
+            "waiters": status, "unrouted": unrouted, "roles": list(rows.values())}
 
 
 def _factory_override_entry(factory: FactoryConfig | None, role: str) -> SlotEntry | None:

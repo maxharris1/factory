@@ -247,7 +247,7 @@ from lib.qa_cloud import qa_id
 from lib.queue import (
     ACTIONS, LOCAL_GATE_PASSED, RECIPIENTS, STATES, PriorityMark, passed_head, priority_marks,
 )
-from lib.role_router import role_matrix
+from lib.role_router import ORCHESTRATOR_BOT, role_matrix
 from lib.schema import TICKETS
 from lib import max_actions
 from lib.status import PAUSED_STATES, _hold_approvers
@@ -843,8 +843,8 @@ def collect_snapshot(
     observed until a newer snapshot is overdue (lib/dashboard_page.py).
     `uptime` is the boot and monotonic clock at `now`, so a heartbeat's age
     leaves out time the box was suspended (lib/health.py). `waiters` is
-    each harness's waiter argv (`waiter_argv`), from which the Role routing
-    panel shows what a new job runs; None looks at no waiter."""
+    each bot's waiter argv by bot name (`waiter_argv`), from which the Role
+    routing panel shows what a new job runs; None looks at no waiter."""
     if (
         isinstance(refresh_seconds, bool)
         or not isinstance(refresh_seconds, int)
@@ -1007,14 +1007,12 @@ def collect_snapshot(
 
 
 def waiter_argv() -> dict[str, tuple[str, ...] | None]:
-    """Each harness's waiter command, from `~/.config/factory/waiter-<bot>.yml` alone (`bot`, `command`),
-    None when missing or unreadable."""
     found: dict[str, tuple[str, ...] | None] = {}
-    for bot, harness in OWNING_BOTS.items():
+    for bot in (*OWNING_BOTS, ORCHESTRATOR_BOT):
         try:
-            found[harness] = load_harness_command(default_harness_config(bot), bot).command
+            found[bot] = load_harness_command(default_harness_config(bot), bot).command
         except WaiterError:
-            found[harness] = None
+            found[bot] = None
     return found
 
 
