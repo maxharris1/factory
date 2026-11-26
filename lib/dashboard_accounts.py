@@ -175,7 +175,7 @@ def read_accounts(
             "id": account.id,
             "harness": account.harness,
             "plan": safe_text(account.plan),
-            "not_tracked": usage_readings.NOT_TRACKED.get(account.harness),
+            "not_tracked": None if readings else usage_readings.NOT_TRACKED.get(account.harness),
             "max_jobs": account.max_jobs,
             "paused": account.paused,
             "read_only": read_only,

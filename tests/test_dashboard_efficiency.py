@@ -1042,6 +1042,6 @@ def test_a_recorded_cursor_row_shows_its_meter_not_the_muted_row(tmp_path: Path,
     rows = _rows(headroom)
     (key,) = [key for key in rows if key.startswith("cursor Cursor Ultra ultra")]
     assert key == "cursor Cursor Ultra ultra · via usage record · read 1m 00s ago"
-    assert rows[key][:4] == ["no reading", "1% used", "in 3d 00h", "99%"]
+    assert rows[key][:4] == ["no reading", "1% used", "in 3d 0h", "99% (7-day only)"]
     assert rows[key][-1] == "box ok, mac signed-out, pc unreachable"
     assert "external" not in rows[key][-1]

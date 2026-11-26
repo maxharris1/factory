@@ -11,15 +11,17 @@ There is one entry per account: a subscription, named in machines.yml
 devices in machines.yml order (`devices` and `bots` name the devices that
 log in to the account and their bot users), then declared accounts no
 device uses (external ones included), then any account that only stored
-readings name, with the devices its rows name. An external account has no
-devices or bots: its rows' reserved device and bot are not shown. Each
+readings name, with the devices its rows name. A row on the reserved device
+`external` (an `orch usage record` reading) adds no device or bot, so an
+external account has none and a cursor account keeps its logins'. Each
 window holds the newest reading across the account's rows and is `ok`,
 `stale` (the window has reset or the reading is older than STALE_SECONDS,
 and `used` is then null), `not on plan` (Codex only: left out of
 NOT_ON_PLAN_READINGS fresh readings in a row that report other limits) or
-`no reading`. An account is `not tracked` (its harness is in NOT_TRACKED,
-and `not_tracked` says why), `no reading` (no row yet), `no telemetry` (no
-table: an older database, or telemetry never on), `stale` or `ok`. Its
+`no reading`. An account is `not tracked` (its harness is in NOT_TRACKED
+and it has no stored reading; `not_tracked` says why), `no reading` (no row
+yet), `no telemetry` (no table: an older database, or telemetry never on),
+`stale` or `ok`. Its
 limit is its own lane pause, else an older recipient-wide pause on its
 harness. No value is guessed: a missing utilization stays null. Each entry
 also carries what placement reads (lib/device_pool.py account_loads): its
@@ -38,6 +40,7 @@ from lib import device_pool, lane_limit
 from lib.dashboard_accounts import declared_devices, doctor_statuses, safe_text
 from lib.machines_yml import EXTERNAL, MachinesConfig
 from lib.usage_readings import (
+    EXTERNAL_DEVICE,
     NOT_TRACKED,
     SOURCES,
     WINDOWS,
@@ -104,7 +107,7 @@ def _rows(connection: sqlite3.Connection) -> dict[str, _Account] | None:
         if reading is None:
             continue
         account = found.setdefault(str(row.account), _Account(str(row.harness)))
-        if row.harness != EXTERNAL:
+        if row.harness != EXTERNAL and row.device != EXTERNAL_DEVICE:
             account.used_by(str(row.device), str(row.bot))
         kept = account.windows.get(reading.window)
         if kept is None or reading.observed_at > kept.observed_at:
@@ -136,6 +139,7 @@ def _entry(
 ) -> dict:
     harness = account.harness
     windows = readings or {}
+    not_tracked = None if windows else NOT_TRACKED.get(harness)
     observed = max((r.observed_at for r in windows.values()), default=None)
     declared = None if machines is None else machines.account(account_id)
     entry = {
@@ -143,7 +147,7 @@ def _entry(
         "plan": None if declared is None else safe_text(declared.plan),
         "label": None if declared is None else safe_text(declared.label),
         "source": SOURCES.get(harness),
-        "not_tracked": NOT_TRACKED.get(harness),
+        "not_tracked": not_tracked,
         "bot": account.bots[0] if account.bots else None,
         "bots": account.bots,
         "harness": harness,
@@ -162,7 +166,7 @@ def _entry(
         ],
     }
     states = {entry[window]["state"] for window in WINDOWS}
-    if harness in NOT_TRACKED:
+    if not_tracked is not None:
         state = "not tracked"
     elif readings is None:
         state = "no telemetry"
