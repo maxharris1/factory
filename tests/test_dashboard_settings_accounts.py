@@ -14,7 +14,16 @@ from lib.account_requests import ADD_REFUSED
 from lib.dashboard import collect_snapshot, render_pages
 from tests import test_dashboard_layout as layout
 from tests import test_dashboard_settings as test_settings
-from tests.test_dashboard_accounts import CURSOR_REASON, MACHINES, NOW, SIGN_INS, cursor_snapshot, sign_in, world
+from tests.test_dashboard_accounts import (
+    CURSOR_REASON,
+    MACHINES,
+    NOW,
+    SIGN_INS,
+    cursor_snapshot,
+    recorded_cursor_snapshot,
+    sign_in,
+    world,
+)
 from tests.test_remote_start import config_of
 from tests.test_dashboard_layout import BAR, HARNESS, _no_script, _section, _text, needs_node
 
@@ -888,3 +897,20 @@ def test_polling_keeps_focus_on_the_panel_buttons(tmp_path: Path, op: str) -> No
     for name in ("tick", "changed"):
         focus = _focused(out, name)
         assert focus is not None and focus["op"] == op, name
+
+
+def test_a_cursor_card_with_a_recorded_reading_shows_the_window_numbers(tmp_path: Path) -> None:
+    card = _card(_panel(recorded_cursor_snapshot(tmp_path)), "cursor-ultra")
+    facts = _facts(card)
+    assert (facts["5h used"], facts["7d used"], facts["headroom"]) == ("—", "1%", "99% · floor 5%")
+    assert "usage" not in facts
+    assert "not tracked" not in card
+
+
+@needs_node
+def test_script_draws_a_recorded_cursor_card_like_the_server(tmp_path: Path) -> None:
+    snapshot = recorded_cursor_snapshot(tmp_path)
+    out = _run(tmp_path / "run", snapshot)
+    server = _panel(snapshot)
+    assert out["html"]["accounts"] == server[server.index(">") + 1:server.rindex("<")]
+    assert "not tracked" not in _card(out["html"]["accounts"], "cursor-ultra")

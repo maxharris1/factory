@@ -14,7 +14,7 @@ from lib.dashboard_pages import efficiency
 from lib.machines_yml import load_machines_yml
 from lib.usage_readings import Reading
 from tests.test_dashboard import NOW, add_ticket, make_db, seeded
-from tests.test_dashboard_accounts import CURSOR_REASON, cursor_snapshot
+from tests.test_dashboard_accounts import CURSOR_REASON, CURSOR_RESET, cursor_snapshot, recorded_cursor_snapshot
 from tests.test_dashboard_lanes import Browser, _page_with_status_stub, needs_chrome
 from tests.test_dashboard_layout import _run_page, _section, _text, needs_node
 from tests.test_dashboard_telemetry import add_telemetry
@@ -1014,3 +1014,34 @@ def test_two_claude_accounts_on_shared_devices_render_one_row_each(tmp_path: Pat
         "2 running · no max · box unchecked, pc unchecked · running on box, pc")
     assert blocks[1].startswith(SHARED_B) and blocks[1].endswith(
         "1 running · max 2 · box ok, pc signed-out · running on box")
+
+
+def test_a_recorded_cursor_reading_makes_the_cursor_row_tracked(tmp_path: Path) -> None:
+    entries = {e["account"]: e for e in recorded_cursor_snapshot(tmp_path)["usage"]["accounts"]}
+    cursor = entries["cursor-ultra"]
+    assert (cursor["state"], cursor["not_tracked"], cursor["source"]) == ("ok", None, "usage record")
+    assert cursor["seven_day"] == {"used": 0.01, "resets_at": CURSOR_RESET, "observed_at": NOW - 60, "state": "ok"}
+    assert cursor["five_hour"]["state"] == "no reading"
+    assert cursor["headroom"] == 0.99
+    assert (cursor["devices"], cursor["bots"], cursor["bot"]) == (["box", "mac", "pc"], ["cursor-bot"], "cursor-bot")
+    assert "external" not in cursor["devices"] and "cursor-ultra" not in cursor["bots"]
+
+
+def test_an_old_recorded_cursor_reading_is_stale_not_untracked(tmp_path: Path) -> None:
+    old = NOW - usage_readings.STALE_SECONDS - 60
+    cursor = next(e for e in recorded_cursor_snapshot(tmp_path, observed_at=old)["usage"]["accounts"]
+                  if e["account"] == "cursor-ultra")
+    assert (cursor["state"], cursor["not_tracked"], cursor["seven_day"]["state"]) == ("stale", None, "stale")
+    assert cursor["seven_day"]["used"] is None
+
+
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+def test_a_recorded_cursor_row_shows_its_meter_not_the_muted_row(tmp_path: Path, render: str) -> None:
+    headroom = _render(tmp_path, recorded_cursor_snapshot(tmp_path), render, "headroom")
+    assert "not tracked" not in headroom
+    rows = _rows(headroom)
+    (key,) = [key for key in rows if key.startswith("cursor Cursor Ultra ultra")]
+    assert key == "cursor Cursor Ultra ultra · via usage record · read 1m 00s ago"
+    assert rows[key][:4] == ["no reading", "1% used", "in 3d 00h", "99%"]
+    assert rows[key][-1] == "box ok, mac signed-out, pc unreachable"
+    assert "external" not in rows[key][-1]
