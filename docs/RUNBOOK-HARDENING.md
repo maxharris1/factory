@@ -129,7 +129,7 @@ bin/orch check-config --orch orch.yml --machines machines.yml --factory factory.
 
 ---
 
-## 3. Separate OS Users on `box` (Drop Shared `ssh_user: box`)
+## 3. Separate OS Users on `box` (Drop the Legacy Shared `ssh_user: box`)
 
 In the legacy shared-login setup, `machines.yml` ran all harnesses on `box` through a single `ssh_user: box`, which let any harness process read peer credentials and tokens on `box`. The shipped `machines.yml` now omits `ssh_user` so each harness logs in as its own bot user (`claude-bot`, `codex-bot`, `cursor-bot`) via `box-{bot}`.
 
@@ -170,7 +170,7 @@ Host box-cursor-bot
 
 ### 3.3 Update `machines.local.yml`
 
-Override the `box` entry in `machines.local.yml` to remove `ssh_user: box` and use per-bot paths:
+Drop the legacy `ssh_user: box` from the `box` entry in `machines.local.yml`, and override it to use per-bot paths:
 
 ```yaml
 devices:
