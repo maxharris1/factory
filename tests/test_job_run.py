@@ -664,6 +664,7 @@ def _running_job(
     recipient: str = "codex",
     action: str = "review",
     machines: Path | None = None,
+    detail: str | None = None,
 ):
     queue.enqueue(
         JobRequest(
@@ -673,6 +674,7 @@ def _running_job(
             recipient=recipient,
             source_comment_id="1",
             timeout_seconds=timeout,
+            detail=detail,
         ),
         dedupe_key=f"k-{time.monotonic_ns()}",
     )
@@ -1373,6 +1375,49 @@ def test_cli_job_run_records_what_the_job_ran_under(
         harness="codex",
     )
     assert stderr.count("exposure: recorded (") == 1
+
+
+_PLAN_ROUTING = {
+    "builder": "claude", "builder_model": "claude-opus-5-5", "builder_effort": "medium",
+    "planner": "claude", "plan_model": "claude-fable-5-2", "plan_effort": "high",
+}
+_REVIEW_ROUTING = {"builder": "claude", "reviewer": "codex", "reviewer_model": "gpt-6.2-sol", "reviewer_effort": "high"}
+
+
+@pytest.mark.parametrize(
+    ("bot", "recipient", "action", "wrapper_name", "args", "routing", "model", "harness"),
+    [
+        ("claude-bot", "claude", "plan", "claude-harness",
+         ("-p", "--model", "claude-opus-5-5", "--effort", "medium"), _PLAN_ROUTING, "claude-fable-5-2", "claude"),
+        ("codex-bot", "codex", "review", "codex-review-harness",
+         ("exec", "-m", "gpt-5.5"), _REVIEW_ROUTING, "gpt-6.2-sol", "codex"),
+    ],
+)
+def test_cli_job_run_records_the_routed_model_a_wrapper_harness_ran_under(
+    tmp_path: Path, bot: str, recipient: str, action: str, wrapper_name: str,
+    args: tuple[str, ...], routing: dict, model: str, harness: str,
+) -> None:
+    factory = tmp_path / "factory"
+    factory.mkdir()
+    machines = _box_only(tmp_path, factory)
+    queue = _queue(tmp_path)
+    detail = json.dumps({"action": action, "routing": routing})
+    job = _running_job(queue, recipient=recipient, action=action, machines=machines, detail=detail)
+    wrapper = tmp_path / wrapper_name
+    wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    proc = _orch(
+        "job", "run", bot, job.id, "--machines", str(machines), "--db", str(tmp_path / "orch.db"),
+        "--", str(wrapper), *args,
+        env={"ORCH_JOB_BRIEF": str(tmp_path / "no-brief.md"), "ORCH_TELEMETRY": "off"},
+        stdin=subprocess.DEVNULL,
+    )
+    _, stderr = proc.communicate(timeout=30)
+
+    assert proc.returncode == 0, stderr
+    with queue.connect() as connection:
+        recorded = exposure.read(connection, job.id)
+    assert (recorded.model, recorded.effort, recorded.harness) == (model, "high", harness)
 
 
 def test_cli_job_run_records_unknown_and_still_runs_when_it_cannot_tell(tmp_path: Path) -> None:

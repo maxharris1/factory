@@ -404,7 +404,9 @@ def _shipped_waiter_command(tmp_path: Path, name: str, bot: str) -> list[str]:
     ("harness", "binary"),
     [
         ("claude", "claude"),
+        ("claude", "claude-harness"),
         ("codex", "codex"),
+        ("codex", "codex-review-harness"),
         ("cursor", "cursor-agent"),
         ("cursor", "agent"),
         ("gemini", "agy"),
@@ -413,7 +415,8 @@ def _shipped_waiter_command(tmp_path: Path, name: str, bot: str) -> list[str]:
 def test_routing_recognizes_every_binary_its_harness_driver_runs(harness: str, binary: str) -> None:
     from lib.harnesses import get
 
-    assert get(harness).matches_binary(binary)
+    driver = get(harness)
+    assert driver.matches_binary(binary) or binary in driver.wrapper_binaries
     detail = _build_detail(harness, "model-x")
     for path in (binary, f"/opt/bin/{binary}"):
         routed = routing_argv_for_detail([path, "--flag"], harness=harness, detail=detail)
@@ -425,12 +428,72 @@ def test_routing_leaves_a_binary_its_harness_driver_does_not_run_alone(harness: 
     from lib.harnesses import all_drivers, get
 
     detail = _build_detail(harness, "model-x", effort="high")
-    others = {"claude", "codex", "cursor-agent", "agent", "agy", "gemini"}
+    others = {"claude", "codex", "cursor-agent", "agent", "agy", "gemini", "claude-harness", "codex-review-harness"}
     for binary in sorted(others):
-        if get(harness).matches_binary(binary):
+        if get(harness).matches_binary(binary) or binary in get(harness).wrapper_binaries:
             continue
         assert routing_argv_for_detail([binary, "-p"], harness=harness, detail=detail) == [binary, "-p"]
     assert {driver.name for driver in all_drivers()} == {"claude", "codex", "cursor", "gemini"}
+
+
+@pytest.mark.parametrize(
+    ("harness", "binaries", "pins"),
+    [
+        ("claude", ["claude", "claude-harness"], ["--model"]),
+        ("codex", ["codex", "codex-review-harness"], ["--model", "-m"]),
+        ("gemini", ["agy"], ["--model"]),
+        ("cursor", ["cursor-agent", "agent"], ["--model"]),
+    ],
+)
+def test_every_binary_and_wrapper_a_harness_runs_gets_the_routed_model(
+    harness: str, binaries: list[str], pins: list[str]
+) -> None:
+    from lib.harnesses import get
+
+    driver = get(harness)
+    assert set(binaries) == {b for b in binaries if driver.matches_binary(b)} | driver.wrapper_binaries
+    detail = _build_detail(harness, "model-new")
+    for binary in binaries:
+        assert routing_argv_for_detail([binary, "-p"], harness=harness, detail=detail) == [
+            binary, "-p", "--model", "model-new",
+        ], binary
+        for pin in pins:
+            assert routing_argv_for_detail([binary, pin, "old", "-p"], harness=harness, detail=detail) == [
+                binary, "-p", "--model", "model-new",
+            ], (binary, pin)
+
+
+@pytest.mark.parametrize("binary", ["claude-harness", "/home/box/.local/bin/claude-harness"])
+def test_a_plan_job_through_claude_harness_gets_the_routed_plan_pick(binary: str) -> None:
+    detail = _plan_detail("claude", "claude-opus-5-5", "medium", "claude-fable-5-2", "high")
+    command = [binary, "-p", "--model", "claude-opus-5-5", "--effort", "medium"]
+    assert routing_argv_for_detail(command, harness="claude", detail=detail) == [
+        binary, "-p", "--model", "claude-fable-5-2", "--effort", "high",
+    ]
+
+
+@pytest.mark.parametrize("pinned", [["-m", "gpt-5.5"], ["--model", "gpt-5.5"]])
+def test_a_review_job_through_codex_review_harness_gets_the_routed_reviewer_pick(pinned: list[str]) -> None:
+    detail = json.dumps({
+        "action": "review",
+        "routing": {"builder": "claude", "reviewer": "codex", "reviewer_model": "gpt-6.2-sol", "reviewer_effort": "high"},
+    })
+    command = ["codex-review-harness", "exec", *pinned, "-"]
+    assert routing_argv_for_detail(command, harness="codex", detail=detail) == [
+        "codex-review-harness", "exec", "--model", "gpt-6.2-sol", "-c", "model_reasoning_effort=high", "-",
+    ]
+
+
+@pytest.mark.parametrize("action", ["build", "fix"])
+@pytest.mark.parametrize("pinned", [[], ["--model", "claude-fable-5-2"]])
+def test_build_and_fix_jobs_through_claude_harness_get_the_routed_build_pick(
+    action: str, pinned: list[str]
+) -> None:
+    routing = json.loads(_build_detail("claude", "claude-opus-5-5", "medium"))["routing"]
+    detail = json.dumps({"action": action, "routing": routing})
+    assert routing_argv_for_detail(["claude-harness", "-p", *pinned], harness="claude", detail=detail) == [
+        "claude-harness", "-p", "--model", "claude-opus-5-5", "--effort", "medium",
+    ]
 
 
 def test_the_shipped_gemini_waiter_command_gets_the_routed_model_and_effort(tmp_path: Path) -> None:

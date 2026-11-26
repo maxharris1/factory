@@ -595,15 +595,14 @@ def routing_argv_for_detail(
     harness: str,
     detail: str | None,
 ) -> list[str]:
-    """Apply validated routing model/effort from a queued job's detail JSON, if present.
-
-    Only modifies argv when `command` runs the binary `harness`'s driver
-    runs (never injecting flags into arbitrary shell or test wrappers).
-    """
+    """Apply validated routing model/effort from a queued job's detail JSON, if present."""
     if not detail or not command:
         return list(command)
     driver = harnesses.find(harness)
-    if driver is None or not driver.matches_binary(Path(command[0]).name):
+    if driver is None:
+        return list(command)
+    name = Path(command[0]).name
+    if not (driver.matches_binary(name) or name in driver.wrapper_binaries):
         return list(command)
     try:
         parsed = json.loads(detail)

@@ -28,6 +28,7 @@ class CodexDriver:
     bot_user: str = "codex-bot"
     skills_dir: str = ".agents/skills"
     end_events: frozenset[str] = frozenset({"turn.completed"})
+    wrapper_binaries: frozenset[str] = frozenset({"codex-review-harness"})
 
     def family_for_model(self, model: str | None) -> str | None:
         return "openai"

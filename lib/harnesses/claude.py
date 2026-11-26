@@ -18,6 +18,7 @@ class ClaudeDriver:
     bot_user: str = "claude-bot"
     skills_dir: str = ".claude/skills"
     end_events: frozenset[str] = frozenset({"result"})
+    wrapper_binaries: frozenset[str] = frozenset({"claude-harness"})
 
     def family_for_model(self, model: str | None) -> str | None:
         return "anthropic"

@@ -22,6 +22,7 @@ class CursorDriver:
     bot_user: str = "cursor-bot"
     skills_dir: str = ".cursor/skills"
     end_events: frozenset[str] = frozenset({"result"})
+    wrapper_binaries: frozenset[str] = frozenset()
 
     def family_for_model(self, model: str | None) -> str | None:
         if not model:
