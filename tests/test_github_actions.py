@@ -71,6 +71,21 @@ REPO = "repos/owner/repo"
 COMMENTS = ("--paginate", f"{REPO}/issues/42/comments?per_page=100")
 CHECKS = ("--paginate", f"{REPO}/commits/{HEAD}/check-runs?per_page=100")
 STATUS = (f"{REPO}/commits/{HEAD}/status",)
+WORKFLOW_RUNS = ("--paginate", f"{REPO}/actions/runs?head_sha={HEAD}&per_page=100")
+
+
+def pr_workflow_runs(*run_ids: int, path: str = ".github/workflows/ci.yml") -> GhResult:
+    runs = [
+        {
+            "id": run_id,
+            "event": "pull_request",
+            "workflow_id": 100 + index,
+            "path": path,
+            "created_at": "2026-11-10T19:49:00Z",
+        }
+        for index, run_id in enumerate(run_ids)
+    ]
+    return GhResult(0, json.dumps({"total_count": len(runs), "workflow_runs": runs}), "")
 TIP = (f"{REPO}/git/ref/heads/main",)
 PULL = (f"{REPO}/pulls/42",)
 FF = (
@@ -915,7 +930,7 @@ def test_ci_status_names_the_checks_still_running() -> None:
 
 def concluded_run(status: str, conclusion: str | None) -> GhResult:
     page = json.loads((FIXTURES / "check-runs-in-progress-concluded.json").read_text())
-    page["check_runs"][0].update(status=status, conclusion=conclusion)
+    page["check_runs"][0].update(status=status, conclusion=conclusion, check_suite={"id": 77})
     return GhResult(0, json.dumps(page), "")
 
 
@@ -939,9 +954,11 @@ def test_ci_status_judges_a_check_run_by_its_conclusion_whatever_its_status(
     actions, gh = adapter()
     gh.route(CHECKS, concluded_run(status, conclusion))
     gh.route(STATUS, served("status-empty.json"))
+    gh.route(WORKFLOW_RUNS, pr_workflow_runs(44080749819))
 
     result = actions.ci_status("owner/repo", HEAD)
     assert (result.status, result.pending) == (expected, pending)
+    assert gh.count(WORKFLOW_RUNS) == (1 if expected == "failure" else 0)
 
 
 def test_ci_status_passes_the_in_progress_run_that_concluded_success() -> None:
@@ -1542,6 +1559,7 @@ def test_ci_status_names_the_actions_run_and_job_of_each_failed_check() -> None:
     actions, gh = adapter()
     gh.route(CHECKS, served("check-runs-failure-actions.json"))
     gh.route(STATUS, served("status-failure.json"))
+    gh.route(WORKFLOW_RUNS, pr_workflow_runs(123456))
 
     result = actions.ci_status("owner/repo", HEAD)
 
@@ -1567,6 +1585,7 @@ def test_ci_status_reads_a_run_not_acquired_by_a_runner_as_infra() -> None:
     actions, gh = adapter()
     gh.route(CHECKS, served("check-runs-cancelled-pickup.json"))
     gh.route(STATUS, served("status-empty.json"))
+    gh.route(WORKFLOW_RUNS, pr_workflow_runs(43900570415))
     gh.route(ANNOTATIONS, served("annotations-not-acquired.json"))
 
     result = actions.ci_status("owner/repo", HEAD)
@@ -1581,6 +1600,7 @@ def test_ci_status_reads_a_completed_runs_annotations_once() -> None:
     actions, gh = adapter()
     gh.route(CHECKS, served("check-runs-cancelled-pickup.json"))
     gh.route(STATUS, served("status-empty.json"))
+    gh.route(WORKFLOW_RUNS, pr_workflow_runs(43900570415))
     gh.route(ANNOTATIONS, served("annotations-not-acquired.json"))
 
     first = actions.ci_status("owner/repo", HEAD)
@@ -1602,6 +1622,7 @@ def test_a_failure_annotation_past_the_first_page_classifies_the_run() -> None:
     actions, gh = adapter()
     gh.route(CHECKS, served("check-runs-cancelled-pickup.json"))
     gh.route(STATUS, served("status-empty.json"))
+    gh.route(WORKFLOW_RUNS, pr_workflow_runs(43900570415))
     gh.route(ANNOTATIONS, GhResult(0, pages, ""))
 
     first = actions.ci_status("owner/repo", HEAD)
@@ -1616,6 +1637,7 @@ def test_an_unreadable_annotations_page_leaves_the_cause_unknown_and_is_read_aga
     actions, gh = adapter()
     gh.route(CHECKS, served("check-runs-cancelled-pickup.json"))
     gh.route(STATUS, served("status-empty.json"))
+    gh.route(WORKFLOW_RUNS, pr_workflow_runs(43900570415))
     gh.route(
         ANNOTATIONS,
         GhResult(1, "", "gh: Server Error (HTTP 502)\n"),
@@ -1637,6 +1659,7 @@ def test_annotations_of_a_run_not_yet_completed_are_read_again() -> None:
     actions, gh = adapter()
     gh.route(CHECKS, GhResult(0, json.dumps(page), ""))
     gh.route(STATUS, served("status-empty.json"))
+    gh.route(WORKFLOW_RUNS, pr_workflow_runs(43900570415))
     gh.route(ANNOTATIONS, served("annotations-not-acquired.json"))
 
     actions.ci_status("owner/repo", HEAD)
@@ -1657,6 +1680,7 @@ def test_a_failed_run_without_annotations_reads_no_annotations(count: int | None
     actions, gh = adapter()
     gh.route(CHECKS, GhResult(0, json.dumps(page), ""))
     gh.route(STATUS, served("status-empty.json"))
+    gh.route(WORKFLOW_RUNS, pr_workflow_runs(43900570415))
 
     result = actions.ci_status("owner/repo", HEAD)
 
@@ -1704,6 +1728,7 @@ def test_ci_status_lists_every_latest_attempt_check_without_another_read() -> No
     actions, gh = adapter()
     gh.route(CHECKS, served("check-runs-failure-actions.json"))
     gh.route(STATUS, served("status-failure.json"))
+    gh.route(WORKFLOW_RUNS, pr_workflow_runs(123456))
 
     result = actions.ci_status("owner/repo", HEAD)
 
@@ -1728,7 +1753,7 @@ def test_ci_status_lists_every_latest_attempt_check_without_another_read() -> No
             workflow="suite:77",
         ),
     )
-    assert gh.keys() == [CHECKS, STATUS]
+    assert gh.keys() == [CHECKS, STATUS, WORKFLOW_RUNS]
 
 
 @pytest.mark.parametrize(
@@ -1785,6 +1810,7 @@ def test_ci_status_is_the_same_gate_whatever_the_check_times_hold() -> None:
     page["check_runs"][0].update(started_at="soon", completed_at=17)
     gh.route(CHECKS, GhResult(0, json.dumps(page), ""))
     gh.route(STATUS, served("status-empty.json"))
+    gh.route(WORKFLOW_RUNS, pr_workflow_runs(123456))
 
     result = actions.ci_status("owner/repo", HEAD)
 
@@ -2730,6 +2756,7 @@ def test_the_macos_pickup_watchdog_and_the_job_it_cancelled_read_as_infra(
     actions, gh = adapter()
     gh.route(CHECKS, GhResult(0, json.dumps(page), ""))
     gh.route(STATUS, served("status-empty.json"))
+    gh.route(WORKFLOW_RUNS, pr_workflow_runs(43900570415))
     gh.route(WATCHDOG_ANNOTATIONS, GhResult(0, json.dumps([annotation]), ""))
 
     result = actions.ci_status("owner/repo", HEAD)

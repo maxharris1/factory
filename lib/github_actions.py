@@ -67,9 +67,11 @@ import os
 import re
 import signal
 import subprocess
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from fnmatch import fnmatchcase
+from itertools import compress
 from typing import Any
 from urllib.parse import quote
 
@@ -858,7 +860,9 @@ class GitHubReviewActions:
         run = _object(self._json(f"{_repo_path(repo)}/actions/runs/{run_id}"))
         return _created_at(run.get("created_at"))
 
-    def ci_status(self, repo: str, head: str) -> CIResult:
+    def ci_status(
+        self, repo: str, head: str, *, required_checks: Sequence[str] = ()
+    ) -> CIResult:
         """Check runs and commit statuses on head.
 
         success needs at least one check run that concluded success, or a
@@ -873,6 +877,16 @@ class GitHubReviewActions:
 
         A run is pending only with no conclusion; a conclusion decides it
         even when status is not completed (#720).
+
+        When a check run in a check suite on head failed, workflow-run
+        metadata is read for head so earlier failed workflow_dispatch runs
+        superseded by a later run (by run number) in the same workflow file
+        and check name, and non-PR (workflow_dispatch, schedule) runs
+        outside required_checks, do not red-gate the PR (#1579). A run is
+        matched to its workflow run by check suite. checks keeps every
+        latest attempt so the board sees each completion; a discarded run's
+        row has gates=False. A short workflow-runs read is pending with
+        every row ungated.
         """
         from lib.evidence.ci import classify_failure
 
@@ -893,12 +907,25 @@ class GitHubReviewActions:
         if not runs and not total:
             return CIResult("pending", reported=False)
         runs = _latest_attempts(runs)
-        checks = tuple(map(_check_row, runs))
+        keep = [True] * len(runs)
+        if any(
+            run.get("conclusion") in CHECK_FAILED and _check_suite_id(run) is not None
+            for run in runs
+        ):
+            workflow_runs = self._head_workflow_runs(repo, head)
+            if workflow_runs is _WORKFLOW_RUNS_SHORT_READ:
+                return CIResult(
+                    "pending",
+                    checks=tuple(_check_row(run, gates=False) for run in runs),
+                )
+            if isinstance(workflow_runs, dict) and workflow_runs:
+                keep = _filter_non_pr_runs(runs, workflow_runs, required_checks)
+        checks = tuple(map(_check_row, runs, keep))
         statuses = _status_rows(combined)
         failed: list[FailedCheck] = []
         pending: list[str] = []
         passed = False
-        for run in runs:
+        for run in compress(runs, keep):
             name = str(run.get("name"))
             status = run.get("status")
             conclusion = run.get("conclusion")
@@ -962,6 +989,53 @@ class GitHubReviewActions:
                     del self._completed_run_annotations[next(iter(self._completed_run_annotations))]
                 self._completed_run_annotations[key] = annotations
         return [*texts, *annotations]
+
+    def _head_workflow_runs(
+        self, repo: str, head: str
+    ) -> dict[int, _WorkflowRunMeta] | None | object:
+        """Workflow-run metadata for head by check suite id, fail-closed on adapter/shape errors (#1579)."""
+        try:
+            pages = self._pages(f"{_repo_path(repo)}/actions/runs?head_sha={head}&per_page=100")
+        except GitHubAdapterError:
+            return None
+        raw_runs: list[dict[str, Any]] = []
+        counted: set[int] = set()
+        for page in pages:
+            if not isinstance(page, dict):
+                return None
+            listed = page.get("workflow_runs")
+            if not isinstance(listed, list) or not all(isinstance(item, dict) for item in listed):
+                return None
+            try:
+                counted.add(_count(page.get("total_count"), "workflow-runs"))
+            except GitHubAdapterError:
+                return None
+            raw_runs.extend(listed)
+        if counted != {len(raw_runs)}:
+            return _WORKFLOW_RUNS_SHORT_READ
+        result: dict[int, _WorkflowRunMeta] = {}
+        for item in raw_runs:
+            run_id = item.get("id")
+            suite_id = _int(item.get("check_suite_id"))
+            event = item.get("event")
+            if _int(run_id) is None or suite_id is None or not isinstance(event, str):
+                continue
+            run_number = _int(item.get("run_number"))
+            path = item.get("path")
+            workflow_id = item.get("workflow_id")
+            if isinstance(path, str) and path:
+                workflow: str | None = path
+            elif isinstance(workflow_id, int) and not isinstance(workflow_id, bool):
+                workflow = f"workflow-id:{workflow_id}"
+            else:
+                workflow = None
+            result[suite_id] = _WorkflowRunMeta(
+                run_id=run_id,
+                run_number=-1 if run_number is None else run_number,
+                event=event,
+                workflow=workflow,
+            )
+        return result
 
     def _read_failure_annotations(self, repo: str, run_id: int) -> tuple[str, ...] | None:
         try:
@@ -1321,6 +1395,100 @@ class LinearReviewActions(GitHubReviewActions):
         return None
 
 
+_NON_PR_EVENTS = frozenset({"workflow_dispatch", "schedule"})
+_WORKFLOW_RUNS_SHORT_READ = object()
+
+
+@dataclass(frozen=True)
+class _WorkflowRunMeta:
+    run_id: int
+    run_number: int
+    event: str
+    workflow: str | None
+
+
+def _run_app_key(run: Mapping[str, Any]) -> str:
+    app = run.get("app")
+    if isinstance(app, dict):
+        return str(app.get("id", app.get("slug", "")))
+    return ""
+
+
+def _int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _check_suite_id(run: Mapping[str, Any]) -> int | None:
+    suite = run.get("check_suite")
+    return _int(suite.get("id")) if isinstance(suite, dict) else None
+
+
+def _workflow_order(run: Mapping[str, Any], meta: _WorkflowRunMeta) -> tuple[int, int, int]:
+    check_id = _int(run.get("id"))
+    return (meta.run_number, meta.run_id, -1 if check_id is None else check_id)
+
+
+def _matches_required(name: str, required_checks: Sequence[str]) -> bool:
+    return any(fnmatchcase(name, glob) for glob in required_checks)
+
+
+def _filter_non_pr_runs(
+    runs: list[dict[str, Any]],
+    workflow_runs: Mapping[int, _WorkflowRunMeta],
+    required_checks: Sequence[str],
+) -> list[bool]:
+    """Which runs gate CI, one flag per run (#1579).
+
+    A run belongs to the workflow run whose check suite it is in. Within
+    the same workflow file and check name on the same head, any later
+    workflow run (by run number, then id) that actually ran or is running
+    supersedes earlier failed workflow_dispatch runs. Remaining
+    workflow_dispatch / schedule runs do not fail (or gate) CI unless their
+    check name matches required_checks. PR-triggered runs and runs whose
+    workflow metadata is missing keep the existing #84 / #87 behavior.
+    """
+    latest_order: dict[tuple[str, str, str], tuple[int, int, int]] = {}
+    metas: list[_WorkflowRunMeta | None] = []
+    for run in runs:
+        suite_id = _check_suite_id(run)
+        meta = workflow_runs.get(suite_id) if suite_id is not None else None
+        metas.append(meta)
+        if meta is None or meta.workflow is None:
+            continue
+        if run.get("conclusion") in _CHECK_NOT_RUN:
+            continue
+        key = (_run_app_key(run), meta.workflow, str(run.get("name")))
+        order = _workflow_order(run, meta)
+        current = latest_order.get(key)
+        if current is None or order > current:
+            latest_order[key] = order
+
+    return [
+        _gates(run, meta, latest_order, required_checks)
+        for run, meta in zip(runs, metas, strict=True)
+    ]
+
+
+def _gates(
+    run: Mapping[str, Any],
+    meta: _WorkflowRunMeta | None,
+    latest_order: Mapping[tuple[str, str, str], tuple[int, int, int]],
+    required_checks: Sequence[str],
+) -> bool:
+    if meta is None:
+        return True
+    name = str(run.get("name"))
+    if (
+        meta.event == "workflow_dispatch"
+        and meta.workflow is not None
+        and run.get("conclusion") in CHECK_FAILED
+    ):
+        newest = latest_order.get((_run_app_key(run), meta.workflow, name))
+        if newest is not None and _workflow_order(run, meta) < newest:
+            return False
+    return meta.event not in _NON_PR_EVENTS or _matches_required(name, required_checks)
+
+
 def _latest_attempts(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Only the latest attempt of each check (issue #84).
 
@@ -1333,9 +1501,8 @@ def _latest_attempts(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     latest: dict[tuple[str, str, str], dict[str, Any]] = {}
     for run in runs:
-        app = _object(run.get("app")) if isinstance(run.get("app"), dict) else {}
         key = (
-            str(app.get("id", app.get("slug", ""))),
+            _run_app_key(run),
             _workflow_identity(run),
             str(run.get("name")),
         )
@@ -1398,7 +1565,7 @@ def _failed_check(name: str, details: object, cause: Cause, signal: str | None) 
     )
 
 
-def _check_row(run: dict[str, Any]) -> CheckRow:
+def _check_row(run: dict[str, Any], gates: bool = True) -> CheckRow:
     conclusion = run.get("conclusion")
     status = _board_status(run.get("status"), conclusion)
     details = run.get("details_url")
@@ -1413,6 +1580,7 @@ def _check_row(run: dict[str, Any]) -> CheckRow:
         run_id=None if job is None else job.group(2),
         job_id=None if job is None else job.group(3),
         workflow=_workflow_identity(run),
+        gates=gates,
     )
 
 

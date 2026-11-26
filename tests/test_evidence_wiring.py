@@ -13,7 +13,17 @@ from tests.test_dispatcher import ANSWERS, GO, PLAN, QUESTIONS, comment, handled
 from lib.github_actions import GhResult
 from lib.orch_yml import OrchConfig
 from lib.poll_source import LivePollSource
-from tests.test_github_actions import CHECKS, HEAD, REPO, STATUS, RecordedGh, adapter, served
+from tests.test_github_actions import (
+    CHECKS,
+    HEAD,
+    REPO,
+    STATUS,
+    WORKFLOW_RUNS,
+    RecordedGh,
+    adapter,
+    pr_workflow_runs,
+    served,
+)
 from tests.test_lifecycle import Flow as LifecycleFlow
 from tests.test_rounds_and_caps import HEADS, Flow
 
@@ -105,6 +115,7 @@ def actions_ci_fix(tmp_path: Path, *log: GhResult | BaseException) -> tuple[CIFl
     actions, gh = adapter()
     gh.route(CHECKS, served("check-runs-failure-actions.json"))
     gh.route(STATUS, served("status-empty.json"))
+    gh.route(WORKFLOW_RUNS, pr_workflow_runs(123456))
     gh.route(RUN_LOG, *log)
     flow = built(tmp_path)
     flow.dispatcher.ci_logs = actions.failed_run_logs
