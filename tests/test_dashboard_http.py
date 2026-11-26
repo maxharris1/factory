@@ -596,6 +596,45 @@ def test_an_unlisted_peer_gets_404_everywhere(serve_actions, fake_github) -> Non
     assert client.raw("GET", "/status.json")[0] == 200
 
 
+def test_action_client_uses_last_xff_hop_only_from_the_proxy() -> None:
+    fn = server_module.action_client
+    own = "100.101.102.103"
+    listed = "100.64.0.7"
+    # Direct client, no proxy: XFF is ignored even if it names a listed address.
+    assert fn("100.64.0.8", listed, own) == "100.64.0.8"
+    assert fn("100.64.0.8", f"100.64.0.9, {listed}", own) == "100.64.0.8"
+    # Proxy peer is the node's own TAILNET_IP: last hop is used when it is IPv4.
+    assert fn(own, listed, own) == listed
+    assert fn(own, f"203.0.113.9, {listed}", own) == listed
+    assert fn(own, f"  {listed}  ", own) == listed
+    # Missing or unusable XFF falls back to the TCP peer.
+    assert fn(own, "", own) == own
+    assert fn(own, "not-an-ip", own) == own
+    assert fn(own, "2001:db8::1", own) == own
+    # Loopback is also treated as a local proxy (tests, and if serve used it).
+    assert fn("127.0.0.1", listed, own) == listed
+    assert fn("::1", listed, own) == listed
+    assert fn("127.0.0.1", "", own) == "127.0.0.1"
+
+
+def test_xff_from_the_local_proxy_can_sign_in(serve_actions, fake_github) -> None:
+    client = serve_actions(clients=("100.64.0.7",))
+    assert client.post("/api/signin")[0] == 404
+    status, body = client.post("/api/signin", **{"X-Forwarded-For": "100.64.0.9, 100.64.0.7"})
+    assert status == 200
+    assert body["user_code"] == USER_CODE
+    # Earlier hops are ignored: last hop unlisted stays 404.
+    assert client.post("/api/signin", **{"X-Forwarded-For": "100.64.0.7, 100.64.0.9"})[0] == 404
+
+
+def test_proxy_xff_does_not_skip_origin_checks(serve_actions) -> None:
+    client = serve_actions(clients=("100.64.0.7",))
+    assert client.post(
+        "/api/signin",
+        **{"X-Forwarded-For": "100.64.0.7", "Origin": "http://evil.example"},
+    ) == (403, {"error": "origin"})
+
+
 @pytest.mark.parametrize(
     "target",
     [
@@ -966,6 +1005,7 @@ def test_load_config_turns_actions_on_only_with_a_client_id(site: Path) -> None:
         frozenset({server_module.ipaddress.IPv4Address("100.64.0.7"),
                    server_module.ipaddress.IPv4Address("100.64.0.8")}),
         "https://api.github.com", "https://github.com",
+        own_address="100.101.102.103",
     )
 
 
