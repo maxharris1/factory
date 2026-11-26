@@ -282,6 +282,7 @@ WAITER_CASES = {
     "unrouted": {"claude": CLAUDE_WAITER, "gemini": GEMINI_WAITER},
     "missing-waiter": {"claude": None},
     "wrapped": {"claude": WRAPPED_WAITER},
+    "two-missing": {"claude": CLAUDE_WAITER, "codex": None, "gemini": None},
 }
 
 
@@ -358,6 +359,17 @@ def test_an_empty_slot_lists_each_waiter_it_falls_back_to(tmp_path: Path, base: 
 def test_the_note_says_what_a_runs_line_means(tmp_path: Path, base: dict, render: str) -> None:
     assert ("Each runs line is the model and effort a new job gets once the bot&#x27;s waiter-&lt;bot&gt;.yml argv "
             "is applied; CLI default means the harness picks.") in _panel(tmp_path, _with(base, _matrix(tmp_path)), render)
+
+
+@pytest.mark.parametrize("render", BOTH)
+def test_panel_names_the_bots_whose_waiter_config_was_not_read(tmp_path: Path, base: dict, render: str) -> None:
+    panel = _panel(tmp_path, _with(base, _matrix(tmp_path, waiters=WAITER_CASES["two-missing"])), render)
+    line = ('<p class="rt-waiters">waiter-&lt;bot&gt;.yml not read for codex-bot, gemini-bot; '
+            "their unrouted values show unknown</p>")
+    assert panel.count(line) == 1
+    assert panel.index(line) < panel.index('<p class="rt-note">')
+    for waiters in (None, {"claude": CLAUDE_WAITER}):
+        assert "rt-waiters" not in _panel(tmp_path, _with(base, _matrix(tmp_path, waiters=waiters)), render)
 
 
 @pytest.mark.parametrize("render", BOTH)

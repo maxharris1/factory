@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from lib.dashboard_pages.common import _e, _panel, _span
 from lib.dashboard_static import read_asset
+from lib.role_router import KNOWN_HARNESSES, WAITER_BOTS
 
 CSS = read_asset("css/routing.css")
 
@@ -64,6 +65,14 @@ def _role_row(row: dict) -> str:
             f'<td>{_e(SOURCE_WORDS[row["source"]])}</td><td>{_pool(row)}</td></tr>')
 
 
+def _unread(waiters: dict) -> str:
+    bots = [WAITER_BOTS[harness] for harness in KNOWN_HARNESSES if waiters.get(harness) == "missing"]
+    if not bots:
+        return ""
+    said = f"waiter-<bot>.yml not read for {', '.join(bots)}; their unrouted values show unknown"
+    return f'<p class="rt-waiters">{_e(said)}</p>'
+
+
 def _routing(snapshot: dict) -> str:
     matrix = snapshot["routing"]
     if matrix["state"] == "missing":
@@ -77,6 +86,7 @@ def _routing(snapshot: dict) -> str:
     inner = (
         f'<div class="rt-scroll"><table class="rt-table"><thead><tr>{head}</tr></thead>'
         f"<tbody>{rows}</tbody></table></div>"
+        f"{_unread(matrix['waiters'])}"
         f'<p class="rt-note">{_e(NOTE)}</p>'
     )
     return _panel("routing", TITLE, inner, count=f"{matrix['budget']} budget · effort up to {matrix['ceiling']}")
