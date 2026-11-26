@@ -833,6 +833,20 @@ def test_poller_ensure_also_ensures_every_autostarted_waiter(
     assert not _pidfile(home).exists()
 
 
+
+def test_poller_ensure_also_ensures_the_gemini_bot_waiter(home: Path, tmp_path: Path) -> None:
+    calls = tmp_path / "waiter-calls"
+    service = _deploy_copy(tmp_path, calls)
+    config = home / ".config/factory"
+    for name in ("waiter-autostart-gemini-bot", "waiter-autostart-grok-bot"):
+        (config / name).touch()
+    try:
+        result = _service(home, "ensure", service=service)
+        assert result.returncode == 0, result.stderr
+        assert calls.read_text().splitlines() == ["gemini-bot ensure"]
+    finally:
+        _service(home, "stop", service=service)
+
 @pytest.mark.skipif(shutil.which("flock") is None, reason="needs flock(1)")
 def test_ensure_without_crontab_starts_the_ensure_loop_that_keeps_waiters_alive(
     home: Path, tmp_path: Path
