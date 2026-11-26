@@ -335,6 +335,8 @@ def gemini_status(name: str) -> tuple[int, bytes, bytes]:
     ("one-model", True, ""),
     ("signed-out", False, account_doctor.NOT_LOGGED_IN),
     ("no-models", False, account_doctor.NOT_UNDERSTOOD),
+    ("no-models-text", False, account_doctor.NOT_UNDERSTOOD),
+    ("sign-in-text", False, account_doctor.NOT_UNDERSTOOD),
     ("cache-warning", False, account_doctor.NOT_UNDERSTOOD),
     ("warning-word", False, account_doctor.NOT_UNDERSTOOD),
 ])
@@ -351,11 +353,18 @@ def test_the_gemini_status_probe_reads_each_recorded_reply(name: str, logged_in:
     (42, b"", b"No input provided via stdin.\n"),
     (41, b"", b"Please set an Auth method in your settings.json\n"),
     (127, b"", b"sh: 1: agy: not found\n"),
-    (0, b"Warning: model cache is unavailable\ngemini-3.1-pro\n", b""),
+    (0, b"Warning: model cache is unavailable\ngemini-3.1-pro-high Gemini 3.1 Pro (High)\n", b""),
     (0, b"WARNING:\n", b""),
+    (0, b"Please sign in to view available models\n", b""),
+    (0, b"No models available\n", b""),
+    (0, b"gemini-3.1-pro-high\n", b""),
+    (0, b"Gemini-3.1-Pro-High Gemini 3.1 Pro (High)\n", b""),
+    (0, b"gemini Gemini\n", b""),
 ], ids=[
     "other-error", "sign-in-text-exit-0", "sign-in-text-on-stderr-exit-0", "model-list-on-stderr",
     "upstream-no-input", "upstream-no-auth", "missing-binary", "warning-mixed-into-a-list", "warning-word-on-stdout",
+    "bare-sign-in-sentence-exit-0", "no-models-sentence-exit-0", "model-id-without-display-name",
+    "upper-case-model-id", "model-id-without-a-hyphen",
 ])
 def test_a_gemini_model_reply_or_other_failure_never_reads_signed_in(code: int, stdout: bytes, stderr: bytes) -> None:
     probe = account_doctor.parse_gemini("gemini-ultra", "pc", code, stdout, stderr)
@@ -428,7 +437,7 @@ def test_the_doctor_probes_the_gemini_bot_login_with_agy_models_and_every_overri
     assert [names & set(PLANTED_LOGIN) for names, _ in calls] == [set(), set()]
 
 
-@pytest.mark.parametrize("name", ["cache-warning", "warning-word", "no-models"])
+@pytest.mark.parametrize("name", ["cache-warning", "warning-word", "no-models", "no-models-text", "sign-in-text"])
 def test_an_exit_0_reply_with_no_model_list_on_stdout_keeps_the_gemini_hold(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
