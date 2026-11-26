@@ -4,6 +4,8 @@ import io
 import json
 import re
 import sqlite3
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import get_args
 
@@ -12,10 +14,10 @@ import pytest
 from lib import (
     account_doctor,
     account_home,
+    cli,
     factory_md,
     harness_env,
     harnesses,
-    lane_limit,
     orch_yml,
     pstack_models,
     pstack_pin,
@@ -26,11 +28,15 @@ from lib import (
     wait,
     waiter,
 )
+from lib.account_requests import ADD_REFUSED
 from lib.brief import render_brief
-from lib.harnesses import AccountIsolation, HarnessDriver, StreamFlags
+from lib.harnesses import HarnessDriver, StreamFlags
 from lib.harnesses.gemini import AUTH_OVERRIDES, GeminiDriver
-from lib.machines_yml import load_machines_yml
+from lib.machines_yml import DEVICE_LOGIN_ONLY, load_machines_yml
 from tests.test_brief import job
+from tests.test_remote_start import Ssh
+
+ROOT = pstack_pin.ROOT
 
 NOW = 1_800_000_000.0
 
@@ -52,37 +58,30 @@ def test_gemini_is_first_class_in_schema_wait_queue_and_registry() -> None:
     assert driver.family_for_model("gemini-3.1-pro") == "google"
     assert driver.family_for_model(None) == "google"
     assert harnesses.driver_for_bot("gemini-bot") is driver
-    assert driver.account_isolation() == AccountIsolation("GEMINI_CLI_HOME", AUTH_OVERRIDES)
+    assert driver.account_isolation() is None
+    assert "gemini" in DEVICE_LOGIN_ONLY
     assert driver.probe_usage({}, NOW) == []
     assert usage_readings.NOT_TRACKED["gemini"]
 
 
-UPSTREAM_AUTH_OVERRIDES = (
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
-    "GOOGLE_CLOUD_ACCESS_TOKEN",
-    "GOOGLE_APPLICATION_CREDENTIALS",
-    "GOOGLE_GENAI_USE_GCA",
-    "GOOGLE_GENAI_USE_VERTEXAI",
-    "GEMINI_CLI_USE_COMPUTE_ADC",
-    "CLOUD_SHELL",
-)
-
-
-def test_an_account_job_drops_every_gemini_auth_override_and_signs_in_from_its_folder() -> None:
-    home = "/home/gemini-bot/.factory-accounts/gemini-pro"
-    secrets = {name: f"SYNTHETIC-{index}-{name}" for index, name in enumerate(AUTH_OVERRIDES)}
-    scrubbed = harness_env.account_environ({"PATH": "/usr/bin", "KEEP": "ok", **secrets}, "gemini", home)
-
-    assert set(UPSTREAM_AUTH_OVERRIDES) <= set(AUTH_OVERRIDES)
-    assert scrubbed == {"PATH": "/usr/bin", "KEEP": "ok", "GEMINI_CLI_HOME": home}
-    assert not [value for value in secrets.values() if value in repr(scrubbed)]
+def test_a_gemini_account_cannot_run_from_a_folder_of_its_own() -> None:
+    assert "gemini" not in harness_env.ACCOUNT_ISOLATION
+    with pytest.raises(ValueError, match="cannot run from an account folder"):
+        harness_env.account_environ({"PATH": "/usr/bin"}, "gemini", "/home/gemini-bot/.factory-accounts/gemini-ultra")
 
 
 @pytest.mark.parametrize("path", ["README.md", "docs/SPEC.md", "bots/gemini-bot/SKILL.md"])
 def test_the_docs_name_every_gemini_auth_override_the_job_drops(path: str) -> None:
     text = (pstack_pin.ROOT / path).read_text(encoding="utf-8")
     assert [name for name in AUTH_OVERRIDES if f"`{name}`" not in text] == []
+
+
+@pytest.mark.parametrize("path", ["README.md", "docs/SPEC.md"])
+def test_the_docs_name_a_gemini_account_as_the_devices_gemini_bot_login(path: str) -> None:
+    text = " ".join((pstack_pin.ROOT / path).read_text(encoding="utf-8").split())
+    assert "each device's `gemini-bot` login" in text
+    assert "`agy models`" in text
+    assert not re.search(r"`GEMINI_CLI_HOME` \(Gemini\) set to `<home>/\.factory-accounts", text)
 
 
 def _gemini_session(tmp_path: Path) -> tuple[telemetry.Session, io.BytesIO]:
@@ -291,174 +290,278 @@ def test_gemini_not_tracked_reason_surfaces_in_efficiency_and_settings(tmp_path:
 
 
 GEMINI_STATUS = Path(__file__).parent / "fixtures" / "gemini_status"
-GEMINI_REPLIES = {"gemini-default": "signed-in", "gemini-b": "needs-login", "gemini-c": "no-auth-method"}
-FAKE_GEMINI = """\
+PLANTED_LOGIN = {name: f"SYNTHETIC-{index}" for index, name in enumerate((*AUTH_OVERRIDES, "GEMINI_CLI_HOME"))}
+FAKE_AGY = """\
 #!/bin/sh
-printf '%s\\n' "$(env | cut -d= -f1 | tr '\\n' ' ')" >> {log}
-folder=${{GEMINI_CLI_HOME:-{home}/.factory-accounts/gemini-default}}
-reply={replies}/$(basename "$folder")
-if [ -n "{token_test}" ]; then reply={replies}/token; fi
-cat "$reply.out" >&2
+printf '%s|%s\\n' "$(env | cut -d= -f1 | tr '\\n' ' ')" "$*" >> {log}
+reply={replies}/$(cat {state})
+if [ -f "$reply.out" ]; then cat "$reply.out"; fi
+if [ -f "$reply.err" ]; then cat "$reply.err" >&2; fi
 exit "$(cat "$reply.code")"
 """
 
 
-def gemini_status(name: str) -> tuple[int, bytes]:
-    return int((GEMINI_STATUS / f"{name}.code").read_text()), (GEMINI_STATUS / f"{name}.out").read_bytes()
+class FakeAgy:
+    def __init__(self, tmp_path: Path) -> None:
+        self.bin = tmp_path / "agy-bin"
+        self.bin.mkdir()
+        self.log = tmp_path / "agy.log"
+        self.state = tmp_path / "agy-reply"
+        self.answer("signed-in")
+        fake = self.bin / "agy"
+        fake.write_text(FAKE_AGY.format(log=self.log, replies=GEMINI_STATUS, state=self.state), encoding="utf-8")
+        fake.chmod(0o755)
+
+    def answer(self, name: str) -> None:
+        self.state.write_text(name, encoding="utf-8")
+
+    def calls(self) -> list[tuple[set[str], str]]:
+        lines = self.log.read_text(encoding="utf-8").splitlines() if self.log.exists() else []
+        return [(set(names.split()), args) for names, args in (line.split("|") for line in lines)]
+
+
+def gemini_status(name: str) -> tuple[int, bytes, bytes]:
+    stdout, stderr = (GEMINI_STATUS / f"{name}.out", GEMINI_STATUS / f"{name}.err")
+    return (
+        int((GEMINI_STATUS / f"{name}.code").read_text()),
+        stdout.read_bytes() if stdout.exists() else b"",
+        stderr.read_bytes() if stderr.exists() else b"",
+    )
 
 
 @pytest.mark.parametrize("name, logged_in, detail", [
     ("signed-in", True, ""),
-    ("needs-login", False, account_doctor.NOT_LOGGED_IN),
-    ("no-auth-method", False, account_doctor.NOT_LOGGED_IN),
+    ("models-with-warning", True, ""),
+    ("one-model", True, ""),
+    ("signed-out", False, account_doctor.NOT_LOGGED_IN),
+    ("no-models", False, account_doctor.NOT_UNDERSTOOD),
+    ("no-models-text", False, account_doctor.NOT_UNDERSTOOD),
+    ("sign-in-text", False, account_doctor.NOT_UNDERSTOOD),
+    ("cache-warning", False, account_doctor.NOT_UNDERSTOOD),
+    ("warning-word", False, account_doctor.NOT_UNDERSTOOD),
 ])
 def test_the_gemini_status_probe_reads_each_recorded_reply(name: str, logged_in: bool, detail: str) -> None:
-    probe = account_doctor.parse_gemini("gemini-b", "pc", *gemini_status(name))
+    probe = account_doctor.parse_gemini("gemini-ultra", "pc", *gemini_status(name))
     assert (probe.reached, probe.logged_in, probe.detail) == (True, logged_in, detail)
 
 
-@pytest.mark.parametrize("code, reply", [
-    (0, b"Hello! How can I help you today?\n"),
-    (42, b"Unknown argument: auth\n"),
-    (1, gemini_status("signed-in")[1]),
+@pytest.mark.parametrize("code, stdout, stderr", [
+    (1, b"", b"Error: could not reach the model service\n"),
+    (0, gemini_status("signed-out")[2], b""),
+    (0, b"", gemini_status("signed-out")[2]),
+    (0, b"", gemini_status("signed-in")[1]),
+    (42, b"", b"No input provided via stdin.\n"),
+    (41, b"", b"Please set an Auth method in your settings.json\n"),
+    (127, b"", b"sh: 1: agy: not found\n"),
+    (0, b"Warning: model cache is unavailable\ngemini-3.1-pro-high Gemini 3.1 Pro (High)\n", b""),
+    (0, b"WARNING:\n", b""),
+    (0, b"Please sign in to view available models\n", b""),
+    (0, b"No models available\n", b""),
+    (0, b"gemini-3.1-pro-high\n", b""),
+    (0, b"Gemini-3.1-Pro-High Gemini 3.1 Pro (High)\n", b""),
+    (0, b"gemini Gemini\n", b""),
+], ids=[
+    "other-error", "sign-in-text-exit-0", "sign-in-text-on-stderr-exit-0", "model-list-on-stderr",
+    "upstream-no-input", "upstream-no-auth", "missing-binary", "warning-mixed-into-a-list", "warning-word-on-stdout",
+    "bare-sign-in-sentence-exit-0", "no-models-sentence-exit-0", "model-id-without-display-name",
+    "upper-case-model-id", "model-id-without-a-hyphen",
 ])
-def test_a_gemini_model_reply_or_other_failure_never_reads_signed_in(code: int, reply: bytes) -> None:
-    probe = account_doctor.parse_gemini("gemini-b", "pc", code, reply)
+def test_a_gemini_model_reply_or_other_failure_never_reads_signed_in(code: int, stdout: bytes, stderr: bytes) -> None:
+    probe = account_doctor.parse_gemini("gemini-ultra", "pc", code, stdout, stderr)
     assert (probe.logged_in, probe.detail) == (False, account_doctor.NOT_UNDERSTOOD)
 
 
-def test_the_doctor_probes_gemini_accounts_from_their_folders_with_every_override_unset(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from lib import cli
-    from tests.test_remote_start import Ssh
+@dataclass(frozen=True)
+class GeminiDevices:
+    ssh: Ssh
+    agy: FakeAgy
+    home: Path
+    machines: Path
+    db: Path
 
+
+def gemini_devices(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> GeminiDevices:
     ssh = Ssh(tmp_path)
     for device in ("pc", "lap"):
         (ssh.hosts / f"{device}-gemini-bot").write_text("gemini-bot", encoding="utf-8")
     ssh.offline("lap-gemini-bot").touch()
     home = tmp_path / "device-home"
     home.mkdir()
-    replies = tmp_path / "replies"
-    replies.mkdir()
-    for account, name in {**GEMINI_REPLIES, "token": "signed-in"}.items():
-        code, reply = gemini_status(name)
-        (replies / f"{account}.out").write_bytes(reply)
-        (replies / f"{account}.code").write_text(str(code), encoding="utf-8")
-    bin_dir = tmp_path / "device-bin"
-    bin_dir.mkdir()
-    env_log = tmp_path / "gemini-env.log"
-    fake = bin_dir / "gemini"
-    fake.write_text(FAKE_GEMINI.format(
-        log=env_log, home=home, replies=replies, token_test="".join(f"${name}" for name in AUTH_OVERRIDES),
-    ), encoding="utf-8")
-    fake.chmod(0o755)
-    planted = {name: f"SYNTHETIC-{index}" for index, name in enumerate(AUTH_OVERRIDES)}
+    agy = FakeAgy(tmp_path)
     (home / ".bash_profile").write_text(
-        f"export PATH={bin_dir}:$PATH\nexport GEMINI_CLI_HOME={home}/elsewhere\n"
-        + "".join(f"export {name}={value}\n" for name, value in planted.items()),
+        f"export PATH={agy.bin}:$PATH\n" + "".join(f"export {name}={value}\n" for name, value in PLANTED_LOGIN.items()),
         encoding="utf-8",
     )
     machines = tmp_path / "machines.yml"
-    machines.write_text(f"""\
-orch_host: pc
-accounts:
-  - {{id: gemini-b, harness: gemini, signed_in_on: [pc]}}
-  - {{id: gemini-c, harness: gemini, signed_in_on: [pc]}}
-devices:
-  - name: pc
-    tailscale_name: pc.example.ts.net
+    machines.write_text("orch_host: pc\naccounts:\n  - {id: gemini-ultra, harness: gemini, plan: ultra}\ndevices:\n" + "".join(
+        f"""\
+  - name: {device}
+    tailscale_name: {device}.example.ts.net
     slot_max: 2
-    harnesses: {{gemini: gemini-bot}}
+    harnesses: {{gemini: {{bot: gemini-bot, account: gemini-ultra}}}}
     workdir_root: /home/{{bot}}/work
-    ssh_alias: pc-{{bot}}
-    factory_root: /srv/factory
+    ssh_alias: {device}-{{bot}}
+    factory_root: {ROOT}
     home: {home}
-  - name: lap
-    tailscale_name: lap.example.ts.net
-    slot_max: 1
-    harnesses: {{gemini: gemini-bot}}
-    workdir_root: /home/{{bot}}/work
-    ssh_alias: lap-{{bot}}
-    factory_root: /srv/factory
-    home: {home}
-""", encoding="utf-8")
+""" for device in ("pc", "lap")), encoding="utf-8")
     for name, value in ssh.env().items():
         monkeypatch.setenv(name, value)
     monkeypatch.setenv("FAKE_SSH_HOME", str(home))
     monkeypatch.setenv("ORCH_SSH_MUX", "off")
-    db = tmp_path / "orch.db"
+    return GeminiDevices(ssh, agy, home, machines, tmp_path / "orch.db")
 
-    assert cli.main(["accounts", "doctor", "--db", str(db), "--machines", str(machines)]) == 0
 
-    with sqlite3.connect(db) as connection:
-        rows = {(row[0], row[1]): row for row in connection.execute(
-            f"SELECT account, device, status, auth_method, detail FROM {account_doctor.TABLE}")}
-    assert {key: (row[2], row[4]) for key, row in rows.items()} == {
-        ("gemini-default", "pc"): ("ok", ""),
-        ("gemini-b", "pc"): ("signed-out", account_doctor.NOT_LOGGED_IN),
-        ("gemini-c", "pc"): ("signed-out", account_doctor.NOT_LOGGED_IN),
-        ("gemini-default", "lap"): ("unreachable", account_doctor.SSH_DOWN),
+def run_doctor(devices: GeminiDevices) -> dict[tuple[str, str], tuple[str, str]]:
+    assert cli.main(["accounts", "doctor", "--db", str(devices.db), "--machines", str(devices.machines)]) == 0
+    with sqlite3.connect(devices.db) as connection:
+        rows = list(connection.execute(f"SELECT account, device, status, detail FROM {account_doctor.TABLE}"))
+    assert not [value for value in PLANTED_LOGIN.values() if value in repr(rows)]
+    return {(account, device): (status, detail) for account, device, status, detail in rows}
+
+
+def test_the_doctor_probes_the_gemini_bot_login_with_agy_models_and_every_override_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    devices = gemini_devices(tmp_path, monkeypatch)
+    assert run_doctor(devices) == {
+        ("gemini-ultra", "pc"): ("ok", ""),
+        ("gemini-ultra", "lap"): ("unreachable", account_doctor.SSH_DOWN),
     }
-    envs = [set(line.split()) for line in env_log.read_text(encoding="utf-8").splitlines()]
-    assert len(envs) == 3
-    for names in envs:
-        assert not names & set(AUTH_OVERRIDES)
-        assert "NO_BROWSER" in names
-    assert not [value for value in planted.values() if value in repr(rows)]
+    devices.agy.answer("signed-out")
+    assert run_doctor(devices) == {
+        ("gemini-ultra", "pc"): ("signed-out", account_doctor.NOT_LOGGED_IN),
+        ("gemini-ultra", "lap"): ("unreachable", account_doctor.SSH_DOWN),
+    }
+    calls = devices.agy.calls()
+    assert [args for _, args in calls] == ["models", "models"]
+    assert [names & set(PLANTED_LOGIN) for names, _ in calls] == [set(), set()]
 
 
-def test_the_dashboard_and_doctor_give_the_gemini_sign_in_command(tmp_path: Path) -> None:
+@pytest.mark.parametrize("name", ["cache-warning", "warning-word", "no-models", "no-models-text", "sign-in-text"])
+def test_an_exit_0_reply_with_no_model_list_on_stdout_keeps_the_gemini_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    devices = gemini_devices(tmp_path, monkeypatch)
+    with sqlite3.connect(devices.db) as connection:
+        account_doctor.hold(connection, "gemini-ultra", "pc", "runtime", account_doctor.AUTHENTICATION_FAILED, NOW)
+    devices.agy.answer(name)
+    assert run_doctor(devices)[("gemini-ultra", "pc")] == ("signed-out", account_doctor.NOT_UNDERSTOOD)
+    with sqlite3.connect(devices.db) as connection:
+        assert list(connection.execute("SELECT account, device FROM signin_holds")) == [("gemini-ultra", "pc")]
+
+
+@pytest.mark.parametrize("name", ["signed-in", "one-model", "models-with-warning"])
+def test_an_exit_0_model_list_reads_signed_in_and_clears_the_gemini_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    devices = gemini_devices(tmp_path, monkeypatch)
+    with sqlite3.connect(devices.db) as connection:
+        account_doctor.hold(
+            connection, "gemini-ultra", "pc", "runtime", account_doctor.AUTHENTICATION_FAILED, time.time() - 60
+        )
+    devices.agy.answer(name)
+    assert run_doctor(devices)[("gemini-ultra", "pc")] == ("ok", "")
+    with sqlite3.connect(devices.db) as connection:
+        assert list(connection.execute("SELECT account, device FROM signin_holds")) == []
+
+
+def test_running_the_doctor_on_a_gemini_device_login_prepares_no_account_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lib import settings_apply
+    from lib.remote import SshTransport
+    from tests.test_settings_apply import OWNER, Runner
+
+    devices = gemini_devices(tmp_path, monkeypatch)
+    with (devices.home / ".bash_profile").open("a", encoding="utf-8") as profile:
+        profile.write("export LOGNAME=gemini-bot USER=gemini-bot\n")
+    sqlite3.connect(devices.db).close()
+    state = tmp_path / "state"
+    state.mkdir()
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    spool.chmod(0o755)
+    applier = settings_apply.Applier(
+        machines=devices.machines, state_dir=state, deploy=tmp_path / "deploy",
+        approver="maxharris1", environ={}, restart=("poller",), pending=(),
+        claims=settings_apply.claim_lock(devices.db), run=Runner(None), clock=lambda: NOW,
+        db=devices.db, transport=SshTransport(), repo=None,
+    )
+    rid = "pair-0001-abcdefghijk"
+    request = spool / f"{rid}.json"
+    request.write_text(json.dumps({
+        "id": rid, "actor": "maxharris1", "requested_at": "2026-11-22T10:00:00Z",
+        "target": "account", "op": "doctor", "account": "gemini-ultra", "device": "pc",
+    }), encoding="utf-8")
+    request.chmod(0o644)
+
+    (entry,) = settings_apply.run_pass(applier, settings_apply.LocalSpool(spool), OWNER)
+
+    assert (entry.result, entry.error, entry.new) == ("applied", None, "ok"), entry
+    assert [call for call in devices.ssh.calls() if "accounts prepare" in call["script"]] == []
+    assert not (devices.home / ".factory-accounts").exists()
+
+
+def test_the_dashboard_and_doctor_give_the_interactive_agy_sign_in_command(tmp_path: Path) -> None:
     from lib import dashboard_accounts
     from lib.machines_yml import Account, Device, MachinesConfig
 
-    folder = "/home/gemini-bot/.factory-accounts/gemini-pro"
-    command = account_doctor.login_command("gemini", folder)
-    assert command == (
-        "env " + " ".join(f"-u {name}" for name in AUTH_OVERRIDES)
-        + f" GEMINI_CLI_HOME={folder} NO_BROWSER=true gemini"
-    )
-    assert account_doctor.login_command("gemini", None).split(" NO_BROWSER")[0].endswith("-u GEMINI_CLI_HOME")
+    command = account_doctor.login_command("gemini", None)
+    assert command == "env " + " ".join(f"-u {name}" for name in AUTH_OVERRIDES) + " -u GEMINI_CLI_HOME agy"
     config = MachinesConfig(
-        (Device("pc", 1, {"gemini": "gemini-bot"}, home="/home/gemini-bot"),),
-        accounts=(Account("gemini-pro", "gemini", signed_in_on=frozenset({"pc"})),),
+        (Device("pc", 1, {"gemini": "gemini-bot"}, accounts={"gemini": "gemini-ultra"}, home="/home/gemini-bot"),),
+        accounts=(Account("gemini-ultra", "gemini", plan="ultra"),),
     )
     with sqlite3.connect(":memory:") as db:
         rows = dashboard_accounts.read_accounts(db, NOW, config)
     commands = {account["id"]: [row["command"] for row in account["signed_in_on"]] for account in rows}
-    assert commands["gemini-pro"] == [command]
+    assert commands["gemini-ultra"] == [command]
 
 
-def test_a_gemini_account_folder_is_prepared(tmp_path: Path) -> None:
-    err = {"type": "error", "message": "quota exhausted"}
-    assert lane_limit.error_text("gemini", err) == err["message"]
-
-    bot_home = tmp_path / "gemini-home"
-    bot_home.mkdir()
-    machines = tmp_path / "machines.yml"
-    machines.write_text(
-        f"""\
+GEMINI_MACHINES = """\
 orch_host: pc
 accounts:
-  - {{id: gemini-pro, harness: gemini, signed_in_on: [pc]}}
+  - {{id: gemini-ultra, harness: gemini, plan: ultra{signed_in_on}}}
 devices:
   - name: pc
     tailscale_name: pc.example.ts.net
     slot_max: 2
-    harnesses: {{gemini: gemini-bot}}
+    harnesses: {{gemini: {harness}}}
     workdir_root: /home/{{bot}}/factory-work
     ssh_alias: pc-{{bot}}
     factory_root: /home/{{bot}}/factory
-    home: {bot_home.as_posix()}
-""",
-        encoding="utf-8",
-    )
+    home: {home}
+"""
+
+
+def test_a_gemini_account_is_each_devices_gemini_bot_login_with_no_folder(tmp_path: Path) -> None:
+    bot_home = tmp_path / "gemini-home"
+    bot_home.mkdir()
+    machines = tmp_path / "machines.yml"
+    machines.write_text(GEMINI_MACHINES.format(
+        signed_in_on="", harness="{bot: gemini-bot, account: gemini-ultra}", home=bot_home.as_posix(),
+    ), encoding="utf-8")
     config, findings = load_machines_yml(machines, overlay=False)
-    assert config is not None
-    assert not [f for f in findings if f.severity == "error"]
-    assert config.accounts_on("pc", "gemini") == ("gemini-default", "gemini-pro")
-    changes = account_home.prepare(config, "pc", "gemini-bot", bot_home)
-    assert any(c.action == "made" and c.path.endswith("gemini-pro") for c in changes)
+    assert config is not None and findings == []
+    assert config.accounts_on("pc", "gemini") == ("gemini-ultra",)
+    assert config.account_home("pc", "gemini", "gemini-ultra") is None
+    assert account_home.prepare(config, "pc", "gemini-bot", bot_home) == []
+    assert not (bot_home / ".factory-accounts").exists()
+
+
+def test_settings_refuses_to_add_every_device_login_harness_with_the_machines_yml_step() -> None:
+    assert set(ADD_REFUSED) == DEVICE_LOGIN_ONLY
+    assert "harnesses.gemini" in ADD_REFUSED["gemini"] and "machines.yml" in ADD_REFUSED["gemini"]
+
+
+def test_a_gemini_account_signed_in_from_a_folder_is_refused(tmp_path: Path) -> None:
+    machines = tmp_path / "machines.yml"
+    machines.write_text(GEMINI_MACHINES.format(
+        signed_in_on=", signed_in_on: [pc]", harness="gemini-bot", home="/home/gemini-bot",
+    ), encoding="utf-8")
+    config, findings = load_machines_yml(machines, overlay=False)
+    assert config is None
+    assert any("signed_in_on is not supported for a gemini account" in item.message for item in findings)
 
 
 @pytest.mark.parametrize("path", ["docs/ACCOUNTS.md", "docs/RUNBOOK-HARDENING.md", "bots/gemini-bot/SKILL.md"])

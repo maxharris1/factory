@@ -1,17 +1,19 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
+import json
+import math
+from dataclasses import asdict, dataclass
 from typing import Literal
 
+from lib.dashboard_evals import KEEP, METRIC_KEYS, UNRECORDED
 from lib.dashboard_pages.common import _chip, _e, _panel, _span
 from lib.dashboard_static import read_asset
 
 CSS = read_asset("css/evals.css")
 
 TITLE = "Weekly evals"
-NO_DIR = '<p class="empty">No evals dir on this host.</p>'
-NO_SNAPSHOTS = '<p class="empty">No weekly evals yet. The Monday report writes the first.</p>'
+NO_DIR = "No evals dir on this host."
+NO_SNAPSHOTS = "No weekly evals yet. The Monday report writes the first."
 
 
 @dataclass(frozen=True)
@@ -31,44 +33,49 @@ KINDS = {
 }
 
 
-def _number(value: object) -> float | None:
-    return None if isinstance(value, bool) or not isinstance(value, (int, float)) else value
-
-
-def _metric(key: str) -> Callable[[list[dict], int], float | None]:
-    return lambda weeks, i: _number(weeks[i]["metrics"].get(key)) if i < len(weeks) else None
-
-
-_SUCCEEDED = _metric("tickets-succeeded")
-
-
-def _shipped(weeks: list[dict], i: int) -> float | None:
-    now, before = _SUCCEEDED(weeks, i), _SUCCEEDED(weeks, i + 1)
-    return None if now is None or before is None else now - before
-
-
 @dataclass(frozen=True)
 class EvalRow:
     label: str
     kind: str
     better: Literal["up", "down"]
-    value: Callable[[list[dict], int], float | None]
+    metric: str
+    shipped: bool = False
 
 
 EVAL_ROWS = (
-    EvalRow("Throughput (tickets shipped)", "count", "up", _shipped),
-    EvalRow("First-pass approve rate (lifetime)", "rate", "up", _metric("first-pass-approve-rate")),
-    EvalRow("Cap rate (lifetime)", "rate", "down", _metric("cap-rate")),
-    EvalRow("Poll errors", "count", "down", _metric("poll-errors")),
-    EvalRow("Stuck jobs", "count", "down", _metric("stuck-jobs")),
-    EvalRow("Failed jobs", "count", "down", _metric("failed-jobs")),
-    EvalRow("Cycle time p50", "hours", "down", _metric("cycle-time-p50-hours")),
-    EvalRow("Cycle time p90", "hours", "down", _metric("cycle-time-p90-hours")),
-    EvalRow("Max interventions", "count", "down", _metric("max-interventions")),
-    EvalRow("Wasted wakes", "count", "down", _metric("wasted-wakes")),
-    EvalRow("Productive spend", "usd", "up", _metric("productive-cost-usd")),
-    EvalRow("Wasted spend", "usd", "down", _metric("wasted-cost-usd")),
+    EvalRow("Throughput (tickets shipped)", "count", "up", "tickets-succeeded", shipped=True),
+    EvalRow("First-pass approve rate (lifetime)", "rate", "up", "first-pass-approve-rate"),
+    EvalRow("Cap rate (lifetime)", "rate", "down", "cap-rate"),
+    EvalRow("Poll errors", "count", "down", "poll-errors"),
+    EvalRow("Stuck jobs", "count", "down", "stuck-jobs"),
+    EvalRow("Failed jobs", "count", "down", "failed-jobs"),
+    EvalRow("Cycle time p50", "hours", "down", "cycle-time-p50-hours"),
+    EvalRow("Cycle time p90", "hours", "down", "cycle-time-p90-hours"),
+    EvalRow("Max interventions", "count", "down", "max-interventions"),
+    EvalRow("Wasted wakes", "count", "down", "wasted-wakes"),
+    EvalRow("Productive spend", "usd", "up", "productive-cost-usd"),
+    EvalRow("Wasted spend", "usd", "down", "wasted-cost-usd"),
 )
+
+
+def _value(row: EvalRow, weeks: list[dict], i: int) -> float | None:
+    def read(j: int) -> float | None:
+        value = weeks[j]["metrics"].get(row.metric) if j < len(weeks) else None
+        return None if isinstance(value, bool) or not isinstance(value, (int, float)) else float(value)
+
+    now = read(i)
+    if not row.shipped or now is None:
+        return now
+    before = read(i + 1)
+    return None if before is None else now - before
+
+
+def _half_up(value: float, digits: int) -> float | None:
+    scaled = value * 10**digits
+    if not math.isfinite(scaled):
+        return None
+    whole = math.floor(scaled)
+    return (whole + 1 if scaled - whole >= 0.5 else whole) / 10**digits
 
 
 def _format(kind: Kind, number: float, suffix: str, signed: bool) -> str:
@@ -78,11 +85,12 @@ def _format(kind: Kind, number: float, suffix: str, signed: bool) -> str:
 
 def _cell(row: EvalRow, weeks: list[dict], i: int) -> str:
     kind = KINDS[row.kind]
-    now, before = row.value(weeks, i), row.value(weeks, i + 1)
-    text = "n/a" if now is None else _format(kind, round(now * kind.scale, kind.digits), kind.suffix, False)
-    if now is None or before is None:
+    now, before = _value(row, weeks, i), _value(row, weeks, i + 1)
+    shown = None if now is None else _half_up(now * kind.scale, kind.digits)
+    text = "n/a" if shown is None else _format(kind, shown, kind.suffix, False)
+    delta = None if now is None or before is None else _half_up((now - before) * kind.scale, kind.digits)
+    if delta is None:
         return f'<td>{_span("ev-v", text)} {_chip("n/a")}</td>'
-    delta = round((now - before) * kind.scale, kind.digits)
     tone = "muted" if not delta else "ok" if (delta > 0) == (row.better == "up") else "bad"
     return f'<td>{_span("ev-v", text)} {_chip(_format(kind, delta, kind.delta_suffix, True), tone)}</td>'
 
@@ -91,9 +99,9 @@ def _evals(snapshot: dict) -> str:
     bundle = snapshot.get("evals") or {"state": "no dir", "weeks": [], "skipped": 0}
     weeks, skipped = bundle["weeks"], bundle["skipped"]
     if bundle["state"] == "no dir":
-        inner = NO_DIR
+        inner = f'<p class="empty">{NO_DIR}</p>'
     elif bundle["state"] != "ok" or not weeks:
-        inner = NO_SNAPSHOTS
+        inner = f'<p class="empty">{NO_SNAPSHOTS}</p>'
     else:
         head = "".join(f'<th scope="col">{_e(week["week"])}</th>' for week in weeks)
         rows = "".join(
@@ -106,3 +114,11 @@ def _evals(snapshot: dict) -> str:
         inner += f'<p class="ev-skipped">{skipped} report{"" if skipped == 1 else "s"} skipped.</p>'
     count = f'{len(weeks)} week{"" if len(weeks) == 1 else "s"}' if weeks else None
     return _panel("evals", TITLE, inner, count=count)
+
+
+SCRIPT = read_asset("js/evals.js").replace("__EVALS__", json.dumps(
+    {"rows": [asdict(row) for row in EVAL_ROWS], "kinds": {name: asdict(kind) for name, kind in KINDS.items()},
+     "texts": {"title": TITLE, "no_dir": NO_DIR, "no_snapshots": NO_SNAPSHOTS},
+     "keep": KEEP, "metric_keys": METRIC_KEYS, "unrecorded": UNRECORDED},
+    separators=(",", ":"),
+))

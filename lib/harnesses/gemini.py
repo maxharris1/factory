@@ -31,7 +31,9 @@ class GeminiDriver:
         return "google"
 
     def account_isolation(self) -> AccountIsolation | None:
-        return AccountIsolation("GEMINI_CLI_HOME", AUTH_OVERRIDES)
+        # The #1639 live check of agy 1.5.15 found that only a different HOME
+        # moves its login, so each device's gemini-bot login is its one account.
+        return None
 
     def extra_env(self) -> Mapping[str, str]:
         return {}

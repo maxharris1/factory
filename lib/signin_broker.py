@@ -26,7 +26,7 @@ from pathlib import Path
 
 from lib import account_doctor, heal, health, self_deploy, settings_apply
 from lib.account_settings import PairRequest
-from lib.machines_yml import Device, orch_host
+from lib.machines_yml import Device, MachinesConfig, orch_host
 from lib.orch_yml import load_orch_yml
 from lib.remote import _UNTRACE, PROBE_TIMEOUT_SECONDS, SSH_UNREACHABLE, ByteTransport, SshTransport, _login
 from lib.settings_apply import (
@@ -65,6 +65,7 @@ class Attempt:
     device: Device
     home: str
     previous: str | None
+    config: MachinesConfig
 
 
 def _pair(request: PairRequest) -> tuple[str, str]:
@@ -213,8 +214,8 @@ class Broker:
         request = attempt.request
         if self._home_missing(attempt.device, attempt.harness, attempt.home):
             self.relay.publish(request.id, {"state": "preparing"})
-            error = prepare_pair(self.transport, self.machines, attempt.device, attempt.harness,
-                                 request.account)
+            error = prepare_pair(self.transport, self.machines, attempt.config, attempt.device,
+                                 attempt.harness, request.account)
             if error is not None:
                 return error
         self.relay.publish(request.id, {"state": "launching"})
@@ -243,7 +244,7 @@ class Broker:
                 raise Refused("attempt-live")
             if len(self._attempts) >= MAX_CONCURRENT:
                 raise Refused("too-many")
-        attempt = Attempt(request, harness, device, home, previous)
+        attempt = Attempt(request, harness, device, home, previous, config)
         try:
             with self.claims() as held:
                 busy = _pair(request) in {(pair.account, pair.device) for pair in held.pairs(config)}

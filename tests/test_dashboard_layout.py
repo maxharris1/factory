@@ -650,7 +650,8 @@ def test_pages_have_no_external_assets_or_markup_sinks(tmp_path: Path) -> None:
             assert needle not in html, (name, needle)
         for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
             assert sink not in script, (name, sink)
-        assert re.findall(r"fetch\(([^,)]+)", script) == ["path", "'/api/session'", "'tickets.json'", "STATUS_URL"], name
+        assert re.findall(r"fetch\(([^,)]+)", script) == [
+            "'evals.json'", "path", "'/api/session'", "'tickets.json'", "STATUS_URL"], name
         assert all(path.startswith("/api/") for path in re.findall(r"ghPost\('([^']*)'", script)), name
 
 
@@ -686,7 +687,7 @@ def test_no_device_checkout_path_reaches_any_page(tmp_path: Path, monkeypatch: p
 
 HARNESS = r"""
 const fs = require('fs');
-const [script, statusText, page, hash, idsText, actionsText, ticketsText] = [2, 3, 4, 5, 6, 7, 8].map(i => {
+const [script, statusText, page, hash, idsText, actionsText, ticketsText, evalsText] = [2, 3, 4, 5, 6, 7, 8, 9].map(i => {
   const v = process.argv[i]; return i <= 3 || i >= 7 ? fs.readFileSync(v, 'utf8') : v; });
 const status = JSON.parse(statusText);
 const ids = {};
@@ -812,6 +813,8 @@ const replaced = [];
 global.location = {hash, reload: () => { console.log('RELOAD'); }, replace: (url) => { replaced.push(url); }};
 let fetches = 0;
 let ticketFetches = 0;
+let evalsFetches = 0;
+const evalsAnswer = JSON.parse(evalsText);
 const heldTickets = [];
 const holdTickets = JSON.parse(actionsText).some(([kind]) => kind === 'hold');
 global.fetch = (url, opts) => {
@@ -820,6 +823,13 @@ global.fetch = (url, opts) => {
     ticketFetches += 1;
     const res = {ok: true, status: 200, json: () => Promise.resolve(JSON.parse(ticketsText))};
     return holdTickets ? new Promise(resolve => heldTickets.push(() => resolve(res))) : Promise.resolve(res);
+  }
+  if (url === 'evals.json') {
+    if (opts.cache !== 'no-store' || opts.credentials !== 'same-origin') throw new Error('bad fetch ' + url);
+    evalsFetches += 1;
+    const answer = evalsAnswer || {status: 404, body: null};
+    return Promise.resolve({ok: answer.status === 200, status: answer.status,
+      json: () => Promise.resolve(answer.body)});
   }
   fetches += 1;
   if (url !== 'status.json' || opts.cache !== 'no-store') throw new Error('bad fetch ' + url);
@@ -831,7 +841,7 @@ global.setInterval = (fn) => { intervals.push(fn); return intervals.length; };
 eval(script);
 setTimeout(() => {
   act(JSON.parse(actionsText));
-  process.stdout.write(JSON.stringify({fetches, steps, tickets: ticketFetches, replaced,
+  process.stdout.write(JSON.stringify({fetches, steps, tickets: ticketFetches, evals: evalsFetches, replaced,
     text: Object.fromEntries(Object.entries(ids).map(([k, v]) => [k, v.textContent])),
     html: Object.fromEntries(Object.entries(ids).map(([k, v]) => [k, v.children.map(c => c.html()).join('')])),
     hidden: Object.fromEntries(Object.entries(ids).map(([k, v]) => [k, !!v.hidden])),
@@ -845,31 +855,33 @@ needs_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
 
 def _run_page(
     tmp_path: Path, snapshot: dict, page: str, ids: list[str], hash_: str = "",
-    actions: list | None = None,
+    actions: list | None = None, evals: dict | None = None,
 ) -> dict:
     name = {"main": "index.html"}.get(page, f"{page}.html")
     html = render_pages(snapshot)[name]
     assert '<script src="/app.js" defer></script>' in html
     script = dashboard.render_static_assets(snapshot)["app.js"]
     assert f'data-page="{page}"' in html
-    out = run_harness(tmp_path, HARNESS, script, snapshot, page, ids, actions or [], hash_, tickets_json(snapshot))
+    out = run_harness(tmp_path, HARNESS, script, snapshot, page, ids, actions or [], hash_, tickets_json(snapshot),
+                      evals)
     assert out["fetches"] >= 1
     return out
 
 
 def run_harness(
     tmp_path: Path, harness: str, script: str, snapshot: dict, page: str, ids: list[str], actions: list | dict,
-    hash_: str = "", tickets: str = "null",
+    hash_: str = "", tickets: str = "null", evals: dict | None = None,
 ) -> dict:
-    """Linux caps one argument at 128 KiB, so actions and tickets.json go by file like the script and snapshot."""
+    """Linux caps one argument at 128 KiB, so actions, tickets.json and evals.json go by file like the script and snapshot."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     files = {"harness.js": harness, "page.js": script, "status.json": json.dumps(snapshot),
-             "actions.json": json.dumps(actions), "tickets.json": tickets}
+             "actions.json": json.dumps(actions), "tickets.json": tickets, "evals.json": json.dumps(evals)}
     for name, text in files.items():
         (tmp_path / name).write_text(text, encoding="utf-8")
     result = subprocess.run(
         [NODE, str(tmp_path / "harness.js"), str(tmp_path / "page.js"), str(tmp_path / "status.json"),
-         page, hash_, json.dumps(ids), str(tmp_path / "actions.json"), str(tmp_path / "tickets.json")],
+         page, hash_, json.dumps(ids), str(tmp_path / "actions.json"), str(tmp_path / "tickets.json"),
+         str(tmp_path / "evals.json")],
         capture_output=True, text=True, timeout=60, check=False,
     )
     assert result.returncode == 0, result.stderr

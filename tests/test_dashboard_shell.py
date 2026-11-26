@@ -1651,9 +1651,9 @@ def test_polls_that_fail_from_the_first_fetch_show_the_red_bar(tmp_path: Path, b
         _fresh_harness()
         .replace("let failing = false;", "let failing = true;", 1)
         .replace("body.attrs['data-generated'] = '1800000000.000';",
-                 f"body.attrs['data-generated'] = '{snapshot['generated_at_epoch']:.3f}';", 1)
+                 f"body.attrs['data-generated'] = '{float(snapshot['generated_at_epoch'])!r}';", 1)
     )
-    assert "let failing = true;" in harness and f"'{NOW - STALE_AGE:.3f}'" in harness
+    assert "let failing = true;" in harness and f"'{float(NOW - STALE_AGE)!r}'" in harness
     out = _link_run(tmp_path, snapshot, [["fresh"], ["advance", 7], ["fresh"], ["advance", 1], ["fresh"]],
                     ids=FRESH_IDS, harness=harness)
     early, lost, later = [_plain(step["fresh"]) for step in out["steps"] if "fresh" in step]
