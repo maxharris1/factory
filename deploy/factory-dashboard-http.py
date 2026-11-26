@@ -537,7 +537,7 @@ DEVICE_ERRORS = {
 
 
 class ApiError(Exception):
-    def __init__(self, status: int, code: str, **extra: str):
+    def __init__(self, status: int, code: str, **extra: str | int):
         super().__init__(code)
         self.status = status
         self.body = {"error": code, **extra}
@@ -547,6 +547,15 @@ class GitHubError(Exception):
     def __init__(self, status: int):
         super().__init__(f"github answered {status}")
         self.status = status
+
+
+GITHUB_HINT = "OAuth app may need approval for this org / SSO"
+HINTED_STATUSES = frozenset({403, 404})
+
+
+def github_failure(exc: GitHubError) -> ApiError:
+    hint = {"hint": GITHUB_HINT} if exc.status in HINTED_STATUSES else {}
+    return ApiError(502, "github", github_status=exc.status, **hint)
 
 
 class Target(NamedTuple):
@@ -740,8 +749,8 @@ class Actions:
     def post_as_approver(self, session: Session, target: Target, body: str) -> str:
         try:
             comment = self.github.post_comment(session.token, target.repo, target.number, body)
-        except GitHubError:
-            raise ApiError(502, "github") from None
+        except GitHubError as exc:
+            raise github_failure(exc) from None
         author = comment.get("user")
         login = author.get("login") if isinstance(author, dict) else None
         url = comment.get("html_url")
@@ -759,8 +768,8 @@ class Actions:
     def head(self, session: Session, target: Target) -> str:
         try:
             return self.github.pull_head(session.token, target.repo, target.number)
-        except GitHubError:
-            raise ApiError(502, "github") from None
+        except GitHubError as exc:
+            raise github_failure(exc) from None
 
 
 def _number(value: object) -> int:
@@ -1447,7 +1456,8 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         try:
             url = self._post_act(actions, session, payload)
         except ApiError as exc:
-            audit.append({**entry, "result": exc.body["error"], "url": None})
+            status = {"github_status": exc.body["github_status"]} if "github_status" in exc.body else {}
+            audit.append({**entry, "result": exc.body["error"], **status, "url": None})
             raise
         audit.append({**entry, "result": "posted", "url": url})
         return 201, {"url": url}, []
