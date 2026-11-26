@@ -297,7 +297,7 @@ Confirm reports are written under `~/.local/state/factory/evals/weekly-YYYY-MM-D
 
 ## 6. Authenticate Cursor & Gemini CLIs (Preparation for Epic 2)
 
-Once **E2-2** (Cursor CLI driver) and **E2-3** (Gemini CLI driver) are merged:
+Once **E2-2** (Cursor CLI driver) and **E2-3** (Gemini `agy` driver) are merged:
 
 1. **Cursor (`cursor-agent`):**
    ```bash
@@ -305,9 +305,13 @@ Once **E2-2** (Cursor CLI driver) and **E2-3** (Gemini CLI driver) are merged:
    ```
    Remove `cursor` from `refused_harnesses` in `orch.local.yml`, enable `cursor-bot` waiter, and verify `bin/orch doctor --live --harness cursor` as `cursor-bot`.
 
-2. **Gemini (`gemini`):**
-   Create `gemini-bot` user (same pattern as Section 3.1). Sign it in with Google for Gemini Code Assist, then run `orch accounts doctor` (`docs/ACCOUNTS.md`). `gemini` stays in `refused_harnesses` until that passes on each device (`docs/decisions/1412-gemini-harness.md`).
-   Add `gemini: gemini-bot` under `devices[].harnesses` in `machines.local.yml`, run `bin/orch install-skills`, and verify `bin/orch doctor --live --harness gemini` as `gemini-bot`.
+2. **Gemini (`agy`):**
+   Create `gemini-bot` user (same pattern as Section 3.1). Sign it in with interactive `agy`, with every API key and token override unset:
+   ```sh
+   sudo -u gemini-bot -H bash -lc 'env -u GEMINI_API_KEY -u GOOGLE_API_KEY -u GOOGLE_CLOUD_ACCESS_TOKEN -u GOOGLE_APPLICATION_CREDENTIALS -u GOOGLE_GENAI_USE_GCA -u GOOGLE_GENAI_USE_VERTEXAI -u GEMINI_CLI_USE_COMPUTE_ADC -u CLOUD_SHELL -u GOOGLE_GEMINI_BASE_URL -u GEMINI_CLI_CUSTOM_HEADERS -u GEMINI_CLI_HOME agy'
+   ```
+   Sign in with the Google AI Ultra account, then quit `agy`. There is no account folder. The account is each device's `gemini-bot` login. Run `orch accounts doctor` (`docs/ACCOUNTS.md`), which probes the login with `agy models`. Gemini quota is tracked through `agy -p /usage` at each gemini job's start. `gemini` stays in `refused_harnesses` until the doctor passes on each device (`docs/decisions/1412-gemini-harness.md`).
+   Add `gemini: {bot: gemini-bot, account: <id>}` under `devices[].harnesses` in `machines.local.yml`, run `bin/orch install-skills`, and verify `bin/orch doctor --live --harness gemini` as `gemini-bot`.
 
 3. **Additional Same-Harness Accounts (Even Usage Balancing):**
    For each secondary account (e.g., `claude-b`, `codex-b`), create its isolated directory under `/home/<bot>/accounts/<account-name>` (`0700`), sign in using `CLAUDE_CONFIG_DIR` / `CODEX_HOME`, and register it in `machines.local.yml` `accounts:`. Epic 2 ticket **E2-5** will automatically balance usage evenly across accounts of the same harness.
