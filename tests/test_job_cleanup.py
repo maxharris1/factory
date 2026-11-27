@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -182,7 +183,7 @@ def work_root(tmp_path: Path, name: str = "pc") -> Path:
     return tmp_path / name / "claude-bot" / "work"
 
 
-def database(tmp_path: Path, rows: list[tuple[str, str, str, float | None]],
+def database(tmp_path: Path, rows: list[tuple[str, str, str, float | str | bytes | None]],
              unhandled: frozenset[str] = frozenset(),
              recipients: dict[str, str] | None = None) -> Path:
     db = tmp_path / "orch.db"
@@ -2470,6 +2471,116 @@ def test_cli_bot_pass_keeps_jobs_inside_its_ten_minute_grace(
     assert re.fullmatch(rf"{label}: removed old \d+ bytes", removed), removed
     assert kept == f"{label}: kept fresh recent"
     assert (root / "jobs" / "fresh" / "repo" / "README").exists()
+
+
+BAD_FINISHED_AT = {
+    "iso text": ("2026-11-20T10:00:00Z", "text"),
+    "garbage text": ("soon", "text"),
+    "infinity": (float("inf"), "real"),
+    "blob": (b"\x00\x01", "blob"),
+}
+
+
+def raw_finished_at(db: Path, job_id: str) -> tuple[object, str]:
+    connection = sqlite3.connect(db)
+    try:
+        return connection.execute(
+            "SELECT finished_at, typeof(finished_at) FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    finally:
+        connection.close()
+
+
+class PlanRecorder(InProcessTransport):
+    def __init__(self, root: Path):
+        super().__init__(root)
+        self.plans: list[dict] = []
+
+    def call(self, argv, *, timeout: float, input: bytes | None = None) -> Called:
+        self.plans.append(json.loads(input.decode()))
+        return super().call(argv, timeout=timeout, input=input)
+
+
+@pytest.mark.parametrize("sweep", [["--backlog"], ["--bot", "claude-bot"]], ids=["backlog", "bot"])
+@pytest.mark.parametrize("bad", BAD_FINISHED_AT, ids=list(BAD_FINISHED_AT))
+def test_cli_keeps_a_bad_finished_at_job_and_cleans_the_rest(
+    tmp_path: Path, capsys, monkeypatch, bad: str, sweep: list[str]
+) -> None:
+    value, kind = BAD_FINISHED_AT[bad]
+    root = work_root(tmp_path)
+    folder = job_folder(root, "bad")
+    old = job_folder(root, "old")
+    db = database(tmp_path, [("bad", "t1", "done", value), ("old", "t2", "done", OLD)])
+    monkeypatch.setattr(job_cleanup.health, "load_machines", lambda _: machines(tmp_path, "pc"))
+    transport = PlanRecorder(root)
+
+    code, out = cleanup(["run", *sweep, "--db", str(db)], transport, capsys)
+
+    assert code == 0, out
+    assert not old.exists()
+    assert (folder / "repo" / "README").exists()
+    assert transport.plans
+    assert all("bad" not in plan["finished"] and "bad" not in plan["finished_at"]
+               for plan in transport.plans), transport.plans
+    assert raw_finished_at(db, "bad") == (value, kind)
+
+
+KEEP_REASON_CASES = {
+    "done without a finish time": ([("j", "t1", "done", None)], frozenset(), "recent"),
+    "queued with garbage text": ([("j", "t1", "queued", "soon")], frozenset(), "live"),
+    "running with infinity": ([("j", "t1", "running", float("inf"))], frozenset(), "live"),
+    "done with iso text": ([("j", "t1", "done", "2026-11-20T10:00:00Z")], frozenset(),
+                           "bad-finished-at"),
+    "failed with garbage text while its ticket is active": (
+        [("j", "t1", "failed", "soon"), ("retry", "t1", "queued", None)], frozenset(),
+        "bad-finished-at"),
+    "failed unhandled with infinity": ([("j", "t1", "failed", float("inf"))], frozenset({"j"}),
+                                       "bad-finished-at"),
+}
+
+
+@pytest.mark.parametrize("case", KEEP_REASON_CASES, ids=list(KEEP_REASON_CASES))
+def test_keep_reason_of_a_job_read_from_orch_db(tmp_path: Path, case: str) -> None:
+    rows, unhandled, reason = KEEP_REASON_CASES[case]
+    db = database(tmp_path, rows, unhandled)
+
+    reasons = job_cleanup.keep_reasons(job_cleanup.read_jobs(db), NOW - 6 * HOUR)
+
+    assert reasons["j"] == reason
+
+
+@pytest.mark.parametrize("devices", [("pc",), ()], ids=["a device", "no devices"])
+def test_cli_bot_pass_prints_its_own_bad_finished_at_job_without_a_folder(
+    tmp_path: Path, capsys, monkeypatch, devices: tuple[str, ...]
+) -> None:
+    root = work_root(tmp_path)
+    db = database(tmp_path, [("bad", "t1", "done", "soon"), ("xbad", "t2", "done", "soon")],
+                  recipients={"xbad": "codex"})
+    monkeypatch.setattr(job_cleanup.health, "load_machines",
+                        lambda _: machines(tmp_path, *devices))
+
+    code, out = cleanup(["run", "--bot", "claude-bot", "--db", str(db)],
+                        InProcessTransport(root), capsys)
+
+    assert code == 0, out
+    assert [line for line in out.splitlines() if "bad-finished-at" in line] == [
+        "orch cleanup run: kept bad bad-finished-at"]
+
+
+def test_cli_reports_a_bad_finished_at_job_from_the_host_and_from_its_folder(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    root = work_root(tmp_path)
+    job_folder(root, "bad")
+    db = database(tmp_path, [("bad", "t1", "done", "soon")])
+    monkeypatch.setattr(job_cleanup.health, "load_machines", lambda _: machines(tmp_path, "pc"))
+
+    code, out = cleanup(["run", "--backlog", "--db", str(db)], InProcessTransport(root), capsys)
+
+    assert code == 0, out
+    first, *rest = out.splitlines()
+    assert first == "orch cleanup run: kept bad bad-finished-at"
+    assert f"pc claude-bot {root}: kept bad bad-finished-at" in rest
+    assert (root / "jobs" / "bad" / "repo" / "README").exists()
 
 
 class NoCalls:
