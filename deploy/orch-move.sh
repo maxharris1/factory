@@ -64,8 +64,7 @@
 # snapshot as machines.<this host>.yml, merges the staged job-detail/ into
 # the one beside orch.db with `orch move-db merge-detail` (refusing, placing
 # nothing, when a file there of the same name differs from the staged copy
-# by more than keys the staged copy adds, as spill_cold adds keys to a cold
-# job's file), places orch.db through orch.db.tmp
+# by more than keys the staged copy adds), places orch.db through orch.db.tmp
 # and mv (never `orch restore-db`, which holds queued jobs), removes this
 # host's orch-retired, and starts the poller first, then the waiter of each
 # bot with ~/.config/factory/waiter-autostart-<bot>, self-heal and the

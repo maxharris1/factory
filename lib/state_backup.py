@@ -292,13 +292,12 @@ def merge_job_detail(source: Path, target: Path) -> None:
     """Copy the job-detail files in source into target.
 
     A file already in target may differ from source's copy only by lacking
-    keys, as spill_cold grows a file by adding keys; any other difference
-    raises BackupError before anything is copied.
+    keys; any other difference raises BackupError before anything is copied.
     """
     if not source.is_dir():
         return
     staged = sorted(source.glob("*.json"))
-    conflicts = [path.name for path in staged if not _grows(path, target / path.name)]
+    conflicts = [path.name for path in staged if not _only_adds_keys(path, target / path.name)]
     if conflicts:
         raise BackupError(
             f"{len(conflicts)} job-detail files in {target} differ from the export's copy "
@@ -315,7 +314,7 @@ def merge_job_detail(source: Path, target: Path) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def _grows(staged: Path, placed: Path) -> bool:
+def _only_adds_keys(staged: Path, placed: Path) -> bool:
     if not placed.exists():
         return True
     old, new = placed.read_bytes(), staged.read_bytes()
