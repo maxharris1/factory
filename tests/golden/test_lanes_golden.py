@@ -17,11 +17,11 @@ GOLDEN = {
     "counts.CSS": "fc5e8cfaa290c726bc5d6a5fb5bff25dd9bbff75864feb867f4419cbabc0ca02",
     "counts.SCRIPT": "c65d30a7f29d994eb2324ccc339defe2ad8edc7da28db9f6d21b854f4af30c0a",
     "__LANES__": "0a070c5626c19ae07dc2fd8adfb927643b397d9899d61f93f67b20ee6f76e617",
-    "seeded/main": "c919b5672aba984e4ccdae8d54bc14135c221048ebdcac583e6bd84256412296",
+    "seeded/main": "9826fe521ce780a39b1ff9f7d770c8edb463adb2bbdd7d19c08bec20ef33a8d8",
     "seeded/chrome": "aadbe4dfbea694de291073438eca2d8b35ecfd9fbd09e4249c76dff8e9c29bd0",
-    "hostile/main": "c919b5672aba984e4ccdae8d54bc14135c221048ebdcac583e6bd84256412296",
+    "hostile/main": "9826fe521ce780a39b1ff9f7d770c8edb463adb2bbdd7d19c08bec20ef33a8d8",
     "hostile/chrome": "6381d02d574e86bfc1d9eb1cb283877a3e3f07d5a7cb1d4a425b0883c5411ef4",
-    "empty/main": "c313c3b58d21e31405c4fb82dd692d91f8e289cea0a61ea894ebc1c7f0350217",
+    "empty/main": "a373ab34ec077b5d73a21a23118d1b06b8de40d73def9f7ce1e9680d3a9ebf52",
     "empty/chrome": "d8299bd08e7a667a0f7eef8243d7c3289688d19b6059608781e484db8564bb69",
 }
 
