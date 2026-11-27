@@ -11,8 +11,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from lib import cli, job_detail
-from lib.dashboard import _detail_round
+from lib import cli, dashboard, job_detail
 from lib.dispatcher import Dispatcher
 from lib import queue as queue_module
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
@@ -647,12 +646,13 @@ def _every_reader(path: Path) -> dict[str, dict[str, object]]:
     queue = make_queue(path, [10.0])
     with queue.connect() as connection:
         rows = connection.execute("SELECT id, detail FROM jobs").fetchall()
+        rounds = connection.execute(f"SELECT id, {dashboard._DETAIL_ROUND} AS round FROM jobs").fetchall()
         return {
             "job": {job.id: job.request.detail for job in queue.outstanding()},
             "verdict": {
                 str(row["id"]): job_detail.load_row(connection, row["id"], row["detail"]) for row in rows
             },
-            "dashboard round": {str(row["id"]): _detail_round(row["detail"]) for row in rows},
+            "dashboard round": {str(row["id"]): dashboard._round(row["round"]) for row in rounds},
         }
 
 

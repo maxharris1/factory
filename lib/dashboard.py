@@ -20,8 +20,9 @@ be fetched) the server-rendered page reloads every refresh_seconds (15 to
 
 Secrets: only allowlisted columns are selected (never comment bodies or
 environment values, and of a head only the 7-character short sha in `ci_runs`; the environment is not read except for the
-ORCH_* path variables). jobs.detail is read only to take its `round`
-field, kept only when it is digits/digits; nothing else of it is copied.
+ORCH_* path variables). SQLite takes the `round` field out of jobs.detail
+with json_extract, so no detail value is read into Python; the round is
+kept only when it is digits/digits.
 Every free-text value (stuck reasons, poll_errors, deferrals, log lines)
 goes through `redact`. It runs its rules
 on the text as written and again on a decoded copy (percent and JSON
@@ -307,6 +308,7 @@ HEALTH_OK_SECONDS, HEALTH_LATE_SECONDS = health_thresholds(POLL_SECONDS)
 # A handled orch:v1 comment's outcome as the dispatcher writes it.
 _OUTCOME = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
 _ROUND = re.compile(r"[0-9]{1,3}/[0-9]{1,3}")
+_DETAIL_ROUND = "CASE WHEN json_valid(detail) THEN json_extract(detail, '$.round') END"
 MACHINES_MAX_BYTES = 256 * 1024
 WAIT_RECIPIENTS = ("claude", "codex", "cursor", "gemini")
 HARNESSES = ("claude", "codex", "cursor", "gemini")
@@ -1951,8 +1953,7 @@ def _qa_rounds(connection: sqlite3.Connection, tables: set[str]) -> dict[str, in
     }
 
 
-def _review_round(detail: object, qa_round: int | None) -> str:
-    found = _detail_round(detail)
+def _review_round(found: str | None, qa_round: int | None) -> str:
     if found is not None:
         return found.split("/")[0]
     return exposure.UNKNOWN if qa_round is None else str(qa_round)
@@ -1977,18 +1978,8 @@ def _exposure(found: exposure.Exposure | None, review_round: str) -> dict:
     }
 
 
-def _detail_round(detail: object) -> str | None:
-    """A job's review round ("2/3") from its detail JSON, or None."""
-    if not isinstance(detail, str):
-        return None
-    try:
-        value = json.loads(detail)
-    except ValueError:
-        return None
-    if not isinstance(value, dict):
-        return None
-    found = value.get("round")
-    return found if isinstance(found, str) and _ROUND.fullmatch(found) else None
+def _round(value: object) -> str | None:
+    return value if isinstance(value, str) and _ROUND.fullmatch(value) else None
 
 
 def _read_db(
@@ -2062,7 +2053,7 @@ def _read_db(
         for row in connection.execute(
             f"""
             SELECT id, repo, ticket_id, action, recipient, state,
-                   timeout_seconds, created_at, last_activity_at, detail
+                   timeout_seconds, created_at, last_activity_at, {_DETAIL_ROUND} AS round
             FROM jobs WHERE state IN ('queued', 'running')
             ORDER BY {epoch.sql('created_at')}, id
             """
@@ -2110,7 +2101,7 @@ def _read_db(
                     **base,
                     "job_state": job_state,
                     "stale_cause": cause,
-                    "round": _detail_round(row["detail"]),
+                    "round": _round(row["round"]),
                     "heartbeat_age_seconds": age,
                     "heartbeat_at": epoch.read(row["last_activity_at"]),
                     "timeout_seconds": timeout,
@@ -2119,7 +2110,7 @@ def _read_db(
                     "elapsed_seconds": _age(now, started) or 0,
                     "elapsed_from": elapsed_from,
                     "exposure": _exposure(
-                        exposures.get(str(row["id"])), _review_round(row["detail"], qa_rounds.get(str(row["id"])))
+                        exposures.get(str(row["id"])), _review_round(_round(row["round"]), qa_rounds.get(str(row["id"])))
                     ),
                 }
                 running.append(item)
@@ -2133,7 +2124,7 @@ def _read_db(
                 # since a claim that never started was released (#77 F1.2).
                 age = _age(now, row["last_activity_at"]) or 0
                 mark = marks.get((str(row["repo"]).lower(), str(row["ticket_id"])), PriorityMark())
-                item = {**base, "round": _detail_round(row["detail"]), "age_seconds": age,
+                item = {**base, "round": _round(row["round"]), "age_seconds": age,
                         "tier": mark.tier, "own_tier": mark.own_tier}
                 queued.append(item)
                 active.append((item, str(row["repo"]), str(row["ticket_id"])))
@@ -2679,7 +2670,7 @@ def _ticket_flows(
     qa_rounds: dict[str, int],
 ) -> tuple[dict[tuple[str, str], dict], dict[tuple[str, str], int], dict[tuple[str, str], float]]:
     """(flow, accepted retries, tracked_at) per ticket key (repo casefolded,
-    ticket id). Each table is read once, whole, and kept for `keys` only: no
+    ticket id). Each table is read whole and kept for `keys` only: no
     `IN (...)` list, so the number of tickets never meets SQLite's variable cap."""
     epoch.register(connection)
     histories: dict[tuple[str, str], list[JobStep]] = {key: [] for key in keys}
@@ -2694,27 +2685,35 @@ def _ticket_flows(
             f"t.{name} AS {name}" if joined and name in columns else f"NULL AS {name}"
             for name in ("started_at", "finished_at")
         )
+        kept = []
         for row in connection.execute(
             "SELECT jobs.id, jobs.repo, jobs.ticket_id, jobs.action, jobs.recipient, jobs.created_at, "
-            f"jobs.attempt, jobs.detail, {times} "
+            f"jobs.attempt, {times} "
             "FROM jobs "
             + ("LEFT JOIN job_telemetry t ON t.job_id = jobs.id " if joined else "")
             + f"ORDER BY {epoch.sql('jobs.created_at')}, jobs.rowid"
         ):
             key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
             if key in histories:
-                histories[key].append(JobStep(
-                    _enum(row["action"], ACTIONS),
-                    _enum(row["recipient"], RECIPIENTS),
-                    epoch.read(row["created_at"]),
-                    epoch.cell(row["started_at"]),
-                    epoch.cell(row["finished_at"]),
-                    int(row["attempt"]),
-                    _clean(str(row["id"])[:8], 8),
-                    _exposure(
-                        exposures.get(str(row["id"])), _review_round(row["detail"], qa_rounds.get(str(row["id"])))
-                    ),
-                ))
+                kept.append((key, row))
+        rounds = dict(connection.execute(
+            f"SELECT jobs.id, {_DETAIL_ROUND} AS round FROM json_each(?) AS ids JOIN jobs ON jobs.id = ids.value",
+            (json.dumps([row["id"] for _, row in kept]),),
+        ).fetchall())
+        for key, row in kept:
+            histories[key].append(JobStep(
+                _enum(row["action"], ACTIONS),
+                _enum(row["recipient"], RECIPIENTS),
+                epoch.read(row["created_at"]),
+                epoch.cell(row["started_at"]),
+                epoch.cell(row["finished_at"]),
+                int(row["attempt"]),
+                _clean(str(row["id"])[:8], 8),
+                _exposure(
+                    exposures.get(str(row["id"])),
+                    _review_round(_round(rounds.get(row["id"])), qa_rounds.get(str(row["id"]))),
+                ),
+            ))
     recorded: dict[tuple[str, str], list[Transition]] = {key: [] for key in keys}
     if "ticket_transitions" in tables:
         for row in connection.execute(

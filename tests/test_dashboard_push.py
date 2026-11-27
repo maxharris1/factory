@@ -31,6 +31,7 @@ from lib.qa_evidence_push import (
     plan,
     push_evidence,
 )
+from tests.test_dashboard import TEXT_CAP, large_detail_db, spy_on_sqlite
 from tests.test_qa_evidence_recycle import DAY, NOW, REPO, TICKET, _closed, _lane, _run, db, root  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1387,3 +1388,17 @@ def test_parse_inventory(stdout: str, inventory: dict[str, int]) -> None:
 def test_an_unparsable_inventory_is_a_push_error(stdout: str) -> None:
     with pytest.raises(PushError, match="qa inventory unparsable"):
         parse_inventory(stdout)
+
+
+def test_cli_status_only_push_reads_no_large_job_detail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db = large_detail_db(tmp_path)
+    orch = tmp_path / "orch.yml"
+    orch.write_text(BASE_ORCH + f"dashboard:\n  push:\n    transport: ssh\n    host: {TARGET}\n", encoding="utf-8")
+    transport = FakeTransport()
+    monkeypatch.setattr(lib.dashboard_cli, "transport_for", lambda config: transport)
+    spy = spy_on_sqlite(monkeypatch)
+    out = tmp_path / "out"
+    argv = ["push", "--once", "--status-only", "--orch", str(orch), "--db", str(db), "--out", str(out)]
+    assert lib.dashboard_cli.main(argv) == 0
+    assert transport.sent == [[out / "status.json"]]
+    assert spy.longest_text <= TEXT_CAP
