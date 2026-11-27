@@ -207,6 +207,7 @@ def test_require_auth_reads_allows_auth_js_only_before_signin(tmp_path: Path) ->
         root_fd=mod.open_root(site),
     )
     handler.client_address = ("127.0.0.1", 0)
+    handler._action_client = lambda: "127.0.0.1"
     handler._cookie = lambda _: None
     out: list[tuple[int, str, bytes]] = []
     handler._send = lambda code, data, ctype, **kw: out.append((code, ctype, data))

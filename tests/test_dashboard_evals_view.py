@@ -575,6 +575,7 @@ def test_evals_json_is_401_json_when_signed_out_like_the_other_snapshot_json(sit
         root_fd=server_module.open_root(site),
     )
     handler.client_address = ("127.0.0.1", 0)
+    handler._action_client = lambda: "127.0.0.1"
     handler._cookie = lambda _: None
     out: list[tuple[int, str, bytes]] = []
     handler._send = lambda code, data, content_type, **_: out.append((code, content_type, data))

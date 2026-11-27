@@ -393,6 +393,7 @@ def test_require_auth_reads_protects_html_and_qa_routes_without_exposing_snapsho
         root_fd=server.open_root(tmp_path / "site"),
     )
     handler.client_address = ("127.0.0.1", 0)
+    handler._action_client = lambda: "127.0.0.1"
     handler._cookie = lambda _: None
     out: list[tuple[int, bytes]] = []
     handler._send = lambda code, data, *a, **kw: out.append((code, data))
