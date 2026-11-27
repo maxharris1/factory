@@ -88,11 +88,11 @@ def test_role_slot_selection_across_ticket_types() -> None:
 @pytest.mark.parametrize(
     ("built_by", "excluded_family", "expected_harness", "expected_family"),
     [
-        (("claude", "claude-opus-4-6"), "anthropic", "codex", "openai"),
-        (("codex", "gpt-5.4"), "openai", "claude", "anthropic"),
+        (("claude", "claude-opus-4-6"), "anthropic", "gemini", "google"),
+        (("codex", "gpt-5.4"), "openai", "gemini", "google"),
         (("gemini", "gemini-2.5-pro"), "google", "codex", "openai"),
-        (("cursor", "claude-sonnet-4-6"), "anthropic", "codex", "openai"),
-        (("cursor", "gpt-5.4"), "openai", "claude", "anthropic"),
+        (("cursor", "claude-sonnet-4-6"), "anthropic", "gemini", "google"),
+        (("cursor", "gpt-5.4"), "openai", "gemini", "google"),
         (("cursor", "gemini-2.5-pro"), "google", "codex", "openai"),
     ],
 )
@@ -107,6 +107,8 @@ def test_mechanical_cross_family_review_across_all_four_harnesses(
     rev = resolve_slot("review", routing=cfg, built_by=built_by)
     assert rev.family != excluded_family
     assert (rev.harness, rev.family) == (expected_harness, expected_family)
+    if expected_harness == "codex":
+        assert rev.model == "gpt-6.2-sol"
 
 
 def test_cross_family_review_falls_through_to_google_and_fails_closed_when_exhausted() -> None:
@@ -136,7 +138,7 @@ def test_budget_ladder_overrides_and_effort_clamping() -> None:
     assert cfg is not None
 
     unlim_rev = resolve_slot("review", routing=cfg, budget="unlimited", built_by=("claude", "claude-opus-4-6"))
-    assert unlim_rev.effort == "xhigh"
+    assert (unlim_rev.harness, unlim_rev.model, unlim_rev.effort) == ("codex", "gpt-6.2-sol", "xhigh")
 
     small_build = resolve_slot("build", routing=cfg, budget="small")
     assert small_build.model == "claude-sonnet-5-5"
@@ -223,8 +225,8 @@ def test_orchestrate_choose_route_integrates_role_router() -> None:
         "openai",
     )
     assert (decision.reviewer_harness, decision.reviewer_family) == (
-        "claude",
-        "anthropic",
+        "gemini",
+        "google",
     )
     assert decision.builder_family != decision.reviewer_family
 

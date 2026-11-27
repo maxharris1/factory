@@ -75,19 +75,20 @@ PANELS: dict[str, Callable[[dict], str]] = {
 }
 
 NET_NEW = ("lib/dashboard_pages/counts.py", "lib/dashboard_static/css/counts.css")
+COPIED = (*NET_NEW, "config/routing.yml")
 
 REPRODUCE = f"""\
     git worktree add --detach /tmp/golden-$sha $sha
     cp tests/test_dashboard_golden.py /tmp/golden-$sha/tests/
-{"".join(f"    cp {path} /tmp/golden-$sha/{path}\n" for path in NET_NEW)}\
+{"".join(f"    cp {path} /tmp/golden-$sha/{path}\n" for path in COPIED)}\
     (cd /tmp/golden-$sha && GOLDEN_UPDATE=1 python3 -m pytest -q -p no:cacheprovider tests/test_dashboard_golden.py)
     diff -r tests/golden/dashboard /tmp/golden-$sha/tests/golden/dashboard"""
 
 README = f"""# Dashboard leaf panel goldens
 
 Server-rendered HTML of every leaf panel, one block per fixture variant. The 35 unsuffixed goldens were rendered
-from main {SOURCE}; the `.<kind>` and `.visual-qa` goldens from main {EXTENDED}. Run with this harness, both
-commits render all 52 goldens byte for byte.
+from main {SOURCE}; the `.<kind>` and `.visual-qa` goldens from main {EXTENDED}. Run with this harness and the
+checked-in `config/routing.yml`, both commits render all 52 goldens byte for byte.
 
 Each ticket page section is pinned for every ticket kind whose page shows it: running `{RUNNING}`, shipped
 `{SHIPPED}` (added by `_with_shipped`), stopped `{STOPPED}`, queued `{QUEUED}` and idle `{ASKING}`.
@@ -103,6 +104,7 @@ Update mode deletes every `.html` here that the harness does not render. {SOURCE
 {EXTENDED} renders only the 35 unsuffixed goldens, so copy this harness into a checkout of either commit before
 regenerating.
 Neither commit has the panels added since, so copy their files too: {", ".join(f"`{path}`" for path in NET_NEW)}.
+`_routing.html` renders the checked-in `config/routing.yml`, so copy it too.
 From the repo root, with `sha` set to one of them:
 
 {REPRODUCE}
@@ -179,7 +181,7 @@ def test_the_reproduce_steps_keep_inserted_paths_intact_when_they_contain_the_re
     lines = [shlex.split(line) for line in reproduce_steps(scratch, python).splitlines()]
     assert lines[0][-2:] == [f"{scratch}/golden-$sha", "$sha"]
     assert lines[1][-1] == f"{scratch}/golden-$sha/tests/"
-    assert [line[-1] for line in lines[2:-2]] == [f"{scratch}/golden-$sha/{path}" for path in NET_NEW]
+    assert [line[-1] for line in lines[2:-2]] == [f"{scratch}/golden-$sha/{path}" for path in COPIED]
     assert lines[-2][1] == f"{scratch}/golden-$sha"
     assert lines[-2][4] == str(python)
     assert lines[-1][-1] == f"{scratch}/golden-$sha/tests/golden/dashboard"
