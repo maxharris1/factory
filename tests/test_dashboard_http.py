@@ -615,16 +615,22 @@ def test_action_client_uses_the_last_hop_only_from_roots_socket_on_own_address(m
     assert proxy_client(monkeypatch, 0, OWN, f"  {LISTED}  ") == LISTED
 
 
-def test_action_client_ignores_xff_from_a_non_root_socket_on_own_address(monkeypatch) -> None:
-    assert proxy_client(monkeypatch, 1001, OWN, LISTED) == OWN
-    assert proxy_client(monkeypatch, None, OWN, LISTED) == OWN
+@pytest.mark.parametrize("own", [OWN, None])
+def test_action_client_uses_the_last_hop_from_roots_socket_on_loopback(monkeypatch, own) -> None:
+    for peer in ("127.0.0.1", "127.0.0.2"):
+        assert proxy_client(monkeypatch, 0, peer, LISTED, own=own) == LISTED, peer
+        assert proxy_client(monkeypatch, 0, peer, f"100.64.0.9, {LISTED}", own=own) == LISTED, peer
+
+
+def test_action_client_ignores_xff_from_a_non_root_socket_on_a_proxy_address(monkeypatch) -> None:
+    for peer in (OWN, "127.0.0.1", "127.0.0.2"):
+        assert proxy_client(monkeypatch, 1001, peer, LISTED) == peer
+        assert proxy_client(monkeypatch, None, peer, LISTED) == peer
 
 
 def test_action_client_ignores_xff_from_any_other_peer(monkeypatch) -> None:
     assert proxy_client(monkeypatch, 0, "100.64.0.8", LISTED) == "100.64.0.8"
     assert proxy_client(monkeypatch, 0, "100.64.0.8", f"100.64.0.9, {LISTED}") == "100.64.0.8"
-    assert proxy_client(monkeypatch, 0, "127.0.0.1", LISTED) == "127.0.0.1"
-    assert proxy_client(monkeypatch, 0, "127.0.0.2", LISTED) == "127.0.0.2"
     assert proxy_client(monkeypatch, 0, OWN, LISTED, own=None) == OWN
 
 
@@ -701,6 +707,16 @@ def test_xff_from_the_proxy_socket_can_sign_in(serve_actions, fake_github, monke
     assert status == 200
     assert body["user_code"] == USER_CODE
     assert client.post("/api/signin", **{"X-Forwarded-For": f"{LISTED}, 100.64.0.9"})[0] == 404
+
+
+@pytest.mark.skipif(not HAS_TCP_TABLE, reason="needs /proc/net/tcp")
+def test_xff_from_a_loopback_proxy_socket_can_sign_in(serve_actions, fake_github, monkeypatch) -> None:
+    monkeypatch.setattr(server_module, "TAILSCALED_UID", os.geteuid())
+    client = serve_actions(clients=(LISTED,), own_address=OWN)
+    assert client.post("/api/signin")[0] == 404
+    status, body = client.post("/api/signin", **{"X-Forwarded-For": LISTED})
+    assert status == 200
+    assert body["user_code"] == USER_CODE
 
 
 @pytest.mark.skipif(not HAS_TCP_TABLE, reason="needs /proc/net/tcp")

@@ -49,7 +49,7 @@ and DASHBOARD_ACTION_CLIENTS (a comma list of tailnet IPv4 addresses, never
 this node's own) are required, the process must not run as a bot account,
 and POST is answered under /api only, to those clients only. The last
 X-Forwarded-For hop is used as the client only when the TCP peer is this
-node's TAILNET_IP and the kernel's socket table (/proc/net/tcp) shows that
+node's TAILNET_IP or loopback and the kernel's socket table (/proc/net/tcp) shows that
 peer socket established and owned by root, which is tailscaled (tailscale
 serve's backend). A closed non-root socket's leftover timewait row reports
 uid 0 and is not trusted.
@@ -668,13 +668,15 @@ def action_client(
     peer: tuple[str, int], local: tuple[str, int], forwarded_for: str, own_address: str | None
 ) -> str:
     """IP used for DASHBOARD_ACTION_CLIENTS: the last X-Forwarded-For hop when
-    the peer is tailscaled on this node's TAILNET_IP, else the TCP peer."""
-    if not own_address or peer[0] != own_address:
-        return peer[0]
+    the peer is tailscaled on this node's TAILNET_IP or loopback, else the TCP
+    peer."""
     hop = forwarded_for.rsplit(",", 1)[-1].strip()
     try:
+        proxy = ipaddress.IPv4Address(peer[0])
         ipaddress.IPv4Address(hop)
     except ValueError:
+        return peer[0]
+    if peer[0] != own_address and not proxy.is_loopback:
         return peer[0]
     if tcp_socket_uid(peer, local) != TAILSCALED_UID:
         return peer[0]
