@@ -757,6 +757,15 @@ def test_a_bundle_newer_than_the_snapshot_is_drawn_and_not_fetched_again(tmp_pat
 
 
 @needs_node
+def test_the_efficiency_page_draws_a_newer_bundle(tmp_path: Path) -> None:
+    snapshot = snapshot_for(tmp_path / "db")
+    epoch = snapshot["generated_at_epoch"]
+    out = _run_page(tmp_path / "page", snapshot, "efficiency", EVALS_IDS, evals=served(BOTH_WEEKS, epoch + 30))
+    assert out["html"]["evals"] == section_inner(BOTH_WEEKS)
+    assert out["evals"] == 1
+
+
+@needs_node
 def test_a_published_bundle_is_drawn_when_a_status_only_push_lands_before_the_next_poll(tmp_path: Path) -> None:
     out, _ = polled(tmp_path, lambda epoch: [
         ["serve", served(BOTH_WEEKS, epoch + 30)], ["poll", {"generated_at_epoch": epoch + 31}],

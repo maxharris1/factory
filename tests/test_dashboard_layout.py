@@ -446,8 +446,17 @@ def test_system_page_draws_devices_headroom_accounts_and_routing_after_the_log(t
     assert len(ids) == len(set(ids)), sorted(i for i in ids if ids.count(i) > 1)
 
 
-def test_efficiency_page_draws_cost_alone_and_balance_on_its_own_row(tmp_path: Path) -> None:
-    assert _main_children(_pages(tmp_path)["efficiency.html"]) == [
+def test_efficiency_page_puts_evals_beside_cost_and_balance_on_its_own_row(tmp_path: Path) -> None:
+    pages = _pages(tmp_path)
+    page = _no_script(pages["efficiency.html"])
+    hud = _section(page, "hud")
+    evals = _section(page, "evals")
+    assert evals == _section(pages["evals.html"], "evals")
+    wrapper = '<div style="display:grid;flex:3 1 560px;min-width:0">'
+    top = f'<div class="ef-row">{wrapper}{evals}</div>{_section(page, "tokens")}</div>'
+    assert hud.find(top) == hud.index('<div class="ef-row">')
+    assert re.findall(r"<[^>]*\bstyle=[^>]*>", top) == [wrapper]
+    assert _main_children(page) == [
         ("ef-row", ["tokens"]), ("ef-row", ["rounds", "savings"]), ("ef-row", ["balance"]), "jobs-lifetime",
     ]
 
