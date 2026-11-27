@@ -11,6 +11,7 @@ import pytest
 
 import lib.dashboard as dashboard
 from lib import feeder
+from lib.branch_stack import stack_wait
 from lib.dashboard import (
     REFRESH_DEFAULT,
     DashboardError,
@@ -24,6 +25,7 @@ from lib.dashboard import (
 from lib.dashboard_pages import tickets as tickets_page
 from lib.dashboard_pages.ticket_detail import ticket_view
 from lib.dispatcher import Dispatcher
+from lib.feeder_gates import GateLines, Holds, PathPolicy, Progress, Ref, RefStatus, blocker_waits
 from lib.queue import SQLiteJobQueue
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -271,6 +273,8 @@ def add_feeder_item(
     title: str,
     *,
     seen_at: float = NOW - 60,
+    state: str = "eligible",
+    reason: str | None = None,
 ) -> None:
     feeder.ensure_tables(connection)
     connection.execute(
@@ -279,11 +283,11 @@ def add_feeder_item(
     connection.execute(
         f"""
         INSERT INTO {feeder.FEEDER_TABLE} (
-            repo, issue, tracker, title, harness, state, risk,
+            repo, issue, tracker, title, harness, state, waiting_reason, risk,
             issue_created_at, first_seen_at, seen_at
-        ) VALUES (?, ?, 'github', ?, 'claude', 'eligible', 'low', ?, ?, ?)
+        ) VALUES (?, ?, 'github', ?, 'claude', ?, ?, 'low', ?, ?, ?)
         """,
-        (repo, issue, title, NOW - 7200, NOW - 7200, seen_at),
+        (repo, issue, title, state, reason, NOW - 7200, NOW - 7200, seen_at),
     )
 
 
@@ -736,6 +740,129 @@ def test_ticket_rows_carry_their_feeder_title(tmp_path: Path) -> None:
     assert titles[("aut0-code/aut0", "AUT-7")] == "Linear ticket title"
     assert titles[("maxharris1/cleffy", "12")] is None
     assert [item["issue"] for item in snapshot["feeder"]["items"]] == ["107"]
+
+
+def _tickets(*refs: str) -> list[dict]:
+    return [{"kind": "ticket", "ref": ref, "path": None} for ref in refs]
+
+
+def test_blocked_by_reads_what_the_feeder_writes() -> None:
+    def ref(number: int | str, repo: str = "o/r", tracker: str = "github") -> Ref:
+        return Ref(tracker, repo, str(number))
+
+    def blocked(*refs: Ref) -> GateLines:
+        return GateLines(blocked_by=frozenset(refs))
+
+    waits = blocker_waits(
+        {
+            ref(10): blocked(ref(2), ref(3), ref("AUT-7", tracker="linear"), ref(9, "acme/widgets")),
+            ref(1): blocked(ref(2)),
+            ref(2): blocked(ref(3)),
+            ref(3): blocked(ref(1)),
+            ref(4): blocked(ref(4)),
+        },
+        {
+            ref(2): RefStatus(Progress.OPEN),
+            ref(3): RefStatus(Progress.UNFINISHED, detail="closed as not planned"),
+            ref("AUT-7", tracker="linear"): RefStatus(Progress.MISSING),
+        },
+    )
+    holds = Holds(policies={"o/r": PathPolicy(max_holders=2)})
+    holds.take(ref(2), (), GateLines(touches=frozenset({"lib/dashboard.py"})))
+    holds.take(ref(3), (), GateLines(touches=frozenset({"lib/dashboard.py"})))
+    file_wait = holds.collision(ref(11), GateLines(touches=frozenset({"lib/dashboard.py"})))
+    conflicts = Holds()
+    conflicts.take(ref(4), (), GateLines())
+    conflict_wait = conflicts.collision(ref(12), GateLines(conflicts_with=frozenset({ref(4)})))
+    assert file_wait is not None and conflict_wait is not None
+    held = [{"kind": "file", "ref": f"o/r#{n}", "path": "lib/dashboard.py"} for n in (2, 3)]
+    cases = [
+        (waits[ref(10)], _tickets("o/r#2", "o/r#3", "AUT-7", "acme/widgets#9")),
+        (waits[ref(1)], _tickets("o/r#2", "o/r#3")),
+        (waits[ref(4)], []),
+        (file_wait, held),
+        (conflict_wait, _tickets("o/r#4")),
+        (stack_wait("o/r", "branch factory/issue-7", [5, 6]), _tickets("o/r#5", "o/r#6")),
+        (stack_wait("o/r", "head abc1234", [8]), _tickets("o/r#8")),
+    ]
+    for wait, expected in cases:
+        assert dashboard._blocked_by(wait.reason, "o/r") == expected, wait.reason
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        ("waiting on #2", _tickets("o/r#2")),
+        (
+            "waiting on #2, #3 (closed as not planned), AUT-7 (not found), acme/widgets#9 (status unreadable)",
+            _tickets("o/r#2", "o/r#3", "AUT-7", "acme/widgets#9"),
+        ),
+        ("waiting on #5 (branch factory/issue-7 carries its commits)", _tickets("o/r#5")),
+        (
+            "waiting on file lib/dashboard.py held by #2, acme/widgets#3",
+            [
+                {"kind": "file", "ref": "o/r#2", "path": "lib/dashboard.py"},
+                {"kind": "file", "ref": "acme/widgets#3", "path": "lib/dashboard.py"},
+            ],
+        ),
+        ("waiting on a blocker cycle: #1 -> #3 -> #2 -> #1", _tickets("o/r#3", "o/r#2")),
+        ("waiting on a blocker cycle: #1 -> #1", []),
+    ],
+)
+def test_blocked_by_reads_the_three_waiting_reasons(reason: str, expected: list[dict]) -> None:
+    assert dashboard._blocked_by(reason, "o/r") == expected
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        None,
+        12,
+        b"waiting on #2",
+        "",
+        "main CI unreadable for main",
+        "#12 was closed because its base is green",
+        "waiting on #2, the release",
+        "waiting on #2 and more",
+        "waiting on #2\n",
+        "waiting on #2 (see (#3))",
+        "waiting on file lib/dashboard.py held by #2 (conflicts with it)",
+        "waiting on file lib/my file.py held by #2",
+        "waiting on a blocker cycle: #1 -> #2 -> #3",
+    ],
+)
+def test_blocked_by_is_empty_for_any_other_reason(reason: object) -> None:
+    assert dashboard._blocked_by(reason, "o/r") == []
+
+
+def test_feeder_waiting_states_are_feeder_states() -> None:
+    assert set(dashboard.FEEDER_WAITING) <= set(feeder.STATES)
+
+
+def test_waiting_feeder_items_carry_blocked_by(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    many = "waiting on " + ", ".join(f"#{n} (status unreadable)" for n in range(100, 120))
+    token_path = f"lib/{GH_CLASSIC}.py"
+    rows = [
+        ("201", "waiting-blocked", many),
+        ("202", "waiting-blocked", f"waiting on file {token_path} held by #7"),
+        ("203", "waiting-capacity", "waiting on a free lane"),
+        ("204", "waiting-blocked", "main CI unreadable for main"),
+        ("205", "fed", "waiting on #9"),
+    ]
+    with sqlite3.connect(db) as connection:
+        for issue, state, reason in rows:
+            add_feeder_item(connection, "maxharris1/cleffy", issue, "t", state=state, reason=reason)
+    items = {item["issue"]: item for item in collect_snapshot(db, log, now=NOW)["feeder"]["items"]}
+    assert items["201"]["reason"].endswith("…")
+    assert items["201"]["blocked_by"] == _tickets(*(f"maxharris1/cleffy#{n}" for n in range(100, 120)))
+    assert items["202"]["blocked_by"] == [
+        {"kind": "file", "ref": "maxharris1/cleffy#7", "path": "lib/[redacted-token].py"}
+    ]
+    assert items["203"]["blocked_by"] == []
+    assert items["204"]["blocked_by"] == []
+    assert items["205"]["reason"] == "waiting on #9"
+    assert "blocked_by" not in items["205"]
 
 
 def test_ticket_rows_have_a_null_title_without_a_feeder_table(tmp_path: Path) -> None:

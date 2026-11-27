@@ -1299,6 +1299,24 @@ feeder row, not only those seen at the last poll, so a merged ticket keeps its
 title. A ticket with no feeder row, or a database without the feeder's table,
 has a null `title`. No page shows it yet.
 
+Each `feeder.items` item in a waiting state (`waiting-blocked` or
+`waiting-capacity`) also carries `blocked_by` (issue #1757). It is a list of
+`{kind, ref, path}`, read from the item's stored waiting reason before the
+reason is cut. `kind` is `ticket` or `file`. `ref` is a full ref. A `#N`
+label takes the item's repo, so `#12` reads as `owner/repo#12`. `path` is the
+held file for a `file` entry and null for a `ticket` entry. Three reason
+forms are read:
+
+- `waiting on <labels>` gives one `ticket` entry per label. A bracket note
+  after a label, such as `(not found)`, is dropped.
+- `waiting on file <path> held by <labels>` gives one `file` entry per
+  holder, each with `path` set.
+- `waiting on a blocker cycle: A -> B -> A` gives one `ticket` entry per
+  ticket on the loop, in loop order, without the item itself.
+
+Any other reason, a null one or one that does not match a form whole, gives
+an empty list. Other items have no `blocked_by` key. No page shows it yet.
+
 `ready_starts_review` defaults to `false`. When `true`, a trusted `ready` from
 `factory.md`'s builder (`from=<builder>-bot role=builder`, by a
 `trusted_logins` author) whose head names the PR head starts tracking an

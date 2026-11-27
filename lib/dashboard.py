@@ -138,6 +138,15 @@ looked up in the whole feeder_items table by repo (casefolded) and issue
 (its source without the leading `#`, else its ticket id), null with no
 match or no table.
 
+Blockers (#1757): each feeder item in FEEDER_WAITING carries `blocked_by`,
+a list of {kind, ref, path} read from its raw stored waiting_reason. `kind`
+is `ticket` or `file`, and `path` is the held file or null. A `#N` label
+takes the item's repo, and `ref` and `path` go through `_clean`. Three
+whole reasons are read: `waiting on <labels>` drops each bracket note,
+`waiting on file <path> held by <labels>` gives `file` entries, and
+`waiting on a blocker cycle: A -> B -> A` drops the item itself at both
+ends of the loop. Anything else gives [], and other items have no key.
+
 Ticket records (#530): tickets.json holds one record per tracked ticket
 (the tickets in status.json's `tickets`), built from the database whether
 or not the ticket has a job. The snapshot carries them under RECORDS, so
@@ -700,6 +709,45 @@ def _clean(value: object, limit: int = LINE_LIMIT) -> str:
 
 def _enum(value: object, allowed: Iterable[str]) -> str:
     return str(value) if str(value) in tuple(allowed) else "other"
+
+
+FEEDER_WAITING = ("waiting-blocked", "waiting-capacity")
+_WAIT_REPO = r"[\w.-]{1,39}/[\w.-]{1,100}"
+_WAIT_LABEL = rf"(?:(?:{_WAIT_REPO})?#[1-9][0-9]{{0,9}}|[A-Z][A-Z0-9]{{0,9}}-[1-9][0-9]{{0,9}})"
+_WAIT_NOTE = r" \([^()]*\)"
+_WAIT_PART = rf"{_WAIT_LABEL}(?:{_WAIT_NOTE})?"
+_WAIT_REASON = re.compile(
+    "waiting on (?:"
+    rf"a blocker cycle: (?P<cycle>{_WAIT_LABEL}(?: -> {_WAIT_LABEL})+)"
+    rf"|file (?P<path>\S{{1,{LINE_LIMIT}}}) held by (?P<holders>{_WAIT_LABEL}(?:, {_WAIT_LABEL})*)"
+    rf"|(?P<labels>{_WAIT_PART}(?:, {_WAIT_PART})*)"
+    ")",
+    re.ASCII,
+)
+
+
+def _blocked_by(reason: object, repo: object) -> list[dict]:
+    if not (isinstance(reason, str) and isinstance(repo, str) and re.fullmatch(_WAIT_REPO, repo, re.ASCII)):
+        return []
+    match = _WAIT_REASON.fullmatch(reason)
+    if match is None:
+        return []
+    path = match["path"]
+    if match["cycle"]:
+        loop = match["cycle"].split(" -> ")
+        labels = [label for label in loop[1:-1] if label != loop[0]] if loop[0] == loop[-1] else []
+    elif path:
+        labels = match["holders"].split(", ")
+    else:
+        labels = re.sub(_WAIT_NOTE, "", match["labels"]).split(", ")
+    return [
+        {
+            "kind": "file" if path else "ticket",
+            "ref": _clean(repo + label if label.startswith("#") else label, 160),
+            "path": _clean(path) if path else None,
+        }
+        for label in labels
+    ]
 
 
 def _scrub(value: object) -> object:
@@ -2347,6 +2395,11 @@ def _read_db(
                     "state": _enum(item["state"], FEEDER_STATES),
                     "pr": _clean(item["pr_number"], 16) if item["pr_number"] is not None else None,
                     "reason": _clean(item["waiting_reason"], 200) if item["waiting_reason"] else None,
+                    **(
+                        {"blocked_by": _blocked_by(item["waiting_reason"], item["repo"])}
+                        if item["state"] in FEEDER_WAITING
+                        else {}
+                    ),
                     "fed_age_seconds": _age(now, item["fed_at"]),
                     "tier": None if item["tier"] is None else int(item["tier"]),
                     "own_tier": None if item["own_tier"] is None else int(item["own_tier"]),
