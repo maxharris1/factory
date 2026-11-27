@@ -2029,10 +2029,14 @@ PHONE_LAYOUT = r"""
   const tiles = [...art.querySelectorAll('.jd-hero .jd-tile')].map(box);
   const edges = r => r && [r.left, r.right];
   const chart = art.querySelector('details.jd-chart');
+  const canvas = art.querySelector('[data-sec=journey] canvas.jd-journey');
+  const css = box(canvas);
   return {order: Object.entries(tops).filter(([, r]) => r).sort((a, b) => a[1].top - b[1].top).map(([k]) => k),
           hero: edges(tops.hero), runlog: edges(tops.runlog), journey: edges(tops.journey),
           cols: new Set(tiles.map(r => Math.round(r.left))).size, rows: new Set(tiles.map(r => Math.round(r.top))).size,
-          open: chart.open, scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth,
+          open: chart.open, logOpen: art.querySelector('details.jd-runlog').open,
+          canvas: [canvas.width, canvas.height], canvasCss: [css.left, css.width],
+          boxLeft: box(canvas.closest('.jd-box')).left, scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth,
           innerWidth: innerWidth};
 })()"""
 
@@ -2045,7 +2049,7 @@ def _ticket_at(chrome: _Chrome, base: str, address: str, width: int) -> None:
 
 
 @pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
-def test_at_every_width_the_ticket_page_is_one_full_width_column_with_the_run_log_after_next(tmp_path: Path) -> None:
+def test_at_every_width_the_ticket_page_is_one_full_width_column_with_the_journey_1000px_and_the_run_log_closed(tmp_path: Path) -> None:
     server = _serve(tmp_path, {"fixture": _with_shipped(_snapshot(tmp_path))})
     base = f"http://127.0.0.1:{server.server_address[1]}/fixture/"
     chrome = _Chrome(tmp_path / "profile")
@@ -2054,6 +2058,8 @@ def test_at_every_width_the_ticket_page_is_one_full_width_column_with_the_run_lo
         for kind in PAGE_SECS:
             for width in (375, 1024, 1280, 1440):
                 _ticket_at(chrome, base, ADDRESS[kind], width)
+                if width == 1440:
+                    _wait(chrome, "document.querySelector('article.ticketpage canvas.jd-journey').width === 1000")
                 found[kind, width] = chrome.run(PHONE_LAYOUT)
     finally:
         chrome.close()
@@ -2067,6 +2073,10 @@ def test_at_every_width_the_ticket_page_is_one_full_width_column_with_the_run_lo
             page = found[kind, width]
             assert page["order"] == order, (kind, width)
             assert page["runlog"] == page["journey"] == page["hero"], (kind, width)
+            assert page["logOpen"] is False, (kind, width)
+        desk = found[kind, 1440]
+        assert desk["canvas"] == [1000, 336], kind
+        assert desk["canvasCss"] == [desk["boxLeft"], 1000], kind
         for width in (1024, 1280):
             page = found[kind, width]
             assert page["innerWidth"] == width, (kind, width)
@@ -2767,6 +2777,14 @@ def test_the_ticket_css_lays_the_sections_out_as_one_column_at_every_width() -> 
     assert ".jd-cols{display:flex;flex-direction:column;gap:16px}" in ticket_detail.CSS
     for gone in (".jd-right", "@container", "container-type", "[data-sec=", "{order:", "__", ".jd-runlog{flex"):
         assert gone not in ticket_detail.CSS, gone
+
+
+def test_the_ticket_css_keeps_the_journey_canvas_1000px_wide_and_fits_it_on_a_phone() -> None:
+    wide, phone_media, phone = ticket_detail.CSS.partition(f"@media {ticket_detail.PHONE}{{")
+    assert phone_media
+    assert ".jd-box canvas{display:block;width:1000px;max-width:none}" in wide
+    assert ".jd-box canvas{display:block;width:1000px;max-width:none}" not in phone
+    assert ".ticketpage canvas.jd-journey{width:auto;max-width:100%}" in phone
 
 
 RUN_LOG_VIEW = r"""
