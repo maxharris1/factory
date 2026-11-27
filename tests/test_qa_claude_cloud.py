@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import http.server
 import json
 import os
@@ -114,6 +115,8 @@ with calls_file.open("a", encoding="utf-8") as fh:
 if "-p" in argv and "--cloud" in argv:
     idx = argv.index("--cloud")
     sid = argv[idx + 1]
+    if mode.get("stop_delay"):
+        time.sleep(float(mode["stop_delay"]))
     if mode.get("stop_error"):
         err = mode["stop_error"]
         sys.stderr.write(err["text"] + "\\n")
@@ -1121,6 +1124,7 @@ def test_git_http_access_denial_is_launch_failed_without_runner_backoff(tmp_path
 @pytest.mark.parametrize("status", [403, 407])
 def test_git_proxy_connect_denial_is_launch_failed_without_runner_backoff(tmp_path: Path, status: int) -> None:
     listener = socket.create_server(("127.0.0.1", 0))
+    listener.settimeout(0.05)
     port = listener.getsockname()[1]
     requests: list[bytes] = []
     stopping = threading.Event()
@@ -1129,17 +1133,25 @@ def test_git_proxy_connect_denial_is_launch_failed_without_runner_backoff(tmp_pa
         while not stopping.is_set():
             try:
                 conn, _ = listener.accept()
+            except TimeoutError:
+                continue
             except OSError:
                 return
             with conn:
+                conn.settimeout(1.0)
                 data = b""
                 while b"\r\n\r\n" not in data:
-                    chunk = conn.recv(4096)
+                    try:
+                        chunk = conn.recv(4096)
+                    except (TimeoutError, OSError):
+                        break
                     if not chunk:
                         break
                     data += chunk
-                requests.append(data)
-                conn.sendall(f"HTTP/1.1 {status} Denied\r\nContent-Length: 0\r\n\r\n".encode())
+                if data:
+                    requests.append(data)
+                    with contextlib.suppress(OSError):
+                        conn.sendall(f"HTTP/1.1 {status} Denied\r\nContent-Length: 0\r\n\r\n".encode())
 
     thread = threading.Thread(target=_serve, daemon=True)
     thread.start()
@@ -1164,7 +1176,8 @@ def test_git_proxy_connect_denial_is_launch_failed_without_runner_backoff(tmp_pa
     finally:
         stopping.set()
         listener.close()
-        thread.join(timeout=5)
+        thread.join(timeout=2)
+        assert not thread.is_alive()
 
 
 def test_git_ssh_permission_denied_is_launch_failed(tmp_path: Path) -> None:
@@ -1195,3 +1208,126 @@ def test_launch_works_on_a_base_branch_renamed_upstream(tmp_path: Path, old: str
 
     assert _calls(state_dir)[-1]["branch"] == new
     assert _calls(state_dir)[-1]["head"] == _git("rev-parse", new, cwd=source)
+
+
+# --- Issue #1701 follow-ups from #1669 ---------------------------------------
+
+
+def test_reused_checkout_removes_nested_git_repository_before_next_launch(tmp_path: Path) -> None:
+    """f-6: git clean -ffdx removes untracked nested git repositories inside disposable checkouts."""
+    source, _ = _source_repo(tmp_path)
+    runner, state_dir = _runner(tmp_path, source=source)
+    lane1 = _lane("lane-nested-1")
+    runner.launch(lane1)
+    checkout = runner.checkout_path_for(lane1.repo, lane1.base_ref)
+
+    # Clone a nested git repo inside the disposable checkout between launches.
+    nested = checkout / "old-project"
+    _git("clone", str(source), str(nested))
+    assert (nested / ".git").is_dir()
+
+    runner.launch(_lane("lane-nested-2"))
+    assert not nested.exists()
+    assert _git("status", "--porcelain", cwd=checkout) == ""
+    assert len([c for c in _calls(state_dir) if "--cloud" in c["argv"] and "-p" not in c["argv"]]) == 2
+
+
+def test_module_docstring_has_no_unresolvable_local_doc_path() -> None:
+    """f-7: module docstring does not name docs/plans/qa-cloud-lane-measurements.md absent on HEAD."""
+    from lib.qa_runners import claude_cloud
+
+    doc = claude_cloud.__doc__ or ""
+    assert "docs/plans/qa-cloud-lane-measurements.md" not in doc
+    assert "#780" in doc and "PR #1664" in doc
+
+
+def test_tag_only_base_ref_fails_as_missing_branch_without_launching(tmp_path: Path) -> None:
+    """f-11: a remote tag named `release` without a `refs/heads/release` branch fails before launch."""
+    source, _ = _source_repo(tmp_path, branch="main")
+    _git("tag", "release", cwd=source)
+    runner, state_dir = _runner(tmp_path, source=source)
+
+    with pytest.raises(LaunchFailed):
+        runner.launch(_lane("lane-tag-only", base_ref="release"))
+    assert _calls(state_dir) == []
+
+
+def test_concurrent_stop_across_two_runner_instances_queues_one_message(tmp_path: Path) -> None:
+    """f-12: two runner instances stopping the same session concurrently send only one stop CLI call."""
+    source, _ = _source_repo(tmp_path)
+    runner_a, state_dir = _runner(tmp_path, source=source)
+    runner_b = ClaudeCloudRunner(runner_a.config, home=tmp_path / "home", environ=runner_a._environ)
+    launched = runner_a.launch(_lane("lane-concurrent-stop"))
+
+    (state_dir / "mode.json").write_text(json.dumps({"stop_delay": 0.4}), encoding="utf-8")
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(2)
+
+    def _call_stop(r: ClaudeCloudRunner) -> None:
+        try:
+            barrier.wait(timeout=5)
+            r.stop(launched.agent_id)
+        except BaseException as exc:  # pragma: no cover
+            errors.append(exc)
+
+    t1 = threading.Thread(target=_call_stop, args=(runner_a,))
+    t2 = threading.Thread(target=_call_stop, args=(runner_b,))
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    assert not errors
+    assert runner_a.status(launched.agent_id) == "ended"
+    assert runner_b.status(launched.agent_id) == "ended"
+    stop_calls = [c for c in _calls(state_dir) if "-p" in c["argv"]]
+    assert len(stop_calls) == 1
+
+
+def test_empty_reply_from_url_containing_response403_raises_runner_outage_and_falls_back(
+    tmp_path: Path,
+) -> None:
+    """f-3 (r4 variant): a repo path containing `response403` must not mask an empty-reply outage."""
+    listener = socket.create_server(("127.0.0.1", 0))
+    listener.settimeout(0.05)
+    port = listener.getsockname()[1]
+    stopping = threading.Event()
+
+    def _serve() -> None:
+        while not stopping.is_set():
+            try:
+                conn, _ = listener.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            with conn:
+                conn.settimeout(1.0)
+                with contextlib.suppress(OSError, TimeoutError):
+                    conn.recv(4096)
+                # Close immediately without headers -> curl/git reports Empty reply from server.
+
+    thread = threading.Thread(target=_serve, daemon=True)
+    thread.start()
+    try:
+        runner, _ = _runner(
+            tmp_path / "runner",
+            repo_url_template=f"http://127.0.0.1:{port}/example/response403.git",
+            environments={"full-stack": "ccpool_full_stack"},
+        )
+        lane = _lane("lane-response403", repo="example/response403", environment="full-stack")
+        with pytest.raises(RunnerOutage):
+            runner.launch(lane)
+
+        lab = Lab(tmp_path / "lab", lanes=1, runners=("claude-cloud", "cursor-cloud"))
+        lab.fakes["claude-cloud"] = runner
+        lab.worker = lab.new_worker()
+        lab.enqueue(ids=1)
+        lab.tick(3)
+        assert lab.header()["runner"] == "cursor-cloud"
+        assert lab.header()["result"] == "PASS"
+    finally:
+        stopping.set()
+        listener.close()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
