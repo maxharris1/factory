@@ -14,7 +14,8 @@ dashboard:
                                        #   omitted, it pushes after every cycle
     live: true                         # ssh only, optional (default false):
                                        #   also push status.json whenever
-                                       #   orch.db changes, about once a second
+                                       #   orch.db changes, at most every 5 s
+                                       #   and 5 s after each push ends
     qa_budget_gib: 5                   # ssh only, optional: past this many GiB
                                        #   of QA evidence on the PC, the oldest
                                        #   closed tickets' runs are removed;

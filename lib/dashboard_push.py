@@ -33,10 +33,14 @@ watcher thread stats orch.db and its WAL every WATCH_SECONDS; any committed
 change (a job claimed, a heartbeat, a job finished, a verdict recorded, by
 the poller or by any other process) and the end of every poll cycle start
 `orch dashboard push --once --status-only`: status.json alone, uploaded and
-renamed exactly like the full set. Pushes start at most once every
-LIVE_MIN_SECONDS, never while the previous one runs, and a change that
-arrives meanwhile is pushed as soon as both allow, so the last change is
-never dropped. The full set (the pages too) still goes out at the
+renamed exactly like the full set. No push starts while the previous one
+runs, nor until LIVE_MIN_SECONDS (5) after the later of its start and the
+watcher tick that saw it end, so even a slow push is followed by 5 idle
+seconds. The watcher settles a finished push on every tick, change or not,
+so its outcome reaches `record` within a tick and a change after a quiet
+spell goes out on the tick that sees it. A change that arrives meanwhile is
+pushed as soon as all of this allows, so the last change is never
+dropped. The full set (the pages too) still goes out at the
 `PollPusher` cadence.
 
 #106: a dead link fails fast. Connect and keepalive timeouts come from the
@@ -396,6 +400,7 @@ class PollPusher:
         self.record = record
         self._child: object | None = None
         self._last: float | None = None
+        self._settled: float | None = None
         self._failures = 0
         self._retry_at: float | None = None
         self._lock = threading.Lock()
@@ -437,6 +442,7 @@ class PollPusher:
         if code is None:
             return True
         self._child = None
+        self._settled = self.clock()
         if code == 0:
             self._failures = 0
             self._retry_at = None
@@ -534,7 +540,7 @@ def poll_pusher_for(
 
 # --- real-time pushes -------------------------------------------------------------
 
-LIVE_MIN_SECONDS = 1.0
+LIVE_MIN_SECONDS = 5.0
 WATCH_SECONDS = 0.25
 LIVE_ERROR_LOG_SECONDS = 60.0
 
@@ -637,14 +643,15 @@ class LivePusher(PollPusher):
         self._pump()
 
     def _pump(self) -> None:
-        if not (self._pending_status or self._pending_full):
-            return
         if self._running():
+            return
+        if not (self._pending_status or self._pending_full):
             return
         now = self.clock()
         if self._backing_off(now):
             return  # the pending push waits; it is not dropped
-        if self._last is not None and now - self._last < self.min_interval:
+        activity = [at for at in (self._last, self._settled) if at is not None]
+        if activity and now - max(activity) < self.min_interval:
             return
         full = self._pending_full
         argv = list(self.argv)

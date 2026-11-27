@@ -4,8 +4,9 @@ With `dashboard.push.live: true` the poller's push hook is a `LivePusher`.
 A watcher notices orch.db changes (a job claimed, finished, heartbeat, a
 verdict recorded) by stat-ing orch.db and its WAL, and the end of every poll
 cycle counts as a change too. Each change starts `orch dashboard push --once
---status-only` (status.json alone, temp-then-rename over scp), at most about
-once a second and never while the previous push is still running. The full
+--status-only` (status.json alone, temp-then-rename over scp), never while
+the previous push is still running and never until 5 seconds after the later
+of the previous push's start and the tick that saw it end. The full
 pair (index.html too) still goes at the old cadence: the first cycle, then
 every cycle or every `every_minutes`.
 
@@ -246,40 +247,91 @@ def test_each_separate_change_is_pushed() -> None:
     pusher, spawn, clock, fingerprint, _ = live()
     for _ in range(3):
         fingerprint.bump()
-        pusher.tick()
-        clock.now += 5
+        for _ in range(24):
+            pusher.tick()
+            clock.now += 0.25
     assert len(spawn.calls) == 3
     assert all(status_only(argv) for argv in spawn.argvs())
 
 
-def test_a_burst_of_changes_is_rate_limited_to_about_one_push_a_second() -> None:
+def test_a_burst_of_changes_is_rate_limited_to_one_push_every_5_seconds() -> None:
     pusher, spawn, clock, fingerprint, _ = live()
     started: list[float] = []
-    for _ in range(50):  # a change every 0.1 s for 5 s, the watcher ticking with it
+    for _ in range(300):
         fingerprint.bump()
         before = len(spawn.calls)
         pusher.tick()
         if len(spawn.calls) > before:
             started.append(clock.now)
         clock.now = round(clock.now + 0.1, 3)
-    assert LIVE_MIN_SECONDS == 1.0
+    assert LIVE_MIN_SECONDS == 5.0
     gaps = [later - earlier for earlier, later in zip(started, started[1:])]
     assert all(gap >= LIVE_MIN_SECONDS - 1e-9 for gap in gaps), gaps
     assert 5 <= len(started) <= 6
+
+
+def test_a_long_push_is_followed_by_5_idle_seconds_then_the_pending_change() -> None:
+    pusher, spawn, clock, fingerprint, lines = live(spawn=Spawn())
+    fingerprint.bump()
+    pusher.tick()
+    for _ in range(80):
+        clock.now += 0.25
+        fingerprint.bump()
+        pusher.tick()
+    assert len(spawn.calls) == 1
+    spawn.children[0].returncode = 0
+    clock.now += 0.25
+    settled = clock.now
+    pusher.tick()
+    assert len(spawn.calls) == 1
+    for _ in range(19):
+        clock.now += 0.25
+        pusher.tick()
+    assert clock.now - settled == 4.75
+    assert len(spawn.calls) == 1
+    clock.now += 0.25
+    pusher.tick()
+    assert len(spawn.calls) == 2
+    assert clock.now - settled == LIVE_MIN_SECONDS
+    assert lines == []
+
+
+def test_a_change_after_a_quiet_spell_is_pushed_on_the_tick_that_sees_it() -> None:
+    pusher, spawn, clock, fingerprint, _ = live(spawn=Spawn())
+    outcomes: list[bool] = []
+    pusher.record = outcomes.append
+    fingerprint.bump()
+    pusher.tick()
+    clock.now += 0.25
+    spawn.children[0].returncode = 0
+    pusher.tick()
+    assert outcomes == [True]
+    for _ in range(240):
+        clock.now += 0.25
+        pusher.tick()
+    assert len(spawn.calls) == 1
+    fingerprint.bump()
+    clock.now += 0.25
+    pusher.tick()
+    assert len(spawn.calls) == 2
 
 
 def test_the_last_change_of_a_burst_is_still_pushed() -> None:
     pusher, spawn, clock, fingerprint, _ = live()
     fingerprint.bump()
     pusher.tick()  # pushed at once
-    clock.now += 0.2
+    clock.now += 0.1
+    settled = clock.now
     fingerprint.bump()
-    pusher.tick()  # too soon: held back, not dropped
-    assert len(spawn.calls) == 1
-    clock.now += 0.3
     pusher.tick()
     assert len(spawn.calls) == 1
-    clock.now += 0.6  # 1.1 s after the first push
+    clock.now = settled + 3
+    pusher.tick()
+    assert len(spawn.calls) == 1
+    clock.now = settled + 4.9
+    pusher.tick()
+    assert len(spawn.calls) == 1
+    clock.now = settled + LIVE_MIN_SECONDS
     pusher.tick()
     assert len(spawn.calls) == 2
     clock.now += 5
@@ -298,6 +350,9 @@ def test_changes_during_a_running_push_wait_for_it_and_go_out_once() -> None:
     assert len(spawn.calls) == 1
     spawn.children[0].returncode = 0
     clock.now += 0.25
+    pusher.tick()
+    assert len(spawn.calls) == 1
+    clock.now += LIVE_MIN_SECONDS
     pusher.tick()
     assert len(spawn.calls) == 2
     assert lines == []
@@ -332,6 +387,9 @@ def test_a_cycle_end_is_pushed_even_while_a_change_push_runs() -> None:
     assert len(spawn.calls) == 1
     spawn.children[0].returncode = 0
     pusher.tick()
+    assert len(spawn.calls) == 1
+    clock.now += LIVE_MIN_SECONDS
+    pusher.tick()
     assert len(spawn.calls) == 2
     assert not status_only(spawn.argvs()[1])
     assert lines == []
@@ -343,11 +401,13 @@ def test_pushes_carry_the_last_cycle_time_for_poll_health() -> None:
     fingerprint.bump()
     pusher.tick()
     assert "--last-cycle" not in spawn.argvs()[0]  # no cycle has ended yet
+    pusher.tick()
     clock.now += 5
     wall.now += 5
     pusher()
     argv = spawn.argvs()[1]
     assert argv[argv.index("--last-cycle") + 1] == "1800000005.000"
+    pusher.tick()
     clock.now += 5
     fingerprint.bump()
     pusher.tick()
@@ -363,7 +423,7 @@ def test_a_failed_spawn_is_logged_redacted_at_most_once_a_minute() -> None:
         fingerprint.bump()
         pusher.tick()
         clock.now += 1
-    assert len(spawn.calls) == 30
+    assert len(spawn.calls) == 6
     assert 1 <= len(lines) <= 2
     for line in lines:
         assert line.startswith("dashboard push: ")
@@ -679,8 +739,10 @@ def test_a_failed_live_push_backs_off_and_keeps_the_pending_change() -> None:
     pusher.tick()  # no new change, but the pending one goes out now
     assert len(spawn.calls) == 2
     spawn.children[1].returncode = 0
+    clock.now += 0.25
+    pusher.tick()
     fingerprint.bump()
-    clock.now += 1
+    clock.now += LIVE_MIN_SECONDS
     pusher.tick()
     assert len(spawn.calls) == 3
     assert outcomes == [False, True]

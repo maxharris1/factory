@@ -133,8 +133,9 @@ projects:
 # Optional read-only dashboard (README "Dashboard"). Push is off unless
 # dashboard.push.transport is ssh; then `orch poll` (deploy/poller-service.sh)
 # pushes after every poll cycle, or every `every_minutes`, and with
-# `live: true` also pushes status.json on every orch.db change (about once a
-# second at most) for the real-time mission-control page. It holds no
+# `live: true` also pushes status.json on every orch.db change (at most every
+# 5 seconds, and 5 idle seconds after each push ends) for the real-time
+# mission-control page. It holds no
 # secrets; SSH uses the login Max provisioned for the box's
 # pc-wsl-cursor-bot alias. The pushed pair lands in
 # /home/cursor-bot/factory-dashboard on pc-wsl-bots, served tailnet-only at
