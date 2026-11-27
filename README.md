@@ -1836,7 +1836,7 @@ each poll cycle the dispatcher stores what `LivePollSource` parsed in the
 back. A `factory.md` the poller could not read, or has not read yet, is
 `status: unknown` with the `reason`, never a default.
 
-`status.json`'s `usage` backs the System page's Subscription headroom
+`status.json`'s `usage` backs the Efficiency page's Subscription headroom
 (issue #151). It has one entry per usage account (see Usage accounts
 below): each account a harness uses on an enabled `machines.yml` device,
 then each declared account no device uses, such as an `external` one. Each entry gives the 5-hour and 7-day
@@ -1893,7 +1893,7 @@ placement uses (`account_loads` in `lib/device_pool.py`, issue #1251).
 ### Usage accounts
 
 Each subscription is its own usage account (issue #772), with its own
-readings, its own pause and its own System row. Declare accounts in
+readings, its own pause and its own Efficiency row. Declare accounts in
 `machines.yml` and list the devices each one is signed in on (issue #1063):
 
 ```yaml
@@ -1954,7 +1954,7 @@ CLI shows its usage meters only in the interactive `/usage` view, and no
 documented non-interactive command or API reports used and reset without
 reading the login's credentials. Cursor's weekly used and reset are
 recorded on the Cursor account itself (`orch usage record --account
-cursor-ultra`), and System and Settings show that reading on the
+cursor-ultra`), and Efficiency and Settings show that reading on the
 account's row; there is no pooled row. A Cursor account with no reading
 shows `not tracked` and the reason. Max allowed Cursor as a build and
 review harness, so `orch.yml` no longer lists it in `refused_harnesses`
