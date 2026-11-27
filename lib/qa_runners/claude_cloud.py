@@ -114,6 +114,7 @@ _MACHINE_LINE = re.compile(r"(?:^|\n)Machine:\s*([A-Za-z0-9][A-Za-z0-9._-]{0,63}
 _VERSION_TOKEN = re.compile(r"\b(\d+\.\d+(?:\.\d+)?(?:[-+][A-Za-z0-9._-]+)?)\b")
 
 _URL_IN_TEXT = re.compile(r"(?:https?|s3)://\S+", re.IGNORECASE)
+_LOCATION_IN_TEXT = re.compile(r"'[^'\n]*/[^'\n]*'|[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"]+")
 _SECRET_IN_TEXT = re.compile(
     r"(?:sk-ant-[A-Za-z0-9_-]+|Bearer\s+\S+|(?:X-Amz-[A-Za-z0-9-]+|sig|token|up|down)=[^&\s]+)",
     re.IGNORECASE,
@@ -237,13 +238,17 @@ def _sanitize_error_text(text: str, *, max_len: int = 160) -> str:
     return summary[:max_len]
 
 
+def _message_text(text: str) -> str:
+    return _LOCATION_IN_TEXT.sub("<location>", _strip_ansi(text))
+
+
 def _is_usage_limit(text: str) -> bool:
-    plain = _strip_ansi(text)
+    plain = _message_text(text)
     return any(pattern.search(plain) for pattern in _USAGE_LIMIT_PATTERNS)
 
 
 def _is_outage(text: str) -> bool:
-    plain = _strip_ansi(text)
+    plain = _message_text(text)
     return any(pattern.search(plain) for pattern in _OUTAGE_PATTERNS)
 
 
@@ -252,19 +257,19 @@ def _is_client_error(status: int) -> bool:
 
 
 def _is_access_denied(text: str) -> bool:
-    plain = _strip_ansi(text)
+    plain = _message_text(text)
     if _ACCESS_DENIED_PATTERN.search(plain):
         return True
     return any(_is_client_error(int(code)) for code in _HTTP_STATUS.findall(plain))
 
 
 def _is_git_transport_failure(text: str) -> bool:
-    plain = _strip_ansi(text)
-    return _GIT_TRANSPORT_PATTERN.search(plain) is not None and not _is_access_denied(plain)
+    plain = _message_text(text)
+    return _GIT_TRANSPORT_PATTERN.search(plain) is not None
 
 
 def _is_already_ended(text: str, *, under_launch_account: bool) -> bool:
-    plain = _strip_ansi(text)
+    plain = _message_text(text)
     if _is_usage_limit(plain) or _is_outage(plain):
         return False
     if any(pattern.search(plain) for pattern in _ALREADY_ENDED_PATTERNS):
@@ -273,8 +278,8 @@ def _is_already_ended(text: str, *, under_launch_account: bool) -> bool:
 
 
 def _classify_cli_failure(prefix: str, text: str, returncode: int) -> LaunchFailed | RunnerOutage | UsageLimit:
-    plain = _strip_ansi(text)
-    detail = _sanitize_error_text(plain) or f"exit {returncode}"
+    plain = _message_text(text)
+    detail = _sanitize_error_text(text) or f"exit {returncode}"
     if _is_usage_limit(plain):
         return UsageLimit(f"{prefix}: {detail}")
     if _is_access_denied(plain):

@@ -533,6 +533,10 @@ def test_silent_remote_exit_reclaims_lane_at_timeout_when_stop_sees_already_ende
             RunnerOutage,
         ),
         (
+            "Error: request to https://api.anthropic.com/response403/v1/messages failed: ECONNREFUSED",
+            RunnerOutage,
+        ),
+        (
             "Error: --cloud requires an interactive terminal.\nNon-interactive invocations run locally.",
             LaunchFailed,
         ),
@@ -592,7 +596,8 @@ def test_git_http_503_raises_runner_outage_and_triggers_coordinator_fallback(tmp
         server.server_close()
 
 
-def test_git_empty_reply_raises_runner_outage_and_triggers_coordinator_fallback(tmp_path: Path) -> None:
+@pytest.mark.parametrize("repo_path", ["example", "response403", "HTTP404", "rate_limit_error"])
+def test_git_empty_reply_raises_runner_outage_and_triggers_coordinator_fallback(tmp_path: Path, repo_path: str) -> None:
     class _EmptyReply(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             self.close_connection = True
@@ -606,7 +611,7 @@ def test_git_empty_reply_raises_runner_outage_and_triggers_coordinator_fallback(
     try:
         runner, _ = _runner(
             tmp_path / "runner",
-            repo_url_template=f"http://127.0.0.1:{server.server_address[1]}/{{repo}}.git",
+            repo_url_template=f"http://127.0.0.1:{server.server_address[1]}/{repo_path}/{{repo}}.git",
             environments={"full-stack": "ccpool_full_stack"},
         )
         with pytest.raises(RunnerOutage):
@@ -644,6 +649,11 @@ def test_git_empty_reply_raises_runner_outage_and_triggers_coordinator_fallback(
         ),
         ("error: RPC failed; HTTP 403 curl 22 The requested URL returned error: 403", LaunchFailed),
         ("client_loop: send disconnect: Broken pipe", RunnerOutage),
+        ("fatal: unable to access 'http://127.0.0.1:9/example/response403.git/': Empty reply from server", RunnerOutage),
+        ("fatal: unable to access 'https://repo.invalid/HTTP404/r.git/': Connection reset by peer", RunnerOutage),
+        ("fatal: repository 'https://repo.invalid/econnreset/r.git/' not found", LaunchFailed),
+        ("fatal: 'acme/getaddrinfo.git' does not appear to be a git repository", LaunchFailed),
+        ("fatal: unable to access 'https://repo.invalid/response502/r.git/': The requested URL returned error: 403", LaunchFailed),
     ],
 )
 def test_git_failure_classification(tmp_path: Path, stderr: str, expected: type[Exception]) -> None:
