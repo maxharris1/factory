@@ -1125,6 +1125,7 @@ def retire_requeued(
     if not _has_table(connection, "ticket_state"):
         return None
     harness = "id = ? AND state = 'queued' AND recipient != 'grok'"
+    finished_states = ", ".join("?" * len(job_detail.FINISHED_TICKET_STATES))
     finished = connection.execute(
         f"""
         SELECT 1 FROM jobs WHERE {harness}
@@ -1132,10 +1133,10 @@ def retire_requeued(
             SELECT 1 FROM ticket_state
             WHERE ticket_state.repo = lower(jobs.repo)
               AND ticket_state.ticket_id = jobs.ticket_id
-              AND ticket_state.workflow_state IN ('merged', 'done', 'abandoned')
+              AND ticket_state.workflow_state IN ({finished_states})
           )
         """,
-        (job_id,),
+        (job_id, *job_detail.FINISHED_TICKET_STATES),
     ).fetchone()
     if finished is not None:
         detail = f"finished:{reason}"
