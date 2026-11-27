@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -160,6 +161,22 @@ def test_the_committed_readme_is_the_one_update_mode_writes(rendered: dict[str, 
     assert (GOLDEN / "README.md").read_text(encoding="utf-8") == README
 
 
+def reproduce_steps(scratch: Path, python: Path) -> str:
+    inserted = {"/tmp/": shlex.quote(f"{scratch}/"), "python3 ": f"{shlex.quote(str(python))} "}
+    return re.sub("|".join(map(re.escape, inserted)), lambda match: inserted[match.group(0)], REPRODUCE)
+
+
+def test_the_reproduce_steps_keep_inserted_paths_intact_when_they_contain_the_replaced_text() -> None:
+    scratch = Path("/tmp/python3 tests/golden steps")
+    python = Path("/tmp/a venv/tmp/bin/python3")
+    lines = [shlex.split(line) for line in reproduce_steps(scratch, python).splitlines()]
+    assert lines[0][-2:] == [f"{scratch}/golden-$sha", "$sha"]
+    assert lines[1][-1] == f"{scratch}/golden-$sha/tests/"
+    assert lines[2][1] == f"{scratch}/golden-$sha"
+    assert lines[2][4] == str(python)
+    assert lines[3][-1] == f"{scratch}/golden-$sha/tests/golden/dashboard"
+
+
 @pytest.mark.parametrize("sha", [SOURCE, EXTENDED])
 def test_the_documented_steps_reproduce_the_goldens_at_each_cited_commit(tmp_path: Path, sha: str) -> None:
     if os.environ.get("GOLDEN_UPDATE") == "1":
@@ -173,7 +190,7 @@ def test_the_documented_steps_reproduce_the_goldens_at_each_cited_commit(tmp_pat
     python.parent.mkdir()
     python.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
     python.chmod(0o755)
-    script = REPRODUCE.replace("/tmp/", shlex.quote(f"{scratch}/")).replace("python3 ", f"{shlex.quote(str(python))} ")
+    script = reproduce_steps(scratch, python)
     env = {key: value for key, value in os.environ.items() if not key.startswith(("PYTEST", "GOLDEN"))}
     try:
         steps = subprocess.run(["bash", "-euc", script], cwd=root, env={**env, "sha": sha},
