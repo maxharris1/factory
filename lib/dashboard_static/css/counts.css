@@ -1,0 +1,8 @@
+#counts{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 14px;padding:10px 16px}
+#counts h2{margin:0;font:500 11px/1.5 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+#counts h2>span:first-child::before{display:none}
+.jc-cell{font:13px/1.5 var(--mono);font-variant-numeric:tabular-nums;color:var(--muted);text-decoration:none}
+.jc-cell:hover{color:var(--text);text-decoration:underline;text-underline-offset:3px}
+.jc-cell b{font-weight:600;color:var(--text)}
+.jc-cell b.jc-zero{font-weight:400;color:var(--muted)}
+.jc-cell b.jc-bad{color:var(--bad)}
