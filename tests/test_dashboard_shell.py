@@ -35,14 +35,15 @@ from tests.test_dashboard_layout import BAR, JOB, _no_script, _run_page, _sectio
 from tests.test_dashboard_pixelstrip import _node
 from tests.test_dashboard_lanes import FOLD, Browser, _page_with_status_stub, needs_chrome
 
-PAGES = ("index.html", "job.html", "activity.html", "efficiency.html", "evals.html", "health.html", "settings.html",
+PAGES = ("index.html", "job.html", "activity.html", "efficiency.html", "health.html", "evals.html", "settings.html",
          "ticket.html")
 SCRIPT_PAGE = {"index.html": "main", "job.html": "job", "activity.html": "activity",
                "efficiency.html": "efficiency", "evals.html": "evals", "health.html": "health",
                "settings.html": "settings", "ticket.html": "ticket"}
 NAV = [("index.html", "Lanes"), ("job.html", "Tickets"), ("activity.html", "Activity"),
-       ("efficiency.html", "Efficiency"), ("evals.html", "Evals"), ("health.html", "System"),
-       ("settings.html", "Settings")]
+       ("efficiency.html", "Efficiency"), ("health.html", "System")]
+NAV_PARENT = {"evals.html": "efficiency.html", "settings.html": "health.html", "ticket.html": "job.html"}
+CURRENT = ' aria-current="page"'
 SHELL = ["caret", "band", "attention-strip", "statusline"]
 # The harness clock starts 3 s after the snapshot; this puts it back, so
 # every ticking age reads as the server wrote it.
@@ -911,8 +912,11 @@ def test_nav_labels_current_item_and_file_names_on_every_page(base: dict) -> Non
         nav = _section(html, "nav")
         links = re.findall(r'<a href="([^"]+)"( aria-current="page")?>([^<]+)</a>', nav)
         assert [(href, label) for href, _, label in links] == NAV, name
-        assert [href for href, current, _ in links if current] == [{"ticket.html": "job.html"}.get(name, name)], name
-        label = {**dict(NAV), "ticket.html": "Ticket"}[name].lower()
+        parent = NAV_PARENT.get(name, name)
+        assert [href for href, current, _ in links if current] == [parent], name
+        body = "".join(f'<a href="{href}"{CURRENT if href == parent else ""}>{label}</a>' for href, label in NAV)
+        assert re.fullmatch(r"<nav\b[^>]*>(.*)</nav>", nav, re.S).group(1) == body, name
+        label = {**dict(NAV), "evals.html": "Evals", "settings.html": "Settings", "ticket.html": "Ticket"}[name].lower()
         assert f"<title>factory mission control · {label}</title>" in html
 
 
@@ -1398,14 +1402,25 @@ def test_the_skip_link_moves_focus_to_main_without_a_hash(tmp_path: Path, base: 
 
 
 @pytest.mark.parametrize(("name", "label"), [
-    ("index.html", "Lanes"), ("activity.html", "Activity"), ("efficiency.html", "Efficiency"), ("evals.html", "Evals"),
+    ("index.html", "Lanes"), ("activity.html", "Activity"), ("efficiency.html", "Efficiency"),
     ("health.html", "System"), ("job.html", "Tickets"),
 ])
-def test_six_pages_have_one_hidden_h1_with_the_nav_label(base: dict, name: str, label: str) -> None:
+def test_five_pages_have_one_hidden_h1_with_the_nav_label(base: dict, name: str, label: str) -> None:
     html = render_pages(base)[name]
     assert re.findall(r"<h1\b[^>]*>.*?</h1>", html) == [f'<h1 class="vh">{label}</h1>']
     assert f'<a href="{name}" aria-current="page">{label}</a>' in html
     assert '<main id="hud" tabindex="-1"><h1 class="vh">' in html
+
+
+@pytest.mark.parametrize(("name", "label", "parent"), [
+    ("evals.html", "Evals", "efficiency.html"), ("settings.html", "Settings", "health.html"),
+])
+def test_off_nav_pages_keep_their_h1_and_mark_their_parent_tab(base: dict, name: str, label: str, parent: str) -> None:
+    html = render_pages(base)[name]
+    assert re.findall(r"<h1\b[^>]*>.*?</h1>", html) == [f'<h1 class="vh">{label}</h1>']
+    nav = _section(html, "nav")
+    assert f'href="{name}"' not in nav
+    assert re.findall(r'<a href="([^"]+)" aria-current="page">', nav) == [parent]
 
 
 def test_the_strip_and_status_line_are_labelled(base: dict) -> None:

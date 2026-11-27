@@ -219,11 +219,11 @@ def test_a_pending_change_naming_an_unknown_service_stays_pending(tmp_path: Path
     assert row["result"] == "pending"
 
 
-def test_every_page_links_settings(tmp_path: Path) -> None:
+def test_settings_is_off_the_nav_and_marks_system_current(tmp_path: Path) -> None:
     pages = render_pages(_snapshot(tmp_path))
     for name, html in pages.items():
-        assert '<a href="settings.html"' in _section(html, "nav"), name
-    assert '<a href="settings.html" aria-current="page">Settings</a>' in pages["settings.html"]
+        assert 'href="settings.html"' not in _section(html, "nav"), name
+    assert '<a href="health.html" aria-current="page">System</a>' in _section(pages["settings.html"], "nav")
 
 
 def test_no_credential_reaches_the_page_or_status_json(tmp_path: Path) -> None:

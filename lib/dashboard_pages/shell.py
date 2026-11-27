@@ -63,15 +63,13 @@ def px_script() -> str:
 # refresh_seconds) and the script only has to replace their contents.
 
 # In nav order (#78).
-NAV_PAGES = (
-    "index.html", "job.html", "activity.html", "efficiency.html", "evals.html", "health.html", "settings.html",
-)
+NAV_PAGES = ("index.html", "job.html", "activity.html", "efficiency.html", "health.html")
 
 
-PAGES = (*NAV_PAGES, "ticket.html")
+PAGES = (*NAV_PAGES, "evals.html", "settings.html", "ticket.html")
 
 
-_NAV_PARENT = {"ticket.html": "job.html"}
+_NAV_PARENT = {"evals.html": "efficiency.html", "settings.html": "health.html", "ticket.html": "job.html"}
 
 
 _PAGE_NAMES = {

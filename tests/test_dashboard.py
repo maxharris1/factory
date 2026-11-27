@@ -1410,7 +1410,7 @@ def test_write_snapshot_is_atomic_and_leaves_no_temp_files(
     monkeypatch.setattr(dashboard.os, "replace", spy)
     paths = dashboard.write_snapshot_pages(out, snapshot)
     names = ["status.json", *dashboard.STATIC_ASSETS, "index.html", "job.html", "activity.html", "efficiency.html",
-             "evals.html", "health.html", "settings.html", "ticket.html", "tickets.json", "evals.json"]
+             "health.html", "evals.html", "settings.html", "ticket.html", "tickets.json", "evals.json"]
     assert [target for _, target in replaced] == names
     assert all(source.startswith(".") for source, _ in replaced)
     assert paths == tuple(out / name for name in names)
@@ -1529,7 +1529,7 @@ def test_cli_snapshot_writes_both_files(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     names = ["status.json", *dashboard.STATIC_ASSETS, "index.html", "job.html", "activity.html", "efficiency.html",
-             "evals.html", "health.html", "settings.html", "ticket.html", "tickets.json", "evals.json"]
+             "health.html", "evals.html", "settings.html", "ticket.html", "tickets.json", "evals.json"]
     assert sorted(path.name for path in out.iterdir()) == sorted(names)
     status = json.loads((out / "status.json").read_text(encoding="utf-8"))
     assert status["queue"]["totals"]["queued"] == 2
