@@ -19,6 +19,7 @@ from lib import health as component_health
 from lib.dashboard import collect_snapshot, rules_and_limits
 from lib.dashboard_flow import load_chart
 from lib.dashboard_page import CSS, render_pages, render_static_assets, version_drift
+from lib.dashboard_pages.shell import _PAGE_NAMES
 from lib.factory_md import load_factory_md
 from tests.test_dashboard import NOW, seeded
 from tests import test_dashboard_tickets_board as board
@@ -762,6 +763,22 @@ def test_moved_panels_left_their_old_pages(tmp_path: Path) -> None:
     assert [name for name, html in pages.items() if 'id="routing"' in html] == ["health.html"]
     assert [name for name, html in pages.items() if 'id="headroom"' in html] == ["health.html"]
     assert [name for name, html in pages.items() if 'id="balance"' in html] == ["efficiency.html"]
+
+
+def test_docs_place_usage_accounts_on_the_pages_that_draw_them(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[1]
+    pages = render_pages(_snapshot(tmp_path))
+    away = [_PAGE_NAMES[name][1] for name, html in pages.items()
+            if 'id="headroom"' not in html and 'id="accounts"' not in html]
+    usage = re.compile(r"headroom|usage record|not tracked|\brows?\b")
+    stale = [
+        (doc, label, " ".join(sentence.split()))
+        for doc in ("README.md", "docs/SPEC.md", "docs/ACCOUNTS.md")
+        for sentence in re.split(r"(?<=[.;])\s+|\n\s*\n", (root / doc).read_text(encoding="utf-8"))
+        for label in away
+        if usage.search(sentence) and re.search(rf"\b{label}\b", sentence)
+    ]
+    assert stale == []
 
 
 

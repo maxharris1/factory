@@ -393,10 +393,10 @@ bin/orch usage record --account cursor-ultra --window weekly --used 0.01 --reset
 ```
 
 A Cursor card then shows 5h used, 7d used and headroom from that reading,
-and the Efficiency page shows it on the account's row with source `usage
+and the System page shows it on the account's row with source `usage
 record`. There is no pooled row. A Cursor account with no reading shows its
 plan and `not tracked: <reason>` instead, on its own muted row on
-Efficiency; the reason comes from `NOT_TRACKED` in `lib/usage_readings.py`.
+System; the reason comes from `NOT_TRACKED` in `lib/usage_readings.py`.
 
 ### Cursor builds and reviews
 
@@ -419,7 +419,7 @@ changes no placement until then.
 Gemini quota is tracked. At each gemini job's start, `orch job run` runs
 `agy -p /usage --output-format json` as the device's gemini-bot with the
 doctor's Google/Gemini overrides unset; agy answers with no model turn.
-The card and the Efficiency row show its 5h and weekly windows from the
+The card and the System row show its 5h and weekly windows from the
 `Gemini Models` group.
 
 ## 1. Declare the account
