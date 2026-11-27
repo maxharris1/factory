@@ -1081,43 +1081,33 @@ class Actions:
                 self.sessions.pop(session_id, None)
                 self._discard_stored(session_id)
                 session = None
-
-        if session is not None:
-            if session.client_ip and (not client_ip or not hmac.compare_digest(session.client_ip, client_ip)):
-                return None, False
-            if session.key_digest is not None:
-                if cookie_key is None or not hmac.compare_digest(
-                    hashlib.sha256(cookie_key).digest(), session.key_digest
-                ):
+            if session is None and self.store is not None and cookie_key is not None:
+                loaded = self.store.load(session_id, cookie_key, client_ip=client_ip, now=now_wall)
+                if loaded is None:
                     return None, False
-        elif self.store is not None and cookie_key is not None:
-            loaded = self.store.load(session_id, cookie_key, client_ip=client_ip, now=now_wall)
-            if loaded is None:
-                return None, False
-            login, token, csrf, created_ns, wall_expires_at = loaded
-            if (
-                OAUTH_APP_TOKEN.fullmatch(token) is None
-                or login.casefold() != self.config.approver.casefold()
-                or is_bot_login(login)
-            ):
-                self._discard_stored(session_id)
-                return None, False
-            remaining = wall_expires_at - now_wall
-            if remaining <= 0:
-                self._discard_stored(session_id)
-                return None, False
-            session = Session(
-                session_id,
-                login,
-                token,
-                csrf,
-                now_mono + remaining,
-                client_ip=client_ip,
-                key_digest=hashlib.sha256(cookie_key).digest(),
-                created_ns=created_ns,
-                wall_expires_at=wall_expires_at,
-            )
-            with self.lock:
+                login, token, csrf, created_ns, wall_expires_at = loaded
+                if (
+                    OAUTH_APP_TOKEN.fullmatch(token) is None
+                    or login.casefold() != self.config.approver.casefold()
+                    or is_bot_login(login)
+                ):
+                    self._discard_stored(session_id)
+                    return None, False
+                remaining = wall_expires_at - now_wall
+                if remaining <= 0:
+                    self._discard_stored(session_id)
+                    return None, False
+                session = Session(
+                    session_id,
+                    login,
+                    token,
+                    csrf,
+                    now_mono + remaining,
+                    client_ip=client_ip,
+                    key_digest=hashlib.sha256(cookie_key).digest(),
+                    created_ns=created_ns,
+                    wall_expires_at=wall_expires_at,
+                )
                 self._prune_memory_locked(now_mono)
                 while len(self.sessions) >= MAX_SESSIONS:
                     self.sessions.pop(next(iter(self.sessions)))
@@ -1125,40 +1115,48 @@ class Actions:
 
         if session is None:
             return None, False
+        if session.client_ip and (not client_ip or not hmac.compare_digest(session.client_ip, client_ip)):
+            return None, False
+        if session.key_digest is not None:
+            if cookie_key is None or not hmac.compare_digest(
+                hashlib.sha256(cookie_key).digest(), session.key_digest
+            ):
+                return None, False
 
-        if (
-            self.store is not None
-            and cookie_key is not None
-            and session.wall_expires_at > 0
-            and session.wall_expires_at - now_wall
-            <= self.config.session_seconds
-            - min(SESSION_RENEW_SECONDS, self.config.session_seconds // 2)
-        ):
-            new_wall_expires = int(now_wall) + self.config.session_seconds
-            try:
-                self.store.save(
-                    session.session_id,
-                    cookie_key,
-                    login=session.login,
-                    token=session.token,
-                    csrf=session.csrf,
-                    client_ip=session.client_ip or client_ip,
-                    created_ns=session.created_ns,
-                    expires_at=new_wall_expires,
-                    now=now_wall,
-                )
-            except OSError:
-                sys.stderr.write("factory-dashboard-http: session store renew failed\n")
-            else:
-                updated = session._replace(
-                    expires_at=now_mono + self.config.session_seconds,
-                    wall_expires_at=new_wall_expires,
-                )
-                with self.lock:
-                    if session.session_id in self.sessions:
-                        self.sessions[session.session_id] = updated
-                session = updated
-                renewed = True
+        if self.store is None or cookie_key is None:
+            return session, False
+        with self.lock:
+            session = self.sessions.get(session_id)
+            if session is None:
+                return None, False
+            if (
+                session.wall_expires_at > 0
+                and session.wall_expires_at - now_wall
+                <= self.config.session_seconds
+                - min(SESSION_RENEW_SECONDS, self.config.session_seconds // 2)
+            ):
+                new_wall_expires = int(now_wall) + self.config.session_seconds
+                try:
+                    self.store.save(
+                        session.session_id,
+                        cookie_key,
+                        login=session.login,
+                        token=session.token,
+                        csrf=session.csrf,
+                        client_ip=session.client_ip or client_ip,
+                        created_ns=session.created_ns,
+                        expires_at=new_wall_expires,
+                        now=now_wall,
+                    )
+                except OSError:
+                    sys.stderr.write("factory-dashboard-http: session store renew failed\n")
+                else:
+                    session = session._replace(
+                        expires_at=now_mono + self.config.session_seconds,
+                        wall_expires_at=new_wall_expires,
+                    )
+                    self.sessions[session_id] = session
+                    renewed = True
 
         return session, renewed
 
@@ -1331,7 +1329,6 @@ class Actions:
         except GitHubError as exc:
             if exc.status == 401:
                 self.sign_out(session.session_id)
-                raise ApiError(401, "no-session") from None
             raise github_failure(exc) from None
         author = comment.get("user")
         login = author.get("login") if isinstance(author, dict) else None
@@ -1353,7 +1350,6 @@ class Actions:
         except GitHubError as exc:
             if exc.status == 401:
                 self.sign_out(session.session_id)
-                raise ApiError(401, "no-session") from None
             raise github_failure(exc) from None
 
 

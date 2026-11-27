@@ -2596,7 +2596,7 @@ def test_revoked_github_token_401_clears_persisted_session(
     sid = client.server.actions.session.session_id
     cur = client.server.actions.sessions[sid]
     client.server.actions.sessions[sid] = cur._replace(token="gho_revoked_token")
-    assert comment(client) == (401, {"error": "no-session"})
+    assert comment(client) == (502, {"error": "github", "github_status": 401})
     assert client.session() == {"signed_in": False, "account_signin": False}
     assert list(session_store.iterdir()) == []
 
@@ -2713,6 +2713,66 @@ def test_sign_out_due_for_renewal_only_clears_the_cookie(
     assert client.post("/api/signout") == (200, {})
     (cleared,) = _session_set_cookies(client, seen)
     assert cleared.startswith("factory_session=;") and "Max-Age=0" in cleared
+
+
+@pytest.mark.parametrize("scope", ["all-from-another-device", "own-device"])
+@pytest.mark.parametrize("pause_at", ["renewal-write", "store-load"])
+def test_sign_out_revokes_a_session_whose_renewal_is_in_flight(
+    serve_actions, fake_github: FakeGitHub, session_store: Path, advance_clock, monkeypatch,
+    scope: str, pause_at: str,
+) -> None:
+    phone = serve_actions(session_store=session_store)
+    laptop = Client(phone.port)
+    assert phone.sign_in(fake_github, MAX_TOKEN) == "signed-in"
+    assert laptop.sign_in(fake_github, MAX_TOKEN) == "signed-in"
+    actions = phone.server.actions
+    if pause_at == "store-load":
+        actions.sessions.clear()
+    advance_clock(86401)
+
+    store = actions.store
+    paused, release = threading.Event(), threading.Event()
+    real_save, real_load = store.save, store.load
+
+    def hold() -> None:
+        if not paused.is_set():
+            paused.set()
+            assert release.wait(5)
+
+    def held_save(*args, **kwargs):
+        hold()
+        return real_save(*args, **kwargs)
+
+    def held_load(*args, **kwargs):
+        loaded = real_load(*args, **kwargs)
+        hold()
+        return loaded
+
+    monkeypatch.setattr(store, "save" if pause_at == "renewal-write" else "load",
+                        held_save if pause_at == "renewal-write" else held_load)
+
+    phone_cookie = phone.cookies["factory_session"]
+    renewing = Client(phone.port)
+    renewing.cookies = {"factory_session": phone_cookie}
+    renewer = threading.Thread(target=renewing.raw, args=("GET", "/api/session"))
+    renewer.start()
+    assert paused.wait(5)
+
+    signer, payload = (laptop, {"all": True}) if scope == "all-from-another-device" else (phone, {})
+    result: list = []
+    signing_out = threading.Thread(target=lambda: result.append(signer.post("/api/signout", payload)))
+    signing_out.start()
+    signing_out.join(0.5)
+    release.set()
+    renewer.join(5)
+    signing_out.join(5)
+
+    assert result == [(200, {})]
+    probe = Client(phone.port)
+    probe.cookies = {"factory_session": phone_cookie}
+    assert probe.session() == {"signed_in": False, "account_signin": False}
+    assert len(list(session_store.iterdir())) == (0 if scope == "all-from-another-device" else 1)
+    assert laptop.session()["signed_in"] is (scope == "own-device")
 
 
 def test_a_one_day_session_slides_while_the_device_is_active(
