@@ -216,3 +216,48 @@ def test_a_device_placement_stamped_as_a_datetime_string_keeps_its_running_job(t
     snapshot = collect_snapshot(db, tmp_path / "poll.log", now=NOW, machines_path=machines)
     assert len(snapshot["running"]) == 3
     assert snapshot["running"] == control["running"]
+
+
+def _subsecond_world(tmp_path: Path) -> tuple[Path, Path]:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute("UPDATE jobs SET finished_at = NULL")
+        for job_id, ticket_id, finished_at in (
+            ("older-40", "40", NOW - 4.75),
+            ("newer-40", "40", NOW - 4.25),
+            *((f"later-{n:02}", "41", NOW - 4 + n / 4) for n in range(11)),
+        ):
+            add_job(connection, job_id, state="done", ticket_id=ticket_id, handoff_comment_id=f"c-{job_id}")
+            _finish(connection, job_id, finished_at)
+    return db, log
+
+
+def _recent_jobs(snapshot: dict) -> list[str]:
+    return [item["job"] for item in snapshot["handoff_savings"]["recent"]]
+
+
+def _relay_jobs(snapshot: dict, ticket: str) -> list[str]:
+    thread = next(item for item in snapshot["relay"]["threads"] if item["ticket_id"] == ticket)
+    return [item["job"] for item in thread["handoffs"]]
+
+
+def test_handoffs_order_by_the_subsecond_instant_of_a_datetime_string(tmp_path: Path) -> None:
+    db, log = _subsecond_world(tmp_path)
+    as_epochs = collect_snapshot(db, log, now=NOW)
+    assert _recent_jobs(as_epochs)[-1] == "newer-40", "the twelfth newest handoff"
+    assert _relay_jobs(as_epochs, "40") == ["newer-40", "older-40"]
+    with sqlite3.connect(db) as connection:
+        connection.execute("UPDATE jobs SET finished_at = '2027-01-15 07:59:55.750' WHERE id = 'newer-40'")
+    snapshot = collect_snapshot(db, log, now=NOW)
+    assert _recent_jobs(snapshot) == _recent_jobs(as_epochs)
+    assert _relay_jobs(snapshot, "40") == ["newer-40", "older-40"]
+
+
+def test_the_queue_lists_jobs_by_the_subsecond_instant_they_were_created(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute("DELETE FROM jobs WHERE state = 'queued'")
+        add_job(connection, "first-50", state="queued", ticket_id="50", created_at="2027-01-15 07:59:29.250")
+        add_job(connection, "next-51", state="queued", ticket_id="51", created_at=NOW - 30.25)
+    queued = collect_snapshot(db, log, now=NOW)["queued"]
+    assert [item["job"] for item in queued] == ["first-50", "next-51"]

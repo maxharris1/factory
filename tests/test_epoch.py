@@ -38,16 +38,30 @@ def test_read_refuses_nothing() -> None:
 
 def _table(values: list) -> sqlite3.Connection:
     connection = sqlite3.connect(":memory:")
+    epoch.register(connection)
     connection.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v)")
     connection.executemany("INSERT INTO t (v) VALUES (?)", [(value,) for value in values])
     return connection
 
 
-@pytest.mark.parametrize("value", [*FORMS, "2026-11-26 22:15:58.25"])
-def test_sql_reads_each_storage_form_as_the_instant_to_the_second(value: object) -> None:
+@pytest.mark.parametrize("value", [*FORMS, INSTANT + 0.25, "2026-11-26 22:15:58.25", "2026-11-26T22:15:58.250000Z"])
+def test_sql_reads_each_storage_form_as_the_instant_python_reads(value: object) -> None:
     with contextlib.closing(_table([value])) as connection:
         (read,) = connection.execute(f"SELECT {epoch.sql('v')} FROM t").fetchone()
-    assert read == INSTANT
+    assert read == epoch.read(value)
+
+
+@pytest.mark.parametrize("value", [None, "soon"])
+def test_sql_reads_a_value_that_is_no_time_as_null(value: object) -> None:
+    with contextlib.closing(_table([value])) as connection:
+        assert connection.execute(f"SELECT {epoch.sql('v')} FROM t").fetchone() == (None,)
+
+
+def test_sql_orders_fractions_of_a_second_across_storage_forms() -> None:
+    values = ["2026-11-26 22:15:58.750", INSTANT + 0.25]
+    with contextlib.closing(_table(values)) as connection:
+        ordered = [row[0] for row in connection.execute(f"SELECT v FROM t ORDER BY {epoch.sql('v')} DESC")]
+    assert ordered == values
 
 
 def test_sql_orders_mixed_storage_by_instant() -> None:

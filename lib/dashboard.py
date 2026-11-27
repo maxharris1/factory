@@ -735,6 +735,7 @@ def open_readonly(path: Path) -> sqlite3.Connection:
     try:
         connection = sqlite3.connect(uri, uri=True)
         connection.row_factory = sqlite3.Row
+        epoch.register(connection)
         connection.execute("PRAGMA query_only = ON")
         # Opening is lazy; read the schema now so a failure surfaces here.
         connection.execute("SELECT count(*) FROM sqlite_master").fetchone()
@@ -1110,10 +1111,10 @@ def _no_ci_bases(connection: sqlite3.Connection, tables: set[str]) -> dict[tuple
     }
     if "job_events" in tables:
         for row in connection.execute(
-            """
+            f"""
             SELECT event.repo, event.ticket_id, event.detail FROM job_events AS event
             JOIN no_ci_bases AS base ON base.repo = event.repo AND base.ticket_id = event.ticket_id
-            WHERE event.event = ? ORDER BY event.recorded_at, event.id
+            WHERE event.event = ? ORDER BY {epoch.sql('event.recorded_at')}, event.id
             """,
             (LOCAL_GATE_PASSED,),
         ):
@@ -1993,11 +1994,11 @@ def _read_db(
     running_on: dict[str, int] = {}  # running jobs per device they are placed on
     if jobs:
         for row in connection.execute(
-            """
+            f"""
             SELECT id, repo, ticket_id, action, recipient, state,
                    timeout_seconds, created_at, last_activity_at, detail
             FROM jobs WHERE state IN ('queued', 'running')
-            ORDER BY created_at, id
+            ORDER BY {epoch.sql('created_at')}, id
             """
         ):
             base = {
@@ -2400,13 +2401,13 @@ def _read_db(
     if "poll_deferrals" in tables:
         row = connection.execute(
             "SELECT count(*) AS n FROM poll_deferrals "
-            "WHERE recorded_at >= ? AND detail LIKE '%Linear poll budget%'",
+            f"WHERE {epoch.sql('recorded_at')} >= ? AND detail LIKE '%Linear poll budget%'",
             (now - 3600,),
         ).fetchone()
         budget["deferrals"] = int(row["n"])
     if "poll_errors" in tables:
         row = connection.execute(
-            """
+            f"""
             SELECT
               COALESCE(SUM(error LIKE '%Linear poll budget is exhausted%'), 0)
                 AS exhausted,
@@ -2414,7 +2415,7 @@ def _read_db(
                            OR error LIKE '%Linear returned RATELIMITED%'
                            OR error LIKE '%Linear rate-limit backoff%'), 0)
                 AS rate_limited
-            FROM poll_errors WHERE recorded_at >= ?
+            FROM poll_errors WHERE {epoch.sql('recorded_at')} >= ?
             """,
             (now - 3600,),
         ).fetchone()
@@ -2642,7 +2643,7 @@ def _ticket_flows(
     if "ticket_transitions" in tables:
         for row in connection.execute(
             "SELECT repo, ticket_id, from_state, to_state, at, source FROM ticket_transitions "
-            "ORDER BY at, id"
+            f"ORDER BY {epoch.sql('at')}, id"
         ):
             key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
             at = _telemetry_time(row["at"])

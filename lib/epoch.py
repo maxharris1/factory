@@ -1,4 +1,7 @@
+import sqlite3
 from datetime import datetime, timezone
+
+SQL_FUNCTION = "epoch"
 
 
 def read(value: float | str) -> float:
@@ -9,9 +12,16 @@ def read(value: float | str) -> float:
     return (moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)).timestamp()
 
 
+def _cell(value: object) -> float | None:
+    try:
+        return read(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def register(connection: sqlite3.Connection) -> None:
+    connection.create_function(SQL_FUNCTION, 1, _cell, deterministic=True)
+
+
 def sql(column: str) -> str:
-    return (
-        f"CASE WHEN typeof({column}) IN ('integer', 'real') THEN {column} "
-        f"WHEN {column} GLOB '[0-9][0-9][0-9][0-9]-*' THEN CAST(strftime('%s', {column}) AS REAL) "
-        f"ELSE CAST({column} AS REAL) END"
-    )
+    return f"{SQL_FUNCTION}({column})"
