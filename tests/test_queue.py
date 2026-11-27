@@ -659,22 +659,24 @@ def _every_reader(path: Path) -> dict[str, dict[str, object]]:
 def test_db_spill_detail_moves_inline_detail_out_and_vacuums(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    path = tmp_path / "orch.db"
+    path = tmp_path / "state" / "orch.db"
+    path.parent.mkdir()
+    backups = ["--dir", str(tmp_path / "backups")]
     details = _inline_jobs(path, 300, 80_000)
     before_size = path.stat().st_size
     assert before_size > 20_000_000
     before = _every_reader(path)
     assert before["job"] == details
 
-    assert cli.main(["db-spill-detail", "--db", str(path), "--vacuum"]) == 0
+    assert cli.main(["db-spill-detail", "--db", str(path), *backups, "--vacuum"]) == 0
     out = capsys.readouterr().out
-    assert "moved the detail of 300 jobs" in out
+    assert "moved 300 jobs by key, 0 cold jobs" in out
     assert "vacuumed" in out
     assert path.stat().st_size < before_size * 0.10
     assert _every_reader(path) == before
 
-    assert cli.main(["db-spill-detail", "--db", str(path)]) == 0
-    assert "moved the detail of 0 jobs" in capsys.readouterr().out
+    assert cli.main(["db-spill-detail", "--db", str(path), *backups]) == 0
+    assert "moved 0 jobs by key, 0 cold jobs" in capsys.readouterr().out
 
 
 def test_db_spill_detail_refuses_while_a_poller_holds_the_lock(
