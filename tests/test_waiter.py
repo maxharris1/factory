@@ -39,11 +39,13 @@ from lib.queue import JobRequest, SQLiteJobQueue
 from lib.remote import Called
 from lib.stacks import stack_name
 from lib.waiter import (
+    CleanupStreak,
     ContextResult,
     GhContextSource,
     HarnessCommand,
     Waiter,
     WaiterError,
+    cleanup_streak,
     job_run_argv,
     load_harness_command,
     local_only,
@@ -481,6 +483,39 @@ def test_a_ninth_cleanup_pass_drops_the_oldest_log(tmp_path: Path) -> None:
     assert names == ["cleanup.log", *(f"cleanup.log.{n}" for n in range(1, 8))]
     assert "pass 9\n" in (state_dir / "cleanup.log").read_text()
     assert "pass 2\n" in (state_dir / "cleanup.log.7").read_text()
+
+
+def finished_pass(code: int, *output: str) -> str:
+    return "".join(f"{line}\n" for line in (STARTED_LINE, *output, f"cleanup run exited {code}"))
+
+
+RUNNING_PASS = f"{STARTED_LINE}\npass 9\n"
+NOT_STARTED_PASS = f"{STARTED_LINE}\ncleanup run not started: cannot exec orch\n"
+
+
+@pytest.mark.parametrize("passes, expected", [
+    ([], None),
+    ([RUNNING_PASS, NOT_STARTED_PASS], None),
+    ([finished_pass(0, "removed 3")], CleanupStreak(0, "")),
+    ([finished_pass(1, "boom 4"), finished_pass(1, "boom 3"), finished_pass(0),
+      finished_pass(1, "boom 1")], CleanupStreak(2, "boom 4")),
+    ([finished_pass(1, "boom 5"), finished_pass(75, "already running"), RUNNING_PASS,
+      NOT_STARTED_PASS, finished_pass(1, "boom 1")], CleanupStreak(2, "boom 5")),
+    ([finished_pass(75, "already running"), finished_pass(0)], CleanupStreak(0, "")),
+    ([finished_pass(-9, "kept 12")], CleanupStreak(1, "kept 12")),
+    ([finished_pass(1)], CleanupStreak(1, "")),
+    ([finished_pass(1, "real failure", "   ")], CleanupStreak(1, "real failure")),
+    ([finished_pass(1, "cleanup run exited 0")], CleanupStreak(1, "cleanup run exited 0")),
+    ([f"{STARTED_LINE}\norch cleanup run: kept 2842cleanup run exited -9\n"],
+     CleanupStreak(1, "orch cleanup run: kept 2842")),
+], ids=[
+    "no-passes", "none-finished", "clean", "streak-stops-at-clean", "skips-unfinished-and-75",
+    "75-then-clean", "signal", "no-output", "blank-tail", "fake-exit-in-output", "glued-exit",
+])
+def test_cleanup_streak_reads_the_kept_passes_newest_first(
+    passes: list[str], expected: CleanupStreak | None
+) -> None:
+    assert cleanup_streak(passes) == expected
 
 
 def test_a_cleanup_pass_that_could_not_start_says_so_in_its_log(tmp_path: Path) -> None:

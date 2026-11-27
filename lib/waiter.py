@@ -136,7 +136,7 @@ import stat
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -166,6 +166,7 @@ from lib.handoff_check import (
 from lib.handoff_check import problems as handoff_problems
 from lib.handoff_marker import handoff_marker
 from lib.heal import _webhook
+from lib.job_cleanup import ALREADY_RUNNING
 from lib.health import LOADED_VERSION, checkout_sha
 from lib.orch_yml import Approvals, OrchConfig, approvals, load_orch_yml
 from lib.pre_ready import ContextUnavailable, check_environ, checks_for, first_failure
@@ -239,6 +240,9 @@ CONTAINER_SWEEP_SECONDS = 600.0
 CLEANUP_SWEEP_SECONDS = 900.0
 CLEANUP_LOG = "cleanup.log"
 CLEANUP_LOGS = 8
+CLEANUP_STARTED = "cleanup run started "
+CLEANUP_EXITED = "cleanup run exited "
+_CLEANUP_EXIT = re.compile(rf"{CLEANUP_EXITED}(-?\d+)$")
 LOCAL_GATE_RETRY_SECONDS = 600
 UNSTARTED_CLAIM = (
     "harness = ? AND autostart_pid = ? AND runner_pid IS NULL "
@@ -598,6 +602,41 @@ def _lock_for_runner(path: Path) -> int:
         os.close(fd)
         raise WaiterError(f"{path} is held by an earlier run of this job") from exc
     return fd
+
+
+@dataclass(frozen=True)
+class CleanupStreak:
+    """failed: finished passes in a row that failed, newest first; 0 when
+    the newest finished pass exited 0. error: the last non-blank output line
+    of the newest failed pass, "" when failed is 0 or it printed nothing."""
+
+    failed: int
+    error: str
+
+
+def cleanup_streak(passes: Iterable[str]) -> CleanupStreak | None:
+    """The streak in the kept cleanup pass files, newest first, or None when
+    no pass finished. A pass with no exit line (running, not started, or its
+    waiter died) and a pass that exited ALREADY_RUNNING are skipped."""
+    failed, error = 0, ""
+    for text in passes:
+        lines = text.splitlines()
+        if lines and lines[0].startswith(CLEANUP_STARTED):
+            lines = lines[1:]
+        output = [line.strip() for line in lines if line.strip()]
+        exited = _CLEANUP_EXIT.search(output[-1]) if output else None
+        if exited is None:
+            continue
+        code = int(exited.group(1))
+        if code == ALREADY_RUNNING:
+            continue
+        if code == 0:
+            return CleanupStreak(failed, error)
+        if not failed:
+            output[-1] = output[-1][:exited.start()].strip()
+            error = next((line for line in reversed(output) if line), "")
+        failed += 1
+    return CleanupStreak(failed, error) if failed else None
 
 
 def read_status(path: Path) -> int | None:
