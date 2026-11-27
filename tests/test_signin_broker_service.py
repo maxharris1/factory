@@ -250,6 +250,33 @@ def test_a_broker_that_exits_at_startup_fails_start(home: Path) -> None:
     assert _service(home, "status").returncode == 3
 
 
+def _slow_loginctl(home: Path, seconds: float) -> None:
+    loginctl = home / ".local/bin/loginctl"
+    loginctl.write_text(f"#!/bin/sh\nsleep {seconds}\necho no\n", encoding="utf-8")
+    loginctl.chmod(0o755)
+
+
+def test_a_broker_that_exits_after_a_slow_containment_still_fails_start(home: Path) -> None:
+    _slow_loginctl(home, 2.8)
+    started = _service(home, "start", FAKE_BROKER_FAIL="1")
+    assert started.returncode == 1, started.stdout + started.stderr
+    assert "exited at startup" in started.stderr
+    assert _service(home, "status").returncode == 3
+
+
+@pytest.mark.parametrize("containment", [0, 1.5])
+def test_a_healthy_broker_found_within_the_start_wait_settles_and_ensure_succeeds(
+    home: Path, containment: float
+) -> None:
+    if containment:
+        _slow_loginctl(home, containment)
+    ensured = _service(home, "ensure", ORCH_SIGNIN_BROKER_START_WAIT="2")
+    assert ensured.returncode == 0, ensured.stdout + ensured.stderr
+    [pid] = _pids(home)
+    assert f"started sign-in broker (pid {pid})" in ensured.stdout
+    assert _service(home, "status").returncode == 0
+
+
 def test_a_retired_host_starts_nothing(home: Path) -> None:
     (home / ".config/factory/orch-retired").write_text("moved\n", encoding="utf-8")
     for command in ("start", "ensure", "restart"):
