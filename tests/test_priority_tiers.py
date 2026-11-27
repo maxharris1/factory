@@ -88,7 +88,7 @@ def test_priority_from_linear_must_be_a_bool(tmp_path: Path) -> None:
 
 def _claim_tickets(queue: SQLiteJobQueue) -> list[str]:
     with queue.connect() as connection:
-        return [str(row["ticket_id"]) for row in claim_order(connection, "claude", now=0.0)]
+        return [candidate.ticket_id for candidate in claim_order(connection, "claude", now=0.0)]
 
 
 def _enqueue(queue: SQLiteJobQueue, now: list[float], *tickets: str) -> None:
@@ -142,7 +142,7 @@ def _claim_actions(tmp_path: Path, *jobs: tuple[str, int]) -> list[str]:
         with queue.connect() as connection:
             set_ticket_priority(connection, HOME, str(number), urgent=False, bug=False, at=now[0], tier=tier)
     with queue.connect() as connection:
-        return [str(row["action"]) for row in claim_order(connection, "claude", now=now[0])]
+        return [candidate.action for candidate in claim_order(connection, "claude", now=now[0])]
 
 
 @pytest.mark.parametrize("finishing", ["review", "fix", "update-from-main", "qa"])
@@ -507,7 +507,7 @@ def test_a_database_from_before_tiers_still_reads_and_then_migrates(tmp_path: Pa
         )
     with sqlite3.connect(db) as connection:
         connection.row_factory = sqlite3.Row
-        assert [row["ticket_id"] for row in claim_order(connection, "claude", now=0.0)] == ["8", "7"]
+        assert [candidate.ticket_id for candidate in claim_order(connection, "claude", now=0.0)] == ["8", "7"]
         assert [(item["issue"], item["tier"], item["own_tier"], item["unblocks"])
                 for item in feeder_items(connection)] == [("8", None, None, 0)]
         assert priority_marks(connection)[(HOME, "8")].own_tier is None
