@@ -219,7 +219,7 @@ def test_orchestrate_choose_route_integrates_role_router() -> None:
         summary="optimize hot path",
         likely_files=("lib/foo.py",),
     )
-    decision = choose_route(req, routing=cfg, ticket_type="perf")
+    decision = choose_route(req, routing=cfg, ticket_type="perf", refused_harnesses=())
     assert (decision.builder_harness, decision.builder_family) == (
         "codex",
         "openai",

@@ -6,6 +6,7 @@ import pytest
 
 from lib.dispatcher import CIResult, Dispatcher
 from lib.factory_md import FactoryConfig, FactoryRouting, parse_factory_md
+from lib.natural_intake import NaturalIntakeSession
 from lib.orch_yml import load_orch_yml
 from lib.orchestrate import RouteRequest, choose_route, go_comment
 from lib.queue import SQLiteJobQueue
@@ -109,3 +110,41 @@ def test_review_is_queued_for_the_reviewer_choose_route_picked(
     assert detail["reviewer_harness"] == reviewer[0]
     assert (detail["routing"]["reviewer"], detail["routing"]["reviewer_model"]) == reviewer
     assert detail["routing"]["reviewer_effort"] == "high"
+
+
+def test_default_intake_routes_around_the_checked_in_refusals_and_starts_the_build(
+    tmp_path: Path,
+) -> None:
+    config = _root_factory()
+    session = NaturalIntakeSession(config)
+    questions = session.classify_and_post("Tighten the retry helper.", [])
+    artifacts = session.promote(
+        goal="Tighten the retry helper",
+        acceptance_criteria=["Retries cap at 5s"],
+        likely_files=["lib/retry.py"],
+        risk="high",
+        done_evidence="pytest tests/test_retry.py",
+    )
+    decision = artifacts.decision
+    assert (decision.reviewer_harness, decision.reviewer_model) == ("codex", "gpt-6.2-sol")
+
+    dispatcher, queue = _dispatcher(tmp_path, _checked_in_refused())
+    dispatcher.process(
+        ticket(
+            comment("q-1", questions.comment, author="grok-login", created_at=1),
+            comment("brief-1", artifacts.brief_comment, author="grok-login", created_at=2),
+            comment("go-1", artifacts.go_comment, author="grok-login", created_at=3),
+            factory_config=config,
+        )
+    )
+
+    build = queue.claim(decision.builder_harness)
+    assert build is not None and build.request.action == "build"
+    routing = json.loads(build.request.detail)["routing"]
+    assert (routing["reviewer"], routing["reviewer_model"]) == ("codex", "gpt-6.2-sol")
+
+
+def test_choose_route_reads_the_deployed_refusals_by_default() -> None:
+    decision = choose_route(RouteRequest(_root_factory(), "high", False, "feature", ("x.py",)))
+    assert "gemini" in _checked_in_refused()
+    assert (decision.reviewer_harness, decision.reviewer_model) == ("codex", "gpt-6.2-sol")

@@ -536,6 +536,7 @@ def test_skill_matches_the_spec_path_and_the_interface() -> None:
         "lib.factory_md",
         "lib.handoff",
         "lib.load",
+        "lib.orch_yml",
         "lib.role_router",
         "lib.schema",
         "markdown_it",

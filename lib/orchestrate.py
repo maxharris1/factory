@@ -31,6 +31,7 @@ from lib.factory_md import (
 )
 from lib.handoff import Handoff, format_comment
 from lib.load import Finding, split_front_matter
+from lib.orch_yml import load_orch_yml
 from lib.role_router import RoutingConfig, RoutingError, central_routing, resolve_pair
 from lib.schema import HARNESSES
 
@@ -39,6 +40,7 @@ ROLE = "orchestrator"
 
 QUESTION_CLASSES = ("observable", "default-able", "product")
 JOBS = ("build", "plan")
+ROOT = Path(__file__).resolve().parents[1]
 STOPS = ("refused", "stuck", "blocked", "capped", "abandoned")
 _ORDERED_MARKER = re.compile(r"^\d{1,9}(?=[.)])")
 _BACKTICK_FENCE = re.compile(r"^`{3,}[^`]*$")
@@ -352,13 +354,24 @@ def refused_stop(findings: Sequence[Finding]) -> StopReport:
     )
 
 
+def deployed_refused_harnesses(path: Path = ROOT / "orch.yml") -> tuple[str, ...]:
+    """orch.yml refused_harnesses with its local overlay, () when absent. Raises RouteError when invalid."""
+    if not path.is_file():
+        return ()
+    config, findings = load_orch_yml(path, allow_placeholders=True)
+    errors = "; ".join(f.message for f in findings if f.severity == "error")
+    if config is None or errors:
+        raise RouteError(f"{path}: {errors}")
+    return config.refused_harnesses
+
+
 def choose_route(
     request: RouteRequest,
     usage: object | None = None,
     *,
     routing: object | None = None,
     ticket_type: str | None = None,
-    refused_harnesses: Sequence[str] = (),
+    refused_harnesses: Sequence[str] | None = None,
     unavailable_harnesses: Sequence[str] = (),
 ) -> RouteDecision:
     """Resolve builder and cross-family reviewer from routing.yml / factory.md.
@@ -369,6 +382,7 @@ def choose_route(
     delegates to `lib.role_router.resolve_pair` with mechanical cross-family
     filtering, reading the shipped `config/routing.yml` when `routing` is
     None. Otherwise keeps legacy `factory.md` pair resolution.
+    `refused_harnesses` of None reads the deployed orch.yml refusals.
     """
     del usage  # dead cross-harness reserve removed; kept as optional kwarg for caller compatibility
     _check_request(request)
@@ -385,6 +399,8 @@ def choose_route(
         try:
             if routing is None:
                 routing = central_routing()
+            if refused_harnesses is None:
+                refused_harnesses = deployed_refused_harnesses()
             builder_slot, reviewer_slot = resolve_pair(
                 routing=routing,
                 factory=config,

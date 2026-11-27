@@ -90,11 +90,11 @@ Build a `RouteRequest` from `project.config`, the brief's risk, the likely files
 
 `urgent` is true only for a resumed paused step, past-ship work, or a ticket Max marked urgent.
 
-Call `choose_route(request)`. If the route cannot satisfy cross-family review, `choose_route` raises `RouteError`. Do not post `orch:go`. Report stop `blocked` once, with the error as the evidence.
+Call `choose_route(request)` with no `refused_harnesses`: it reads them from `orch.yml` and `orch.local.yml`, as the dispatcher does, so it never names a refused harness. If the route cannot satisfy cross-family review, `choose_route` raises `RouteError`. Do not post `orch:go`. Report stop `blocked` once, with the error as the evidence.
 
 Call `TicketFlow.post_go(decision, project.config.verify)` only after the questions step has run and every product question has an answer. `post_go` raises `GoBlocked` otherwise. `TicketFlow` keeps its record in memory, so first read the ticket's comments: if a trusted `grok-bot` `kind=go` with the same `state` is there, do not post another. The verify value is the skill name from `factory.md`, or `none`.
 
-`post_go` writes `builder`, `risk`, and `state` (`planning` or `building`). Everything else is in the body. Posting `orch:go` is the handoff. Stop. The dispatcher enforces the round cap from `factory.md`.
+`post_go` writes `builder`, `reviewer`, `risk`, and `state` (`planning` or `building`). Everything else is in the body. Posting `orch:go` is the handoff. Stop. The dispatcher enforces the round cap from `factory.md`.
 
 ## Mid-work questions
 
