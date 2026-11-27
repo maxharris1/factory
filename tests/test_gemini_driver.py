@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
+import shutil
 import sqlite3
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -658,3 +661,50 @@ def test_gemini_pstack_adapter_and_bot_skill_exist_and_verify() -> None:
     assert "## Skills" in brief
     assert "`/home/gemini-bot/factory/skills/factory/harness/gemini.md`" in brief
     assert "inherit-parent" in brief
+
+
+def _runbook_gemini_step() -> str:
+    text = _doc("docs/RUNBOOK-HARDENING.md")
+    return text[text.index("2. **Gemini (`agy`):**"):text.index("3. **Additional Same-Harness Accounts")]
+
+
+def test_the_runbook_gemini_step_writes_a_machines_local_yml_that_loads(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("ORCH_NO_LOCAL_OVERLAY", raising=False)
+    blocks = [block for tag, block in _fenced_blocks(_runbook_gemini_step()) if tag == "yaml"]
+    assert len(blocks) == 1
+    shutil.copy(ROOT / "machines.yml", tmp_path / "machines.yml")
+    (tmp_path / "machines.local.yml").write_text(blocks[0], encoding="utf-8")
+    config, findings = load_machines_yml(tmp_path / "machines.yml")
+    assert [f for f in findings if f.severity == "error"] == []
+    assert config is not None
+    assert "gemini" in config.device("pc").harnesses
+
+
+def _orch_job_run_commands() -> list[tuple[str, str]]:
+    paths = [*sorted(ROOT.glob("bots/*/SKILL.md")), *sorted(ROOT.glob("skills/factory/harness/*.md"))]
+    return [
+        (str(path.relative_to(ROOT)), span)
+        for path in paths
+        for span in re.findall(r"`(orch job run [^`]*)`", " ".join(path.read_text(encoding="utf-8").split()))
+        if "$ORCH_JOB_BRIEF" in span
+    ]
+
+
+def _shell_words(command: str) -> list[str]:
+    stubbed = re.sub(r"<[^>]*>", "X", command)
+    script = 'orch() { printf "%s\\0" "$@"; }; ' + stubbed
+    env = {key: value for key, value in os.environ.items() if key != "ORCH_JOB_BRIEF"}
+    out = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, check=True).stdout
+    return out.split("\0")[:-1]
+
+
+def test_the_shell_word_reader_sees_double_quotes_expand_the_brief_path() -> None:
+    assert not any("$ORCH_JOB_BRIEF" in word for word in _shell_words('orch job run b X -- agy -p "Read $ORCH_JOB_BRIEF"'))
+    assert "Read $ORCH_JOB_BRIEF" in _shell_words("orch job run b X -- agy -p 'Read $ORCH_JOB_BRIEF'")
+
+
+def test_every_shipped_orch_job_run_command_keeps_the_brief_path_for_orch_to_set() -> None:
+    commands = _orch_job_run_commands()
+    assert GEMINI_BOT_SKILL in {path for path, _ in commands}
+    for path, command in commands:
+        assert any("$ORCH_JOB_BRIEF" in word for word in _shell_words(command)), (path, command)
