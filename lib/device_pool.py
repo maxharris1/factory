@@ -90,7 +90,7 @@ from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
 
-from lib import account_doctor, device_sync, lane_limit, live_settings, usage_readings
+from lib import account_doctor, device_sync, epoch, lane_limit, live_settings, usage_readings
 from lib.device_sync import NOTHING_BLOCKED, Blocked
 from lib.machines_yml import (
     Device,
@@ -293,7 +293,7 @@ def running_pairs(connection: sqlite3.Connection, config: MachinesConfig | None)
             device = None if config is None else config.device(str(device_name))
             account = None if device is None else device.account_for(str(harness))
         if account is not None:
-            pairs.append(RunningPair(str(job_id), str(account), str(device_name), float(placed_at)))
+            pairs.append(RunningPair(str(job_id), str(account), str(device_name), epoch.read(placed_at)))
     return pairs
 
 
