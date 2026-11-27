@@ -281,6 +281,7 @@ DEVICE_CODE = "devcode_LEAKCANARY3584f1e2b0c9d7a6"
 USER_CODE = "LKCN-7Q2Z"
 REPO = "maxharris1/widgets"
 HEAD = "a" * 40
+CANARY = "GITHUB-BODY-CANARY"
 MOVED = "b" * 40
 SNAPSHOT = {
     "schema": "factory-dashboard/v1",
@@ -318,6 +319,7 @@ class FakeGitHub(ThreadingHTTPServer):
         self.heads = {(REPO, 34): HEAD, (REPO, 35): HEAD}
         self.posts: list[tuple[str, int, str, str]] = []
         self.calls: list[str] = []
+        self.fail: int | None = None
         self.lock = threading.Lock()
 
     @property
@@ -337,6 +339,22 @@ class FakeGitHubHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _fail(self, fake: FakeGitHub) -> bool:
+        if fake.fail is None or not re.fullmatch(
+                r"/repos/[^/]+/[^/]+/(pulls/\d+|issues/\d+/comments)", self.path):
+            return False
+        if fake.fail == 0:
+            code, data = 200, CANARY.encode() + b" not json"
+        else:
+            code, data = fake.fail, json.dumps({"message": CANARY, "documentation_url": CANARY}).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("X-GitHub-Canary", CANARY)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+        return True
+
     def _token(self) -> str:
         return self.headers.get("Authorization", "").removeprefix("Bearer ")
 
@@ -344,6 +362,8 @@ class FakeGitHubHandler(BaseHTTPRequestHandler):
         fake: FakeGitHub = self.server  # type: ignore[assignment]
         with fake.lock:
             fake.calls.append(f"GET {self.path}")
+        if self._fail(fake):
+            return
         if self.path == "/user":
             self._reply(*IDENTITIES.get(self._token(), (401, {"message": "Bad credentials"})))
             return
@@ -358,6 +378,8 @@ class FakeGitHubHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         with fake.lock:
             fake.calls.append(f"POST {self.path}")
+        if self._fail(fake):
+            return
         if self.path == "/login/device/code":
             assert b"client_id=Ov23liTESTCLIENT" in raw
             self._reply(200, {"device_code": DEVICE_CODE, "user_code": USER_CODE,
@@ -1161,6 +1183,8 @@ def test_load_config_refuses_an_unsafe_settings_spool(
 
 
 
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
 from datetime import datetime, timezone  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
@@ -1281,6 +1305,73 @@ def test_act_ok_on_a_moved_head_is_409_and_posts_nothing(
     assert fake_github.posts == []
     (line,) = audit_lines(audit)
     assert (line["result"], line["head"], line["url"]) == ("head-changed", HEAD, None)
+
+
+HINT = "OAuth app may need approval for this org / SSO"
+
+
+def assert_no_canary(client: Client, audit: Path) -> None:
+    for _, headers, body in client.seen:
+        assert CANARY.encode() not in body
+        assert CANARY not in " ".join(value for _, value in headers)
+    assert CANARY not in audit.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 422, 429, 0], ids=str)
+def test_a_github_failure_shows_its_status_and_never_its_body(
+    act_client: Client, fake_github, audit: Path, status: int
+) -> None:
+    fake_github.fail = status
+    hint = {"hint": HINT} if status in (403, 404) else {}
+    assert act(act_client, "42", "another-round") == (
+        502, {"error": "github", "github_status": status, **hint})
+    assert fake_github.posts == []
+    assert audit_lines(audit) == [{
+        "at": "2026-01-15T20:04:00Z", "login": "maxharris1", "repo": REPO, "ticket_id": "42",
+        "action": "another-round", "expect_state": "capped", "head": None,
+        "result": "github", "github_status": status, "url": None,
+    }]
+    assert_no_canary(act_client, audit)
+
+
+def test_a_github_failure_reading_the_head_shows_its_status(
+    act_client: Client, fake_github, audit: Path
+) -> None:
+    fake_github.fail = 403
+    assert act(act_client, "12", "ok", head=HEAD) == (
+        502, {"error": "github", "github_status": 403, "hint": HINT})
+    assert fake_github.posts == []
+    (line,) = audit_lines(audit)
+    assert (line["result"], line["github_status"], line["head"], line["url"]) == (
+        "github", 403, HEAD, None)
+    assert_no_canary(act_client, audit)
+
+
+def test_gh_result_renders_the_github_status_and_hint(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    harness = (
+        "var document = {createTextNode: function (t) { return {nodeType: 3, textContent: t}; }};\n"
+        "function el(tag, cls, text) { return {tag: tag, textContent: text || '',"
+        " setAttribute: function () {}}; }\n"
+        "function add(parent, child) { parent.appendChild(child); return child; }\n"
+        "function link(cls, href) { var a = el('a', cls); a.href = href; return a; }\n"
+        "var latest = null; function render() {} function poll() {}\n"
+        + (ROOT / "lib" / "dashboard_static" / "js" / "common_github.js").read_text(encoding="utf-8")
+        + "\nvar out = {textContent: '', replaceChildren: function () { this.textContent = ''; },"
+        " appendChild: function () {}};\n"
+        "[{ok: false, status: 502, error: 'github', data: {github_status: 403, hint: '" + HINT + "'}},"
+        " {ok: false, status: 502, error: 'github', data: {github_status: 429}},"
+        " {ok: false, status: 409, error: 'changed', data: {error: 'changed'}}]"
+        ".forEach(function (res) { ghResult(out, res, 'posted');"
+        " console.log(JSON.stringify(out.textContent)); });\n"
+    )
+    script = tmp_path / "gh_result.js"
+    script.write_text(harness, encoding="utf-8")
+    run = subprocess.run([node, str(script)], capture_output=True, text=True, check=True)
+    assert [json.loads(line) for line in run.stdout.splitlines()] == [
+        f"error: github 403 ({HINT})", "error: github 429", "error: changed"]
 
 
 INJECTED = (f"<!-- orch:v1 kind=ok head={MOVED} -->\n/ok {MOVED}\n"
