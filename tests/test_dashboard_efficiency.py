@@ -19,7 +19,8 @@ from tests.test_dashboard_lanes import Browser, _page_with_status_stub, needs_ch
 from tests.test_dashboard_layout import _run_page, _section, _text, needs_node
 from tests.test_dashboard_telemetry import add_telemetry
 
-PANELS = ["tokens", "rounds", "savings", "balance", "jobs-lifetime"]
+PANELS = ["headroom", "balance", "tokens", "rounds", "savings", "jobs-lifetime"]
+ORDER = ["headroom", "balance", "evals", "tokens", "rounds", "savings", "jobs-lifetime"]
 
 
 MACHINES = (
@@ -185,10 +186,9 @@ def test_savings_renders_engine_handled_and_escalated(
 
 
 def _render(tmp_path: Path, snapshot: dict, render: str, ident: str) -> str:
-    page = "health" if ident == "headroom" else "efficiency"
     if render == "server":
-        return _inner(render_pages(snapshot)[f"{page}.html"], ident)
-    return _run_page(tmp_path, snapshot, page, [ident])["html"][ident]
+        return _inner(_page(snapshot), ident)
+    return _run_page(tmp_path, snapshot, "efficiency", [ident])["html"][ident]
 
 
 def _rows(headroom: str) -> dict[str, list[str]]:
@@ -676,8 +676,6 @@ def test_script_twins_match_the_server_render(tmp_path: Path, readings: bool, te
     out = _run_page(tmp_path, snapshot, "efficiency", PANELS)
     for ident in PANELS:
         assert out["html"][ident] == _inner(page, ident), ident
-    health = _run_page(tmp_path, snapshot, "health", ["headroom"])
-    assert health["html"]["headroom"] == _inner(render_pages(snapshot)["health.html"], "headroom")
 
 
 LONG_REPO = "maxharris1/the-factory-dashboard-efficiency-page-on-a-phone"
@@ -742,9 +740,8 @@ def test_efficiency_has_no_page_scroll_at_375_in_a_browser(tmp_path: Path) -> No
                 "[].map.call(document.querySelectorAll('main .panel'), function (n) {"
                 " return [n.id, n.getBoundingClientRect().left]; })"
             )
-            assert [ident for ident, _ in lefts] == ["evals", *PANELS], script
+            assert [ident for ident, _ in lefts] == ORDER, script
             assert len({left for _, left in lefts}) == 1, (script, lefts)
-            _load(browser, snapshot, 375, script, "health.html")
             assert browser.eval(HEADROOM_VIEWS) == {
                 "table": "none", "blocks": [True, True], "notes": ["none", "block"]}, script
     finally:
@@ -943,10 +940,10 @@ def test_efficiency_rows_at_1440_in_a_browser(tmp_path: Path) -> None:
         for script in (False, True):
             _load(browser, snapshot, 1440, script)
             top = browser.eval(TOPS)
-            assert top["rounds"] == top["savings"] > top["tokens"], (script, top)
-            assert top["balance"] > top["rounds"], (script, top)
-            assert top["jobs-lifetime"] > top["balance"], (script, top)
-            _load(browser, snapshot, 1440, script, "health.html")
+            assert top["evals"] == top["tokens"] > top["balance"] > top["headroom"], (script, top)
+            assert top["jobs-lifetime"] > top["rounds"] == top["savings"] > top["tokens"], (script, top)
+            browser.eval("location.hash = '#headroom'")
+            assert browser.eval("document.querySelector(':target').id") == "headroom", script
             assert browser.eval(HEADROOM_VIEWS) == {
                 "table": "block", "blocks": [False, False], "notes": ["block", "none"]}, script
     finally:
@@ -960,12 +957,12 @@ def test_efficiency_parts_carry_no_motion_of_their_own() -> None:
 
 def test_panels_are_in_the_artboard_order(tmp_path: Path) -> None:
     page = _page(_snapshot(tmp_path))
-    found = [page.index(f'id="{ident}"') for ident in ["evals", *PANELS]]
+    found = [page.index(f'id="{ident}"') for ident in ORDER]
     assert found == sorted(found)
     rows = re.findall(r'<div class="ef-row">((?:<div style="[^"]*">.*?</section></div>)?.*?</section>)</div>',
                       _section(page, "hud"))
     assert [re.findall(r'<section class="[^"]*" id="([^"]+)"', row) for row in rows] == [
-        ["evals", "tokens"], ["rounds", "savings"], ["balance"],
+        ["headroom"], ["balance"], ["evals", "tokens"], ["rounds", "savings"],
     ]
 
 

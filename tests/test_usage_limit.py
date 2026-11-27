@@ -542,7 +542,7 @@ def test_the_dashboard_shows_a_limit_before_any_reading(tmp_path: Path) -> None:
     snapshot = collect_snapshot(db, log, now=now[0], machines_path=ROOT / "machines.yml")
     entry = next(e for e in snapshot["usage"]["accounts"] if e["harness"] == "claude")
     assert entry["state"] == "no telemetry"
-    page = render_pages(snapshot)["health.html"]
+    page = render_pages(snapshot)["efficiency.html"]
     assert entry["limit_label"] in page.split("<script>")[0]
 
 

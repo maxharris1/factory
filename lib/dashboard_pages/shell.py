@@ -555,9 +555,9 @@ def _statusline(snapshot: dict) -> str:
 _PANELS = {
     "index.html": (_counts, _needs_max_and_intake, _lanes, _just_happened),
     "activity.html": (_attention, _relay),
-    "efficiency.html": (top_row, middle_row, balance_row, _jobs_lifetime),
+    "efficiency.html": (headroom_row, balance_row, top_row, middle_row, _jobs_lifetime),
     "evals.html": (_evals,),
-    "health.html": (_broken, _components, _versions, _log_row, _settings, headroom_row, _accounts, _routing, _rules, _no_waiter),
+    "health.html": (_broken, _components, _versions, _log_row, _settings, _accounts, _routing, _rules, _no_waiter),
     "job.html": (_board, _tickets),
     "settings.html": (_settings, _accounts),
     "ticket.html": (_ticketview,),
