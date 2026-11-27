@@ -2655,3 +2655,384 @@ def test_a_plan_without_owned_owns_every_id(tmp_path: Path) -> None:
     assert set(box.removed) == {"c1", "c3", "x1", "x2", "x3", "x4"} and box.kept == {}
     assert [path.name for path in jobs.iterdir()] == []
     assert (root / "jobs-kept" / "x4" / job_leftovers.KEPT_JSON).exists()
+
+
+def retired_root(tmp_path: Path) -> Path:
+    return tmp_path / "old" / "claude-bot" / "work"
+
+
+RETIRED_ROWS = [("done1", "t1", "done", OLD), ("gone1", "t2", "done", OLD),
+                ("running1", "t3", "running", None)]
+
+
+def retired_jobs(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
+    old = retired_root(tmp_path)
+    job_folder(old, "done1")
+    gone_folder(old, "gone1")
+    job_folder(old, "running1")
+    job_folder(old, "stray1")
+    monkeypatch.setattr(job_cleanup.health, "load_machines", lambda _: machines(tmp_path, "pc"))
+    return old, database(tmp_path, RETIRED_ROWS)
+
+
+def test_a_retired_root_sweep_removes_finished_jobs_under_the_old_root(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    old, db = retired_jobs(tmp_path, monkeypatch)
+    assert str(old) != machines(tmp_path, "pc").devices[0].workdir_for("claude")
+
+    code, out = cleanup(["run", "--backlog", "--root", f"pc:{old}", "--db", str(db)],
+                        ShellTransport(tmp_path), capsys)
+
+    assert code == 0, out
+    label = f"pc claude-bot {old}"
+    summary, *rest = out.splitlines()
+    assert summary.startswith(f"{label}: removed 2 checkouts ("), summary
+    assert summary.endswith("kept 2 (live 1, unknown 1)"), summary
+    assert {line.rsplit(" ", 2)[0] for line in rest if " removed " in line} == {
+        f"{label}: removed done1", f"{label}: removed gone1"}
+    assert f"{label}: kept running1 live" in rest and f"{label}: kept stray1 unknown" in rest
+    jobs = old / "jobs"
+    for job_id in ("done1", "gone1"):
+        assert not (jobs / job_id).exists() and not (jobs / f"{job_id}.gone").exists()
+        assert (old / "jobs-kept" / job_id / job_leftovers.KEPT_JSON).is_file(), job_id
+    for job_id in ("running1", "stray1"):
+        assert (jobs / job_id / "repo" / "README").exists(), job_id
+
+
+def two_login_pc(tmp_path: Path, *, local: bool = False) -> MachinesConfig:
+    return MachinesConfig(devices=(
+        Device(name="pc", slot_max=2, harnesses=MappingProxyType(BOTS),
+               tailscale_name="pc.example.ts.net", local=False, enabled=True,
+               workdir_root=f"{tmp_path}/pc/{{bot}}/work", ssh_alias="pc-{bot}",
+               factory_root="/srv/{bot}/factory"),
+        Device(name="here", slot_max=2, harnesses=MappingProxyType(BOTS),
+               tailscale_name="here.example.ts.net", local=True, enabled=True,
+               workdir_root=f"{tmp_path}/here/{{bot}}/work", factory_root=str(ROOT)),
+    ))
+
+
+class ScriptRecorder:
+    def __init__(self):
+        self.argvs: list[list[str]] = []
+
+    def call(self, argv, *, timeout: float, input: bytes | None = None) -> Called:
+        self.argvs.append(argv)
+        report = job_cleanup.Report({}, {}, json.loads(input.decode())["dry_run"])
+        return Called(0, f"{job_cleanup.MARK} {report.to_json()}\n", "")
+
+    def logins(self) -> set[tuple[str, str, str]]:
+        return {(argv[argv.index("-l") + 1], argv[-2], argv[-1].split("orch-cleanup ")[1].split()[0])
+                for argv in self.argvs}
+
+
+ROOT_LOGINS = {
+    "every login the device lists": ("", {
+        ("claude-bot", "pc-claude-bot", "/srv/claude-bot/factory"),
+        ("codex-bot", "pc-codex-bot", "/srv/codex-bot/factory")}),
+    "a listed login": ("codex-bot@", {
+        ("codex-bot", "pc-codex-bot", "/srv/codex-bot/factory")}),
+    "an unlisted login": ("ops@", {("ops", "pc-claude-bot", "/srv/claude-bot/factory")}),
+}
+
+
+@pytest.mark.parametrize("case", ROOT_LOGINS, ids=list(ROOT_LOGINS))
+def test_a_retired_root_sweep_runs_once_per_login_with_its_alias_and_checkout(
+    tmp_path: Path, capsys, monkeypatch, case: str
+) -> None:
+    login, expected = ROOT_LOGINS[case]
+    monkeypatch.setattr(job_cleanup.health, "load_machines", lambda _: two_login_pc(tmp_path))
+    old = f"{tmp_path}/old/work"
+    transport = ScriptRecorder()
+
+    code, out = cleanup(["run", "--backlog", "--root", f"{login}pc:{old}/", "--dry-run",
+                         "--db", str(database(tmp_path, []))], transport, capsys)
+
+    assert code == 0, out
+    assert transport.logins() == expected
+    assert sorted(line.split(":")[0] for line in out.splitlines()) == sorted(
+        f"pc {user} {old}" for user, _, _ in expected)
+    assert all("--owner-guard" in argv[-1] for argv in transport.argvs), (
+        "a retired-root sweep asks for the owner guard")
+
+
+def test_a_pass_without_root_does_not_send_the_owner_guard(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    monkeypatch.setattr(job_cleanup.health, "load_machines", lambda _: two_login_pc(tmp_path))
+    transport = ScriptRecorder()
+
+    code, out = cleanup(["run", "--backlog", "--dry-run", "--db", str(database(tmp_path, []))],
+                        transport, capsys)
+
+    assert code == 0, out
+    assert transport.argvs and not any("--owner-guard" in argv[-1] for argv in transport.argvs)
+    assert job_cleanup.device_script("/c", "/w") == job_cleanup.device_script(
+        "/c", "/w", owner_guard=False)
+
+
+ROOT_REFUSALS = {
+    "alone": (["--root", "pc:/old/work"], "one of the arguments --backlog --bot is required"),
+    "beside --bot": (["--bot", "claude-bot", "--root", "pc:/old/work"],
+                     "orch cleanup run: --root needs --backlog"),
+    "no device": (["--backlog", "--root", "/old/work"],
+                  "orch cleanup run: --root: '/old/work' is not [LOGIN@]DEVICE:PATH"),
+    "empty login": (["--backlog", "--root", "@pc:/old/work"],
+                    "orch cleanup run: --root: '@pc:/old/work' is not [LOGIN@]DEVICE:PATH"),
+    "unknown device": (["--backlog", "--root", "mac:/old/work"],
+                       "orch cleanup run: --root: no device 'mac' in machines.yml"),
+    "local device": (["--backlog", "--root", "here:/old/work"],
+                     "orch cleanup run: --root: here is the local device"),
+    "relative path": (["--backlog", "--root", "pc:old/work"],
+                      "orch cleanup run: --root: 'old/work' is not an absolute path"),
+    "a listed work root": (["--backlog", "--root", "pc:{tmp}/pc/codex-bot/work/"],
+                           ("orch cleanup run: --root: {tmp}/pc/codex-bot/work"
+                            " is a work root pc lists today")),
+}
+
+
+@pytest.mark.parametrize("case", ROOT_REFUSALS, ids=list(ROOT_REFUSALS))
+def test_a_root_the_sweep_cannot_take_exits_2(
+    tmp_path: Path, capsys, monkeypatch, case: str
+) -> None:
+    args, message = ROOT_REFUSALS[case]
+    monkeypatch.setattr(job_cleanup.health, "load_machines", lambda _: two_login_pc(tmp_path))
+    db = database(tmp_path, [("done1", "t1", "done", OLD)])
+    job_folder(work_root(tmp_path), "done1")
+    before = tree(tmp_path / "pc")
+
+    code = job_cleanup.main(["run", *(arg.format(tmp=tmp_path) for arg in args), "--db", str(db)],
+                            clock=lambda: NOW, transport=NoCalls())
+
+    captured = capsys.readouterr()
+    assert code == 2, captured
+    assert message.format(tmp=tmp_path) in captured.err, captured.err
+    assert tree(tmp_path / "pc") == before
+
+
+def foreign(monkeypatch, *paths: Path) -> None:
+    real = job_cleanup._owner
+
+    def owner(path: Path) -> int:
+        return os.getuid() + 1 if path in paths else real(path)
+
+    monkeypatch.setattr(job_cleanup, "_owner", owner)
+
+
+def test_the_owner_guard_keeps_a_job_another_user_owns(tmp_path: Path, monkeypatch) -> None:
+    root = work_root(tmp_path)
+    job_folder(root, "mine1")
+    job_folder(root, "theirs1")
+    gone_folder(root, "theirs2")
+    theirs = {name: value for name, value in tree(root).items() if "theirs" in name}
+    foreign(monkeypatch, root / "jobs" / "theirs1", root / "jobs" / "theirs2.gone")
+    plan = Plan(frozenset({"mine1", "theirs1", "theirs2"}), NOW, False, unlink_lock=True)
+
+    hold = job_cleanup.device_step(root, plan, scan=no_process_holds, owner_guard=True)
+    done = job_cleanup.device_step(
+        root, Plan(frozenset(hold.held), NOW, False, job_cleanup.FINISH, unlink_lock=True),
+        scan=no_process_holds, owner_guard=True)
+
+    assert hold.kept == {"theirs1": "not-owner", "theirs2": "not-owner"}, hold
+    assert hold.held == ("mine1",) and set(done.removed) == {"mine1"}, done
+    assert {name: value for name, value in tree(root).items() if "theirs" in name} == theirs
+    assert (root / "jobs-kept" / "mine1" / job_leftovers.KEPT_JSON).is_file()
+
+
+def old_archive(root: Path, job_id: str) -> Path:
+    kept = root / "jobs-kept" / job_id
+    kept.mkdir(parents=True)
+    (kept / job_leftovers.KEPT_JSON).write_text(json.dumps({"id": job_id, "at": 1_000_000_000.0}))
+    (root / "jobs").mkdir(exist_ok=True)
+    return kept
+
+
+def test_the_owner_guard_prunes_old_archives_only_in_a_jobs_kept_this_user_owns(
+    tmp_path: Path, monkeypatch
+) -> None:
+    mine, theirs = work_root(tmp_path, "mine"), work_root(tmp_path, "theirs")
+    kept_mine, kept_theirs = old_archive(mine, "a1"), old_archive(theirs, "a1")
+    foreign(monkeypatch, theirs / "jobs-kept")
+    plan = Plan(frozenset(), NOW, False, unlink_lock=True)
+
+    for root in (mine, theirs):
+        job_cleanup.device_step(root, plan, scan=no_process_holds, owner_guard=True)
+
+    assert not kept_mine.exists(), "an old archive in this user's jobs-kept is pruned"
+    assert kept_theirs.is_dir(), "an old archive in another user's jobs-kept stays"
+
+
+OLDER_DEVICE_ORCH = """import argparse, sys
+parser = argparse.ArgumentParser(prog="orch cleanup")
+commands = parser.add_subparsers(dest="command", required=True)
+commands.add_parser("device").add_argument("--root", required=True)
+parser.parse_args(sys.argv[2:])
+sys.exit("an older device read the plan")
+"""
+
+
+class OlderDevice(ShellTransport):
+    def __init__(self, home: Path):
+        super().__init__(home)
+        self.orch.write_text(OLDER_DEVICE_ORCH)
+
+
+def test_an_older_device_rejects_the_owner_guard_and_nothing_is_touched(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    old, db = retired_jobs(tmp_path, monkeypatch)
+    before = tree(old)
+
+    code, out = cleanup(["run", "--backlog", "--root", f"pc:{old}", "--db", str(db)],
+                        OlderDevice(tmp_path), capsys)
+
+    assert code == 1, out
+    first, last = out.splitlines()
+    assert first == (f"pc claude-bot {old}: failed: device step exited 2: "
+                     "orch cleanup: error: unrecognized arguments: --owner-guard"), first
+    assert last == f"orch cleanup run: failed: {first.replace(': failed', '', 1)}"
+    assert tree(old) == before
+
+
+def test_a_root_with_no_jobs_folder_is_a_failed_target(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    monkeypatch.setattr(job_cleanup.health, "load_machines", lambda _: machines(tmp_path, "pc"))
+    old = retired_root(tmp_path)
+    old.mkdir(parents=True)
+
+    code, out = cleanup(["run", "--backlog", "--root", f"pc:{old}",
+                         "--db", str(database(tmp_path, RETIRED_ROWS))],
+                        ShellTransport(tmp_path), capsys)
+
+    assert code == 1, out
+    assert out.splitlines()[0] == (f"pc claude-bot {old}: failed: device step exited 3: "
+                                   f"orch cleanup device: no jobs folder under {old}")
+    assert list(old.iterdir()) == []
+
+
+def test_a_retired_root_dry_run_prints_the_same_lines_and_changes_nothing(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    old, db = retired_jobs(tmp_path, monkeypatch)
+    before = tree(old)
+
+    code, out = cleanup(["run", "--backlog", "--root", f"pc:{old}", "--dry-run",
+                         "--db", str(db)], ShellTransport(tmp_path), capsys)
+
+    assert code == 0, out
+    label = f"pc claude-bot {old}"
+    summary, *rest = out.splitlines()
+    assert summary.startswith(f"{label}: would remove 2 checkouts ("), summary
+    assert summary.endswith("kept 2 (live 1, unknown 1)"), summary
+    for job_id in ("done1", "gone1"):
+        assert any(re.fullmatch(rf"{label}: would remove {job_id} \d+ bytes", line)
+                   for line in rest), (job_id, rest)
+    assert rest[-2:] == [f"{label}: kept running1 live", f"{label}: kept stray1 unknown"]
+    assert tree(old) == before
+
+
+class SharedRootLogins:
+    def __init__(self, root: Path, monkeypatch):
+        self.root = root
+        self.login = threading.local()
+        self.lock = threading.Lock()
+        self.active = 0
+        self.most = 0
+        monkeypatch.setattr(job_cleanup, "_owner", self.owner)
+
+    def owner(self, path: Path) -> int:
+        path.lstat()
+        mine = path.name == "jobs-kept" or path.name.startswith(self.login.prefix)
+        return os.getuid() if mine else os.getuid() + 1
+
+    def call(self, argv, *, timeout: float, input: bytes | None = None) -> Called:
+        self.login.prefix = {"pc-claude-bot": "c", "pc-codex-bot": "x"}[argv[-2]]
+        with self.lock:
+            self.active += 1
+            self.most = max(self.most, self.active)
+        try:
+            time.sleep(0.05)
+            report = job_cleanup.device_step(self.root, Plan.parse(input.decode()),
+                                             scan=no_process_holds, owner_guard=True)
+        finally:
+            with self.lock:
+                self.active -= 1
+        return Called(0, f"{job_cleanup.MARK} {report.to_json()}\n", "")
+
+
+def test_logins_sweeping_one_retired_root_take_turns(tmp_path: Path, monkeypatch) -> None:
+    old = tmp_path / "old" / "work"
+    ids = [f"{prefix}{n}" for prefix in "cx" for n in range(1, 4)]
+    for job_id in ids:
+        job_folder(old, job_id)
+    db = database(tmp_path, [(job_id, f"t-{job_id}", "done", OLD) for job_id in ids])
+    config = two_login_pc(tmp_path)
+    transport = SharedRootLogins(old, monkeypatch)
+
+    outcomes = job_cleanup.run(db, config, transport, now=NOW, grace_hours=6, dry_run=False,
+                               sweep=job_cleanup.root_targets(config, f"pc:{old}"))
+
+    assert transport.most == 1, "two logins ran a device step on one root at once"
+    removed = {target.bot: set(report.removed) for target, report in outcomes}
+    assert removed == {"claude-bot": {"c1", "c2", "c3"}, "codex-bot": {"x1", "x2", "x3"}}, outcomes
+    assert sorted(path.name for path in (old / "jobs").iterdir()) == []
+
+
+def test_the_owner_guard_skips_an_entry_that_vanishes_while_it_looks(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = work_root(tmp_path)
+    job_folder(root, "mine1")
+    lock = root / "jobs" / "done1.lock"
+    lock.touch()
+    real = job_cleanup._owner
+
+    def owner(path: Path) -> int:
+        if path == lock:
+            lock.unlink()
+        return real(path)
+
+    monkeypatch.setattr(job_cleanup, "_owner", owner)
+    plan = Plan(frozenset({"mine1", "done1"}), NOW, False, unlink_lock=True)
+
+    hold = job_cleanup.device_step(root, plan, scan=no_process_holds, owner_guard=True)
+
+    assert hold.held == ("mine1",) and hold.kept == {}, hold
+
+
+def test_the_owner_guard_leaves_a_finished_id_it_did_not_see(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = work_root(tmp_path)
+    job_folder(root, "mine1")
+    late = root / "jobs" / "late1"
+    real = job_cleanup._owner
+
+    def owner(path: Path) -> int:
+        if not late.exists():
+            job_folder(root, "late1")
+        return os.getuid() + 1 if path.name.startswith("late1") else real(path)
+
+    monkeypatch.setattr(job_cleanup, "_owner", owner)
+    plan = Plan(frozenset({"mine1", "late1"}), NOW, False, unlink_lock=True)
+
+    hold = job_cleanup.device_step(root, plan, scan=no_process_holds, owner_guard=True)
+
+    assert hold.held == ("mine1",), hold
+    assert late.is_dir() and not (root / "jobs" / "late1.cleanup").exists()
+
+
+def test_the_owner_guard_leaves_a_pending_archive_another_user_owns(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = work_root(tmp_path)
+    (root / "jobs").mkdir(parents=True)
+    record = pending_record(root, "x4")
+    foreign(monkeypatch, record.parent)
+    plan = Plan(frozenset({"x4"}), NOW, False, unlink_lock=True)
+
+    hold = job_cleanup.device_step(root, plan, scan=no_process_holds, owner_guard=True)
+
+    assert "x4" not in hold.removed, hold
+    assert record.is_file() and not (record.parent / job_leftovers.KEPT_JSON).exists()
