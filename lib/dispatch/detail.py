@@ -530,6 +530,12 @@ class DetailMixin:
         """
         if request.recipient == "grok":
             request = self._grok_request(request)
+        if (
+            request.action == "review"
+            and request.recipient in self.refused_harnesses
+            and ticket.factory.reviewer_harness not in self.refused_harnesses
+        ):
+            request = _review_for_reviewer_of_record(ticket, request)
         request = self._with_evidence(connection, ticket, comment, request, ci=ci)
         job = self.queue.enqueue_in_transaction(connection, request, dedupe_key=dedupe_key)
         self._record_handled_time(connection, ticket, comment.id, self.queue.now())
@@ -557,10 +563,11 @@ class DetailMixin:
 
         with self._connect() as connection:
             comments = _verdict_sources(connection, ticket, comment)
+            reviewers = _accepted_reviewers(connection, ticket)
         return findings_evidence(
             comments=comments,
             trusted_logins=self.trusted_logins,
-            reviewer=f"{ticket.factory.reviewer_harness}-bot",
+            reviewers=reviewers,
             current_round=through_round + 1,
             bases={},
         ).reviewed_head
@@ -605,7 +612,7 @@ class DetailMixin:
         findings = findings_evidence(
             comments=_verdict_sources(connection, ticket, comment),
             trusted_logins=self.trusted_logins,
-            reviewer=f"{ticket.factory.reviewer_harness}-bot",
+            reviewers=_accepted_reviewers(connection, ticket),
             current_round=(_detail_round_number(request.detail) or 1)
             + (request.action == "review"),
             bases=_review_bases(
@@ -770,21 +777,7 @@ class DetailMixin:
         if action in ("plan", "build", "fix", "review") and (decisions := self._decisions(ticket, connection)):
             context["decisions"] = decisions
         if ticket.factory_md is not None:
-            routing_payload: dict[str, object] = {
-                "builder": ticket.factory.builder_harness,
-                "reviewer": ticket.factory.reviewer_harness,
-            }
-            if (picks := ticket.router_picks) is not None:
-                sides = [("builder", picks.builder), ("reviewer", picks.reviewer)]
-                if picks.planner is not None:
-                    routing_payload["planner"] = picks.planner.harness
-                    sides.append(("plan", picks.planner))
-                for side, pick in sides:
-                    if pick.model is not None:
-                        routing_payload[f"{side}_model"] = pick.model
-                    if pick.effort is not None:
-                        routing_payload[f"{side}_effort"] = pick.effort
-            context["routing"] = routing_payload
+            context["routing"] = _routing_payload(ticket)
         if kind is not None:
             context["kind"] = kind
         if plan_round is not None:
@@ -976,6 +969,53 @@ def _verdict_sources(
         )
     }
     return [item for item in ticket.comments if item.id == comment.id or item.id in accepted]
+
+
+def _routing_payload(ticket: TrackedTicket) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "builder": ticket.factory.builder_harness,
+        "reviewer": ticket.factory.reviewer_harness,
+    }
+    if (picks := ticket.router_picks) is not None:
+        sides = [("builder", picks.builder), ("reviewer", picks.reviewer)]
+        if picks.planner is not None:
+            payload["planner"] = picks.planner.harness
+            sides.append(("plan", picks.planner))
+        for side, pick in sides:
+            if pick.model is not None:
+                payload[f"{side}_model"] = pick.model
+            if pick.effort is not None:
+                payload[f"{side}_effort"] = pick.effort
+    return payload
+
+
+def _review_for_reviewer_of_record(ticket: TrackedTicket, request: JobRequest) -> JobRequest:
+    detail = json.loads(request.detail or "{}")
+    detail["reviewer_harness"] = ticket.factory.reviewer_harness
+    if ticket.factory_md is not None:
+        detail["routing"] = _routing_payload(ticket)
+    return replace(
+        request,
+        recipient=ticket.factory.reviewer_harness,
+        detail=json.dumps(detail, separators=(",", ":"), sort_keys=True),
+    )
+
+
+def _accepted_reviewers(connection: sqlite3.Connection, ticket: TrackedTicket) -> frozenset[str]:
+    return frozenset(
+        {f"{ticket.factory.reviewer_harness}-bot"}
+        | {
+            f"{row[0]}-bot"
+            for row in connection.execute(
+                """
+                SELECT DISTINCT recipient FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
+                  AND handoff_comment_id IS NOT NULL
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            )
+        }
+    )
 
 
 def _review_bases(details: list[str]) -> dict[int, str]:

@@ -663,9 +663,9 @@ def test_the_rendered_closed_form_closes_the_finding() -> None:
         for r, body in ((1, blocking + "\n"), (2, closed + "\n"))
     ]
     trusted = {"github": {"codex-login": frozenset({"codex-bot"})}}
-    open_after_1 = findings_evidence(comments=comments[:1], trusted_logins=trusted, reviewer="codex-bot", current_round=2, bases={})
+    open_after_1 = findings_evidence(comments=comments[:1], trusted_logins=trusted, reviewers={"codex-bot"}, current_round=2, bases={})
     assert [(item.id, item.rule) for item in open_after_1.findings] == [("f-1", "tests first")]
-    open_after_2 = findings_evidence(comments=comments, trusted_logins=trusted, reviewer="codex-bot", current_round=3, bases={})
+    open_after_2 = findings_evidence(comments=comments, trusted_logins=trusted, reviewers={"codex-bot"}, current_round=3, bases={})
     assert open_after_2.findings == ()
     assert blocking_ids(closed) == frozenset()
 

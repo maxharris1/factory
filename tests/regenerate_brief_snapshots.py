@@ -252,7 +252,7 @@ def evidence_bundle(current_round: int) -> dict[str, object]:
     findings = findings_evidence(
         comments=[TICKET_BRIEF, ROUND_ONE_VERDICT],
         trusted_logins=TRUSTED,
-        reviewer="codex-bot",
+        reviewers={"codex-bot"},
         current_round=current_round,
         bases={1: "e" * 40},
     )

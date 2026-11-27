@@ -88,7 +88,7 @@ def test_findings_written_in_the_briefs_form_reach_the_next_rounds_evidence() ->
     round_two = findings_evidence(
         comments=[posted_verdict("1/3", raised, "1")],
         trusted_logins=trusted,
-        reviewer="codex-bot",
+        reviewers={"codex-bot"},
         current_round=2,
         bases={},
     )
@@ -100,7 +100,7 @@ def test_findings_written_in_the_briefs_form_reach_the_next_rounds_evidence() ->
     round_three = findings_evidence(
         comments=[posted_verdict("1/3", raised, "1"), posted_verdict("2/3", [closed], "2")],
         trusted_logins=trusted,
-        reviewer="codex-bot",
+        reviewers={"codex-bot"},
         current_round=3,
         bases={},
     )
@@ -254,7 +254,7 @@ def test_the_size_line_is_not_read_as_a_finding() -> None:
     evidence = findings_evidence(
         comments=[posted_verdict("1/3", [raised, "", size], "1")],
         trusted_logins={"github": {"codex-app[bot]": frozenset({"codex-bot"})}},
-        reviewer="codex-bot",
+        reviewers={"codex-bot"},
         current_round=2,
         bases={},
     )

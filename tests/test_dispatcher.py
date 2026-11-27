@@ -8724,13 +8724,15 @@ def gemini_first_review_pool() -> FactoryConfig:
     )
 
 
-def reroute_ticket(*comments: Comment) -> TrackedTicket:
+def reroute_ticket(
+    *comments: Comment, head: str = REROUTE_HEAD, config: FactoryConfig | None = None
+) -> TrackedTicket:
     return ticket(
         REROUTE_GO,
         *comments,
-        head=REROUTE_HEAD,
-        ci={REROUTE_HEAD: CIResult("success")},
-        factory_config=gemini_first_review_pool(),
+        head=head,
+        ci={head: CIResult("success")},
+        factory_config=config or gemini_first_review_pool(),
     )
 
 
@@ -8740,10 +8742,15 @@ def reroute_verdict(
     verdict: str = "APPROVE",
     sender: str = "codex-bot",
     author: str = "codex-login",
+    findings: str = "",
+    created_at: float = 3,
 ) -> Comment:
     body = VERDICT.format(round="1/3", head=REROUTE_HEAD, verdict=verdict, risk="high")
     return comment(
-        comment_id, body.replace("from=codex-bot", f"from={sender}"), author=author, created_at=3
+        comment_id,
+        body.replace("from=codex-bot", f"from={sender}") + findings,
+        author=author,
+        created_at=created_at,
     )
 
 
@@ -8889,3 +8896,289 @@ def test_author_rejection_notice_names_expected_and_actual(
     assert "gemini-bot" in facts["note"]
     assert "codex-bot" in facts["note"]
     assert "codex-login" in facts["note"]
+
+
+REROUTE_LOGINS = {
+    "github": {
+        **TRUSTED_LOGINS["github"],
+        "gemini-login": {"gemini-bot"},
+        "cursor-login": {"cursor-bot"},
+    },
+    "linear": {},
+}
+REROUTE_FINDING = "\n- [blocking] f-1. Rule: the rerouted reviewer's findings carry.\n"
+
+
+def reroute_setup(
+    tmp_path: Path, actions: FakeReviewActions | None = None
+) -> tuple[Dispatcher, SQLiteJobQueue]:
+    path = tmp_path / "d.db"
+    queue = SQLiteJobQueue(path, clock=lambda: 100.0)
+    dispatcher = Dispatcher(
+        path,
+        queue,
+        trusted_logins=REROUTE_LOGINS,
+        review_actions=actions or FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+    )
+    return dispatcher, queue
+
+
+def outcome_or_none(queue: SQLiteJobQueue, comment_id: str) -> str | None:
+    with queue.connect() as connection:
+        row = connection.execute(
+            "SELECT outcome FROM handled_comments WHERE comment_id = ?", (comment_id,)
+        ).fetchone()
+    return None if row is None else str(row[0])
+
+
+def evidence_findings(job: Job) -> dict:
+    return json.loads(job.request.detail)["evidence"]["findings"]
+
+
+def test_rerouted_revise_findings_carry_into_fix_evidence(tmp_path: Path) -> None:
+    dispatcher, queue = reroute_setup(tmp_path)
+    review = review_rerouted_to_codex(dispatcher, queue)
+    queue.finish(review.id, owner="codex", handoff_comment_id="verdict-codex")
+    dispatcher.refused_harnesses = frozenset()
+    revise = reroute_verdict("verdict-codex", verdict="REVISE", findings=REROUTE_FINDING)
+
+    dispatcher.process(reroute_ticket(REROUTE_READY, revise))
+
+    fix = queue.claim("claude")
+    assert fix is not None and fix.request.action == "fix"
+    findings = evidence_findings(fix)
+    assert [finding["id"] for finding in findings["findings"]] == ["f-1"]
+    assert findings["reviewed_head"] == REROUTE_HEAD
+
+
+def test_round_two_rerouted_review_carries_refused_reviewers_findings(tmp_path: Path) -> None:
+    dispatcher, queue = reroute_setup(tmp_path)
+    build_with_gemini_reviewer(dispatcher, queue)
+    dispatcher.process(reroute_ticket(REROUTE_READY))
+    first = queue.claim("gemini")
+    assert first is not None and first.request.action == "review"
+    queue.finish(first.id, owner="gemini", handoff_comment_id="verdict-gemini")
+    revise = reroute_verdict(
+        "verdict-gemini",
+        verdict="REVISE",
+        sender="gemini-bot",
+        author="gemini-login",
+        findings=REROUTE_FINDING,
+    )
+    dispatcher.process(reroute_ticket(REROUTE_READY, revise))
+    fix = queue.claim("claude")
+    assert fix is not None and fix.request.action == "fix"
+    queue.finish(fix.id, owner="claude", handoff_comment_id="ready-fixed")
+    fixed_head = "f" * 40
+    fixed = comment("ready-fixed", READY.format(head=fixed_head), author="claude-login", created_at=4)
+    dispatcher.refused_harnesses = frozenset({"gemini"})
+
+    dispatcher.process(reroute_ticket(REROUTE_READY, revise, fixed, head=fixed_head))
+
+    assert queue.claim("gemini") is None
+    second = queue.claim("codex")
+    assert second is not None and second.request.action == "review"
+    findings = evidence_findings(second)
+    assert [finding["id"] for finding in findings["findings"]] == ["f-1"]
+    assert findings["reviewed_head"] == REROUTE_HEAD
+
+
+@pytest.mark.parametrize("verdict", ["APPROVE", "REVISE", "BLOCKED"])
+def test_failed_rerouted_review_waits_for_t6_instead_of_rejecting(
+    tmp_path: Path, verdict: str
+) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = reroute_setup(tmp_path, actions)
+    review = review_rerouted_to_codex(dispatcher, queue)
+    assert queue.mark_timed_out(review)
+    dispatcher.refused_harnesses = frozenset()
+    posted = reroute_verdict(
+        "verdict-codex",
+        verdict=verdict,
+        findings="" if verdict == "APPROVE" else REROUTE_FINDING,
+        created_at=200,
+    )
+    snapshot = reroute_ticket(REROUTE_READY, posted)
+
+    dispatcher.process(snapshot)
+    assert outcome_or_none(queue, "verdict-codex") is None
+    dispatcher.reconcile_jobs()
+    dispatcher.process(snapshot)
+
+    assert not str(outcome_or_none(queue, "verdict-codex")).startswith("rejected-")
+    assert [row["state"] for row in jobs_of(queue, "review")] == ["done"]
+    if verdict == "APPROVE":
+        assert len(actions.merges) == 1
+
+
+def cursor_review_pool() -> FactoryConfig:
+    return replace(
+        factory(),
+        routing=FactoryRouting(
+            slots={
+                "build": (("claude", "claude-opus-4-6", "high"),),
+                "review": (("gemini", "gemini-2.5-pro", "high"), ("cursor", "gpt-5.4", "high")),
+            }
+        ),
+    )
+
+
+def review_rerouted_to_cursor(dispatcher: Dispatcher, queue: SQLiteJobQueue) -> Job:
+    dispatcher.process(ticket(REROUTE_GO, factory_config=cursor_review_pool()))
+    build = queue.claim("claude")
+    assert build is not None and build.request.action == "build"
+    queue.finish(build.id, owner="claude", handoff_comment_id="ready-reroute")
+    dispatcher.refused_harnesses = frozenset({"gemini"})
+    dispatcher.process(reroute_ticket(REROUTE_READY, config=cursor_review_pool()))
+    review = queue.claim("cursor")
+    assert review is not None and review.request.action == "review"
+    assert json.loads(review.request.detail)["routing"]["reviewer_model"] == "gpt-5.4"
+    return review
+
+
+@pytest.mark.parametrize("finished", [True, False])
+def test_cross_family_multi_family_harness_verdict_checks_job_model(
+    tmp_path: Path, finished: bool
+) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = reroute_setup(tmp_path, actions)
+    review = review_rerouted_to_cursor(dispatcher, queue)
+    if finished:
+        queue.finish(review.id, owner="cursor", handoff_comment_id="verdict-cursor")
+    dispatcher.refused_harnesses = frozenset()
+    approve = reroute_verdict("verdict-cursor", sender="cursor-bot", author="cursor-login")
+
+    dispatcher.process(reroute_ticket(REROUTE_READY, approve, config=cursor_review_pool()))
+
+    outcome = outcome_or_none(queue, "verdict-cursor")
+    if finished:
+        assert outcome != "rejected-approve-author"
+        assert len(actions.merges) == 1
+    else:
+        assert outcome is None
+        assert actions.merges == []
+
+
+def test_refused_verdict_requeue_goes_to_repicked_reviewer(tmp_path: Path) -> None:
+    dispatcher, queue = reroute_setup(tmp_path)
+    build_with_gemini_reviewer(dispatcher, queue)
+    dispatcher.process(reroute_ticket(REROUTE_READY))
+    first = queue.claim("gemini")
+    assert first is not None
+    queue.finish(first.id, owner="gemini", handoff_comment_id="verdict-gemini")
+    dispatcher.refused_harnesses = frozenset({"gemini"})
+    gemini = reroute_verdict("verdict-gemini", sender="gemini-bot", author="gemini-login")
+
+    dispatcher.process(reroute_ticket(REROUTE_READY, gemini))
+
+    assert handled_outcome(queue, "verdict-gemini") == "rejected-approve-author"
+    assert queue.claim("gemini") is None
+    again = queue.claim("codex")
+    assert again is not None and again.request.action == "review"
+    detail = json.loads(again.request.detail)
+    assert detail["reviewer_harness"] == "codex"
+    assert detail["routing"]["reviewer"] == "codex"
+
+
+def test_review_enqueued_for_refused_harness_goes_to_reviewer_of_record(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = reroute_setup(tmp_path)
+    build_with_gemini_reviewer(dispatcher, queue)
+    dispatcher.refused_harnesses = frozenset({"gemini"})
+    routed = dispatcher._routed(reroute_ticket(REROUTE_READY))
+    stale = JobRequest(
+        repo="owner/repo",
+        ticket_id="42",
+        action="review",
+        recipient="gemini",
+        source_comment_id="ready-reroute",
+        timeout_seconds=5400,
+        head=REROUTE_HEAD,
+        detail=json.dumps(
+            {"action": "review", "round": "1/3", "reviewer_harness": "gemini",
+             "routing": {"builder": "claude", "reviewer": "gemini"}}
+        ),
+    )
+
+    with queue.connect() as connection:
+        job, _ = dispatcher._enqueue_step(
+            connection, routed, REROUTE_READY, stale, dedupe_key="stale-review"
+        )
+        connection.commit()
+
+    detail = json.loads(job.request.detail)
+    assert (job.request.recipient, detail["reviewer_harness"], detail["routing"]["reviewer"]) == (
+        "codex",
+        "codex",
+        "codex",
+    )
+
+
+def seed_routed_build(queue: SQLiteJobQueue, routing: dict[str, str]) -> None:
+    queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="build",
+            recipient=routing["builder"],
+            source_comment_id="go-reroute",
+            timeout_seconds=5400,
+            detail=json.dumps({"action": "build", "routing": routing}),
+        ),
+        dedupe_key="seed-routed-build",
+    )
+
+
+def test_repick_without_prior_picks_keeps_fresh_reviewer_model(tmp_path: Path) -> None:
+    dispatcher, queue = reroute_setup(tmp_path)
+    seed_routed_build(queue, {"builder": "claude", "reviewer": "gemini"})
+    dispatcher.refused_harnesses = frozenset({"gemini"})
+
+    routed = dispatcher._routed(reroute_ticket(config=cursor_review_pool()))
+
+    assert (routed.factory.reviewer_harness, routed.factory.reviewer_model) == (
+        "cursor",
+        "gpt-5.4",
+    )
+
+
+@pytest.mark.parametrize(
+    "build_pool",
+    [(("cursor", "gpt-5.4", "high"),), (("claude", "claude-opus-4-6", "high"),)],
+)
+def test_repick_uses_recorded_builder_model(
+    tmp_path: Path, build_pool: tuple[tuple[str, str, str], ...]
+) -> None:
+    dispatcher, queue = reroute_setup(tmp_path)
+    seed_routed_build(
+        queue,
+        {
+            "builder": "cursor",
+            "builder_model": "claude-opus-4-6",
+            "reviewer": "gemini",
+            "reviewer_model": "gemini-2.5-pro",
+        },
+    )
+    dispatcher.refused_harnesses = frozenset({"gemini"})
+    config = replace(
+        factory(),
+        routing=FactoryRouting(
+            slots={
+                "build": build_pool,
+                "review": (
+                    ("gemini", "gemini-2.5-pro", "high"),
+                    ("claude", "claude-opus-4-6", "high"),
+                    ("codex", "gpt-5.4", "high"),
+                ),
+            }
+        ),
+    )
+
+    routed = dispatcher._routed(reroute_ticket(config=config))
+
+    assert (routed.factory.builder_model, routed.factory.reviewer_harness) == (
+        "claude-opus-4-6",
+        "codex",
+    )
