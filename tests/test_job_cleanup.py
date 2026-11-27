@@ -30,6 +30,7 @@ from lib.job_cleanup import Plan
 from lib.machines_yml import Device, MachinesConfig
 from lib.queue import SQLiteJobQueue
 from lib.remote import SSH_UNREACHABLE, Called, RemoteTarget
+from tests.job_times_support import storing_bad_times
 
 ROOT = Path(__file__).resolve().parents[1]
 NOW = 1_800_000_000.0
@@ -188,7 +189,7 @@ def database(tmp_path: Path, rows: list[tuple[str, str, str, float | str | bytes
              recipients: dict[str, str] | None = None) -> Path:
     db = tmp_path / "orch.db"
     SQLiteJobQueue(db, clock=lambda: NOW)
-    with SQLiteJobQueue(db, clock=lambda: NOW).connect() as connection:
+    with storing_bad_times(SQLiteJobQueue(db, clock=lambda: NOW).connect()) as connection:
         for job_id, ticket, state, finished_at in rows:
             connection.execute(
                 """

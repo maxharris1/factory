@@ -12,6 +12,7 @@ from lib import (
     qa_evidence_push, telemetry,
 )
 from lib.dashboard import HANDED_OFF_EXTERNALLY, _age, _read_db, collect_snapshot
+from tests.job_times_support import storing_bad_times
 from tests.test_dashboard import NOW, add_job, add_ticket, seeded
 from tests.test_dashboard_accounts import world
 from tests.test_dashboard_poll_seconds import _orch
@@ -47,7 +48,7 @@ def test_age_still_refuses_a_value_that_is_no_time() -> None:
 
 def _cleffy_213(tmp_path: Path, **stamps: str) -> tuple[Path, Path]:
     db, log = seeded(tmp_path)
-    with sqlite3.connect(db) as connection:
+    with storing_bad_times(sqlite3.connect(db)) as connection:
         add_job(
             connection, "2b81e0489a1349e78012ee59ef76692c", action="awaiting-ok",
             state="done", repo="maxharris1/Cleffy", ticket_id="213",
@@ -118,7 +119,7 @@ STAMPED_COLUMNS = (
 
 
 def _as_datetime_strings(db: Path, *, only: str | None = None, where: str = "1") -> None:
-    with sqlite3.connect(db) as connection:
+    with storing_bad_times(sqlite3.connect(db)) as connection:
         for table, column in STAMPED_COLUMNS:
             present = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
             if column in present and only in (None, table):
@@ -257,7 +258,7 @@ def test_handoffs_order_by_the_subsecond_instant_of_a_datetime_string(tmp_path: 
     as_epochs = collect_snapshot(db, log, now=NOW)
     assert _recent_jobs(as_epochs)[-1] == "newer-40", "the twelfth newest handoff"
     assert _relay_jobs(as_epochs, "40") == ["newer-40", "older-40"]
-    with sqlite3.connect(db) as connection:
+    with storing_bad_times(sqlite3.connect(db)) as connection:
         connection.execute("UPDATE jobs SET finished_at = '2027-01-15 07:59:55.750' WHERE id = 'newer-40'")
     snapshot = collect_snapshot(db, log, now=NOW)
     assert _recent_jobs(snapshot) == _recent_jobs(as_epochs)
@@ -266,7 +267,7 @@ def test_handoffs_order_by_the_subsecond_instant_of_a_datetime_string(tmp_path: 
 
 def test_the_queue_lists_jobs_by_the_subsecond_instant_they_were_created(tmp_path: Path) -> None:
     db, log = seeded(tmp_path)
-    with sqlite3.connect(db) as connection:
+    with storing_bad_times(sqlite3.connect(db)) as connection:
         connection.execute("DELETE FROM jobs WHERE state = 'queued'")
         add_job(connection, "first-50", state="queued", ticket_id="50", created_at="2027-01-15 07:59:29.250")
         add_job(connection, "next-51", state="queued", ticket_id="51", created_at=NOW - 30.25)
@@ -541,7 +542,7 @@ def _stamped_world(tmp_path: Path) -> tuple[Path, Path]:
 
 def _all_as_datetime_strings(db: Path, where: str = "1") -> list[str]:
     converted = []
-    with sqlite3.connect(db) as connection:
+    with storing_bad_times(sqlite3.connect(db)) as connection:
         for (table,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall():
             for column in [row[1] for row in connection.execute(f"PRAGMA table_info({table})")]:
                 if STAMP_COLUMN.search(column):
