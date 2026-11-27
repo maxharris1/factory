@@ -62,8 +62,10 @@
 # .config/factory/orch-retired` succeeds. A refusal places nothing and
 # starts nothing. Then it copies this checkout's machines.yml beside the
 # snapshot as machines.<this host>.yml, merges the staged job-detail/ into
-# the one beside orch.db (refusing, placing nothing, when a file there of
-# the same name differs), places orch.db through orch.db.tmp
+# the one beside orch.db with `orch move-db merge-detail` (refusing, placing
+# nothing, when a file there of the same name differs from the staged copy
+# by more than keys the staged copy adds, as spill_cold adds keys to a cold
+# job's file), places orch.db through orch.db.tmp
 # and mv (never `orch restore-db`, which holds queued jobs), removes this
 # host's orch-retired, and starts the poller first, then the waiter of each
 # bot with ~/.config/factory/waiter-autostart-<bot>, self-heal and the
@@ -242,18 +244,6 @@ export_db() {
     printf '%s\n' "$EXPORT"
 }
 
-merge_job_detail() {
-    local from="$1" to="$2" file
-    [[ -d "$from" ]] || return 0
-    for file in "$from"/*.json; do
-        [[ -e "$file" && -e "${to}/${file##*/}" ]] || continue
-        cmp -s "$file" "${to}/${file##*/}" \
-            || refuse "${to}/${file##*/} differs from the export's copy; placed nothing"
-    done
-    mkdir -p "$to"
-    cp -R "${from}/." "${to}/"
-}
-
 import_db() {
     local source db file stage remote="" bot
     (($# == 1)) || usage
@@ -280,7 +270,8 @@ import_db() {
         cp "$MACHINES" "${stage}/machines.${HOST}.yml"
     fi
 
-    merge_job_detail "${stage}/job-detail" "$(dirname "$db")/job-detail"
+    "$ORCH" move-db merge-detail --from "${stage}/job-detail" --to "$(dirname "$db")/job-detail" \
+        || refuse "the staged job-detail/ conflicts with $(dirname "$db")/job-detail; placed nothing"
     mkdir -p "$(dirname "$db")"
     cp "${stage}/orch.db" "${db}.tmp"
     mv "${db}.tmp" "$db"

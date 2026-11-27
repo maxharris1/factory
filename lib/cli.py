@@ -156,6 +156,7 @@ from lib.state_backup import (
     db_facts,
     default_backup_path,
     labelled_backup,
+    merge_job_detail,
     restore,
     write_manifest,
 )
@@ -334,6 +335,7 @@ move-db manifest --db PATH --out PATH --source-host HOST --to HOST
                  --retired LINE
 move-db check --db PATH --manifest PATH
 move-db unlocked --db PATH
+move-db merge-detail --from DIR --to DIR
   deploy/orch-move.sh runs these on copies taken with backup-db, each
   opened read-only. drained exits 0 when the copy has no running job and
   no held device slot, 1 (printing both counts) when it has, and 2 when
@@ -349,6 +351,9 @@ move-db unlocked --db PATH
   unlocked reads the live database's locks, never the database: it exits
   0 when no poller holds PATH.lock and no `orch wait` holds a
   waiter-<bot>.lock beside PATH, 1 (naming each held lock) when one does.
+  merge-detail copies each job-detail file in --from into --to and exits
+  1, copying nothing, when a file already in --to differs from its --from
+  copy by more than keys the --from copy adds.
 
 db-backup <label> [--db PATH] [--dir PATH]
   Run this before any manual write to orch.db (#654). Copies the database
@@ -3224,6 +3229,9 @@ def _move_db(argv: list[str]) -> int:
     check.add_argument("--manifest", type=Path, required=True)
     unlocked = commands.add_parser("unlocked")
     unlocked.add_argument("--db", type=Path, required=True)
+    merge = commands.add_parser("merge-detail")
+    merge.add_argument("--from", dest="source", type=Path, required=True)
+    merge.add_argument("--to", dest="target", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "unlocked":
         held = _held_locks(args.db)
@@ -3236,6 +3244,9 @@ def _move_db(argv: list[str]) -> int:
             facts = db_facts(args.db)
             print(f"running jobs {facts.running_jobs}, held device slots {facts.held_slots}")
             return 0 if facts.running_jobs == 0 and facts.held_slots == 0 else 1
+        if args.command == "merge-detail":
+            merge_job_detail(args.source, args.target)
+            return 0
         if args.command == "check":
             facts = check_manifest(args.db, args.manifest)
             print(f"{args.db} matches {args.manifest}; integrity ok; row counts:")

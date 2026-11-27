@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import cli, health
+from lib import cli, health, job_detail
 from lib.device_pool import DevicePool
 from lib.machines_yml import load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
@@ -766,7 +766,7 @@ PAYLOAD = {
 }
 
 
-def _queue_spilled_job(db: Path) -> str:
+def _queue_spilled_job(db: Path, payload: dict[str, object] = PAYLOAD) -> str:
     job = SQLiteJobQueue(db, clock=time.time).enqueue(
         JobRequest(
             repo="owner/repo",
@@ -775,7 +775,7 @@ def _queue_spilled_job(db: Path) -> str:
             recipient="claude",
             source_comment_id="go-2",
             timeout_seconds=3600,
-            detail=json.dumps(PAYLOAD, sort_keys=True, separators=(",", ":")),
+            detail=json.dumps(payload, sort_keys=True, separators=(",", ":")),
         ),
         dedupe_key="t43:fix",
     )
@@ -812,6 +812,52 @@ def test_a_cutover_and_its_rollback_carry_a_queued_jobs_spilled_detail(
     assert _detail(box.db, job_id) == PAYLOAD
     assert _rows(box.db) == first["tables"]
     assert _integrity(box.db) == "ok"
+
+
+def _finish_on_a_merged_ticket(db: Path, job_id: str) -> None:
+    with sqlite3.connect(db) as connection:
+        connection.execute("UPDATE jobs SET state = 'done' WHERE id = ?", (job_id,))
+        connection.execute(
+            "INSERT OR REPLACE INTO ticket_state (repo, ticket_id, workflow_state) VALUES ('owner/repo', '43', 'merged')"
+        )
+
+
+def _spill_cold(db: Path) -> int:
+    connection = sqlite3.connect(db, isolation_level=None)
+    try:
+        return job_detail.spill_cold(connection)
+    finally:
+        connection.close()
+
+
+def _stored_detail(db: Path, job_id: str) -> dict[str, object]:
+    with sqlite3.connect(db) as connection:
+        [(detail,)] = connection.execute("SELECT detail FROM jobs WHERE id = ?", (job_id,)).fetchall()
+    return json.loads(job_detail.load(db.parent, job_id, detail))
+
+
+def test_a_rollback_carries_a_detail_file_that_spill_cold_grew_after_the_cutover(
+    tmp_path: Path,
+) -> None:
+    box, pc = Host(tmp_path, "box"), Host(tmp_path, "pc")
+    _seed(tmp_path, box.db)
+    payload = {**PAYLOAD, "brief": "b" * 5000}
+    job_id = _queue_spilled_job(box.db, payload)
+    _finish_on_a_merged_ticket(box.db, job_id)
+
+    cutover = _export(tmp_path, box, "pc")
+    placed = pc.move("import", f"box:{cutover}", **_remote(tmp_path, box.home))
+    assert placed.returncode == 0, placed.stderr
+    assert _spill_cold(pc.db) == 1
+
+    rollback = _export(tmp_path, pc, "box")
+    for path in box.state.glob("orch.db*"):
+        path.rename(path.with_name(path.name.replace("orch.db", "pre-rollback.db")))
+    back = box.move("import", str(rollback))
+    assert back.returncode == 0, back.stderr
+
+    assert _stored_detail(box.db, job_id) == payload
+    assert _spill_cold(box.db) == 0
 
 
 def _change_a_detail_file(export: Path) -> None:
