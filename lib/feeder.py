@@ -179,7 +179,7 @@ from typing import Literal, NamedTuple, Protocol
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
-from lib import attention, lane_limit, live_settings
+from lib import attention, epoch, lane_limit, live_settings
 from lib.branch_stack import OpenPull, stack_wait, stacked_pulls
 from lib.brief_comment import FACTORY_MD_HEADING
 from lib.device_pool import account_loads, choose_pair, free_slots, placement_blocked, slots_in_use
@@ -1076,7 +1076,7 @@ def last_feeder_poll(connection: sqlite3.Connection) -> float | None:
     if not _has_table(connection, POLL_TABLE):
         return None
     row = connection.execute(f"SELECT at FROM {POLL_TABLE}").fetchone()
-    return None if row is None else float(row[0])
+    return None if row is None else epoch.read(row[0])
 
 
 def _has_merge_states(connection: sqlite3.Connection) -> bool:
@@ -1112,11 +1112,12 @@ def feeder_items(connection: sqlite3.Connection) -> list[dict[str, object]]:
     present = {row[1] for row in connection.execute(f"PRAGMA table_info({FEEDER_TABLE})")}
     defaults = {"waiting_reason": "NULL", "tier": "NULL", "own_tier": "NULL", "unblocks": "0", "fed_at": "NULL"}
     optional = ", ".join(name if name in present else f"{value} AS {name}" for name, value in defaults.items())
+    epoch.register(connection)
     cursor = connection.execute(
         f"""
         SELECT repo, issue, tracker, title, harness, state, urgent, bug,
                pr_number, issue_created_at, error, {optional}
-        FROM {FEEDER_TABLE} WHERE seen_at = ?
+        FROM {FEEDER_TABLE} WHERE {epoch.sql('seen_at')} = ?
         """,
         (last,),
     )
@@ -1126,7 +1127,7 @@ def feeder_items(connection: sqlite3.Connection) -> list[dict[str, object]]:
         key=lambda row: (
             *rank(tier=row["tier"], urgent=bool(row["urgent"]), resume=False,
                   bug=bool(row["bug"]), unblocks=int(row["unblocks"])),
-            float(row["issue_created_at"]),
+            epoch.read(row["issue_created_at"]),
             str(row["repo"]),
             _key_order(str(row["issue"])),
         )

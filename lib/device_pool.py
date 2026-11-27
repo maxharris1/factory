@@ -344,17 +344,19 @@ def account_loads(
     last_placed_at: dict[str, tuple[float, int]] = {}
     if _has_table(connection, PLACEMENTS_TABLE):
         cutoff = now - BALANCE_WINDOW_SECONDS
+        epoch.register(connection)
+        placed_at = epoch.sql("placed_at")
         for acct, count, newest_at, max_rowid in connection.execute(
             f"""
-            SELECT account, COUNT(*), MAX(placed_at), MAX(rowid)
+            SELECT account, COUNT(*), MAX({placed_at}), MAX(rowid)
             FROM {PLACEMENTS_TABLE}
-            WHERE placed_at >= ?
+            WHERE {placed_at} >= ?
             GROUP BY account
             """,
             (cutoff,),
         ):
             recent_placements[str(acct)] = int(count)
-            last_placed_at[str(acct)] = (float(newest_at), int(max_rowid))
+            last_placed_at[str(acct)] = (newest_at, int(max_rowid))
     return AccountLoads(
         running,
         frozenset(held),

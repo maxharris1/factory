@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import dashboard_cli
+from lib import dashboard_cli, device_pool, feeder, linear_webhook
 from lib.dashboard import _age, _read_db, collect_snapshot
 from tests.test_dashboard import NOW, add_job, add_ticket, seeded
 from tests.test_dashboard_accounts import world
@@ -75,10 +75,7 @@ class _Capture:
         self.sent.append(tuple(paths))
 
 
-def test_a_push_publishes_with_cleffy_213s_finished_at_left_as_is(
-    tmp_path: Path, monkeypatch
-) -> None:
-    db, log = _cleffy_213(tmp_path)
+def _push(tmp_path: Path, db: Path, log: Path, monkeypatch) -> tuple[int, _Capture]:
     capture = _Capture()
     monkeypatch.delenv("ORCH_DB", raising=False)
     monkeypatch.setattr(dashboard_cli, "transport_for", lambda config: capture)
@@ -87,6 +84,14 @@ def test_a_push_publishes_with_cleffy_213s_finished_at_left_as_is(
          "--out", str(tmp_path / "site"), "--orch", str(_orch(tmp_path, 60)),
          "--machines", str(tmp_path / "no-machines.yml")]
     )
+    return code, capture
+
+
+def test_a_push_publishes_with_cleffy_213s_finished_at_left_as_is(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db, log = _cleffy_213(tmp_path)
+    code, capture = _push(tmp_path, db, log, monkeypatch)
     assert code == 0
     assert len(capture.sent) == 1
     assert all(path.is_file() for path in capture.sent[0])
@@ -269,3 +274,130 @@ def test_read_db_orders_by_instant_on_a_connection_it_did_not_open(tmp_path: Pat
         connection.row_factory = sqlite3.Row
         queue = _read_db(connection, STAMP_EPOCH + 60)["queue"]
     assert queue["totals"]["queued"] == 2
+
+
+def _with_webhook_stamps(db: Path, *, found: list[tuple[str, object]], started: object, received: object, since: object) -> None:
+    with sqlite3.connect(db) as connection:
+        linear_webhook.ensure_tables(connection)
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS linear_webhook_polling (id INTEGER PRIMARY KEY, since REAL NOT NULL)"
+        )
+        connection.execute("INSERT INTO linear_webhook_polling (id, since) VALUES (1, ?)", (since,))
+        connection.execute(
+            "INSERT INTO linear_webhook_health (id, started_at, last_received_at, last_event) "
+            "VALUES (1, ?, ?, 'Comment')",
+            (started, received),
+        )
+        for identifier, found_at in found:
+            connection.execute(
+                "INSERT INTO linear_webhook_missed (issue_id, identifier, event_at, found_at) "
+                "VALUES (?, ?, ?, ?)",
+                (f"id-{identifier}", identifier, STAMP_EPOCH - 900, found_at),
+            )
+
+
+def test_a_push_publishes_with_a_missed_delivery_found_at_datetime_string(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db, log = _cleffy_213(tmp_path)
+    _with_webhook_stamps(
+        db, found=[("AUT-7", "2026-11-26 22:14:58")],
+        started=STAMP_EPOCH - 9000, received=STAMP_EPOCH - 600, since=STAMP_EPOCH - 9000,
+    )
+    code, capture = _push(tmp_path, db, log, monkeypatch)
+    assert code == 0
+    assert len(capture.sent) == 1
+
+
+def test_webhook_health_reads_every_clock_as_an_epoch_or_a_datetime_string(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    _with_webhook_stamps(
+        db,
+        found=[
+            ("AUT-1", STAMP_EPOCH - 3600),
+            ("AUT-2", "2026-11-26 22:14:58"),
+            ("AUT-3", int(STAMP_EPOCH - 120)),
+        ],
+        started="2026-11-26 19:45:58",
+        received="2026-11-26T22:05:58Z",
+        since=STAMP,
+    )
+    with sqlite3.connect(db) as connection:
+        health = linear_webhook.read_health(connection)
+    assert health is not None
+    assert health.started_at == STAMP_EPOCH - 9000
+    assert health.last_received_at == STAMP_EPOCH - 600
+    assert health.polling_since == STAMP_EPOCH
+    assert health.missed == (
+        ("AUT-2", STAMP_EPOCH - 60), ("AUT-3", STAMP_EPOCH - 120), ("AUT-1", STAMP_EPOCH - 3600),
+    )
+    webhook = collect_snapshot(db, log, now=STAMP_EPOCH + 60)["poller"]["linear_webhook"]
+    assert webhook["last_received_age_seconds"] == 660
+    assert webhook["listener_age_seconds"] == 9060
+    assert webhook["warning"] == (
+        "Linear webhook missed 3 deliveries in 24h (newest AUT-2, found 2m ago)"
+    )
+
+
+def _with_feeder_stamps(db: Path, polled: object, items: list[tuple[str, object, object]]) -> None:
+    with sqlite3.connect(db) as connection:
+        feeder.ensure_tables(connection)
+        connection.execute("INSERT INTO feeder_poll (id, at) VALUES (1, ?)", (polled,))
+        for issue, created, fed in items:
+            connection.execute(
+                "INSERT INTO feeder_items (repo, issue, tracker, title, harness, state, risk, "
+                "issue_created_at, first_seen_at, seen_at, fed_at) "
+                "VALUES ('o/r', ?, 'github', 't', 'claude', 'eligible', 'low', ?, ?, ?, ?)",
+                (issue, created, polled, polled, fed),
+            )
+
+
+def test_a_push_publishes_with_feeder_clocks_as_datetime_strings(tmp_path: Path, monkeypatch) -> None:
+    db, log = _cleffy_213(tmp_path)
+    _with_feeder_stamps(db, STAMP, [("7", "2026-11-20 10:00:00", None)])
+    code, capture = _push(tmp_path, db, log, monkeypatch)
+    assert code == 0
+    assert len(capture.sent) == 1
+
+
+@pytest.mark.parametrize("polled", [STAMP, STAMP_EPOCH, int(STAMP_EPOCH)])
+def test_feeder_items_read_every_clock_as_an_epoch_or_a_datetime_string(
+    tmp_path: Path, polled: object
+) -> None:
+    db, log = seeded(tmp_path)
+    _with_feeder_stamps(db, polled, [
+        ("1", "2026-11-21 10:00:00", None),
+        ("2", STAMP_EPOCH - 7 * 86400, "2026-11-26 22:14:58"),
+        ("3", int(STAMP_EPOCH - 3 * 86400), None),
+    ])
+    with sqlite3.connect(db) as connection:
+        assert feeder.last_feeder_poll(connection) == STAMP_EPOCH
+    snapshot = collect_snapshot(db, log, now=STAMP_EPOCH + 60)["feeder"]
+    assert snapshot["eligible"] == 3
+    assert [(item["issue"], item["fed_age_seconds"]) for item in snapshot["items"]] == [
+        ("2", 120), ("1", None), ("3", None),
+    ]
+
+
+def test_account_loads_read_placed_at_as_an_epoch_or_a_datetime_string(tmp_path: Path) -> None:
+    db, _log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS account_placements "
+            "(job_id TEXT NOT NULL, account TEXT NOT NULL, harness TEXT NOT NULL, "
+            "device TEXT NOT NULL, placed_at REAL NOT NULL)"
+        )
+        connection.executemany(
+            "INSERT INTO account_placements VALUES (?, ?, 'claude', 'box', ?)",
+            [
+                ("j1", "a", STAMP_EPOCH - 120),
+                ("j2", "a", STAMP),
+                ("j3", "b", int(STAMP_EPOCH - 60)),
+                ("j4", "b", "2026-11-01 00:00:00"),
+            ],
+        )
+        loads = device_pool.account_loads(connection, None, STAMP_EPOCH + 60)
+    assert loads.recent_placements == {"a": 2, "b": 1}
+    assert {account: at for account, (at, _rowid) in loads.last_placed_at.items()} == {
+        "a": STAMP_EPOCH, "b": STAMP_EPOCH - 60,
+    }

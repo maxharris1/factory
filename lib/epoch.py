@@ -12,7 +12,7 @@ def read(value: float | str) -> float:
     return (moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)).timestamp()
 
 
-def _cell(value: object) -> float | None:
+def cell(value: object) -> float | None:
     try:
         return read(value)
     except (TypeError, ValueError):
@@ -20,7 +20,7 @@ def _cell(value: object) -> float | None:
 
 
 def register(connection: sqlite3.Connection) -> None:
-    connection.create_function(SQL_FUNCTION, 1, _cell, deterministic=True)
+    connection.create_function(SQL_FUNCTION, 1, cell, deterministic=True)
 
 
 def sql(column: str) -> str:
