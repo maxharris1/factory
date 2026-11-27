@@ -18,7 +18,7 @@ jobs:
     needs: changes
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ contains(fromJSON(needs.changes.outputs.hosted || '[]'), format('test-{0}', matrix.shard)) && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","factory-linux"]') }}
-    timeout-minutes: 15
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -49,7 +49,7 @@ jobs:
             sleep 0.5
           done
           echo "::warning::no systemd user manager for $user; the run scope tests skip"
-      - run: pytest -n 4 -m "not serial" --shard ${{ matrix.shard }}/${{ strategy.job-total }}
+      - run: pytest -n ${{ runner.environment == 'self-hosted' && 2 || 4 }} -m "not serial" --shard ${{ matrix.shard }}/${{ strategy.job-total }}
 
   changes:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository

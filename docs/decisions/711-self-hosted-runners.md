@@ -10,6 +10,8 @@ Max approved the plan's defaults and changed one of them. The box runner comes n
 
 **Update, 2026-11-19 (#1012).** Max asked that each factory Linux CI job take a free local `factory-linux` runner first and go to `ubuntu-latest` only when no local slot is free. A hosted `changes` job now routes each run from `FACTORY_LINUX_POOL` and the Actions runs API, and writes the slots that go hosted to its `hosted` output. This replaces the repo-wide `FACTORY_LINUX_RUNNER` switch. Nothing reads that variable any more, and Max deletes it with `gh variable delete FACTORY_LINUX_RUNNER --repo maxharris1/factory`.
 
+**Update, 2026-11-27 (#1778).** The three local test shards at `pytest -n 4` ran 12 workers and loaded the orch host (the PC) to about 14. Local shards now run `pytest -n 2` and hosted shards keep `-n 4`. The `test` job's timeout went from 15 to 25 minutes. See Capacity.
+
 ## Overflow to hosted runners
 
 Each Linux job takes a free local `factory-linux` runner first and runs on `ubuntu-latest` only when no local slot is free. Each Linux job has `needs: changes`. The `checks` job says:
@@ -65,7 +67,7 @@ Cost estimate (measured run counts, Nov 1 to 16): about 116 factory runs a day a
 
 ## Capacity
 
-Runner instances are not factory slots, and `machines.yml` and `orch.yml` are unchanged. The PC instances run under systemd limits (`Nice=10`, `CPUWeight=20`, `CPUQuota=400%`, `MemoryMax=6G`, IOPS caps on the VHDX device). The test shards run `pytest -n 4`, the worker count a 2-core hosted runner used, not `nproc * 2`, which would start 48 workers per shard on the PC. The checklist's first-week numbers decide whether instances go up or down.
+Runner instances are not factory slots, and `machines.yml` and `orch.yml` are unchanged. The PC instances run under systemd limits (`Nice=10`, `CPUWeight=20`, `CPUQuota=400%`, `MemoryMax=6G`, IOPS caps on the VHDX device). The test shards run `pytest -n 2` on the self-hosted pool and `pytest -n 4` on `ubuntu-latest`. Each shard picks its count from `runner.environment`, so the three local shards start at most 6 workers. 12 workers (3 shards at `-n 4`) were measured at a load of about 14 on the orch host. Neither count is `nproc * 2`, which would start 48 workers per shard on the PC. Local shards run slower, so the `test` job's timeout is 25 minutes. The checklist's first-week numbers decide whether instances go up or down.
 
 ## Fallback merge rule (not enabled)
 
