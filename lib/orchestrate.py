@@ -689,6 +689,7 @@ def go_comment(
             "risk": decision.risk,
             "state": state_for_job(decision.job),
             "builder": decision.builder_harness,
+            "reviewer": decision.reviewer_harness,
         },
         body,
         visible=visible,
@@ -867,7 +868,7 @@ def _routing(decision: RouteDecision) -> str:
     lines = [text for flag, text in flags if flag]
     if not lines:
         return ""
-    lines.append("For information; the dispatcher runs factory.md's pair.")
+    lines.append("The dispatcher runs the pair this go names.")
     return "\n**Routing**\n" + "\n".join(lines) + "\n"
 
 

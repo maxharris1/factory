@@ -294,7 +294,7 @@ def test_choose_route_falls_back_when_built_by_matches_reviewer_family() -> None
     assert body.endswith(
         "**Routing**\n"
         "Reviewer is a fallback from factory.md's reviewer.\n"
-        "For information; the dispatcher runs factory.md's pair.\n"
+        "The dispatcher runs the pair this go names.\n"
     )
     plain = choose_route(base)
     assert (
