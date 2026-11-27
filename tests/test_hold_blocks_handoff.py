@@ -40,8 +40,13 @@ from tests.test_ship_hold import (
 from tests.test_hooks import skip_facts
 
 MAX = "maxharris1"
+ROOT_REVIEWER = "gemini"
 HANDOFF = hold_factory(ship="handoff")
 QUEUE_HOLD = HoldConfig(approver=QUEUE_APPROVER, paths=("src/**/*.tsx",))
+
+
+def root_approve(head: str = HEAD, comment_id: str = "approve-1"):
+    return approve(head, comment_id, reviewer=ROOT_REVIEWER)
 
 
 def root_snapshot(*comments, head: str = HEAD) -> TrackedTicket:
@@ -68,11 +73,11 @@ def test_the_factory_repo_holds_a_trust_path_pr_without_a_ready_mark(
     ready(dispatcher, queue)
     actions.states.clear()
 
-    dispatcher.process(root_snapshot(approve()))
+    dispatcher.process(root_snapshot(root_approve()))
     assert_root_held(queue, actions)
 
     for _ in range(3):
-        dispatcher.process(root_snapshot(approve()))
+        dispatcher.process(root_snapshot(root_approve()))
         dispatcher.reconcile_jobs()
     assert_root_held(queue, actions)
     assert actions.states == ["awaiting-ok"], "the state is written once"
@@ -96,7 +101,7 @@ def test_the_factory_repo_ships_a_skills_grok_or_prose_pr_without_an_ok(
     dispatcher, queue, actions = setup(tmp_path)
     ready(dispatcher, queue)
 
-    dispatcher.process(snapshot(approve(), factory=config, files=files, trust=False))
+    dispatcher.process(snapshot(root_approve(), factory=config, files=files, trust=False))
 
     assert actions.handoffs == [HEAD]
     assert workflow_state(queue) == "merge-queue"
@@ -114,10 +119,10 @@ def test_the_factory_repo_holds_a_factory_md_trust_change_until_max_oks_it(
     def trust_edit(*comments):
         return snapshot(*comments, factory=config, files=("factory.md",), trust=True)
 
-    dispatcher.process(trust_edit(approve()))
+    dispatcher.process(trust_edit(root_approve()))
     assert_root_held(queue, actions)
 
-    dispatcher.process(trust_edit(approve(), ok(HEAD, author=MAX)))
+    dispatcher.process(trust_edit(root_approve(), ok(HEAD, author=MAX)))
     assert actions.handoffs == [HEAD]
     assert workflow_state(queue) == "merge-queue"
 
@@ -127,11 +132,11 @@ def test_an_unread_factory_md_comparison_holds_the_factory_repo(tmp_path: Path) 
     dispatcher, queue, actions = setup(tmp_path)
     ready(dispatcher, queue)
 
-    dispatcher.process(snapshot(approve(), factory=config, files=("factory.md",), trust=None))
+    dispatcher.process(snapshot(root_approve(), factory=config, files=("factory.md",), trust=None))
     assert actions.handoffs == []
     assert workflow_state(queue) == "review"
 
-    dispatcher.process(snapshot(approve(), factory=config, files=("factory.md",), trust=False))
+    dispatcher.process(snapshot(root_approve(), factory=config, files=("factory.md",), trust=False))
     assert actions.handoffs == [HEAD]
 
 
@@ -236,10 +241,10 @@ def test_a_maxharris1_ok_at_the_head_hands_off_into_the_merge_queue(
 ) -> None:
     dispatcher, queue, actions = setup(tmp_path, hooks=hooks)
     ready(dispatcher, queue)
-    dispatcher.process(root_snapshot(approve()))
+    dispatcher.process(root_snapshot(root_approve()))
     assert_root_held(queue, actions)
 
-    dispatcher.process(root_snapshot(approve(), ok(HEAD, author=MAX)))
+    dispatcher.process(root_snapshot(root_approve(), ok(HEAD, author=MAX)))
 
     assert actions.handoffs == [HEAD]
     assert workflow_state(queue) == "merge-queue"
@@ -251,7 +256,7 @@ def test_the_queue_merges_the_cleared_factory_repo_pr_at_the_head(tmp_path: Path
     board.factory, _ = root_config()
     pr = board.open("42", sha(1))
     pr.changed_files = ("orch.yml",)
-    board.build_and_approve(pr)
+    board.build_and_approve(pr, reviewer=ROOT_REVIEWER)
     assert board.state("42")["workflow_state"] == "awaiting-ok"
     assert board.actions.handoffs == []
 
@@ -282,7 +287,7 @@ def test_an_ok_that_does_not_name_the_head_from_the_approver_stays_held(
     )
     ready(dispatcher, queue, NEW_HEAD)
 
-    dispatcher.process(root_snapshot(approve(NEW_HEAD), held_ok, head=NEW_HEAD))
+    dispatcher.process(root_snapshot(root_approve(NEW_HEAD), held_ok, head=NEW_HEAD))
 
     assert_root_held(queue, actions, NEW_HEAD)
 
@@ -292,29 +297,31 @@ def test_a_new_head_after_the_ok_needs_a_new_review_and_a_new_ok(tmp_path: Path)
         tmp_path, FakeReviewActions({HEAD: "1" * 40, NEW_HEAD: "2" * 40})
     )
     ready(dispatcher, queue)
-    dispatcher.process(root_snapshot(approve()))
+    dispatcher.process(root_snapshot(root_approve()))
     assert workflow_state(queue) == "awaiting-ok"
 
     first_ok = ok(HEAD, author=MAX)
-    dispatcher.process(root_snapshot(approve(), first_ok, head=NEW_HEAD))
+    dispatcher.process(root_snapshot(root_approve(), first_ok, head=NEW_HEAD))
     assert actions.handoffs == [], "a different patch after the ok is re-reviewed"
     assert workflow_state(queue) == "review"
-    review = queue.claim("codex")
+    review = queue.claim(ROOT_REVIEWER)
     assert review is not None and review.request.head == NEW_HEAD
-    queue.finish(review.id, owner="codex", handoff_comment_id="approve-2")
+    queue.finish(review.id, owner=ROOT_REVIEWER, handoff_comment_id="approve-2")
 
     second = comment(
         "approve-2",
-        VERDICT.format(round=1, head=NEW_HEAD, verdict="APPROVE", risk="high"),
-        author="codex-login",
+        VERDICT.format(round=1, head=NEW_HEAD, verdict="APPROVE", risk="high").replace(
+            "from=codex-bot", f"from={ROOT_REVIEWER}-bot"
+        ),
+        author=f"{ROOT_REVIEWER}-login",
         created_at=30,
     )
-    dispatcher.process(root_snapshot(approve(), first_ok, second, head=NEW_HEAD))
+    dispatcher.process(root_snapshot(root_approve(), first_ok, second, head=NEW_HEAD))
     assert actions.handoffs == [], "the old ok does not cover the new head"
     assert_root_held(queue, actions, NEW_HEAD)
 
     new_ok = comment("ok-2", OK.format(head=NEW_HEAD), author=MAX, created_at=40)
-    dispatcher.process(root_snapshot(approve(), first_ok, second, new_ok, head=NEW_HEAD))
+    dispatcher.process(root_snapshot(root_approve(), first_ok, second, new_ok, head=NEW_HEAD))
     assert actions.handoffs == [NEW_HEAD]
     assert workflow_state(queue) == "merge-queue"
 
@@ -439,14 +446,14 @@ def test_an_edited_ok_at_the_head_stays_held(tmp_path: Path, ship: str) -> None:
     factory = dataclasses.replace(config, ship=ship)
     held = edited(ok(HEAD, author=MAX))
 
-    dispatcher.process(snapshot(approve(), held, factory=factory, files=("orch.yml",)))
+    dispatcher.process(snapshot(root_approve(), held, factory=factory, files=("orch.yml",)))
 
     assert actions.handoffs == []
     assert actions.merges == []
     assert workflow_state(queue) == "awaiting-ok"
 
     clean = ok(HEAD, author=MAX, comment_id="ok-2")
-    dispatcher.process(snapshot(approve(), held, clean, factory=factory, files=("orch.yml",)))
+    dispatcher.process(snapshot(root_approve(), held, clean, factory=factory, files=("orch.yml",)))
 
     assert workflow_state(queue) != "awaiting-ok"
 
@@ -456,7 +463,7 @@ def test_the_queue_does_not_merge_on_a_stale_ok_edited_to_the_head(tmp_path: Pat
     board.factory, _ = root_config()
     pr = board.open("42", sha(1))
     pr.changed_files = ("orch.yml",)
-    board.build_and_approve(pr)
+    board.build_and_approve(pr, reviewer=ROOT_REVIEWER)
     board.post(pr, "ok-1", OK.format(head=sha(1)), MAX)
     pr.comments[-1] = edited(pr.comments[-1])
     board.poll()

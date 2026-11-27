@@ -294,7 +294,7 @@ def test_choose_route_falls_back_when_built_by_matches_reviewer_family() -> None
     assert body.endswith(
         "**Routing**\n"
         "Reviewer is a fallback from factory.md's reviewer.\n"
-        "For information; the dispatcher runs factory.md's pair.\n"
+        "The dispatcher runs the pair this go names.\n"
     )
     plain = choose_route(base)
     assert (
@@ -536,6 +536,7 @@ def test_skill_matches_the_spec_path_and_the_interface() -> None:
         "lib.factory_md",
         "lib.handoff",
         "lib.load",
+        "lib.orch_yml",
         "lib.role_router",
         "lib.schema",
         "markdown_it",
@@ -548,3 +549,24 @@ def _named_fields(text: str, label: str) -> tuple[str, ...]:
     prefix = f"{label} fields: "
     line = next(item for item in text.splitlines() if item.startswith(prefix))
     return tuple(re.findall(r"`([A-Za-z0-9_]+)`", line))
+
+
+def test_only_central_routing_skips_refused_harnesses() -> None:
+    base = request_for("examples/cleffy/factory.md")
+    legacy = replace(
+        base,
+        config=replace(base.config, routing=None, reviewer_harness="gemini", reviewer_model=None),
+    )
+    decision = choose_route(legacy, refused_harnesses=("gemini",))
+    assert decision.reviewer_harness == "gemini"
+    assert "reviewer=gemini" in _go_after_questions(decision, "none")
+
+
+@pytest.mark.parametrize(
+    "relative", ("grok/orchestrate-project/SKILL.md", "skills/factory/orchestrator/SKILL.md")
+)
+def test_skill_limits_refusal_claims_to_central_routing(relative: str) -> None:
+    text = (ROOT / relative).read_text(encoding="utf-8")
+    routing = re.search(r"^## Routing.*?(?=^## )", text, re.M | re.S).group(0)
+    claims = [s for s in re.split(r"(?<=\.)\s+", routing) if "refuse" in s]
+    assert all("`routing`" in claim for claim in claims), claims

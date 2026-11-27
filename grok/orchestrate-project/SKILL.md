@@ -94,7 +94,7 @@ Call `choose_route(request)`. If the route cannot satisfy cross-family review, `
 
 Call `TicketFlow.post_go(decision, project.config.verify)` only after the questions step has run and every product question has an answer. `post_go` raises `GoBlocked` otherwise. `TicketFlow` keeps its record in memory, so first read the ticket's comments: if a trusted `grok-bot` `kind=go` with the same `state` is there, do not post another. The verify value is the skill name from `factory.md`, or `none`.
 
-`post_go` writes `builder`, `risk`, and `state` (`planning` or `building`). Everything else is in the body. Posting `orch:go` is the handoff. Stop. The dispatcher enforces the round cap from `factory.md`.
+`post_go` writes `builder`, `reviewer`, `risk`, and `state` (`planning` or `building`). Everything else is in the body. Posting `orch:go` is the handoff. Stop. The dispatcher enforces the round cap from `factory.md`.
 
 ## Mid-work questions
 
