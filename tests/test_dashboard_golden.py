@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import os
+import shlex
 import subprocess
 import sys
 from collections.abc import Callable
@@ -166,12 +167,18 @@ def test_the_documented_steps_reproduce_the_goldens_at_each_cited_commit(tmp_pat
     root = Path(__file__).parent.parent
     if subprocess.run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=root, capture_output=True).returncode:
         pytest.skip(f"{sha} is not in this clone")
-    script = REPRODUCE.replace("/tmp/", f"{tmp_path}/").replace("python3 ", f"{sys.executable} ")
+    scratch = tmp_path / "golden steps"
+    scratch.mkdir()
+    python = tmp_path / "python bin" / "python3"
+    python.parent.mkdir()
+    python.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
+    python.chmod(0o755)
+    script = REPRODUCE.replace("/tmp/", shlex.quote(f"{scratch}/")).replace("python3 ", f"{shlex.quote(str(python))} ")
     env = {key: value for key, value in os.environ.items() if not key.startswith(("PYTEST", "GOLDEN"))}
     try:
         steps = subprocess.run(["bash", "-euc", script], cwd=root, env={**env, "sha": sha},
                                capture_output=True, text=True, timeout=100)
     finally:
-        subprocess.run(["git", "worktree", "remove", "--force", tmp_path / f"golden-{sha}"], cwd=root,
+        subprocess.run(["git", "worktree", "remove", "--force", scratch / f"golden-{sha}"], cwd=root,
                        capture_output=True)
     assert steps.returncode == 0, steps.stdout + steps.stderr
