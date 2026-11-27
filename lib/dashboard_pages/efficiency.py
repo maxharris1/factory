@@ -4,7 +4,6 @@ import math
 
 from lib import device_pool
 from lib.dashboard_pages.common import _b, _e, _num, _panel, _span, duration
-from lib.dashboard_pages.routing import _routing
 from lib.dashboard_telemetry import rollup_panel
 from lib.dashboard_static import read_asset
 
@@ -277,7 +276,11 @@ def _headroom(snapshot: dict) -> str:
 
 
 def top_row(snapshot: dict) -> str:
-    return _row(_headroom(snapshot), rollup_panel(snapshot))
+    return _row(rollup_panel(snapshot))
+
+
+def headroom_row(snapshot: dict) -> str:
+    return _row(_headroom(snapshot))
 
 
 def middle_row(snapshot: dict) -> str:
@@ -328,5 +331,5 @@ def _balance(snapshot: dict) -> str:
     return _panel("balance", "Account balance", inner, count="recent placements per harness pool")
 
 
-def routing_row(snapshot: dict) -> str:
-    return _row(_routing(snapshot), _balance(snapshot))
+def balance_row(snapshot: dict) -> str:
+    return _row(_balance(snapshot))
