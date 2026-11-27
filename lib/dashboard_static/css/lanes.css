@@ -69,9 +69,10 @@ font:500 11px/1 var(--mono);letter-spacing:.12em;color:var(--warn)}
 .lh2 .sub{margin-left:auto;white-space:nowrap}
 .lh2 .harness{flex-basis:100%}
 .tiles{grid-template-columns:1fr}}
-.pair{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start}
-.pair>.panel{min-width:0}
-#just-happened{flex:3 1 560px}#intake{flex:2 1 380px}
+.lanes-first{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start}
+.lanes-first>.panel{min-width:0}
+.lanes-first>#needs-max{flex:2 1 520px}.lanes-first>#intake{flex:1 1 260px}
+.lanes-first~#just-happened{grid-column:1/-1}
 .wake{padding:0 4px;font-size:10px;color:var(--grok)}
 .intake{display:flex;flex-direction:column;gap:10px}
 .irow{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px}

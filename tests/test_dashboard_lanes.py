@@ -829,6 +829,7 @@ def test_fifteen_slots_fit_above_the_fold_at_1440x900(tmp_path: Path, browser: B
       }).map(function (line) { return line.closest('a.tile').getAttribute('href') + ' ' + line.className; })""")
     assert not wrapped, f"the fold holds only for one-row tiles, and these wrap: {wrapped}"
     assert browser.eval("innerHeight") == FOLD
+    browser.eval("document.getElementById('lanes').scrollIntoView()")
     visible = browser.eval("""(function () {
       var floor = document.getElementById('statusline').getBoundingClientRect().top;
       return [].map.call(document.querySelectorAll('#lanes .tile'), function (tile) {
@@ -841,6 +842,7 @@ def test_fifteen_slots_fit_above_the_fold_at_1440x900(tmp_path: Path, browser: B
     hidden = [t for t in visible if t["bottom"] > t["floor"] or not t["own"]]
     assert not hidden, f"slots under the status line or off screen at 1440x{FOLD}: {hidden}"
     browser.open(_page_with_status_stub(board, "index.html"), 1440)
+    browser.eval("document.getElementById('lanes').scrollIntoView()")
     clipped = browser.eval("""[].filter.call(document.querySelectorAll('#lanes .tile-l3 .action, #lanes .tile-l3 .t'),
       function (e) { return e.scrollWidth > e.clientWidth; }).map(function (e) { return e.textContent; })""")
     assert not clipped, f"line 3 cuts the job's action or elapsed time: {clipped}"

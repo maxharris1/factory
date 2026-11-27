@@ -8,6 +8,7 @@ import json
 import math
 
 from lib.dashboard_pages.activity import _health_link
+from lib.dashboard_pages.cockpit import _needs_max
 from lib.dashboard_pages.common import (
     _JOB_STATE, _bot, _chip, duration, _e, github_links, _job_label, _panel,
     model_effort, _short, _span, _ticket, _tile_label, _when, ticket_page_href,
@@ -501,8 +502,8 @@ def _intake(snapshot: dict) -> str:
     return _panel("intake", "Intake", inner, count=f"{len(waiting)} waiting · {len(fed)} fed today")
 
 
-def _just_happened_and_intake(snapshot: dict) -> str:
-    return f'<div class="pair">{_just_happened(snapshot)}{_intake(snapshot)}</div>'
+def _needs_max_and_intake(snapshot: dict) -> str:
+    return f'<div class="lanes-first">{_needs_max(snapshot)}{_intake(snapshot)}</div>'
 
 
 def lanes_script(script: str) -> str:
