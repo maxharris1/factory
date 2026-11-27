@@ -1,0 +1,14 @@
+.uchip{display:inline-flex;align-items:center;gap:10px;text-decoration:none;color:var(--text-2);font:12px/1.4 var(--mono);white-space:nowrap}
+.uc-seg{display:inline-flex;align-items:center;gap:5px}
+.uc-bar{display:inline-block;width:28px;height:4px;background:var(--line-hi);overflow:hidden}
+.uc-bar i{display:block;height:100%;background:var(--text-2)}
+.uc-seg b{font-weight:600;font-variant-numeric:tabular-nums;color:var(--text-2)}
+.uc-seg.ok i{background:var(--ok)}.uc-seg.ok b{color:var(--ok)}
+.uc-seg.warn i{background:var(--warn)}.uc-seg.warn b{color:var(--warn)}
+.uc-seg.bad i{background:var(--bad)}.uc-seg.bad b{color:var(--bad)}
+.uc-reset{color:var(--muted)}
+.uc-name.claude{color:var(--claude)}
+.uc-name.codex{color:var(--codex)}
+.uc-name.cursor{color:var(--cursor)}
+.uc-seg.stale .uc-name{color:var(--muted)}
+.uc-stale{font-style:italic;color:var(--muted)}
