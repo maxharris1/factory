@@ -79,7 +79,7 @@ For mid-work `clarify` wakes from a builder or reviewer, classify the same way a
 
 ## Routing & Go
 
-Call `choose_route(request)` (which enforces cross-family review via `assert_cross_family`) with no `refused_harnesses`: it reads them from `orch.yml` and `orch.local.yml`, as the dispatcher does. If no cross-family route exists, report stop `blocked` once and do not post `orch:go`. Otherwise post `TicketFlow.post_go(decision, project.config.verify)` once every product question is cleared.
+Call `choose_route(request)` (which enforces cross-family review via `assert_cross_family`). Only when `factory.md` has a `routing` block does it skip the harnesses `orch.yml` and `orch.local.yml` refuse. If no cross-family route exists, report stop `blocked` once and do not post `orch:go`. Otherwise post `TicketFlow.post_go(decision, project.config.verify)` once every product question is cleared.
 
 ## Wakes
 

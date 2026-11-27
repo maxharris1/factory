@@ -382,7 +382,8 @@ def choose_route(
     delegates to `lib.role_router.resolve_pair` with mechanical cross-family
     filtering, reading the shipped `config/routing.yml` when `routing` is
     None. Otherwise keeps legacy `factory.md` pair resolution.
-    `refused_harnesses` of None reads the deployed orch.yml refusals.
+    On that routing path, `refused_harnesses` of None reads the deployed
+    orch.yml refusals; the legacy path ignores refusals.
     """
     del usage  # dead cross-harness reserve removed; kept as optional kwarg for caller compatibility
     _check_request(request)

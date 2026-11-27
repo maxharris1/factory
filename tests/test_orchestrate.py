@@ -549,3 +549,24 @@ def _named_fields(text: str, label: str) -> tuple[str, ...]:
     prefix = f"{label} fields: "
     line = next(item for item in text.splitlines() if item.startswith(prefix))
     return tuple(re.findall(r"`([A-Za-z0-9_]+)`", line))
+
+
+def test_only_central_routing_skips_refused_harnesses() -> None:
+    base = request_for("examples/cleffy/factory.md")
+    legacy = replace(
+        base,
+        config=replace(base.config, routing=None, reviewer_harness="gemini", reviewer_model=None),
+    )
+    decision = choose_route(legacy, refused_harnesses=("gemini",))
+    assert decision.reviewer_harness == "gemini"
+    assert "reviewer=gemini" in _go_after_questions(decision, "none")
+
+
+@pytest.mark.parametrize(
+    "relative", ("grok/orchestrate-project/SKILL.md", "skills/factory/orchestrator/SKILL.md")
+)
+def test_skill_limits_refusal_claims_to_central_routing(relative: str) -> None:
+    text = (ROOT / relative).read_text(encoding="utf-8")
+    routing = re.search(r"^## Routing.*?(?=^## )", text, re.M | re.S).group(0)
+    claims = [s for s in re.split(r"(?<=\.)\s+", routing) if "refuse" in s]
+    assert all("`routing`" in claim for claim in claims), claims
