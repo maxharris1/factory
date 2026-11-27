@@ -1,7 +1,7 @@
 """The Claude Code cloud QA runner (#785).
 
-Implements lib.qa_runners.Runner against the behavior measured in #780
-(docs/plans/qa-cloud-lane-measurements.md):
+Implements lib.qa_runners.Runner against the scripted CLI behavior measured in
+issue #780 (recorded in PR #1664):
 - Launch runs `claude [--environment <ccpool_id>] [--model <model>] --cloud <brief>`
   in a PTY from a deterministic, clean base-branch checkout whose `origin`
   points to the project's remote URL. Claude Code 2.1.323 only accepts self-hosted
@@ -181,7 +181,10 @@ _ACCESS_DENIED_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _GIT_TRANSPORT_PATTERN = re.compile(r"unable to access|rpc failed|curl \d+", re.IGNORECASE)
-_HTTP_STATUS = re.compile(r"(?:returned error:|\bresponse|\bHTTP code|\bHTTP(?:/[\d.]+)?)\s*(\d{3})\b", re.IGNORECASE)
+_HTTP_STATUS = re.compile(
+    r"(?:returned error:\s*|\bresponse(?:\s+code)?(?:\s+|[:=]\s*)|\bHTTP\s+code(?:\s+|[:=]\s*)|\bHTTP(?:/[\d.]+)?\s+)(\d{3})\b",
+    re.IGNORECASE,
+)
 _RETRYABLE_CLIENT_STATUSES = frozenset({408, 429})
 _ALREADY_ENDED_PATTERNS = (
     re.compile(
@@ -659,6 +662,14 @@ class ClaudeCloudRunner:
             home=self._home,
         )
 
+    def _session_lock(self, agent_id: str) -> Path:
+        if not _SAFE_AGENT_ID.fullmatch(agent_id) or ".." in agent_id:
+            raise LaunchFailed(f"unsafe agent_id: {agent_id!r}")
+        return _assert_safe_host_path(
+            self._sessions_dir() / f"{agent_id}.lock",
+            home=self._home,
+        )
+
     def _validate_config_dir(self, value: str, label: str) -> str:
         raw = value.strip()
         if not raw or "\x00" in raw or "\n" in raw or "\r" in raw:
@@ -778,12 +789,14 @@ class ClaudeCloudRunner:
             else:
                 self._git_ok("remote", "set-url", "origin", remote_url, cwd=repo_cache)
 
-            branch_fetch = self._git(
-                "fetch", "origin", f"+refs/heads/{lane.base_ref}:{temp_ref}", cwd=repo_cache
-            )
-            is_branch = branch_fetch.returncode == 0
-            if not is_branch:
+            if _SHA.fullmatch(lane.base_ref):
                 self._git_ok("fetch", "origin", f"+{lane.base_ref}:{temp_ref}", cwd=repo_cache)
+                is_branch = False
+            else:
+                self._git_ok(
+                    "fetch", "origin", f"+refs/heads/{lane.base_ref}:{temp_ref}", cwd=repo_cache
+                )
+                is_branch = True
             try:
                 base_sha = self._git_ok("rev-parse", "--verify", f"{temp_ref}^{{commit}}", cwd=repo_cache)
                 if not (checkout / ".git").exists():
@@ -810,10 +823,10 @@ class ClaudeCloudRunner:
             finally:
                 self._git("update-ref", "-d", temp_ref, cwd=repo_cache)
 
-        # Clean any local drift before checkout so advancing base_ref never collides with dirty tracked files.
+        # Clean any local drift (including nested git repos) before checkout so advancing base_ref stays clean.
         if self._git("rev-parse", "--verify", "HEAD", cwd=checkout).returncode == 0:
             self._git_ok("reset", "--hard", "--quiet", "HEAD", cwd=checkout)
-        self._git_ok("clean", "-fdx", "-q", cwd=checkout)
+        self._git_ok("clean", "-ffdx", "-q", cwd=checkout)
         if is_branch or not _SHA.fullmatch(lane.base_ref):
             self._git_ok("checkout", "--quiet", "-B", lane.base_ref, base_sha, cwd=checkout)
             self._git_ok("config", f"branch.{lane.base_ref}.remote", "origin", cwd=checkout)
@@ -821,7 +834,7 @@ class ClaudeCloudRunner:
         else:
             self._git_ok("checkout", "--quiet", "--detach", base_sha, cwd=checkout)
         self._git_ok("reset", "--hard", "--quiet", base_sha, cwd=checkout)
-        self._git_ok("clean", "-fdx", "-q", cwd=checkout)
+        self._git_ok("clean", "-ffdx", "-q", cwd=checkout)
         return checkout
 
     def build_launch_argv(self, lane: Lane, *, cli_environment: str | None = None) -> list[str]:
@@ -985,55 +998,56 @@ class ClaudeCloudRunner:
 
     def stop(self, agent_id: str) -> None:
         marker = self._session_marker(agent_id)
-        saved = _read_json(marker)
-        if saved.get("state") == "ended":
-            return
+        with self._lock(self._session_lock(agent_id)):
+            saved = _read_json(marker)
+            if saved.get("state") == "ended":
+                return
 
-        saved_config = saved.get("config_dir")
-        under_launch_account = isinstance(saved_config, str) and bool(saved_config)
-        cli_env = self._cli_env(saved_config if under_launch_account else None)
-        checkout_raw = saved.get("checkout")
-        cwd: Path | None = None
-        if isinstance(checkout_raw, str) and checkout_raw:
-            candidate = Path(checkout_raw)
-            if candidate.is_dir():
-                cwd = candidate
+            saved_config = saved.get("config_dir")
+            under_launch_account = isinstance(saved_config, str) and bool(saved_config)
+            cli_env = self._cli_env(saved_config if under_launch_account else None)
+            checkout_raw = saved.get("checkout")
+            cwd: Path | None = None
+            if isinstance(checkout_raw, str) and checkout_raw:
+                candidate = Path(checkout_raw)
+                if candidate.is_dir():
+                    cwd = candidate
 
-        try:
-            proc = self._run(
-                self.build_stop_argv(agent_id),
-                cwd=cwd,
-                env=cli_env,
-                timeout=self.config.stop_timeout_seconds,
-            )
-        except FileNotFoundError:
-            raise RunnerOutage("claude binary is not installed") from None
-        except subprocess.TimeoutExpired:
-            raise RunnerOutage("claude stop command timed out") from None
-        except OSError as exc:
-            raise RunnerOutage(f"claude stop invocation failed: {exc}") from None
+            try:
+                proc = self._run(
+                    self.build_stop_argv(agent_id),
+                    cwd=cwd,
+                    env=cli_env,
+                    timeout=self.config.stop_timeout_seconds,
+                )
+            except FileNotFoundError:
+                raise RunnerOutage("claude binary is not installed") from None
+            except subprocess.TimeoutExpired:
+                raise RunnerOutage("claude stop command timed out") from None
+            except OSError as exc:
+                raise RunnerOutage(f"claude stop invocation failed: {exc}") from None
 
-        combined = "\n".join(part for part in (proc.stdout, proc.stderr) if part)
-        if proc.returncode == 0:
-            raw_out = (proc.stdout or "").strip()
-            if raw_out.startswith("{"):
-                try:
-                    data = json.loads(raw_out)
-                except ValueError:
-                    data = None
-                if isinstance(data, dict) and data.get("ok") is False:
-                    err_text = str(data.get("error") or data.get("message") or combined)
-                    if _is_already_ended(err_text, under_launch_account=under_launch_account):
-                        self._mark_ended(agent_id, saved)
-                        return
-                    raise _classify_cli_failure("claude stop failed", err_text, proc.returncode)
-            self._mark_ended(agent_id, saved)
-            return
+            combined = "\n".join(part for part in (proc.stdout, proc.stderr) if part)
+            if proc.returncode == 0:
+                raw_out = (proc.stdout or "").strip()
+                if raw_out.startswith("{"):
+                    try:
+                        data = json.loads(raw_out)
+                    except ValueError:
+                        data = None
+                    if isinstance(data, dict) and data.get("ok") is False:
+                        err_text = str(data.get("error") or data.get("message") or combined)
+                        if _is_already_ended(err_text, under_launch_account=under_launch_account):
+                            self._mark_ended(agent_id, saved)
+                            return
+                        raise _classify_cli_failure("claude stop failed", err_text, proc.returncode)
+                self._mark_ended(agent_id, saved)
+                return
 
-        if _is_already_ended(combined, under_launch_account=under_launch_account):
-            self._mark_ended(agent_id, saved)
-            return
-        raise _classify_cli_failure("claude stop failed", combined, proc.returncode)
+            if _is_already_ended(combined, under_launch_account=under_launch_account):
+                self._mark_ended(agent_id, saved)
+                return
+            raise _classify_cli_failure("claude stop failed", combined, proc.returncode)
 
     def _cli_version(self) -> str:
         try:
