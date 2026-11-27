@@ -1047,7 +1047,7 @@ def test_script_shows_the_selected_jobs_path(tmp_path: Path) -> None:
     assert "cleffy#40" in page["text"]["ticketview"]
     assert "round 2 of 3" in page["text"]["ticketview"]
     assert "33m 2" in page["text"]["ticketview"]  # time in state, ticking from 33m 20s
-    runlog = view[view.index("ol.runlog"):view.index("ol.journey")]
+    runlog = view[view.index("ol.runlog"):view.index("section.jd-panel.jd-exp")]
     assert re.findall(r"button[.a-z]*\[data-state=([^\]]+)\]", runlog) == [
         "intake", "building", "review", "fixing", "review"]
     assert re.findall(r"button\.visit\.now\[data-state=([^\]]+)\]", runlog) == ["review"]

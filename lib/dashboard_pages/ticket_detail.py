@@ -37,9 +37,6 @@ ET = ZoneInfo("America/New_York")
 TRACKER_NAMES = {"github": "GitHub", "linear": "Linear"}
 SECTION_ORDER = ("liverun", "journey", "next", "chart")
 PHONE = "(max-width:699.98px)"
-COL_GAP, RUNLOG_BASIS, RIGHT_BASIS = 16, 300, 1032
-SIDE_BY_SIDE = RUNLOG_BASIS + COL_GAP + RIGHT_BASIS - 0.02
-PHONE_ORDER = ("liverun", "summary", "journey", "runlog", "next", "exposure", "ended", "chart")
 EXPOSURE_FIELDS = (("round", "review round", ""), ("model", "model", ""), ("effort", "effort", ""),
                    ("harness", "harness", ""), ("cli_version", "CLI version", ""),
                    ("brief_sha256", "brief sha256", ""), ("skill_paths", "skill paths", ", "), ("host", "host", ""),
@@ -76,21 +73,9 @@ PANELS = {
 }
 
 
-CSS = (
-    read_asset("css/ticket_detail.css")
-    .replace("__COL_GAP__", str(COL_GAP))
-    .replace("__RUNLOG_BASIS__", str(RUNLOG_BASIS))
-    .replace("__RIGHT_BASIS__", str(RIGHT_BASIS))
-)
-
 PHONE_CSS = read_asset("css/ticket_detail_phone.css")
 
-CSS += (
-    f"@container (max-width:{SIDE_BY_SIDE:g}px){{\n.ticketpage .jd-right{{display:contents}}\n"
-    ".ticketpage .jd-cols>*,.ticketpage .jd-right>*{flex:1 1 100%}\n"
-    + "".join(f".ticketpage [data-sec={name}]{{order:{i}}}\n" for i, name in enumerate(PHONE_ORDER, 1))
-    + f"}}\n@media {PHONE}{{\n{PHONE_CSS}}}\n"
-)
+CSS = read_asset("css/ticket_detail.css") + f"@media {PHONE}{{\n{PHONE_CSS}}}\n"
 
 
 def _who_tint(who: object) -> str:
@@ -924,8 +909,10 @@ SECTIONS = {
 
 
 def _cols(part: dict, sections: tuple[str, ...]) -> str:
-    right = "".join(SECTIONS[name](part) for name in sections)
-    return f'<div class="jd-cols">{_runlog(part["key"], part["model"])}<div class="jd-right">{right}</div></div>'
+    after = "next" if "next" in sections else "journey"
+    log = _runlog(part["key"], part["model"])
+    stack = "".join(SECTIONS[name](part) + (log if name == after else "") for name in sections)
+    return f'<div class="jd-cols">{stack}</div>'
 
 
 _PICK = {

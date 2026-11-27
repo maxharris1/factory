@@ -858,8 +858,8 @@ def test_the_hold_ok_shows_the_whole_head_it_pins_and_the_whole_new_head(tmp_pat
 TICKET_IDS = BAR + ["hud", "ticketview"]
 AT_SNAPSHOT = [["advance", -3]]
 LIVE = {"running": ("maxharris1/cleffy#40", "h-review"), "queued": ("maxharris1/cleffy#12", "g-grok-c")}
-SECTIONS = ["Run log", "Live run", "Journey", "Can come next", "Full state chart"]
-RUNNING_SECTIONS = ["Run log", "Live run", "Journey", "Can come next", "Exposure", "Full state chart"]
+SECTIONS = ["Live run", "Journey", "Can come next", "Run log", "Full state chart"]
+RUNNING_SECTIONS = ["Live run", "Journey", "Can come next", "Run log", "Exposure", "Full state chart"]
 LIVE_SECTIONS = {"running": RUNNING_SECTIONS, "queued": SECTIONS}
 AWKWARD = ["a/b", "a#b", "50%", "a b", "!*'()", "Ünï-çødé", "~2"]
 
@@ -1206,9 +1206,9 @@ def test_the_ticket_page_never_scrolls_sideways_on_a_phone(tmp_path: Path, kind:
 
 SHIPPED = "maxharris1/cleffy#88"
 RECORD = {"idle": "maxharris1/tracy-harris-coaching#5", "stopped": "aut0-code/aut0#AUT-7", "shipped": SHIPPED}
-NO_JOB_SECTIONS = {"idle": ["Run log", "Journey", "Can come next", "Full state chart"],
-                   "shipped": ["Run log", "Run summary", "Journey", "Ended", "Full state chart"],
-                   "stopped": ["Why it stopped", "Run log", "Journey", "Full state chart"]}
+NO_JOB_SECTIONS = {"idle": ["Journey", "Can come next", "Run log", "Full state chart"],
+                   "shipped": ["Run summary", "Journey", "Run log", "Ended", "Full state chart"],
+                   "stopped": ["Why it stopped", "Journey", "Run log", "Full state chart"]}
 OPENS = {"maxharris1/cleffy#12": SECTIONS, "maxharris1/cleffy#13": RUNNING_SECTIONS,
          "maxharris1/cleffy#40": RUNNING_SECTIONS,
          **{address: NO_JOB_SECTIONS[kind] for kind, address in RECORD.items()}}
@@ -1591,7 +1591,7 @@ def test_a_shipped_ticket_has_run_summary_and_ended_in_place_of_live_run_and_nex
     views = _both(tmp_path, snapshot, SHIPPED)
     assert views["script"] == views["server"]
     for render, markup in views.items():
-        assert _sections(markup) == ["Run log", "Run summary", "Journey", "Ended", "Full state chart"], render
+        assert _sections(markup) == ["Run summary", "Journey", "Run log", "Ended", "Full state chart"], render
         summary = _panel(markup, "Run summary")
         assert _count(summary) == f"the whole run · intake {intake} to merge {shipped}", render
         assert re.findall(r'<div class="lr-tile"><b>([^<]*)</b><span>([^<]*)</span></div>', summary) == [
@@ -1997,9 +1997,11 @@ def test_a_hostile_stop_reason_place_and_state_are_escaped_in_both_renders(tmp_p
             assert escaped in why, (render, escaped)
 
 
-PHONE_ORDER = ["hero", "liverun", "journey", "runlog", "next", "chart"]
-PHONE_SECS = {"running": ["hero", "liverun", "journey", "runlog", "next", "exposure", "chart"], "queued": PHONE_ORDER, "idle": ["hero", "journey", "runlog", "next", "chart"],
-              "shipped": ["hero", "summary", "journey", "runlog", "ended", "chart"], "stopped": ["hero", "journey", "runlog", "chart"]}
+PAGE_SECS = {"running": ["hero", "liverun", "journey", "next", "runlog", "exposure", "chart"],
+             "queued": ["hero", "liverun", "journey", "next", "runlog", "chart"],
+             "idle": ["hero", "journey", "next", "runlog", "chart"],
+             "shipped": ["hero", "summary", "journey", "runlog", "ended", "chart"],
+             "stopped": ["hero", "journey", "runlog", "chart"]}
 ADDRESS = {**{k: a for k, (a, _) in LIVE.items()}, **RECORD}
 
 
@@ -2008,13 +2010,14 @@ def _secs(markup: str) -> list[str]:
 
 
 @needs_node
-@pytest.mark.parametrize("kind", PHONE_SECS)
-def test_both_renders_name_each_section_for_the_phone_order(tmp_path: Path, kind: str) -> None:
+@pytest.mark.parametrize("kind", ticket_detail.TICKET_KINDS)
+def test_both_renders_stack_the_sections_in_one_column_with_the_run_log_after_next(tmp_path: Path, kind: str) -> None:
+    order = [s for s in PAGE_SECS[kind] if s != "hero"]
     views = _both(tmp_path, _with_shipped(_snapshot(tmp_path)), ADDRESS[kind])
-    secs = [s for s in PHONE_SECS[kind] if s != "hero"]
-    desktop = ["runlog", *(s for s in secs if s != "runlog")]
     for render, markup in views.items():
-        assert _secs(markup) == desktop, render
+        assert _secs(markup) == order, render
+        assert markup.count('<div class="jd-cols">') == 1, render
+        assert "jd-right" not in markup, render
 
 
 PHONE_LAYOUT = r"""
@@ -2024,9 +2027,10 @@ PHONE_LAYOUT = r"""
   const tops = {hero: box(art.querySelector('.jd-hero'))};
   art.querySelectorAll('[data-sec]').forEach(n => { tops[n.dataset.sec] = box(n); });
   const tiles = [...art.querySelectorAll('.jd-hero .jd-tile')].map(box);
+  const edges = r => r && [r.left, r.right];
   const chart = art.querySelector('details.jd-chart');
   return {order: Object.entries(tops).filter(([, r]) => r).sort((a, b) => a[1].top - b[1].top).map(([k]) => k),
-          runlog: tops.runlog && [tops.runlog.left, tops.runlog.right], journey: tops.journey && [tops.journey.left, tops.journey.right],
+          hero: edges(tops.hero), runlog: edges(tops.runlog), journey: edges(tops.journey),
           cols: new Set(tiles.map(r => Math.round(r.left))).size, rows: new Set(tiles.map(r => Math.round(r.top))).size,
           open: chart.open, scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth,
           innerWidth: innerWidth};
@@ -2041,32 +2045,32 @@ def _ticket_at(chrome: _Chrome, base: str, address: str, width: int) -> None:
 
 
 @pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
-def test_on_a_phone_the_ticket_page_reads_live_run_journey_run_log_next_then_chart(tmp_path: Path) -> None:
+def test_at_every_width_the_ticket_page_is_one_full_width_column_with_the_run_log_after_next(tmp_path: Path) -> None:
     server = _serve(tmp_path, {"fixture": _with_shipped(_snapshot(tmp_path))})
     base = f"http://127.0.0.1:{server.server_address[1]}/fixture/"
     chrome = _Chrome(tmp_path / "profile")
     found = {}
     try:
-        for kind in PHONE_SECS:
+        for kind in PAGE_SECS:
             for width in (375, 1024, 1280, 1440):
                 _ticket_at(chrome, base, ADDRESS[kind], width)
                 found[kind, width] = chrome.run(PHONE_LAYOUT)
     finally:
         chrome.close()
         server.shutdown()
-    for kind, order in PHONE_SECS.items():
-        phone, desk = found[kind, 375], found[kind, 1440]
-        assert phone["order"] == order, kind
+    for kind, order in PAGE_SECS.items():
+        phone = found[kind, 375]
         assert (phone["cols"], phone["rows"]) == (2, 2), kind
         assert phone["open"] is False, kind
         assert phone["scrollWidth"] == phone["innerWidth"] == 375, kind
-        assert desk["runlog"][1] <= desk["journey"][0], kind
+        for width in (375, 1024, 1280, 1440):
+            page = found[kind, width]
+            assert page["order"] == order, (kind, width)
+            assert page["runlog"] == page["journey"] == page["hero"], (kind, width)
         for width in (1024, 1280):
-            stacked = found[kind, width]
-            assert stacked["order"] == order, (kind, width)
-            assert stacked["runlog"] == stacked["journey"], (kind, width)
-            assert stacked["innerWidth"] == width, (kind, width)
-            assert stacked["scrollWidth"] == stacked["clientWidth"] <= width, (kind, width)
+            page = found[kind, width]
+            assert page["innerWidth"] == width, (kind, width)
+            assert page["scrollWidth"] == page["clientWidth"] <= width, (kind, width)
 
 
 def _current_node(snapshot: dict, address: str) -> tuple[float, float]:
@@ -2759,20 +2763,10 @@ def test_the_script_draws_the_same_collapsed_run_log(tmp_path: Path) -> None:
     assert views["script"].count('<details class="exp-more"') == 2
 
 
-def _css_px(rule: str) -> float:
-    return float(re.search(re.escape(rule) + r"([\d.]+)px", ticket_detail.CSS).group(1))
-
-
-def test_below_the_side_by_side_width_live_run_and_journey_come_before_the_run_log() -> None:
-    fits = _css_px(".jd-runlog{flex:1 1 ") + _css_px(".jd-cols{display:flex;flex-wrap:wrap;align-items:flex-start;gap:") \
-        + _css_px(".jd-right{flex:0 1 ")
-    query = re.search(r"\.jd-cols\{[^}]*container-type:inline-size[^}]*\}", ticket_detail.CSS)
-    assert query, "the columns are a size container"
-    stacked = re.search(r"@container \(max-width:([\d.]+)px\)\{\n(.*?)\n\}", ticket_detail.CSS, re.S)
-    assert stacked, ticket_detail.CSS
-    assert fits - 1 < float(stacked.group(1)) < fits
-    order = {name: int(n) for name, n in re.findall(r"\[data-sec=([a-z]+)\]\{order:(\d+)\}", stacked.group(2))}
-    assert order["liverun"] < order["summary"] < order["journey"] < order["runlog"] < order["next"]
+def test_the_ticket_css_lays_the_sections_out_as_one_column_at_every_width() -> None:
+    assert ".jd-cols{display:flex;flex-direction:column;gap:16px}" in ticket_detail.CSS
+    for gone in (".jd-right", "@container", "container-type", "[data-sec=", "{order:", "__", ".jd-runlog{flex"):
+        assert gone not in ticket_detail.CSS, gone
 
 
 RUN_LOG_VIEW = r"""
