@@ -68,7 +68,7 @@ from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from lib import lane_limit, state_backup
+from lib import epoch, lane_limit, state_backup
 from lib.machines_yml import default_account
 
 if TYPE_CHECKING:
@@ -628,15 +628,16 @@ def from_row(
     """A stored row, re-validated; None when any key value is not what `store` writes."""
     if window not in WINDOWS:
         return None
-    observed = _number(observed_at)
+    observed = epoch.cell(observed_at)
     if observed is None:
         return None
     if resets_at is None:
         count = absent if type(absent) is int and absent >= 0 else 0
         return missing(str(window), observed, count) if used is None else None
-    if isinstance(resets_at, bool) or not isinstance(resets_at, int):
+    resets = epoch.cell(resets_at)
+    if resets is None or resets != int(resets):
         return None
-    return Reading(str(window), used_fraction(used), resets_at, observed)
+    return Reading(str(window), used_fraction(used), int(resets), observed)
 
 
 @dataclass(frozen=True)
@@ -683,11 +684,14 @@ def stored(
         )
     if not parts:
         return None
+    epoch.register(connection)
+    observed, source = epoch.sql("observed_at"), epoch.sql("source_at")
+    newest = f"MAX({observed}, COALESCE({source}, {observed}))"
     rows = connection.execute(
         f"""
         SELECT account, device, harness, bot, window, used, resets_at, observed_at, absent, source_at FROM (
             SELECT *, ROW_NUMBER() OVER (
-                PARTITION BY account, device, window ORDER BY {updated_at()} DESC, rank
+                PARTITION BY account, device, window ORDER BY {newest} DESC, rank
             ) AS n
             FROM ({" UNION ALL ".join(parts)}) WHERE :account IS NULL OR account = :account
         ) WHERE n = 1 ORDER BY account, device, harness, bot LIMIT :limit

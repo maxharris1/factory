@@ -58,6 +58,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from lib import epoch
 from lib.health import age_text
 
 # https://linear.app/docs/security ("source IP addresses for all outbound
@@ -358,19 +359,20 @@ def read_health(connection: sqlite3.Connection) -> WebhookHealth | None:
         if has_polling
         else None
     )
-    polling_since = _float(polling[0]) if polling is not None else None
+    polling_since = epoch.cell(polling[0]) if polling is not None else None
     dirty = (
         int(connection.execute(f"SELECT count(*) FROM {DIRTY_TABLE}").fetchone()[0])
         if _has_table(connection, DIRTY_TABLE)
         else 0
     )
     active = _active_linear(connection)
+    epoch.register(connection)
     missed = (
         tuple(
-            (str(identifier) if identifier is not None else None, float(found_at))
+            (str(identifier) if identifier is not None else None, epoch.read(found_at))
             for identifier, found_at in connection.execute(
                 f"SELECT identifier, found_at FROM {MISSED_TABLE} "
-                "ORDER BY found_at DESC, issue_id LIMIT 100"
+                f"ORDER BY {epoch.sql('found_at')} DESC, issue_id LIMIT 100"
             )
         )
         if _has_table(connection, MISSED_TABLE)
@@ -379,18 +381,14 @@ def read_health(connection: sqlite3.Connection) -> WebhookHealth | None:
     if row is None:
         return WebhookHealth(None, None, None, dirty, active, polling_since, missed)
     return WebhookHealth(
-        started_at=_float(row[0]),
-        last_received_at=_float(row[1]),
+        started_at=epoch.cell(row[0]),
+        last_received_at=epoch.cell(row[1]),
         last_event=str(row[2]) if row[2] is not None else None,
         dirty=dirty,
         active_linear=active,
         polling_since=polling_since,
         missed=missed,
     )
-
-
-def _float(value: object) -> float | None:
-    return float(value) if isinstance(value, (int, float)) else None
 
 
 class LinearDirtyQueue:
@@ -461,7 +459,7 @@ class LinearDirtyQueue:
             ).fetchone()
         finally:
             connection.close()
-        return _float(row[0]) if row is not None else None
+        return epoch.cell(row[0]) if row is not None else None
 
     def listener_started_at(self) -> float | None:
         connection = _connect_existing(self.path)
@@ -473,7 +471,7 @@ class LinearDirtyQueue:
             ).fetchone()
         finally:
             connection.close()
-        return _float(row[0]) if row is not None else None
+        return epoch.cell(row[0]) if row is not None else None
 
     def record_missed(
         self, issue_id: str, identifier: str | None, event_at: float, found_at: float

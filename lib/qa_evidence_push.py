@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
+from lib import epoch
 from lib.dashboard import redact
 from lib.dashboard_config import valid_remote_dir
 from lib.dashboard_pages.qa_evidence import run_page
@@ -99,8 +100,9 @@ class Plan:
 
 def settled_runs(connection: sqlite3.Connection) -> list[SettledRun]:
     closed = ", ".join(f"'{state}'" for state in CLOSED_STATES)
+    epoch.register(connection)
     return [
-        SettledRun(run_id, repo, evidence_dir, bool(is_closed), started_at, rowid)
+        SettledRun(run_id, repo, evidence_dir, bool(is_closed), epoch.read(started_at), rowid)
         for run_id, repo, evidence_dir, is_closed, started_at, rowid in connection.execute(
             f"""
             SELECT r.run_id, r.repo, r.evidence_dir, EXISTS (
@@ -110,7 +112,7 @@ def settled_runs(connection: sqlite3.Connection) -> list[SettledRun]:
             ), r.started_at, r.rowid
             FROM qa_runs r
             WHERE r.evidence_dir IS NOT NULL AND r.state NOT IN ('queued', 'running')
-            ORDER BY r.started_at DESC, r.rowid DESC
+            ORDER BY {epoch.sql('r.started_at')} DESC, r.rowid DESC
             """
         )
     ]

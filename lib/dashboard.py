@@ -184,7 +184,7 @@ from urllib.parse import unquote
 
 import yaml
 
-from lib import account_doctor, exposure
+from lib import account_doctor, epoch, exposure
 from lib import health as component_health
 from lib import live_settings
 from lib.config_overlay import apply_overlay
@@ -201,7 +201,6 @@ from lib.dashboard_flow import (
     stop_facts,
 )
 from lib.dashboard_telemetry import attach as attach_telemetry
-from lib.dashboard_telemetry import _number as _telemetry_time
 from lib.dashboard_telemetry import read_telemetry, ticket_totals
 from lib.dashboard_usage import read_usage
 from lib.dispatch.constants import (
@@ -782,10 +781,10 @@ def read_log_tail(path: Path, *, lines: int = LOG_TAIL_LINES) -> list[str]:
     return result
 
 
-def _age(now: float, then: float | None) -> int | None:
+def _age(now: float, then: float | str | None) -> int | None:
     if then is None:
         return None
-    return int(max(0.0, now - float(then)))
+    return int(max(0.0, now - epoch.read(then)))
 
 
 def _tables(connection: sqlite3.Connection) -> set[str]:
@@ -1104,16 +1103,17 @@ def _ci_attention(connection: sqlite3.Connection, tables: set[str]) -> dict[str,
 
 
 def _no_ci_bases(connection: sqlite3.Connection, tables: set[str]) -> dict[tuple[str, str], dict]:
+    epoch.register(connection)
     bases = {
         (str(row["repo"]).casefold(), str(row["ticket_id"])): {"base": _clean(row["base"], 80)}
         for row in connection.execute("SELECT repo, ticket_id, base FROM no_ci_bases")
     }
     if "job_events" in tables:
         for row in connection.execute(
-            """
+            f"""
             SELECT event.repo, event.ticket_id, event.detail FROM job_events AS event
             JOIN no_ci_bases AS base ON base.repo = event.repo AND base.ticket_id = event.ticket_id
-            WHERE event.event = ? ORDER BY event.recorded_at, event.id
+            WHERE event.event = ? ORDER BY {epoch.sql('event.recorded_at')}, event.id
             """,
             (LOCAL_GATE_PASSED,),
         ):
@@ -1177,7 +1177,7 @@ def _ci_pool(connection: sqlite3.Connection, now: float) -> dict:
     rows = connection.execute("SELECT * FROM ci_runners ORDER BY repo, name").fetchall()
     if not rows:
         return {"state": "unread", "age_seconds": None, "runners": []}
-    age = _age(now, min(float(row["seen_at"]) for row in rows))
+    age = _age(now, min(epoch.read(row["seen_at"]) for row in rows))
     return {
         "state": "live" if age is not None and age <= CI_POOL_STALE_SECONDS else "stale",
         "age_seconds": age,
@@ -1201,11 +1201,12 @@ def _ci_runs(
     sources: dict[tuple[str, str], tuple[str | None, str | None]],
     trackers: dict[tuple[str, str], str | None],
 ) -> dict:
+    epoch.register(connection)
     grouped: dict[tuple[str, str, str], list[dict]] = {}
     refs: dict[tuple[str, str, str], dict] = {}
     failures = []
     for row in connection.execute(
-        "SELECT * FROM ci_jobs ORDER BY COALESCE(created_at, seen_at), check_name"
+        f"SELECT * FROM ci_jobs ORDER BY {epoch.sql('COALESCE(created_at, seen_at)')}, check_name"
     ):
         key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
         head = str(row["head"])
@@ -1220,7 +1221,7 @@ def _ci_runs(
         status = _enum(row["status"], CI_JOB_STATUSES)
         conclusion = _enum(row["conclusion"], CI_CONCLUSIONS) if row["conclusion"] is not None else None
         created, started, completed = (
-            _telemetry_time(row[name]) for name in ("created_at", "started_at", "completed_at")
+            epoch.cell(row[name]) for name in ("created_at", "started_at", "completed_at")
         )
         queue_end = started if started is not None else (None if status == "completed" else now)
         job = {
@@ -1348,7 +1349,7 @@ def _qa(
                 "lanes": len({lane["slice"] for lane in found}),
                 "passed": passed,
                 "total": total,
-                "elapsed_seconds": _age(float(row["finished_at"]) if reported else now, row["started_at"]),
+                "elapsed_seconds": _age(epoch.read(row["finished_at"]) if reported else now, row["started_at"]),
                 "run": [run_id[:16], run_id[16:]] if _QA_RUN_ID.fullmatch(run_id) else None,
             })
     open_lanes = dict(connection.execute(
@@ -1752,13 +1753,14 @@ def _handled(connection: sqlite3.Connection, tables: set[str]) -> list[sqlite3.R
     (_VERDICT_TIMES) or NULL. Joins on grouped tables, not a subquery per
     comment: lower(repo) leaves the subqueries no index (seconds on a live
     database)."""
+    epoch.register(connection)
     joins, times = [], []
     for index, (table, when, column, comment) in enumerate(_VERDICT_TIMES):
         if table in tables and {column, comment} <= {
             str(row["name"]) for row in connection.execute(f"PRAGMA table_info({table})")
         }:
             joins.append(
-                f"LEFT JOIN (SELECT lower(repo) AS repo, ticket_id, {comment} AS comment, {when}({column}) AS at "
+                f"LEFT JOIN (SELECT lower(repo) AS repo, ticket_id, {comment} AS comment, {when}({epoch.sql(column)}) AS at "
                 f"FROM {table} GROUP BY lower(repo), ticket_id, {comment}) AS t{index} "
                 f"ON t{index}.repo = lower(h.repo) AND t{index}.ticket_id = h.ticket_id "
                 f"AND t{index}.comment = h.comment_id"
@@ -1808,16 +1810,17 @@ def _relay(
     tracked: int,
     now: float,
 ) -> dict:
+    epoch.register(connection)
     seen: list[Iterable] = []
     if "tracked_tickets" in tables:
         seen.append(connection.execute("SELECT repo, ticket_id, NULL AS at FROM tracked_tickets"))
     if "jobs" in tables:
         seen.append(connection.execute(
-            "SELECT repo, ticket_id, MAX(COALESCE(finished_at, last_activity_at, created_at)) AS at "
+            f"SELECT repo, ticket_id, MAX({epoch.sql('COALESCE(finished_at, last_activity_at, created_at)')}) AS at "
             "FROM jobs GROUP BY repo, ticket_id"))
     if "ticket_transitions" in tables:
         seen.append(connection.execute(
-            "SELECT repo, ticket_id, MAX(at) FROM ticket_transitions GROUP BY repo, ticket_id"))
+            f"SELECT repo, ticket_id, MAX({epoch.sql('at')}) FROM ticket_transitions GROUP BY repo, ticket_id"))
     seen.append((row["repo"], row["ticket_id"], row["recorded_at"]) for row in handled)
     stored: dict[tuple[str, str], tuple[str, str]] = {}
     moved: dict[tuple[str, str], float] = {}
@@ -1826,7 +1829,8 @@ def _relay(
             key = (str(repo).casefold(), str(ticket_id))
             stored.setdefault(key, (str(repo), str(ticket_id)))
             if at is not None:
-                moved[key] = max(moved.get(key, float(at)), float(at))
+                at = epoch.read(at)
+                moved[key] = max(moved.get(key, at), at)
 
     def newest(key: tuple[str, str]) -> tuple:
         return key not in moved, -moved.get(key, 0.0), key
@@ -1850,9 +1854,9 @@ def _relay(
         wanted = ", ".join("(lower(?), ?)" for _ in chosen)
         for row in connection.execute(
             f"SELECT * FROM (SELECT {_HANDOFF_COLUMNS}, ROW_NUMBER() OVER ("
-            "PARTITION BY lower(repo), ticket_id ORDER BY finished_at DESC, id DESC) AS n "
+            f"PARTITION BY lower(repo), ticket_id ORDER BY {epoch.sql('finished_at')} DESC, id DESC) AS n "
             f"FROM jobs WHERE {_HANDOFF_DONE} AND (lower(repo), ticket_id) IN (VALUES {wanted})) "
-            "WHERE n <= ? ORDER BY finished_at DESC, id DESC",
+            f"WHERE n <= ? ORDER BY {epoch.sql('finished_at')} DESC, id DESC",
             (*(name for key in chosen for name in stored[key]), RELAY_STEPS),
         ):
             threads[(str(row["repo"]).casefold(), str(row["ticket_id"]))]["handoffs"].append(
@@ -1932,6 +1936,7 @@ def _read_db(
     alive: Alive | None = pid_alive,
     host: str = DEFAULT_ORCH_HOST,
 ) -> dict:
+    epoch.register(connection)
     tables = _tables(connection)
     jobs = "jobs" in tables
     exposures = exposure.read_all(connection)
@@ -1978,7 +1983,7 @@ def _read_db(
             held[str(row["device"])] = held.get(str(row["device"]), 0) + 1
             placements[str(row["job_id"])] = (
                 str(row["device"]),
-                float(row["placed_at"]) if row["placed_at"] is not None else None,
+                epoch.read(row["placed_at"]) if row["placed_at"] is not None else None,
             )
 
     slots = read_placements(connection) if "device_slots" in tables else {}
@@ -1992,11 +1997,11 @@ def _read_db(
     running_on: dict[str, int] = {}  # running jobs per device they are placed on
     if jobs:
         for row in connection.execute(
-            """
+            f"""
             SELECT id, repo, ticket_id, action, recipient, state,
                    timeout_seconds, created_at, last_activity_at, detail
             FROM jobs WHERE state IN ('queued', 'running')
-            ORDER BY created_at, id
+            ORDER BY {epoch.sql('created_at')}, id
             """
         ):
             base = {
@@ -2029,7 +2034,7 @@ def _read_db(
                 facts = liveness(slot, alive)
                 job_state = _enum(
                     derive(
-                        last_activity_at=float(row["last_activity_at"]),
+                        last_activity_at=epoch.read(row["last_activity_at"]),
                         now=now,
                         placement=slot,
                         stale_seconds=job_states.stale_seconds,
@@ -2044,7 +2049,7 @@ def _read_db(
                     "stale_cause": cause,
                     "round": _detail_round(row["detail"]),
                     "heartbeat_age_seconds": age,
-                    "heartbeat_at": float(row["last_activity_at"]),
+                    "heartbeat_at": epoch.read(row["last_activity_at"]),
                     "timeout_seconds": timeout,
                     "overdue": age > timeout,
                     "device": device,
@@ -2168,8 +2173,8 @@ def _read_db(
                 _enum(row["tracker"], TRACKERS), stuck, state,
                 ref["repo"], ref["ticket_id"], int(row["review_round"]), reason,
                 f"{redact(str(row['repo']))}#{redact(str(row['ticket_id']))}",
-                row["stuck_at"],
-                _telemetry_time(row["closed_at"]),
+                None if row["stuck_at"] is None else epoch.read(row["stuck_at"]),
+                epoch.cell(row["closed_at"]),
             )
             tickets.append(
                 {
@@ -2183,7 +2188,7 @@ def _read_db(
                     **waiting,
                     **({"ci_wait": ci_wait} if ci_wait else {}),
                     **({"no_ci": no_ci} if no_ci else {}),
-                    **({"external_at": row["external_at"]} if row["external_at"] is not None else {}),
+                    **({"external_at": epoch.read(row["external_at"])} if row["external_at"] is not None else {}),
                     **({"linear_state": _clean(row["linear_state"], 64)} if row["linear_state"] else {}),
                     **acting,
                 }
@@ -2267,11 +2272,11 @@ def _read_db(
     newest_error_at = None
     if "poll_errors" in tables:
         row = connection.execute(
-            """
+            f"""
             SELECT
-              COALESCE(SUM(recorded_at >= ?), 0) AS last_hour,
-              COALESCE(SUM(recorded_at >= ?), 0) AS last_day,
-              MAX(recorded_at) AS newest
+              COALESCE(SUM({epoch.sql('recorded_at')} >= ?), 0) AS last_hour,
+              COALESCE(SUM({epoch.sql('recorded_at')} >= ?), 0) AS last_day,
+              MAX({epoch.sql('recorded_at')}) AS newest
             FROM poll_errors
             """,
             (now - 3600, now - 86400),
@@ -2287,7 +2292,7 @@ def _read_db(
             }
             for item in connection.execute(
                 "SELECT repo, ticket_id, error, recorded_at FROM poll_errors "
-                "ORDER BY recorded_at DESC, id DESC LIMIT ?",
+                f"ORDER BY {epoch.sql('recorded_at')} DESC, id DESC LIMIT ?",
                 (RECENT_ERRORS,),
             )
         ]
@@ -2297,7 +2302,7 @@ def _read_db(
     if "poll_deferrals" in tables:
         rows = connection.execute(
             "SELECT detail, recorded_at FROM poll_deferrals "
-            "ORDER BY recorded_at DESC, id DESC LIMIT ?",
+            f"ORDER BY {epoch.sql('recorded_at')} DESC, id DESC LIMIT ?",
             (RECENT_DEFERRALS,),
         ).fetchall()
         deferrals = {
@@ -2309,7 +2314,7 @@ def _read_db(
                 for item in rows
             ]
         }
-        newest_deferral_at = rows[0]["recorded_at"] if rows else None
+        newest_deferral_at = epoch.read(rows[0]["recorded_at"]) if rows else None
 
     feeder = None
     if last_feeder_poll(connection) is not None:
@@ -2346,7 +2351,7 @@ def _read_db(
             SELECT flag.repo, flag.ticket_id, flag.reason, flag.detail
             FROM needs_attention AS flag
             {finished}
-            ORDER BY flag.raised_at, flag.repo, flag.ticket_id, flag.reason
+            ORDER BY {epoch.sql('flag.raised_at')}, flag.repo, flag.ticket_id, flag.reason
             """
         ):
             attention_flags.append(
@@ -2377,7 +2382,7 @@ def _read_db(
             _handoff_row(sources, row, now)
             for row in connection.execute(
                 f"SELECT {_HANDOFF_COLUMNS} FROM jobs WHERE {_HANDOFF_DONE} "
-                "ORDER BY finished_at DESC, id DESC LIMIT ?",
+                f"ORDER BY {epoch.sql('finished_at')} DESC, id DESC LIMIT ?",
                 (RECENT_HANDOFFS,),
             )
         ]
@@ -2399,13 +2404,13 @@ def _read_db(
     if "poll_deferrals" in tables:
         row = connection.execute(
             "SELECT count(*) AS n FROM poll_deferrals "
-            "WHERE recorded_at >= ? AND detail LIKE '%Linear poll budget%'",
+            f"WHERE {epoch.sql('recorded_at')} >= ? AND detail LIKE '%Linear poll budget%'",
             (now - 3600,),
         ).fetchone()
         budget["deferrals"] = int(row["n"])
     if "poll_errors" in tables:
         row = connection.execute(
-            """
+            f"""
             SELECT
               COALESCE(SUM(error LIKE '%Linear poll budget is exhausted%'), 0)
                 AS exhausted,
@@ -2413,7 +2418,7 @@ def _read_db(
                            OR error LIKE '%Linear returned RATELIMITED%'
                            OR error LIKE '%Linear rate-limit backoff%'), 0)
                 AS rate_limited
-            FROM poll_errors WHERE recorded_at >= ?
+            FROM poll_errors WHERE {epoch.sql('recorded_at')} >= ?
             """,
             (now - 3600,),
         ).fetchone()
@@ -2604,6 +2609,7 @@ def _ticket_flows(
     """(flow, accepted retries, tracked_at) per ticket key (repo casefolded,
     ticket id). Each table is read once, whole, and kept for `keys` only: no
     `IN (...)` list, so the number of tickets never meets SQLite's variable cap."""
+    epoch.register(connection)
     histories: dict[tuple[str, str], list[JobStep]] = {key: [] for key in keys}
     if "jobs" in tables:
         columns = (
@@ -2621,16 +2627,16 @@ def _ticket_flows(
             f"jobs.attempt, jobs.detail, {times} "
             "FROM jobs "
             + ("LEFT JOIN job_telemetry t ON t.job_id = jobs.id " if joined else "")
-            + "ORDER BY jobs.created_at, jobs.rowid"
+            + f"ORDER BY {epoch.sql('jobs.created_at')}, jobs.rowid"
         ):
             key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
             if key in histories:
                 histories[key].append(JobStep(
                     _enum(row["action"], ACTIONS),
                     _enum(row["recipient"], RECIPIENTS),
-                    float(row["created_at"]),
-                    _telemetry_time(row["started_at"]),
-                    _telemetry_time(row["finished_at"]),
+                    epoch.read(row["created_at"]),
+                    epoch.cell(row["started_at"]),
+                    epoch.cell(row["finished_at"]),
                     int(row["attempt"]),
                     _clean(str(row["id"])[:8], 8),
                     _exposure(
@@ -2641,25 +2647,25 @@ def _ticket_flows(
     if "ticket_transitions" in tables:
         for row in connection.execute(
             "SELECT repo, ticket_id, from_state, to_state, at, source FROM ticket_transitions "
-            "ORDER BY at, id"
+            f"ORDER BY {epoch.sql('at')}, id"
         ):
             key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
-            at = _telemetry_time(row["at"])
+            at = epoch.cell(row["at"])
             if key in recorded and at is not None:
                 recorded[key].append(Transition(
                     None if row["from_state"] is None
                     else _enum(row["from_state"], WORKFLOW_STATES),
                     _enum(row["to_state"], WORKFLOW_STATES),
-                    float(at),
+                    at,
                     str(row["source"]),
                 ))
     tracked_at: dict[tuple[str, str], float] = {}
     if "tracked_tickets" in tables:
         for row in connection.execute("SELECT repo, ticket_id, tracked_at FROM tracked_tickets"):
             key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
-            at = _telemetry_time(row["tracked_at"])
+            at = epoch.cell(row["tracked_at"])
             if key in keys and at is not None:
-                tracked_at[key] = float(at)
+                tracked_at[key] = at
     retries: dict[tuple[str, str], int] = {}
     if "ticket_retries" in tables:
         for row in connection.execute(

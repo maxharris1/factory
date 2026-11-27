@@ -90,7 +90,7 @@ from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
 
-from lib import account_doctor, device_sync, lane_limit, live_settings, usage_readings
+from lib import account_doctor, device_sync, epoch, lane_limit, live_settings, usage_readings
 from lib.device_sync import NOTHING_BLOCKED, Blocked
 from lib.machines_yml import (
     Device,
@@ -293,7 +293,7 @@ def running_pairs(connection: sqlite3.Connection, config: MachinesConfig | None)
             device = None if config is None else config.device(str(device_name))
             account = None if device is None else device.account_for(str(harness))
         if account is not None:
-            pairs.append(RunningPair(str(job_id), str(account), str(device_name), float(placed_at)))
+            pairs.append(RunningPair(str(job_id), str(account), str(device_name), epoch.read(placed_at)))
     return pairs
 
 
@@ -344,17 +344,19 @@ def account_loads(
     last_placed_at: dict[str, tuple[float, int]] = {}
     if _has_table(connection, PLACEMENTS_TABLE):
         cutoff = now - BALANCE_WINDOW_SECONDS
+        epoch.register(connection)
+        placed_at = epoch.sql("placed_at")
         for acct, count, newest_at, max_rowid in connection.execute(
             f"""
-            SELECT account, COUNT(*), MAX(placed_at), MAX(rowid)
+            SELECT account, COUNT(*), MAX({placed_at}), MAX(rowid)
             FROM {PLACEMENTS_TABLE}
-            WHERE placed_at >= ?
+            WHERE {placed_at} >= ?
             GROUP BY account
             """,
             (cutoff,),
         ):
             recent_placements[str(acct)] = int(count)
-            last_placed_at[str(acct)] = (float(newest_at), int(max_rowid))
+            last_placed_at[str(acct)] = (newest_at, int(max_rowid))
     return AccountLoads(
         running,
         frozenset(held),

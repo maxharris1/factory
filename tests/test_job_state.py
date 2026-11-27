@@ -555,6 +555,23 @@ def test_read_placements_tolerates_an_f2_01_slot_table(tmp_path: Path) -> None:
         assert read_placements(connection) == {}
 
 
+def test_read_placements_reads_a_placed_at_datetime_string_and_leaves_out_no_time(
+    tmp_path: Path,
+) -> None:
+    with sqlite3.connect(tmp_path / "orch.db") as connection:
+        connection.execute(
+            "CREATE TABLE device_slots (job_id TEXT PRIMARY KEY, device TEXT, "
+            "harness TEXT, os_user TEXT, placed_at REAL)"
+        )
+        connection.executemany(
+            "INSERT INTO device_slots VALUES (?, 'box', 'codex', 'codex-bot', ?)",
+            [("iso", "2026-11-26 22:15:58"), ("none", None), ("soon", "soon")],
+        )
+        found = read_placements(connection)
+    assert set(found) == {"iso"}
+    assert found["iso"].placed_at == 1795731358.0
+
+
 # --- orch.yml ------------------------------------------------------------------
 
 

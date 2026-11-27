@@ -56,7 +56,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from lib import account_doctor
+from lib import account_doctor, epoch
 from lib.device_pool import (
     LINK_DROP_TAG,
     UNREACHABLE_BACKOFF_SECONDS,
@@ -196,8 +196,9 @@ def read_placements(connection: sqlite3.Connection) -> dict[str, Placement]:
     placements: dict[str, Placement] = {}
     for row in connection.execute(f"SELECT {select} FROM {SLOTS_TABLE}"):
         values = dict(zip(_PLACEMENT_COLUMNS, tuple(row)))
-        placed_at = values["placed_at"]
-        if not isinstance(placed_at, (int, float)) or isinstance(placed_at, bool):
+        try:
+            placed_at = epoch.read(values["placed_at"])
+        except (TypeError, ValueError):
             continue
         job_id = str(values["job_id"])
         placements[job_id] = Placement(
@@ -205,7 +206,7 @@ def read_placements(connection: sqlite3.Connection) -> dict[str, Placement]:
             device=str(values["device"]),
             harness=str(values["harness"]),
             os_user=str(values["os_user"]),
-            placed_at=float(placed_at),
+            placed_at=placed_at,
             runner_pid=_int(values["runner_pid"]),
             runner_start=_text(values["runner_start"]),
             worker_pid=_int(values["worker_pid"]),

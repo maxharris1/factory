@@ -7,12 +7,11 @@ ids of other listed accounts.
 
 from __future__ import annotations
 
-import math
 import re
 import sqlite3
 from typing import get_args
 
-from lib import account_doctor, device_pool, usage_readings
+from lib import account_doctor, device_pool, epoch, usage_readings
 from lib.machines_yml import EXTERNAL, Account, Device, MachinesConfig
 from lib.queue import ACTIONS
 from lib.schema import HARNESSES
@@ -61,12 +60,6 @@ def doctor_statuses(connection: sqlite3.Connection) -> dict[tuple[str, str], str
     return {pair: row[0] for pair, row in _sign_ins(connection).items() if row[0] in _STATUSES}
 
 
-def _checked_at(value: object) -> float | None:
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
-        return float(value)
-    return None
-
-
 def _same_login(detail: object, account_id: str, listed: frozenset[str]) -> list[str]:
     if not isinstance(detail, str):
         return []
@@ -109,7 +102,7 @@ def _signed_in_on(
             "subscription_type": subscription
             if isinstance(subscription, str) and account_doctor.SUBSCRIPTION.fullmatch(subscription)
             else None,
-            "checked_at": _checked_at(checked_at),
+            "checked_at": epoch.cell(checked_at),
             "same_login_as": _same_login(detail, account.id, listed),
             "command": None if status == "ok" else _command(machines, device.name, account),
             "login": device.login_for(account.harness),
