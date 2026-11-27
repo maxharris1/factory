@@ -220,8 +220,9 @@ def test_main_page_has_needs_max_and_intake_then_lanes_then_just_happened(tmp_pa
     hud = _section(html, "hud")
     heading_end = hud.index("</h1>") + len("</h1>")
     assert hud[hud.index(">") + 1 :].startswith('<h1 class="vh"'), hud[:200]
-    assert hud[heading_end:].startswith('<div class="lanes-first">'), hud[heading_end : heading_end + 200]
-    order = ['id="needs-max"', 'id="intake"', 'id="lanes"', 'id="queue"', 'data-device="box"', 'id="just-happened"']
+    assert hud[heading_end:].startswith('<section class="panel" id="counts"'), hud[heading_end : heading_end + 200]
+    order = ['id="counts"', 'id="needs-max"', 'id="intake"', 'id="lanes"', 'id="queue"', 'data-device="box"',
+             'id="just-happened"']
     positions = [html.index(needle) for needle in order]
     assert positions == sorted(positions), dict(zip(order, positions))
     first = _section_by_class(html, "lanes-first")
@@ -240,8 +241,8 @@ def test_lanes_first_row_splits_two_thirds_one_third() -> None:
 
 
 def test_script_renderer_order_matches_the_server_page(tmp_path: Path) -> None:
-    mounts = {"renderNeedsMax": "needs-max", "renderIntake": "intake", "renderLanes": "lanes",
-              "renderJustHappened": "just-happened"}
+    mounts = {"renderCounts": "counts", "renderNeedsMax": "needs-max", "renderIntake": "intake",
+              "renderLanes": "lanes", "renderJustHappened": "just-happened"}
     listed = re.search(r"\bmain: \[([^\]]*)\]", common.SCRIPT_TAIL)
     assert listed, "PAGES.main"
     script_order = [mounts[name.strip()] for name in listed.group(1).split(",")]
