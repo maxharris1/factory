@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from lib.dashboard_pages import ci, cockpit, lanes
+from lib.dashboard_pages import ci, cockpit, counts, lanes
 from tests.golden.pages import page_digests, page_name, record, substitutions
 
 NAME = page_name(__file__)
@@ -14,6 +14,7 @@ GOLDEN = {
     "ci.SCRIPT": "b911e0070f5debca7d894695d5484929f5abc168b05e1665bc793351c463bc34",
     "cockpit.CSS": "2bddd9fe81e8baf1d6f29272a6eba6ee66f5ebd00860f1fb7e9cdca1fce763e6",
     "cockpit.SCRIPT": "c2110e91918538773e559ae2846b4dc96844d9ded357a2374b8f46028f898e67",
+    "counts.CSS": "fc5e8cfaa290c726bc5d6a5fb5bff25dd9bbff75864feb867f4419cbabc0ca02",
     "__LANES__": "0a070c5626c19ae07dc2fd8adfb927643b397d9899d61f93f67b20ee6f76e617",
     "seeded/main": "c919b5672aba984e4ccdae8d54bc14135c221048ebdcac583e6bd84256412296",
     "seeded/chrome": "aadbe4dfbea694de291073438eca2d8b35ecfd9fbd09e4249c76dff8e9c29bd0",
@@ -32,6 +33,7 @@ def digests(root: Path) -> dict[str, str]:
         "ci.SCRIPT": ci.SCRIPT,
         "cockpit.CSS": cockpit.CSS,
         "cockpit.SCRIPT": cockpit.SCRIPT,
+        "counts.CSS": counts.CSS,
         "__LANES__": substitutions(None)["__LANES__"],
     }, root)
 

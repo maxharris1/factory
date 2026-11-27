@@ -12,7 +12,9 @@ from pathlib import Path
 import pytest
 
 from lib.dashboard import RECORDS
-from lib.dashboard_pages import activity, cockpit, efficiency, evals, lanes, routing, settings, system, tickets
+from lib.dashboard_pages import (
+    activity, cockpit, counts, efficiency, evals, lanes, routing, settings, system, tickets,
+)
 from lib.dashboard_pages import ticket_detail as td
 from lib.dashboard_pages.common import ticket_address
 from lib.dashboard_telemetry import rollup_panel
@@ -42,7 +44,7 @@ SNAPSHOT_PANELS = (
     efficiency._headroom, efficiency._rounds, efficiency._savings, efficiency._balance, efficiency._jobs_lifetime,
     rollup_panel, routing._routing, evals._evals, system._broken, system._components, system._versions,
     system._health, system._log, system._rules, system._no_waiter, tickets._board, tickets._tickets,
-    settings._settings, settings._accounts,
+    settings._settings, settings._accounts, counts._counts,
 )
 
 
@@ -72,9 +74,12 @@ PANELS: dict[str, Callable[[dict], str]] = {
     "ticket_cockpit_html.visual-qa": lambda c: cockpit.ticket_cockpit_html({**c["asking"], **VISUAL_QA}),
 }
 
-REPRODUCE = """\
+NET_NEW = ("lib/dashboard_pages/counts.py", "lib/dashboard_static/css/counts.css")
+
+REPRODUCE = f"""\
     git worktree add --detach /tmp/golden-$sha $sha
     cp tests/test_dashboard_golden.py /tmp/golden-$sha/tests/
+{"".join(f"    cp {path} /tmp/golden-$sha/{path}\n" for path in NET_NEW)}\
     (cd /tmp/golden-$sha && GOLDEN_UPDATE=1 python3 -m pytest -q -p no:cacheprovider tests/test_dashboard_golden.py)
     diff -r tests/golden/dashboard /tmp/golden-$sha/tests/golden/dashboard"""
 
@@ -82,7 +87,7 @@ README = f"""# Dashboard leaf panel goldens
 
 Server-rendered HTML of every leaf panel, one block per fixture variant. The 35 unsuffixed goldens were rendered
 from main {SOURCE}; the `.<kind>` and `.visual-qa` goldens from main {EXTENDED}. Run with this harness, both
-commits render all 51 goldens byte for byte.
+commits render all 52 goldens byte for byte.
 
 Each ticket page section is pinned for every ticket kind whose page shows it: running `{RUNNING}`, shipped
 `{SHIPPED}` (added by `_with_shipped`), stopped `{STOPPED}`, queued `{QUEUED}` and idle `{ASKING}`.
@@ -96,7 +101,9 @@ Regenerate from the checked-out code:
 
 Update mode deletes every `.html` here that the harness does not render. {SOURCE} has no harness and the one at
 {EXTENDED} renders only the 35 unsuffixed goldens, so copy this harness into a checkout of either commit before
-regenerating. From the repo root, with `sha` set to one of them:
+regenerating.
+Neither commit has the panels added since, so copy their files too: {", ".join(f"`{path}`" for path in NET_NEW)}.
+From the repo root, with `sha` set to one of them:
 
 {REPRODUCE}
 """
@@ -148,7 +155,7 @@ def rendered(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
 
 
 def test_the_golden_files_are_exactly_the_leaf_panels(rendered: dict[str, str]) -> None:
-    assert len(PANELS) == 51
+    assert len(PANELS) == 52
     assert {path.stem for path in GOLDEN.glob("*.html")} == set(PANELS)
 
 
@@ -172,9 +179,10 @@ def test_the_reproduce_steps_keep_inserted_paths_intact_when_they_contain_the_re
     lines = [shlex.split(line) for line in reproduce_steps(scratch, python).splitlines()]
     assert lines[0][-2:] == [f"{scratch}/golden-$sha", "$sha"]
     assert lines[1][-1] == f"{scratch}/golden-$sha/tests/"
-    assert lines[2][1] == f"{scratch}/golden-$sha"
-    assert lines[2][4] == str(python)
-    assert lines[3][-1] == f"{scratch}/golden-$sha/tests/golden/dashboard"
+    assert [line[-1] for line in lines[2:-2]] == [f"{scratch}/golden-$sha/{path}" for path in NET_NEW]
+    assert lines[-2][1] == f"{scratch}/golden-$sha"
+    assert lines[-2][4] == str(python)
+    assert lines[-1][-1] == f"{scratch}/golden-$sha/tests/golden/dashboard"
 
 
 @pytest.mark.parametrize("sha", [SOURCE, EXTENDED])
