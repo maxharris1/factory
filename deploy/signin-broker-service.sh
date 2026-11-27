@@ -132,7 +132,7 @@ service_lock() {
 }
 
 launch() {
-    local pid child i
+    local pid child i settled="" deadline=$((START_WAIT * 10))
     mkdir -p "$STATE"
     if pid="$(running_pid)"; then
         say "sign-in broker already running (pid ${pid})"
@@ -153,14 +153,18 @@ launch() {
     fi
     child=$!
     write_pidfile "$child"
-    for ((i = 0; i < START_WAIT * 10; i++)); do
+    for ((i = 0; i < deadline; i++)); do
         if pid="$(running_pid)"; then
             if ((pid != child)); then
                 write_pidfile "$pid"
                 say "sign-in broker already running (pid ${pid})"
                 return 0
             fi
-            if ((i >= SETTLE * 10)); then
+            if [[ -z "$settled" ]]; then
+                settled=$((i + SETTLE * 10))
+                ((deadline > settled)) || deadline=$((settled + 1))
+            fi
+            if ((i >= settled)); then
                 say "started sign-in broker (pid ${pid})"
                 return 0
             fi
