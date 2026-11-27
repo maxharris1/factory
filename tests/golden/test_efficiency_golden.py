@@ -15,11 +15,11 @@ GOLDEN = {
     "routing.SCRIPT": "a9d2c2f0bcda434daea5b4c0c186a0e21e6523307d9f19a6baf919a7e6bdcc21",
     "TELEMETRY_CSS": "649dcbbee7a9591b4dac5c5d49a14247192fb5baffe024921698d935b8437071",
     "__TELEMETRY__": "a36660b73d6a3ff62efe3db3e1e644deb2aa93f51ddf1021c50b9c150f96e114",
-    "seeded/main": "7026fe18daced5a6eab6af6f0eba7dd2729534bb5bfb8e48461391326ebdaf64",
+    "seeded/main": "dbb9a38d7d4be5dfed8c9ad153a09cf9cbaff38f5a4a8e373aedb56a10e9c93b",
     "seeded/chrome": "425286c58ed83cffc174dd0ad820954cefee741079893345fd2d83a055c2ebee",
-    "hostile/main": "7026fe18daced5a6eab6af6f0eba7dd2729534bb5bfb8e48461391326ebdaf64",
+    "hostile/main": "dbb9a38d7d4be5dfed8c9ad153a09cf9cbaff38f5a4a8e373aedb56a10e9c93b",
     "hostile/chrome": "2e39aff37188fc706bfb14ea8b5eb8b3f8aff006f1b95bf4fcb6fe9ab4dacff6",
-    "empty/main": "f9629ee2bbfd175876a2ef6c21a503a6f9b4433a44f138930b2fd4770bb8ad74",
+    "empty/main": "6519b2783b04824e97c92f3988caa285b23b220bf8850a70ccabef63f4d7d2eb",
     "empty/chrome": "20d8e3ed5aa84ad6552966eb8a60e6e1ac053dfd139d1a93cd86ef3a3960d4d1",
 }
 

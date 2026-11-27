@@ -168,11 +168,10 @@ def test_real_usage_lists_every_account_with_its_headroom(base: dict) -> None:
     assert _text(_row(panel, "cursor-default")[0]) == "no reading"
 
 
-def test_balance_sits_beside_routing(base: dict) -> None:
+def test_balance_sits_alone_in_its_row(base: dict) -> None:
     page = render_pages(base)["efficiency.html"]
-    row = _section(page, "routing")
-    start = page.rindex('<div class="ef-row">', 0, page.index(row))
-    assert page[start:].startswith(f'<div class="ef-row">{row}<section class="panel" id="balance"')
+    panel = _section(page, "balance")
+    assert f'<div class="ef-row">{panel}</div>' in page
 
 
 def test_balance_css_keeps_square_corners() -> None:

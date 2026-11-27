@@ -19,6 +19,7 @@ from lib import health as component_health
 from lib.dashboard import collect_snapshot, rules_and_limits
 from lib.dashboard_flow import load_chart
 from lib.dashboard_page import CSS, render_pages, render_static_assets, version_drift
+from lib.dashboard_pages.shell import _PAGE_NAMES
 from lib.factory_md import load_factory_md
 from tests.test_dashboard import NOW, seeded
 from tests import test_dashboard_tickets_board as board
@@ -600,8 +601,8 @@ def test_components_count_and_version_drift_follow_the_snapshot(tmp_path: Path, 
     _assert_state(state, _section(html, "components"), inner, _section(html, "rules"), html)
     drift = ["drift"] if drawn else []
     waiters = ["no-waiter"] if snapshot["health"]["no_waiter"] else []
-    assert _main_order(html) == ["broken", "components", "versions", *drift, "health", "log", "rules",
-                                 "waiters", *waiters]
+    assert _main_order(html) == ["broken", "components", "versions", *drift, "health", "log", "settings", "accounts",
+                                 "routing", "rules", "waiters", *waiters]
     assert re.search(r'<div class="sys-row"><section class="panel" id="health"', html)
     assert _section(html, "health") + _section(html, "log") in html
 
@@ -753,10 +754,31 @@ def test_moved_panels_left_their_old_pages(tmp_path: Path) -> None:
     assert 'id="health"' not in pages["efficiency.html"]
     assert 'id="log"' not in pages["activity.html"]
     assert "renderHealth, renderLog" in script
-    assert re.search(r"efficiency: \[renderHeadroom, renderTokens, renderRounds, renderSavings, renderRouting, "
-                     r"renderBalance, renderJobsLifetime\]", script)
-    assert [name for name, html in pages.items() if 'id="routing"' in html] == ["efficiency.html"]
+    assert re.search(r"efficiency: \[renderTokens, renderRounds, renderSavings, renderBalance, renderJobsLifetime\]",
+                     script)
+    assert re.search(r"health: \[renderBroken, renderComponents, renderDrift, renderHealth, renderLog, renderSettings, "
+                     r"renderHeadroom, renderAccounts, renderRouting, renderRules, renderNoWaiter\]", script)
+    assert re.search(r"evals: \[renderEvals\],\n", script)
+    assert re.search(r"settings: \[renderSettings, renderAccounts\]\n", script)
+    assert [name for name, html in pages.items() if 'id="routing"' in html] == ["health.html"]
+    assert [name for name, html in pages.items() if 'id="headroom"' in html] == ["health.html"]
     assert [name for name, html in pages.items() if 'id="balance"' in html] == ["efficiency.html"]
+
+
+def test_docs_place_usage_accounts_on_the_pages_that_draw_them(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[1]
+    pages = render_pages(_snapshot(tmp_path))
+    away = [_PAGE_NAMES[name][1] for name, html in pages.items()
+            if 'id="headroom"' not in html and 'id="accounts"' not in html]
+    usage = re.compile(r"headroom|usage record|not tracked|\brows?\b")
+    stale = [
+        (doc, label, " ".join(sentence.split()))
+        for doc in ("README.md", "docs/SPEC.md", "docs/ACCOUNTS.md")
+        for sentence in re.split(r"(?<=[.;])\s+|\n\s*\n", (root / doc).read_text(encoding="utf-8"))
+        for label in away
+        if usage.search(sentence) and re.search(rf"\b{label}\b", sentence)
+    ]
+    assert stale == []
 
 
 

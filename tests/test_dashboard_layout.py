@@ -419,6 +419,39 @@ def test_efficiency_page_has_savings_and_a_one_line_definition(tmp_path: Path) -
         assert f'id="{panel}"' not in html, panel
 
 
+def _main_children(html: str) -> list:
+    children: list = []
+    depth = 0
+    for tag in re.finditer(r"<(/?)(section|div|article|aside)\b([^>]*)>", _section(_no_script(html), "hud")):
+        if tag.group(1):
+            depth -= 1
+            continue
+        depth += 1
+        ident = re.search(r'\bid="([^"]+)"', tag.group(3))
+        row = re.search(r'\bclass="((?:ef|sys)-row)"', tag.group(3))
+        if depth == 1:
+            children.append((row.group(1), []) if row else ident.group(1))
+        elif depth == 2 and ident and isinstance(children[-1], tuple):
+            children[-1][1].append(ident.group(1))
+    return children
+
+
+def test_system_page_draws_devices_headroom_accounts_and_routing_after_the_log(tmp_path: Path) -> None:
+    html = _pages(tmp_path)["health.html"]
+    assert _main_children(html) == [
+        "broken", "components", "versions", ("sys-row", ["health", "log"]), "settings",
+        ("ef-row", ["headroom"]), "accounts", "routing", "rules", "waiters",
+    ]
+    ids = re.findall(r'\bid="([^"]+)"', _no_script(html))
+    assert len(ids) == len(set(ids)), sorted(i for i in ids if ids.count(i) > 1)
+
+
+def test_efficiency_page_draws_cost_alone_and_balance_on_its_own_row(tmp_path: Path) -> None:
+    assert _main_children(_pages(tmp_path)["efficiency.html"]) == [
+        ("ef-row", ["tokens"]), ("ef-row", ["rounds", "savings"]), ("ef-row", ["balance"]), "jobs-lifetime",
+    ]
+
+
 # --- the statechart and the job path ------------------------------------------------------
 
 

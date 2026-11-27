@@ -1,5 +1,5 @@
 """Mission Control device settings (#777) end to end: the real snapshot and
-settings.html, the real dashboard server's POST /api/settings into a spool
+health.html, the real dashboard server's POST /api/settings into a spool
 directory, and the real `settings_apply.run_pass` reading that spool."""
 
 from __future__ import annotations
@@ -79,7 +79,7 @@ class Mission:
         return json.loads((self.site / "status.json").read_text(encoding="utf-8"))
 
     def page(self) -> str:
-        return _section(_no_script((self.site / "settings.html").read_text(encoding="utf-8")), "settings")
+        return _section(_no_script((self.site / "health.html").read_text(encoding="utf-8")), "settings")
 
     def apply(self) -> list:
         self.remember_spool()
@@ -134,7 +134,7 @@ def assert_no_secret(mission: Mission, client: Client) -> None:
     mission.remember_spool()
     texts = {f"spool/{name}": text for name, text in mission.seen_spool.items()}
     texts["audit"] = (mission.state / settings_apply.AUDIT_NAME).read_text(encoding="utf-8")
-    for name in ("status.json", "settings.html"):
+    for name in ("status.json", "health.html"):
         texts[name] = (mission.site / name).read_text(encoding="utf-8")
     assert len(texts) > 3
     for name, text in texts.items():
