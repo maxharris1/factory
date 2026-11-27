@@ -29,7 +29,8 @@ import pytest
 import lib.dashboard as dashboard
 import lib.dashboard_flow as flow
 from lib.dashboard import collect_snapshot, render_pages, tickets_json, write_snapshot, write_snapshot_pages
-from lib.dashboard_pages import common, lanes
+from lib.dashboard_pages import cockpit, common, lanes, shell
+from lib.dashboard_pages.counts import _counts
 from lib.dashboard_pages.common import ticket_address, ticket_page_href
 from lib.dashboard_pages.ticket_detail import ticket_view
 from tests.test_dashboard import (
@@ -123,17 +124,6 @@ def _section(html: str, ident: str) -> str:
     raise AssertionError(f"unclosed {ident}")
 
 
-def _section_by_class(html: str, cls: str) -> str:
-    match = re.search(rf'<div class="{re.escape(cls)}">', html)
-    assert match, cls
-    depth = 0
-    for item in re.finditer(r"<(/?)div\b[^>]*>", html[match.start() :]):
-        depth += -1 if item.group(1) else 1
-        if depth == 0:
-            return html[match.start() : match.start() + item.end()]
-    raise AssertionError(f"unclosed {cls}")
-
-
 def _text(markup: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", markup)).strip()
 
@@ -225,19 +215,25 @@ def test_main_page_has_needs_max_and_intake_then_lanes_then_just_happened(tmp_pa
              'id="just-happened"']
     positions = [html.index(needle) for needle in order]
     assert positions == sorted(positions), dict(zip(order, positions))
-    first = _section_by_class(html, "lanes-first")
-    assert 'id="needs-max"' in first and 'id="intake"' in first
-    assert 'id="just-happened"' not in first and 'id="lanes"' not in first
+    assert "lanes-first" not in html
+    rest, children = hud[heading_end : -len("</main>")], []
+    while rest:
+        child = re.match(r'<section class="panel" id="([^"]+)"', rest)
+        assert child, rest[:200]
+        children.append(child.group(1))
+        rest = rest[len(_section(rest, child.group(1))) :]
+    assert children == ["counts", "needs-max", "intake", "lanes", "just-happened"]
     lane_panel = _section(html, "lanes")
     assert 'id="queue" data-device="queue"' in lane_panel
     assert re.findall(r'class="lane[^"]*" (?:id="[^"]*" )?data-device="([^"]+)"', lane_panel)[-1] == "ci"
 
 
-def test_lanes_first_row_splits_two_thirds_one_third() -> None:
-    for rule in (".lanes-first>#needs-max{flex:2 1 520px}", ".lanes-first>#intake{flex:1 1 260px}",
-                 ".lanes-first~#just-happened{grid-column:1/-1}"):
-        assert rule in lanes.CSS, rule
+def test_main_page_panels_are_five_full_width_rows() -> None:
+    assert "lanes-first" not in lanes.CSS
+    assert "#hud #lanes,#needs-max,#intake,#just-happened{grid-column:1/-1}" in lanes.CSS
     assert ".pair" not in lanes.CSS
+    assert shell._PANELS["index.html"] == (_counts, cockpit._needs_max, lanes._intake, lanes._lanes,
+                                           lanes._just_happened)
 
 
 def test_script_renderer_order_matches_the_server_page(tmp_path: Path) -> None:
