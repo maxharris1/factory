@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from lib import dashboard_cli
-from lib.dashboard import _age, collect_snapshot
+from lib.dashboard import _age, _read_db, collect_snapshot
 from tests.test_dashboard import NOW, add_job, add_ticket, seeded
 from tests.test_dashboard_accounts import world
 from tests.test_dashboard_poll_seconds import _orch
@@ -261,3 +261,11 @@ def test_the_queue_lists_jobs_by_the_subsecond_instant_they_were_created(tmp_pat
         add_job(connection, "next-51", state="queued", ticket_id="51", created_at=NOW - 30.25)
     queued = collect_snapshot(db, log, now=NOW)["queued"]
     assert [item["job"] for item in queued] == ["first-50", "next-51"]
+
+
+def test_read_db_orders_by_instant_on_a_connection_it_did_not_open(tmp_path: Path) -> None:
+    db, _ = _cleffy_213(tmp_path, created_at="2026-11-26 22:05:58")
+    with sqlite3.connect(db) as connection:
+        connection.row_factory = sqlite3.Row
+        queue = _read_db(connection, STAMP_EPOCH + 60)["queue"]
+    assert queue["totals"]["queued"] == 2

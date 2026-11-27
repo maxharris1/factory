@@ -735,7 +735,6 @@ def open_readonly(path: Path) -> sqlite3.Connection:
     try:
         connection = sqlite3.connect(uri, uri=True)
         connection.row_factory = sqlite3.Row
-        epoch.register(connection)
         connection.execute("PRAGMA query_only = ON")
         # Opening is lazy; read the schema now so a failure surfaces here.
         connection.execute("SELECT count(*) FROM sqlite_master").fetchone()
@@ -1934,6 +1933,7 @@ def _read_db(
     alive: Alive | None = pid_alive,
     host: str = DEFAULT_ORCH_HOST,
 ) -> dict:
+    epoch.register(connection)
     tables = _tables(connection)
     jobs = "jobs" in tables
     exposures = exposure.read_all(connection)
