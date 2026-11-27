@@ -7,6 +7,7 @@
 .uc-seg.warn i{background:var(--warn)}.uc-seg.warn b{color:var(--warn)}
 .uc-seg.bad i{background:var(--bad)}.uc-seg.bad b{color:var(--bad)}
 .uc-reset{color:var(--muted)}
+.uc-name{color:var(--text-2)}
 .uc-name.claude{color:var(--claude)}
 .uc-name.codex{color:var(--codex)}
 .uc-name.cursor{color:var(--cursor)}

@@ -25,10 +25,10 @@ def _segment(harness: str, views: list[dict], now: float) -> dict:
 
 
 def _line(entry: dict, view: dict | None) -> str:
+    limit = f" · {entry['limit_label']}" if entry["limit_label"] else ""
     if view is None:
-        return f"{entry['harness']} {entry['account']}: not tracked"
+        return f"{entry['harness']} {entry['account']}: not tracked{limit}"
     (w5, _), (w7, _) = view["windows"]
-    limit = f" · {view['limit']}" if view["limit"] else ""
     return f"{entry['harness']} {efficiency._name(entry)}: 5-hour {w5}, 7-day {w7}{limit}"
 
 

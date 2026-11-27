@@ -196,3 +196,29 @@ def test_account_names_are_escaped(tmp_path: Path) -> None:
     chip = usage_chip._usage_chip(snapshot)
     for name in ("title", "aria-label"):
         assert "codex a&lt;b&quot;&amp;c: 5-hour" in _attr(chip, name)
+
+
+def test_an_untracked_accounts_line_keeps_its_limit_label(tmp_path: Path) -> None:
+    snapshot = _accounts_snapshot(tmp_path)
+    _entry(snapshot, "cursor-default")["limit_label"] = "usage limit until 2026-11-17 03:00 UTC"
+    chip = usage_chip._usage_chip(snapshot)
+    line = "cursor cursor-default: not tracked · usage limit until 2026-11-17 03:00 UTC"
+    assert line in usage_chip.chip_model(snapshot)["title"].split("\n")
+    for name in ("title", "aria-label"):
+        assert line in _attr(chip, name).split("\n")
+
+
+def _own_colour(css: str, classes: set[str]) -> str | None:
+    colour = None
+    for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+        declared = re.search(r"(?:^|;)color:([^;]+)", body)
+        compounds = [s.strip() for s in selectors.split(",")]
+        if declared and any(re.fullmatch(r"(\.[\w-]+)+", s) and set(s[1:].split(".")) <= classes for s in compounds):
+            colour = declared.group(1)
+    return colour
+
+
+@pytest.mark.parametrize("harness", ["external", "gemini"])
+def test_a_harness_with_no_token_keeps_the_text_colour(harness: str) -> None:
+    assert _own_colour(page.app_css(), {"ok"}) == "var(--ok)"
+    assert _own_colour(page.app_css(), {"uc-name", harness}) == "var(--text-2)"
