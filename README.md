@@ -2512,6 +2512,14 @@ Threat model, in short:
   or the log, which records only method, path, status and peer.
 - Only the listed client addresses reach `/api` (everyone else gets 404),
   so nothing on the server's own node, every bot included, can call it.
+  Behind `tailscale serve` the client is the last `X-Forwarded-For` hop,
+  but only on a live connection from the node's `TAILNET_IP` or loopback
+  whose socket the kernel lists as root's (tailscaled). Bots and every other non-root process
+  on the node keep their TCP address, which is the node's own and never
+  listed. The deployment enforces this by running tailscaled as root and the
+  bots and `factory-dash` as non-root users (startup already refuses bot
+  users). Linux only: without `/proc/net/tcp` forwarded identity is never
+  used.
   Every POST needs `Content-Type: application/json` and the server's own
   `Origin`, and every POST after sign-in the session's `X-Factory-CSRF`.
 - Comments and OKs go only to tickets in the served `status.json`. A comment

@@ -9,6 +9,7 @@ are served, never anything outside the directory, never a listing.
 import http.client
 import importlib.util
 import os
+import socket
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -474,7 +475,7 @@ def serve_actions(actions_site: Path, fake_github: FakeGitHub):
 
     def start(clients: tuple[str, ...] = ("127.0.0.1",), spool: Path | None = None,
               approver: str = "maxharris1", audit: Path | None = None,
-              relay: Path | None = None) -> Client:
+              relay: Path | None = None, own_address: str | None = None) -> Client:
         config = server_module.ActionsConfig(
             client_id="Ov23liTESTCLIENT",
             approver=approver,
@@ -484,6 +485,7 @@ def serve_actions(actions_site: Path, fake_github: FakeGitHub):
             settings_spool=spool,
             audit=audit,
             signin_relay=relay,
+            own_address=own_address,
         )
         server = server_module.make_server("127.0.0.1", 0, actions_site, config)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -594,6 +596,137 @@ def test_an_unlisted_peer_gets_404_everywhere(serve_actions, fake_github) -> Non
         assert client.post(path)[0] == 404, path
     assert fake_github.calls == []
     assert client.raw("GET", "/status.json")[0] == 200
+
+
+OWN = "100.101.102.103"
+LOCAL = (OWN, 8090)
+LISTED = "100.64.0.7"
+HAS_TCP_TABLE = Path("/proc/net/tcp").exists()
+
+
+def proxy_client(monkeypatch, uid: int | None, peer: str, xff: str, own: str | None = OWN) -> str:
+    monkeypatch.setattr(server_module, "tcp_socket_uid", lambda peer, local: uid)
+    return server_module.action_client((peer, 40000), LOCAL, xff, own)
+
+
+def test_action_client_uses_the_last_hop_only_from_roots_socket_on_own_address(monkeypatch) -> None:
+    assert proxy_client(monkeypatch, 0, OWN, LISTED) == LISTED
+    assert proxy_client(monkeypatch, 0, OWN, f"203.0.113.9, {LISTED}") == LISTED
+    assert proxy_client(monkeypatch, 0, OWN, f"  {LISTED}  ") == LISTED
+
+
+@pytest.mark.parametrize("own", [OWN, None])
+def test_action_client_uses_the_last_hop_from_roots_socket_on_loopback(monkeypatch, own) -> None:
+    for peer in ("127.0.0.1", "127.0.0.2"):
+        assert proxy_client(monkeypatch, 0, peer, LISTED, own=own) == LISTED, peer
+        assert proxy_client(monkeypatch, 0, peer, f"100.64.0.9, {LISTED}", own=own) == LISTED, peer
+
+
+def test_action_client_ignores_xff_from_a_non_root_socket_on_a_proxy_address(monkeypatch) -> None:
+    for peer in (OWN, "127.0.0.1", "127.0.0.2"):
+        assert proxy_client(monkeypatch, 1001, peer, LISTED) == peer
+        assert proxy_client(monkeypatch, None, peer, LISTED) == peer
+
+
+def test_action_client_ignores_xff_from_any_other_peer(monkeypatch) -> None:
+    assert proxy_client(monkeypatch, 0, "100.64.0.8", LISTED) == "100.64.0.8"
+    assert proxy_client(monkeypatch, 0, "100.64.0.8", f"100.64.0.9, {LISTED}") == "100.64.0.8"
+    assert proxy_client(monkeypatch, 0, OWN, LISTED, own=None) == OWN
+
+
+def test_action_client_falls_back_to_the_peer_on_an_unusable_hop(monkeypatch) -> None:
+    for xff in ("", "not-an-ip", "2001:db8::1", f"{LISTED}, "):
+        assert proxy_client(monkeypatch, 0, OWN, xff) == OWN, xff
+
+
+def test_tcp_socket_uid_reads_the_peer_sockets_owner(tmp_path) -> None:
+    def addr(ip: str, port: int) -> str:
+        packed = server_module.ipaddress.IPv4Address(ip).packed
+        return f"{int.from_bytes(packed, sys.byteorder):08X}:{port:04X}"
+
+    header = ("  sl  local_address rem_address   st tx_queue rx_queue tr tm->when "
+              "retrnsmt   uid  timeout inode")
+    rows = [
+        (LOCAL, (OWN, 40000), "01", 1001),
+        ((OWN, 40000), LOCAL, "01", 0),
+        ((OWN, 40001), LOCAL, "01", 1002),
+        ((OWN, 40003), LOCAL, "05", 0),
+        ((OWN, 40004), LOCAL, "06", 0),
+    ]
+    table = tmp_path / "tcp"
+    table.write_text("\n".join([header] + [
+        f"   {n}: {addr(*a)} {addr(*b)} {st} 00000000:00000000 00:00000000 00000000 {uid:>5} 0 {1000 + n} 1"
+        for n, (a, b, st, uid) in enumerate(rows)
+    ]) + "\n")
+    fn = server_module.tcp_socket_uid
+    assert fn((OWN, 40000), LOCAL, table) == 0
+    assert fn((OWN, 40001), LOCAL, table) == 1002
+    assert fn((OWN, 40002), LOCAL, table) is None
+    assert fn((OWN, 40003), LOCAL, table) is None
+    assert fn((OWN, 40004), LOCAL, table) is None
+    assert fn((OWN, 40000), LOCAL, tmp_path / "missing") is None
+
+
+@pytest.mark.skipif(not HAS_TCP_TABLE, reason="needs /proc/net/tcp")
+@pytest.mark.skipif(os.geteuid() == 0, reason="test process is the proxy uid")
+def test_tcp_socket_uid_does_not_report_a_disconnected_peer_as_root() -> None:
+    listener = socket.create_server(("127.0.0.1", 0))
+    client = socket.create_connection(listener.getsockname())
+    accepted, _ = listener.accept()
+    try:
+        peer = accepted.getpeername()[:2]
+        local = accepted.getsockname()[:2]
+        assert server_module.tcp_socket_uid(peer, local) == os.geteuid()
+        client.close()
+        deadline = time.monotonic() + 2
+        uid = os.geteuid()
+        while uid == os.geteuid() and time.monotonic() < deadline:
+            time.sleep(0.01)
+            uid = server_module.tcp_socket_uid(peer, local)
+        assert uid is None
+    finally:
+        client.close()
+        accepted.close()
+        listener.close()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="test process is the proxy uid")
+def test_forged_xff_from_a_local_non_root_process_is_ignored(serve_actions, fake_github) -> None:
+    for own in ("127.0.0.1", None):
+        client = serve_actions(clients=(LISTED,), own_address=own)
+        assert client.post("/api/signin", **{"X-Forwarded-For": LISTED})[0] == 404, own
+    assert fake_github.calls == []
+
+
+@pytest.mark.skipif(not HAS_TCP_TABLE, reason="needs /proc/net/tcp")
+def test_xff_from_the_proxy_socket_can_sign_in(serve_actions, fake_github, monkeypatch) -> None:
+    monkeypatch.setattr(server_module, "TAILSCALED_UID", os.geteuid())
+    client = serve_actions(clients=(LISTED,), own_address="127.0.0.1")
+    assert client.post("/api/signin")[0] == 404
+    status, body = client.post("/api/signin", **{"X-Forwarded-For": f"100.64.0.9, {LISTED}"})
+    assert status == 200
+    assert body["user_code"] == USER_CODE
+    assert client.post("/api/signin", **{"X-Forwarded-For": f"{LISTED}, 100.64.0.9"})[0] == 404
+
+
+@pytest.mark.skipif(not HAS_TCP_TABLE, reason="needs /proc/net/tcp")
+def test_xff_from_a_loopback_proxy_socket_can_sign_in(serve_actions, fake_github, monkeypatch) -> None:
+    monkeypatch.setattr(server_module, "TAILSCALED_UID", os.geteuid())
+    client = serve_actions(clients=(LISTED,), own_address=OWN)
+    assert client.post("/api/signin")[0] == 404
+    status, body = client.post("/api/signin", **{"X-Forwarded-For": LISTED})
+    assert status == 200
+    assert body["user_code"] == USER_CODE
+
+
+@pytest.mark.skipif(not HAS_TCP_TABLE, reason="needs /proc/net/tcp")
+def test_proxy_xff_does_not_skip_origin_checks(serve_actions, monkeypatch) -> None:
+    monkeypatch.setattr(server_module, "TAILSCALED_UID", os.geteuid())
+    client = serve_actions(clients=(LISTED,), own_address="127.0.0.1")
+    assert client.post(
+        "/api/signin",
+        **{"X-Forwarded-For": LISTED, "Origin": "http://evil.example"},
+    ) == (403, {"error": "origin"})
 
 
 @pytest.mark.parametrize(
@@ -966,6 +1099,7 @@ def test_load_config_turns_actions_on_only_with_a_client_id(site: Path) -> None:
         frozenset({server_module.ipaddress.IPv4Address("100.64.0.7"),
                    server_module.ipaddress.IPv4Address("100.64.0.8")}),
         "https://api.github.com", "https://github.com",
+        own_address="100.101.102.103",
     )
 
 

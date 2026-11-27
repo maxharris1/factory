@@ -47,7 +47,14 @@ GitHub actions (comments and the hold OK as the approver) are off unless
 DASHBOARD_GITHUB_CLIENT_ID is set. Then DASHBOARD_APPROVER (a GitHub login)
 and DASHBOARD_ACTION_CLIENTS (a comma list of tailnet IPv4 addresses, never
 this node's own) are required, the process must not run as a bot account,
-and POST is answered under /api only, to those clients only. Sign-in is
+and POST is answered under /api only, to those clients only. The last
+X-Forwarded-For hop is used as the client only when the TCP peer is this
+node's TAILNET_IP or loopback and the kernel's socket table (/proc/net/tcp) shows that
+peer socket established and owned by root, which is tailscaled (tailscale
+serve's backend). A closed non-root socket's leftover timewait row reports
+uid 0 and is not trusted.
+Bot accounts are not root, so their forged X-Forwarded-For is ignored;
+X-Forwarded-For from any other peer is ignored too. Sign-in is
 GitHub's OAuth device flow; the token stays in this process's memory and is
 never sent to a browser, written to disk or logged. Comments and OKs go
 only to tickets in the served status.json. With actions off, /api/* is 404
@@ -308,6 +315,7 @@ class ActionsConfig(NamedTuple):
     https: bool = False
     oauth_scope: str = "repo"
     require_auth_reads: bool = False
+    own_address: str | None = None
 
 
 def check_spool(value: str) -> Path:
@@ -426,7 +434,8 @@ def check_actions(
                          signin_relay=check_relay(relay) if relay else None,
                          https=https,
                          oauth_scope=oauth_scope,
-                         require_auth_reads=require_auth_reads)
+                         require_auth_reads=require_auth_reads,
+                         own_address=own_address)
 
 
 def current_user() -> str:
@@ -628,6 +637,50 @@ class GitHubClient:
     def post_comment(self, token: str, repo: str, number: int, body: str) -> dict:
         return self._call("POST", f"{self.config.api_base}/repos/{repo}/issues/{number}/comments",
                           token=token, payload={"body": body})
+
+
+TAILSCALED_UID = 0
+TCP_ESTABLISHED = "01"
+
+
+def tcp_socket_uid(
+    peer: tuple[str, int], local: tuple[str, int], table: Path = Path("/proc/net/tcp")
+) -> int | None:
+    """Owner uid of the peer's end of the established IPv4 TCP connection
+    peer <-> local, else None. A closed socket's timewait row is unowned and
+    reports uid 0, so only an ESTABLISHED row counts."""
+    def encode(ip: str, port: int) -> str:
+        return f"{int.from_bytes(ipaddress.IPv4Address(ip).packed, sys.byteorder):08X}:{port:04X}"
+
+    want = (encode(*peer), encode(*local))
+    try:
+        lines = table.read_text().splitlines()[1:]
+    except OSError:
+        return None
+    for line in lines:
+        cols = line.split()
+        if len(cols) > 7 and (cols[1], cols[2], cols[3]) == (*want, TCP_ESTABLISHED):
+            return int(cols[7])
+    return None
+
+
+def action_client(
+    peer: tuple[str, int], local: tuple[str, int], forwarded_for: str, own_address: str | None
+) -> str:
+    """IP used for DASHBOARD_ACTION_CLIENTS: the last X-Forwarded-For hop when
+    the peer is tailscaled on this node's TAILNET_IP or loopback, else the TCP
+    peer."""
+    hop = forwarded_for.rsplit(",", 1)[-1].strip()
+    try:
+        proxy = ipaddress.IPv4Address(peer[0])
+        ipaddress.IPv4Address(hop)
+    except ValueError:
+        return peer[0]
+    if peer[0] != own_address and not proxy.is_loopback:
+        return peer[0]
+    if tcp_socket_uid(peer, local) != TAILSCALED_UID:
+        return peer[0]
+    return hop
 
 
 class Actions:
@@ -1283,6 +1336,16 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         method = getattr(self, "command", None) or "-"
         sys.stderr.write(f"{method} {path or '-'} {status} {self.client_address[0]}\n")
 
+    def _action_client(self) -> str:
+        actions: Actions | None = self.server.actions  # type: ignore[attr-defined]
+        own = actions.config.own_address if actions is not None else None
+        return action_client(
+            self.client_address[:2],
+            self.connection.getsockname()[:2],
+            self.headers.get("X-Forwarded-For") or "",
+            own,
+        )
+
     def do_GET(self) -> None:
         if self._api_get():
             return
@@ -1297,7 +1360,7 @@ class SnapshotHandler(BaseHTTPRequestHandler):
             self.send_error(501, f"Unsupported method ({self.command!r})")
             return
         route = self.server.post_routes.get(urlsplit(self.path).path)  # type: ignore[attr-defined]
-        if route is None or not actions.allows(self.client_address[0]):
+        if route is None or not actions.allows(self._action_client()):
             self._json(404, {"error": "not-found"})
             return
         handler, needs_session = route
@@ -1316,7 +1379,7 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         if actions is None or not (path == "/api" or path.startswith("/api/")):
             return False
         relay: RelayDir | None = self.server.relay  # type: ignore[attr-defined]
-        if not actions.allows(self.client_address[0]):
+        if not actions.allows(self._action_client()):
             self._json(404, {"error": "not-found"})
         elif path == "/api/session":
             session = actions.current(self._cookie("factory_session"))
