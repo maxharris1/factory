@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import dashboard_cli, device_pool, feeder, linear_webhook
+from lib import dashboard_cli, device_pool, feeder, lane_limit, linear_webhook
 from lib.dashboard import _age, _read_db, collect_snapshot
 from tests.test_dashboard import NOW, add_job, add_ticket, seeded
 from tests.test_dashboard_accounts import world
@@ -401,3 +401,83 @@ def test_account_loads_read_placed_at_as_an_epoch_or_a_datetime_string(tmp_path:
     assert {account: at for account, (at, _rowid) in loads.last_placed_at.items()} == {
         "a": STAMP_EPOCH, "b": STAMP_EPOCH - 60,
     }
+
+
+LIMIT_UNTIL = 2140000000
+
+
+def _with_limit(db: Path, table: str, limited_at: object, until: object = LIMIT_UNTIL) -> None:
+    with sqlite3.connect(db) as connection:
+        if table == lane_limit.ACCOUNT_TABLE:
+            connection.execute(lane_limit.ACCOUNT_DDL)
+            connection.execute(
+                f"INSERT INTO {table} VALUES ('acct', 'codex', 'codex-bot', 'codex', ?, ?, 'stream', 'j')",
+                (limited_at, until),
+            )
+        else:
+            connection.execute(lane_limit.DDL)
+            connection.execute(
+                f"INSERT INTO {table} VALUES ('codex', 'codex', 'codex-bot', ?, ?, 'stream', 'j')",
+                (limited_at, until),
+            )
+
+
+@pytest.mark.parametrize("table", [lane_limit.ACCOUNT_TABLE, lane_limit.TABLE])
+def test_a_push_publishes_with_an_active_limit_limited_at_a_datetime_string(
+    tmp_path: Path, monkeypatch, table: str
+) -> None:
+    sent = {}
+    for limited_at in (STAMP_EPOCH, STAMP):
+        run = tmp_path / str(limited_at)
+        run.mkdir()
+        db, log = _cleffy_213(run)
+        _with_limit(db, table, limited_at)
+        code, capture = _push(run, db, log, monkeypatch)
+        assert code == 0
+        assert len(capture.sent) == 1
+        sent[limited_at] = sorted(path.name for path in capture.sent[0])
+    assert len(sent[STAMP]) == 14
+    assert sent[STAMP] == sent[STAMP_EPOCH]
+
+
+LIMIT_STAMPS = [
+    (STAMP_EPOCH, LIMIT_UNTIL),
+    (int(STAMP_EPOCH), str(LIMIT_UNTIL)),
+    (STAMP, LIMIT_UNTIL),
+    (STAMP, "2037-10-24 12:26:40"),
+]
+
+
+@pytest.mark.parametrize(("limited_at", "until"), LIMIT_STAMPS)
+def test_account_limits_read_limited_at_and_until_as_an_epoch_or_a_datetime_string(
+    tmp_path: Path, limited_at: object, until: object
+) -> None:
+    db, _log = seeded(tmp_path)
+    _with_limit(db, lane_limit.ACCOUNT_TABLE, limited_at, until)
+    with sqlite3.connect(db) as connection:
+        limits = lane_limit.account_limits(connection, STAMP_EPOCH + 60)
+    assert {account: (limit.limited_at, limit.until) for account, limit in limits.items()} == {
+        "acct": (STAMP_EPOCH, LIMIT_UNTIL),
+    }
+
+
+@pytest.mark.parametrize(("limited_at", "until"), LIMIT_STAMPS)
+def test_legacy_lane_limits_read_limited_at_and_until_as_an_epoch_or_a_datetime_string(
+    tmp_path: Path, limited_at: object, until: object
+) -> None:
+    db, _log = seeded(tmp_path)
+    _with_limit(db, lane_limit.TABLE, limited_at, until)
+    with sqlite3.connect(db) as connection:
+        limits = lane_limit.all_active(connection, STAMP_EPOCH + 60)
+    assert [(limit.recipient, limit.limited_at, limit.until) for limit in limits] == [
+        ("codex", STAMP_EPOCH, LIMIT_UNTIL),
+    ]
+
+
+@pytest.mark.parametrize("table", [lane_limit.ACCOUNT_TABLE, lane_limit.TABLE])
+def test_a_limit_that_lifted_at_a_datetime_string_no_longer_holds(tmp_path: Path, table: str) -> None:
+    db, _log = seeded(tmp_path)
+    _with_limit(db, table, STAMP_EPOCH - 3600, "2026-11-26 22:00:00")
+    with sqlite3.connect(db) as connection:
+        assert lane_limit.account_limits(connection, STAMP_EPOCH) == {}
+        assert lane_limit.all_active(connection, STAMP_EPOCH) == []

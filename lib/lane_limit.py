@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from lib import harnesses, usage_readings
+from lib import epoch, harnesses, usage_readings
 
 TABLE = "lane_limits"
 DEFAULT_LIMIT_SECONDS = 3600
@@ -172,9 +172,9 @@ def error_text(harness: str, event: dict) -> str | None:
 
 
 def _parse_reset(text: str, now: float) -> int | None:
-    epoch = _EPOCH.search(text)
-    if epoch is not None:
-        return usage_readings.reset_time(int(epoch.group(1)), now)
+    stamped = _EPOCH.search(text)
+    if stamped is not None:
+        return usage_readings.reset_time(int(stamped.group(1)), now)
     local = datetime.fromtimestamp(now).astimezone()
     match = _TRY_AGAIN.search(text)
     if match is not None:
@@ -341,15 +341,10 @@ def active(connection: sqlite3.Connection, recipient: str, now: float) -> LaneLi
     if not _has_table(connection, TABLE):
         return None
     row = connection.execute(
-        f"""
-        SELECT recipient, harness, bot, limited_at, until, source FROM {TABLE}
-        WHERE recipient = ? AND until > ?
-        """,
-        (recipient, now),
+        f"SELECT recipient, harness, bot, limited_at, until, source, NULL FROM {TABLE} WHERE recipient = ?",
+        (recipient,),
     ).fetchone()
-    if row is None:
-        return None
-    return LaneLimit(str(row[0]), str(row[1]), str(row[2]), float(row[3]), int(row[4]), str(row[5]))
+    return None if row is None else _holding(row, now)
 
 
 def all_active(connection: sqlite3.Connection, now: float) -> list[LaneLimit]:
@@ -364,18 +359,19 @@ def account_limits(connection: sqlite3.Connection, now: float) -> dict[str, Lane
     if not _has_table(connection, ACCOUNT_TABLE):
         return {}
     rows = connection.execute(
-        f"""
-        SELECT recipient, harness, bot, limited_at, until, source, account
-        FROM {ACCOUNT_TABLE} WHERE until > ? ORDER BY account
-        """,
-        (now,),
-    ).fetchall()
-    return {
-        str(row[6]): LaneLimit(
-            str(row[0]), str(row[1]), str(row[2]), float(row[3]), int(row[4]), str(row[5]), str(row[6])
-        )
-        for row in rows
-    }
+        f"SELECT recipient, harness, bot, limited_at, until, source, account FROM {ACCOUNT_TABLE} ORDER BY account"
+    )
+    return {limit.account: limit for limit in (_holding(row, now) for row in rows) if limit is not None}
+
+
+def _holding(row: tuple, now: float) -> LaneLimit | None:
+    until = epoch.read(row[4])
+    if until <= now:
+        return None
+    return LaneLimit(
+        str(row[0]), str(row[1]), str(row[2]), epoch.read(row[3]), int(until), str(row[5]),
+        None if row[6] is None else str(row[6]),
+    )
 
 
 def recipient_paused(
