@@ -437,17 +437,17 @@ def _main_children(html: str) -> list:
     return children
 
 
-def test_system_page_draws_devices_headroom_accounts_and_routing_after_the_log(tmp_path: Path) -> None:
+def test_system_page_draws_devices_accounts_and_routing_after_the_log(tmp_path: Path) -> None:
     html = _pages(tmp_path)["health.html"]
     assert _main_children(html) == [
         "broken", "components", "versions", ("sys-row", ["health", "log"]), "settings",
-        ("ef-row", ["headroom"]), "accounts", "routing", "rules", "waiters",
+        "accounts", "routing", "rules", "waiters",
     ]
     ids = re.findall(r'\bid="([^"]+)"', _no_script(html))
     assert len(ids) == len(set(ids)), sorted(i for i in ids if ids.count(i) > 1)
 
 
-def test_efficiency_page_puts_evals_beside_cost_and_balance_on_its_own_row(tmp_path: Path) -> None:
+def test_efficiency_page_puts_headroom_first_then_balance_then_evals_beside_cost(tmp_path: Path) -> None:
     pages = _pages(tmp_path)
     page = _no_script(pages["efficiency.html"])
     hud = _section(page, "hud")
@@ -455,10 +455,11 @@ def test_efficiency_page_puts_evals_beside_cost_and_balance_on_its_own_row(tmp_p
     assert evals == _section(pages["evals.html"], "evals")
     wrapper = '<div style="display:grid;flex:3 1 560px;min-width:0">'
     top = f'<div class="ef-row">{wrapper}{evals}</div>{_section(page, "tokens")}</div>'
-    assert hud.find(top) == hud.index('<div class="ef-row">')
+    assert top in hud
     assert re.findall(r"<[^>]*\bstyle=[^>]*>", top) == [wrapper]
     assert _main_children(page) == [
-        ("ef-row", ["tokens"]), ("ef-row", ["rounds", "savings"]), ("ef-row", ["balance"]), "jobs-lifetime",
+        ("ef-row", ["headroom"]), ("ef-row", ["balance"]), ("ef-row", ["tokens"]),
+        ("ef-row", ["rounds", "savings"]), "jobs-lifetime",
     ]
 
 

@@ -1175,13 +1175,13 @@ def test_a_redraw_never_takes_focus(tmp_path: Path) -> None:
     ("ticket.html", REVIEW_HASH, {"cls": "jd-box", "has": "jd-flowmap"}, "left"),
     ("health.html", "", {"in": "log", "cls": "sys-log"}, "top"),
     ("health.html", "", {"in": "components", "cls": "sys-scroll"}, "left"),
-    ("health.html", "", {"in": "headroom", "cls": "ef-scroll"}, "left"),
+    ("efficiency.html", "", {"in": "headroom", "cls": "ef-scroll"}, "left"),
 ], ids=["journey", "state-chart", "poller-log", "components", "headroom"])
 def test_a_scroll_box_keeps_its_offset_across_two_snapshots(
     tmp_path: Path, page_name: str, hash_: str, box: dict, axis: str
 ) -> None:
-    snapshot = system._snapshot(tmp_path / "db") if page_name == "health.html" else _job(tmp_path)
-    ids = _ids(page_name) + {"health.html": ["components", "log", "headroom"]}.get(page_name, [])
+    snapshot = _job(tmp_path) if page_name == "ticket.html" else system._snapshot(tmp_path / "db")
+    ids = _ids(page_name) + {"health.html": ["components", "log"], "efficiency.html": ["headroom"]}.get(page_name, [])
     steps = _place(tmp_path, snapshot, page_name, ids,
                    [["put", {**box, axis: 137}], ["poll", _next(snapshot)], ["where", None],
                     ["poll", _next(_next(snapshot))], ["where", None]], hash_=hash_)

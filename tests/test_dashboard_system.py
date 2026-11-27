@@ -754,14 +754,14 @@ def test_moved_panels_left_their_old_pages(tmp_path: Path) -> None:
     assert 'id="health"' not in pages["efficiency.html"]
     assert 'id="log"' not in pages["activity.html"]
     assert "renderHealth, renderLog" in script
-    assert re.search(r"efficiency: \[renderEvals, renderTokens, renderRounds, renderSavings, renderBalance, "
-                     r"renderJobsLifetime\]", script)
+    assert re.search(r"efficiency: \[renderHeadroom, renderBalance, renderEvals, renderTokens, renderRounds, "
+                     r"renderSavings, renderJobsLifetime\]", script)
     assert re.search(r"health: \[renderBroken, renderComponents, renderDrift, renderHealth, renderLog, renderSettings, "
-                     r"renderHeadroom, renderAccounts, renderRouting, renderRules, renderNoWaiter\]", script)
+                     r"renderAccounts, renderRouting, renderRules, renderNoWaiter\]", script)
     assert re.search(r"evals: \[renderEvals\],\n", script)
     assert re.search(r"settings: \[renderSettings, renderAccounts\]\n", script)
     assert [name for name, html in pages.items() if 'id="routing"' in html] == ["health.html"]
-    assert [name for name, html in pages.items() if 'id="headroom"' in html] == ["health.html"]
+    assert [name for name, html in pages.items() if 'id="headroom"' in html] == ["efficiency.html"]
     assert [name for name, html in pages.items() if 'id="balance"' in html] == ["efficiency.html"]
 
 
