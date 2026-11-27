@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from itertools import groupby
 from typing import Literal
 
+from lib import job_detail
 from lib.dispatch.constants import REVISE_ROUND_STATES
 from lib.dispatch.decisions import Decision, chosen_words
 from lib.dispatch.qa import QaFix, failed_column
@@ -183,11 +184,11 @@ def _stopped_rule(wake: str) -> str:
 
 def _repeat_finding(connection: sqlite3.Connection, ticket: TrackedTicket, verdict_id: str) -> frozenset[str]:
     wake = connection.execute(
-        "SELECT detail FROM jobs WHERE dedupe_key = ?",
+        "SELECT id, detail FROM jobs WHERE dedupe_key = ?",
         (f"t3-repeat:{_scope(ticket.repo, ticket.ticket_id)}:{verdict_id}",),
     ).fetchone()
     if wake is not None:
-        return frozenset({_stopped_rule(str(wake["detail"]))})
+        return frozenset({_stopped_rule(str(job_detail.load_row(connection, wake["id"], wake["detail"])))})
     ruled = connection.execute(
         """
         SELECT finding_ids FROM engine_decisions

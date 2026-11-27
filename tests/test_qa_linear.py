@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from lib import cli
+from lib import cli, job_detail
 from lib.linear_upload import FakeLinear, HttpLinear
 from lib.orch_yml import LinearConfig, OrchConfig, Project
 from lib.poll_source import HTTPResult
@@ -224,3 +225,30 @@ def test_the_worker_holds_the_linear_key_only_when_it_is_set(
 
     assert isinstance(worker.linear, HttpLinear)
     assert "lin_api_SECRET" not in repr(worker)
+
+
+def test_a_run_whose_job_detail_spilled_cold_still_posts(tmp_path: Path) -> None:
+    lab, linear, run_id = linear_lab(tmp_path)
+    with lab.run.queue.connect() as connection:
+        row = connection.execute("SELECT id, detail FROM jobs WHERE action = 'qa'").fetchone()
+        detail = json.loads(row["detail"])
+        detail["live"][0]["steps"] = [*detail["live"][0]["steps"], "x" * 1100]
+        connection.execute("UPDATE jobs SET detail = ? WHERE id = ?", (json.dumps(detail), row["id"]))
+    lab.tick(4)
+    report(lab, run_id)
+    assert ledger(lab, run_id) == [("pending", None, None)]
+    with lab.run.queue.connect() as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO ticket_state (repo, ticket_id, workflow_state) VALUES (?, ?, 'merged')",
+            (REPO.lower(), TICKET),
+        )
+    connection = sqlite3.connect(lab.run.queue.path, isolation_level=None)
+    try:
+        assert job_detail.spill_cold(connection) == 1
+    finally:
+        connection.close()
+
+    lab.tick()
+
+    assert f"\nQA run {run_id}\n" in only_body(linear)
+    assert ledger(lab, run_id) == [("posted", None, "comment-1")]

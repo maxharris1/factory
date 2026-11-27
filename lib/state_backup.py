@@ -288,6 +288,44 @@ def _job_detail_files(db: Path) -> dict[str, str]:
     }
 
 
+def merge_job_detail(source: Path, target: Path) -> None:
+    """Copy the job-detail files in source into target.
+
+    A file already in target may differ from source's copy only by lacking
+    keys; any other difference raises BackupError before anything is copied.
+    """
+    if not source.is_dir():
+        return
+    staged = sorted(source.glob("*.json"))
+    conflicts = [path.name for path in staged if not _only_adds_keys(path, target / path.name)]
+    if conflicts:
+        raise BackupError(
+            f"{len(conflicts)} job-detail files in {target} differ from the export's copy "
+            f"by more than added keys (first: {', '.join(conflicts[:3])})"
+        )
+    target.mkdir(parents=True, exist_ok=True)
+    for path in staged:
+        placed = target / path.name
+        temporary = placed.with_name(f".{placed.name}.{os.getpid()}.tmp")
+        try:
+            temporary.write_bytes(path.read_bytes())
+            os.replace(temporary, placed)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def _only_adds_keys(staged: Path, placed: Path) -> bool:
+    if not placed.exists():
+        return True
+    old, new = placed.read_bytes(), staged.read_bytes()
+    if old == new:
+        return True
+    old_data, new_data = job_detail.as_object(old.decode(errors="replace")), job_detail.as_object(new.decode(errors="replace"))
+    if old_data is None or new_data is None:
+        return False
+    return all(key in new_data and new_data[key] == value for key, value in old_data.items())
+
+
 def _refuse_spilled_without_file(db: Path) -> None:
     connection = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True)
     try:

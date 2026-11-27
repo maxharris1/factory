@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from lib import job_detail
 from lib.approver_commands import SlashQa
 from lib.dispatch.constants import ORCHESTRATOR
 from lib.dispatch.helpers import _comment_link, _scope
@@ -605,7 +606,7 @@ class QaMixin:
             last = connection.execute(
                 """
                 SELECT qa_runs.run_id, qa_runs.patch_id, qa_runs.round, qa_runs.attempt,
-                       qa_runs.scope, qa_runs.runner, jobs.detail
+                       qa_runs.scope, qa_runs.runner, jobs.id AS job_id, jobs.detail
                 FROM qa_runs JOIN jobs ON jobs.id = qa_runs.job_id
                 WHERE qa_runs.repo = ? AND qa_runs.ticket_id = ? AND qa_runs.head = ?
                   AND qa_runs.arm = 'primary'
@@ -613,7 +614,7 @@ class QaMixin:
                 """,
                 (*key, head),
             ).fetchone()
-            detail = json.loads(last["detail"])
+            detail = json.loads(job_detail.load_row(connection, last["job_id"], last["detail"]))
             scenarios = tuple(detail.get("scenarios") or ())
             live = LiveScenarios(
                 scenarios=tuple(
@@ -668,7 +669,7 @@ class QaMixin:
         last = connection.execute(
             """
             SELECT qa_runs.run_id, qa_runs.patch_id, qa_runs.round, qa_runs.attempt,
-                   qa_runs.scope, qa_runs.runner, jobs.detail
+                   qa_runs.scope, qa_runs.runner, jobs.id AS job_id, jobs.detail
             FROM qa_runs JOIN jobs ON jobs.id = qa_runs.job_id
             WHERE qa_runs.repo = ? AND qa_runs.ticket_id = ? AND qa_runs.head = ?
               AND qa_runs.arm = 'primary'
@@ -690,7 +691,7 @@ class QaMixin:
         )
         if last is None:
             return
-        detail = json.loads(last["detail"])
+        detail = json.loads(job_detail.load_row(connection, last["job_id"], last["detail"]))
         scenarios = tuple(detail.get("scenarios") or ())
         live = LiveScenarios(
             scenarios=tuple(
@@ -750,7 +751,7 @@ class QaMixin:
         last = connection.execute(
             """
             SELECT qa_runs.run_id, qa_runs.head, qa_runs.patch_id, qa_runs.round,
-                   qa_runs.attempt, qa_runs.scope, qa_runs.runner, jobs.detail
+                   qa_runs.attempt, qa_runs.scope, qa_runs.runner, jobs.id AS job_id, jobs.detail
             FROM qa_runs JOIN jobs ON jobs.id = qa_runs.job_id
             WHERE qa_runs.repo = ? AND qa_runs.ticket_id = ? AND qa_runs.arm = 'primary'
             ORDER BY CASE WHEN qa_runs.head = ? THEN 0 ELSE 1 END, qa_runs.rowid DESC
@@ -772,7 +773,7 @@ class QaMixin:
             (*key, head),
         )
         if last is not None:
-            detail = json.loads(last["detail"])
+            detail = json.loads(job_detail.load_row(connection, last["job_id"], last["detail"]))
             scenarios = tuple(detail.get("scenarios") or ())
             live: LiveScenarios | None = LiveScenarios(
                 scenarios=tuple(

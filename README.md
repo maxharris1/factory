@@ -1437,7 +1437,9 @@ exists, so `import` places `orch.db` at the `ORCH_DB` that
 places nothing and starts nothing. Otherwise it adds `machines.<dest>.yml`,
 this host's `machines.yml`, so both hosts' `machines.yml` sit beside the
 snapshot. It merges `job-detail/` into the one beside `orch.db`, and refuses,
-placing nothing, when a file of the same name there differs. Then it places
+placing nothing, when a file of the same name there differs from the export's
+copy by more than keys the export's copy adds (`spill_cold` grows a finished
+job's file by adding keys, so a rollback carries the grown file). Then it places
 `orch.db` with `cp` and `mv`. It never uses `orch restore-db`, which would
 cancel the queued jobs. It removes this host's `orch-retired`, then starts
 `poller-service.sh` first, then the waiter of each bot with

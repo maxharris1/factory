@@ -22,6 +22,7 @@ from lib.qa_evidence import (
     visual_evidence_files,
 )
 from lib.update_check import HeadDiff, merge_update
+from tests.test_cold_spill import spill_while_abandoned
 from tests.qa_support import (
     HEAD_A,
     HEAD_B,
@@ -644,3 +645,25 @@ def test_rerun_qa_keeps_visual_hold_and_never_merges_without_ok(tmp_path: Path) 
     assert run.actions.merges == []
     assert run.rows("SELECT workflow_state FROM ticket_state") == [("awaiting-ok",)]
     assert run.rows("SELECT reasons FROM ship_holds") == [(VISUAL_QA_REASON,)]
+
+
+def test_rerun_qa_carries_the_live_scenarios_of_a_spilled_run(tmp_path: Path) -> None:
+    from tests.test_dashboard_cockpit import _body
+
+    run = _setup_approved(tmp_path, ship="merge", gate="observe", hold=None)
+    _record_primary_evidence(run, HEAD_A, _make_evidence(tmp_path / "ev_rerun", "lane-1/qa-1/home.png"))
+    run.post("q1", qa_report(HEAD_A, "PASS", body=EVIDENCED))
+    run.poll(4)
+    [(job_id,)] = run.rows("SELECT job_id FROM qa_runs")
+    with run.queue.connect() as connection:
+        [(detail,)] = connection.execute("SELECT detail FROM jobs WHERE id = ?", (job_id,)).fetchall()
+        detail = json.loads(detail)
+        detail["live"][0]["steps"] = [*detail["live"][0]["steps"], "x" * 1100]
+        connection.execute("UPDATE jobs SET detail = ? WHERE id = ?", (json.dumps(detail), job_id))
+    spill_while_abandoned(run.queue, job_id)
+
+    run.post("rr-1", _body("rerun-qa", "Re-check the drawer.", head=HEAD_A))
+    run.poll()
+
+    [rerun] = [job for job in run.queue.outstanding() if job.request.action == "qa"]
+    assert json.loads(rerun.request.detail)["live"] == detail["live"]
