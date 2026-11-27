@@ -782,10 +782,18 @@ def read_log_tail(path: Path, *, lines: int = LOG_TAIL_LINES) -> list[str]:
     return result
 
 
-def _age(now: float, then: float | None) -> int | None:
+def _epoch(value: float | str) -> float:
+    try:
+        return float(value)
+    except ValueError:
+        moment = datetime.fromisoformat(str(value))
+    return (moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)).timestamp()
+
+
+def _age(now: float, then: float | str | None) -> int | None:
     if then is None:
         return None
-    return int(max(0.0, now - float(then)))
+    return int(max(0.0, now - _epoch(then)))
 
 
 def _tables(connection: sqlite3.Connection) -> set[str]:
@@ -1177,7 +1185,7 @@ def _ci_pool(connection: sqlite3.Connection, now: float) -> dict:
     rows = connection.execute("SELECT * FROM ci_runners ORDER BY repo, name").fetchall()
     if not rows:
         return {"state": "unread", "age_seconds": None, "runners": []}
-    age = _age(now, min(float(row["seen_at"]) for row in rows))
+    age = _age(now, min(_epoch(row["seen_at"]) for row in rows))
     return {
         "state": "live" if age is not None and age <= CI_POOL_STALE_SECONDS else "stale",
         "age_seconds": age,
@@ -1348,7 +1356,7 @@ def _qa(
                 "lanes": len({lane["slice"] for lane in found}),
                 "passed": passed,
                 "total": total,
-                "elapsed_seconds": _age(float(row["finished_at"]) if reported else now, row["started_at"]),
+                "elapsed_seconds": _age(_epoch(row["finished_at"]) if reported else now, row["started_at"]),
                 "run": [run_id[:16], run_id[16:]] if _QA_RUN_ID.fullmatch(run_id) else None,
             })
     open_lanes = dict(connection.execute(
@@ -1826,7 +1834,7 @@ def _relay(
             key = (str(repo).casefold(), str(ticket_id))
             stored.setdefault(key, (str(repo), str(ticket_id)))
             if at is not None:
-                moved[key] = max(moved.get(key, float(at)), float(at))
+                moved[key] = max(moved.get(key, _epoch(at)), _epoch(at))
 
     def newest(key: tuple[str, str]) -> tuple:
         return key not in moved, -moved.get(key, 0.0), key
@@ -1978,7 +1986,7 @@ def _read_db(
             held[str(row["device"])] = held.get(str(row["device"]), 0) + 1
             placements[str(row["job_id"])] = (
                 str(row["device"]),
-                float(row["placed_at"]) if row["placed_at"] is not None else None,
+                _epoch(row["placed_at"]) if row["placed_at"] is not None else None,
             )
 
     slots = read_placements(connection) if "device_slots" in tables else {}
@@ -2029,7 +2037,7 @@ def _read_db(
                 facts = liveness(slot, alive)
                 job_state = _enum(
                     derive(
-                        last_activity_at=float(row["last_activity_at"]),
+                        last_activity_at=_epoch(row["last_activity_at"]),
                         now=now,
                         placement=slot,
                         stale_seconds=job_states.stale_seconds,
@@ -2044,7 +2052,7 @@ def _read_db(
                     "stale_cause": cause,
                     "round": _detail_round(row["detail"]),
                     "heartbeat_age_seconds": age,
-                    "heartbeat_at": float(row["last_activity_at"]),
+                    "heartbeat_at": _epoch(row["last_activity_at"]),
                     "timeout_seconds": timeout,
                     "overdue": age > timeout,
                     "device": device,
@@ -2628,7 +2636,7 @@ def _ticket_flows(
                 histories[key].append(JobStep(
                     _enum(row["action"], ACTIONS),
                     _enum(row["recipient"], RECIPIENTS),
-                    float(row["created_at"]),
+                    _epoch(row["created_at"]),
                     _telemetry_time(row["started_at"]),
                     _telemetry_time(row["finished_at"]),
                     int(row["attempt"]),
