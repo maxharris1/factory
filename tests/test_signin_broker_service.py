@@ -33,6 +33,7 @@ with open(Path(os.environ["HOME"]) / "broker-starts", "a") as starts:
     starts.write(json.dumps([os.getpid(), args]) + "\\n")
 assert args == ["accounts", "signin-broker", "--state", os.environ["ORCH_STATE_DIR"]], args
 if os.environ.get("FAKE_BROKER_FAIL"):
+    time.sleep(0.5)
     raise SystemExit(1)
 if os.environ.get("FAKE_BROKER_IGNORE_TERM"):
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
