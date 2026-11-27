@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
-from lib import attention, exposure, job_detail, job_token, lane_limit
+from lib import attention, exposure, job_detail, job_times, job_token, lane_limit
 from lib.state_backup import (
     RESTORED,
     RESTORED_CLAIM,
@@ -855,6 +855,7 @@ class SQLiteJobQueue:
                 )
                 if "claim_token_hash" not in _columns(connection, "jobs"):
                     connection.execute("ALTER TABLE jobs ADD COLUMN claim_token_hash TEXT")
+                job_times.install(connection)
                 connection.execute(
                     "CREATE INDEX IF NOT EXISTS idx_jobs_state_recipient ON jobs(state, recipient)"
                 )
