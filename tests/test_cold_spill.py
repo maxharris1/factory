@@ -278,3 +278,23 @@ def test_the_survey_names_the_large_key_and_writes_nothing(tmp_path: Path) -> No
         assert job_detail.survey(connection).movable_bytes == 0
     finally:
         connection.close()
+
+
+def spill_while_abandoned(queue: SQLiteJobQueue, job_id: str) -> None:
+    with queue.connect() as connection:
+        repo, ticket_id = connection.execute("SELECT lower(repo), ticket_id FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        connection.execute("UPDATE jobs SET state = 'done' WHERE id = ? AND state != 'cancelled'", (job_id,))
+        [(state,)] = connection.execute(
+            "SELECT workflow_state FROM ticket_state WHERE repo = ? AND ticket_id = ?", (repo, ticket_id)
+        ).fetchall()
+        connection.execute(
+            "UPDATE ticket_state SET workflow_state = 'abandoned' WHERE repo = ? AND ticket_id = ?", (repo, ticket_id)
+        )
+    connection = _connect(queue.path)
+    try:
+        job_detail.spill_cold(connection)
+        connection.execute("UPDATE ticket_state SET workflow_state = ? WHERE repo = ? AND ticket_id = ?", (state, repo, ticket_id))
+        [(detail,)] = connection.execute("SELECT detail FROM jobs WHERE id = ?", (job_id,)).fetchall()
+    finally:
+        connection.close()
+    assert set(json.loads(detail)[job_detail.MARKER]) - set(job_detail.SPILLED)

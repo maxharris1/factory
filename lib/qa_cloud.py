@@ -21,7 +21,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Literal, get_args
 
-from lib import lane_limit
+from lib import job_detail, lane_limit
 from lib.brief.qa import AFTER_SCREENSHOT, PASS_OUTPUT, LaneFacts, Scenario, pack_ids, render_qa_brief
 from lib.dispatch.constants import ORCHESTRATOR
 from lib.dispatch.qa import record_runner_moved, record_stale
@@ -801,7 +801,7 @@ class QaWorker:
         with self.queue.connect() as connection:
             pending = connection.execute(
                 """
-                SELECT l.run_id, l.repo, l.ticket_id, r.state, r.result, r.comment_id, j.detail
+                SELECT l.run_id, l.repo, l.ticket_id, r.state, r.result, r.comment_id, j.id AS job_id, j.detail
                 FROM qa_linear l JOIN qa_runs r ON r.run_id = l.run_id JOIN jobs j ON j.id = r.job_id
                 WHERE l.state = 'pending' ORDER BY l.updated_at, l.run_id
                 """
@@ -835,7 +835,8 @@ class QaWorker:
         issue = self.linear.issue_id(ticket)
         comment_id = self.linear.find_comment(issue, f"QA run {run_id}")
         if comment_id is None:
-            detail = Detail.of(json.loads(row["detail"]))
+            with self.queue.connect() as connection:
+                detail = Detail.of(json.loads(job_detail.load_row(connection, row["job_id"], row["detail"])))
             rows = self._lanes(run_id)
             root = self.evidence[repo.lower()].evidence_root.resolve()
             chosen = subset(

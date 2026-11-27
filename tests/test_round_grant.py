@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from lib.dispatch.verdict.repeat import StopRecord
 from lib.rule_engine import Grant, Ruling, finding_id, go_header
 from tests.qa_support import Harness
 from tests.test_approver_credential import MAX, AppFlow
+from tests.test_cold_spill import spill_while_abandoned
 from tests.test_dispatcher import job_count
 from tests.test_repeat import capped_stop, decisions, repeat_stop
 from tests.test_qa_gate_table import blocking
@@ -93,6 +95,19 @@ def test_stop_history_reads_a_repeat_stops_finding_from_its_wake(tmp_path: Path)
     assert flow.dispatcher._stop_history(flow.snapshot()) == (
         StopRecord("revise-2", "repeat", frozenset({"f-1"}), "approver"),
     )
+
+
+def test_a_disputed_repeat_stop_reads_its_finding_from_a_spilled_wake(tmp_path: Path) -> None:
+    flow = repeat_stop(tmp_path)
+    assert flow.post("go-max", "/go", MAX) == "resumed-fix"
+    with flow.queue.connect() as connection:
+        wake = connection.execute("SELECT id, detail FROM jobs WHERE dedupe_key LIKE 't3-repeat:%'").fetchone()
+        detail = json.loads(wake["detail"])
+        detail["detail"] += ", " + "x" * 1100
+        connection.execute("UPDATE jobs SET detail = ? WHERE id = ?", (json.dumps(detail), wake["id"]))
+    spill_while_abandoned(flow.queue, wake["id"])
+
+    assert flow.dispatcher._stop_disputed(flow.snapshot(), verdict(flow, "revise-2"), "repeat") == frozenset({"f-1"})
 
 
 def test_stop_history_counts_an_engine_grant_with_no_grok_job(tmp_path: Path) -> None:
