@@ -136,8 +136,8 @@ def _with(base: dict, matrix: dict) -> dict:
 
 def _panel(tmp_path: Path, snapshot: dict, render: str) -> str:
     if render == "server":
-        return _inner(render_pages(snapshot)["efficiency.html"], "routing")
-    return _run_page(tmp_path, snapshot, "efficiency", ["routing"])["html"]["routing"]
+        return _inner(render_pages(snapshot)["health.html"], "routing")
+    return _run_page(tmp_path, snapshot, "health", ["routing"])["html"]["routing"]
 
 
 def _role(panel: str, role: str) -> str:
@@ -213,5 +213,5 @@ def test_panel_lists_the_errors_of_a_broken_file_escaped(tmp_path: Path, base: d
 
 def test_panel_holds_no_control(tmp_path: Path, base: dict) -> None:
     for matrix in (_matrix(tmp_path), role_matrix(tmp_path / "absent.yml")):
-        panel = _inner(render_pages(_with(base, matrix))["efficiency.html"], "routing")
+        panel = _inner(render_pages(_with(base, matrix))["health.html"], "routing")
         assert not re.search(r"<(form|button|input|select|textarea)\b", panel)

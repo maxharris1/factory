@@ -86,7 +86,7 @@ def test_no_audit_log_is_no_results(tmp_path: Path) -> None:
 
 
 def test_each_card_shows_its_device(tmp_path: Path) -> None:
-    page = _section(_no_script(render_pages(_snapshot(tmp_path))["settings.html"]), "settings")
+    page = _section(_no_script(render_pages(_snapshot(tmp_path))["health.html"]), "settings")
     assert "3 devices" in page
     expect = {
         "box": {"enabled": "yes", "slot_max": "3", "harnesses": "claude, codex", "slots": "3 of 3 held",
@@ -120,12 +120,12 @@ def _settings_row(db: Path, machines: Path, *, adopt: bool, seen: dict[str, int]
 def test_a_drained_device_reads_drained(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path)
     snapshot["slots"]["devices"][0]["held"] = 0
-    page = render_pages(snapshot)["settings.html"]
+    page = render_pages(snapshot)["health.html"]
     assert _facts(_card(page, "box"))["drain"] == "drained"
 
 
 def test_each_result_sits_on_its_own_card(tmp_path: Path) -> None:
-    page = _section(_no_script(render_pages(_snapshot(tmp_path))["settings.html"]), "settings")
+    page = _section(_no_script(render_pages(_snapshot(tmp_path))["health.html"]), "settings")
     mac = _card(page, "mac")
     assert '<span class="chip warn">refused</span>' in mac
     assert '<span class="st-err">expect does not match</span>' in mac
@@ -139,7 +139,7 @@ PENDING = {**AUDIT[0], "id": "d" * 16, "result": "pending", "pending": ["waiter-
 
 
 def test_a_pending_result_names_the_waiter_left_to_restart(tmp_path: Path) -> None:
-    page = _section(_no_script(render_pages(_snapshot(tmp_path, [PENDING]))["settings.html"]), "settings")
+    page = _section(_no_script(render_pages(_snapshot(tmp_path, [PENDING]))["health.html"]), "settings")
     pc = _card(page, "pc")
     assert '<span class="chip warn">pending</span>' in pc
     assert '<span class="st-err">restart pending: waiter-codex-bot</span>' in pc
@@ -154,7 +154,7 @@ def test_a_versioned_change_is_pending_until_the_poller_adopts_it(tmp_path: Path
     old, versioned = snapshot["settings"]["results"]
     assert (old["result"], "waiting" in old) == ("applied", False), "a line with no version keeps its result"
     assert (versioned["result"], versioned["waiting"]) == ("pending", True)
-    pc = _card(_section(_no_script(render_pages(snapshot)["settings.html"]), "settings"), "pc")
+    pc = _card(_section(_no_script(render_pages(snapshot)["health.html"]), "settings"), "pc")
     assert '<span class="chip warn">pending</span>' in pc
     assert "<span class=\"st-err\">waiting for the poller&#x27;s next cycle</span>" in pc
 
@@ -163,7 +163,7 @@ def test_a_versioned_change_is_applied_once_the_poller_adopts_it(tmp_path: Path)
     snapshot = _snapshot(tmp_path, [VERSIONED], "adopted")
     (versioned,) = snapshot["settings"]["results"]
     assert (versioned["result"], versioned["waiting"]) == ("applied", False)
-    pc = _card(_section(_no_script(render_pages(snapshot)["settings.html"]), "settings"), "pc")
+    pc = _card(_section(_no_script(render_pages(snapshot)["health.html"]), "settings"), "pc")
     assert '<span class="chip ok">applied</span>' in pc
     assert "waiting" not in pc and "pending" not in pc
 
@@ -179,7 +179,7 @@ def test_a_pending_change_stays_pending_once_the_poller_adopts_it(tmp_path: Path
     snapshot = _snapshot(tmp_path, [{**PENDING, "version": 1}], "adopted")
     (row,) = snapshot["settings"]["results"]
     assert (row["result"], row.get("waiting")) == ("pending", None)
-    pc = _card(_section(_no_script(render_pages(snapshot)["settings.html"]), "settings"), "pc")
+    pc = _card(_section(_no_script(render_pages(snapshot)["health.html"]), "settings"), "pc")
     assert '<span class="chip warn">pending</span>' in pc
     assert '<span class="st-err">restart pending: waiter-codex-bot</span>' in pc
 
@@ -189,7 +189,7 @@ def test_a_pending_change_is_applied_once_the_waiter_places_by_it(tmp_path: Path
     snapshot = _snapshot(tmp_path, [{**PENDING, "version": 1}], "adopted", seen)
     (row,) = snapshot["settings"]["results"]
     assert row["result"] == "applied"
-    pc = _card(_section(_no_script(render_pages(snapshot)["settings.html"]), "settings"), "pc")
+    pc = _card(_section(_no_script(render_pages(snapshot)["health.html"]), "settings"), "pc")
     assert '<span class="chip ok">applied</span>' in pc
     assert "pending" not in pc
 
@@ -229,7 +229,7 @@ def test_every_page_links_settings(tmp_path: Path) -> None:
 def test_no_credential_reaches_the_page_or_status_json(tmp_path: Path) -> None:
     out = tmp_path / "out"
     write_snapshot_pages(out, _snapshot(tmp_path))
-    for name in ("settings.html", "status.json"):
+    for name in ("health.html", "status.json"):
         text = (out / name).read_text(encoding="utf-8")
         for secret in (PLANTED, GH_OAUTH, GH_CLASSIC, GH_PAT, "gho_", "ghp_", "github_pat_"):
             assert secret not in text, (name, secret)
@@ -257,10 +257,10 @@ def _harness(session: dict | None, reply: dict | None = None) -> str:
 
 def _run(tmp_path: Path, snapshot: dict, harness: str, actions: list | None = None) -> dict:
     from lib.dashboard_page import page_script
-    html = render_pages(snapshot)["settings.html"]
+    html = render_pages(snapshot)["health.html"]
     assert '<script src="/app.js" defer></script>' in html
     script = page_script(snapshot.get("statechart"))
-    return layout.run_harness(tmp_path, harness, script, snapshot, "settings", IDS, actions or [])
+    return layout.run_harness(tmp_path, harness, script, snapshot, "health", IDS, actions or [])
 
 
 SIGNED_IN = {"signed_in": True, "login": "maxharris1", "csrf": "csrf-value"}
@@ -273,7 +273,7 @@ SIGNED_IN = {"signed_in": True, "login": "maxharris1", "csrf": "csrf-value"}
 def test_script_draws_the_cards_like_the_server(tmp_path: Path, audit: list, live: str | None) -> None:
     snapshot = _snapshot(tmp_path, audit, live)
     out = _run(tmp_path, snapshot, _harness(None))
-    server = _section(_no_script(render_pages(snapshot)["settings.html"]), "settings")
+    server = _section(_no_script(render_pages(snapshot)["health.html"]), "settings")
     assert out["html"]["settings"] == server[server.index(">") + 1:server.rindex("<")]
 
 
@@ -352,7 +352,7 @@ def test_target_and_account_reach_the_results(tmp_path: Path) -> None:
 def test_a_device_card_drops_account_lines(tmp_path: Path) -> None:
     entry = {**AUDIT[0], "id": "f" * 16, "target": "account", "account": "claude-max-2", "field": "doctor"}
     snapshot = _snapshot(tmp_path, [entry])
-    pc = _card(_section(_no_script(render_pages(snapshot)["settings.html"]), "settings"), "pc")
+    pc = _card(_section(_no_script(render_pages(snapshot)["health.html"]), "settings"), "pc")
     assert "doctor" not in pc
     assert '<p class="empty">no changes yet</p>' in pc
 
@@ -464,11 +464,11 @@ def test_a_superseded_slot_max_never_keeps_restart_pending(tmp_path: Path) -> No
     for snapshot in (second_adopted, waiter_restarted):
         first, second = snapshot["settings"]["results"]
         assert (first["result"], first["superseded_by"]) == ("superseded", "2" * 16)
-        pc = _card(_section(_no_script(render_pages(snapshot)["settings.html"]), "settings"), "pc")
+        pc = _card(_section(_no_script(render_pages(snapshot)["health.html"]), "settings"), "pc")
         assert f'<span class="st-sup">superseded by {"2" * 16}</span>' in pc
         assert pc.count("restart pending") == (1 if second["result"] == "pending" else 0)
     assert waiter_restarted["settings"]["results"][1]["result"] == "applied"
-    pc = _card(_section(_no_script(render_pages(waiter_restarted)["settings.html"]), "settings"), "pc")
+    pc = _card(_section(_no_script(render_pages(waiter_restarted)["health.html"]), "settings"), "pc")
     assert "restart pending" not in pc
 
 
@@ -478,7 +478,7 @@ def test_script_draws_superseded_and_drops_account_lines_like_the_server(tmp_pat
     snapshot["settings"]["results"].append(
         {**AUDIT[0], "id": "f" * 16, "target": "account", "account": "claude-max-2", "field": "doctor"})
     out = _run(tmp_path, snapshot, _harness(None))
-    server = _section(_no_script(render_pages(snapshot)["settings.html"]), "settings")
+    server = _section(_no_script(render_pages(snapshot)["health.html"]), "settings")
     assert out["html"]["settings"] == server[server.index(">") + 1:server.rindex("<")]
     assert "superseded by " + "2" * 16 in out["text"]["settings"]
     assert "restart pending" not in out["text"]["settings"] and "doctor" not in out["text"]["settings"]

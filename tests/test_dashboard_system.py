@@ -600,8 +600,8 @@ def test_components_count_and_version_drift_follow_the_snapshot(tmp_path: Path, 
     _assert_state(state, _section(html, "components"), inner, _section(html, "rules"), html)
     drift = ["drift"] if drawn else []
     waiters = ["no-waiter"] if snapshot["health"]["no_waiter"] else []
-    assert _main_order(html) == ["broken", "components", "versions", *drift, "health", "log", "rules",
-                                 "waiters", *waiters]
+    assert _main_order(html) == ["broken", "components", "versions", *drift, "health", "log", "settings", "accounts",
+                                 "routing", "rules", "waiters", *waiters]
     assert re.search(r'<div class="sys-row"><section class="panel" id="health"', html)
     assert _section(html, "health") + _section(html, "log") in html
 
@@ -753,9 +753,14 @@ def test_moved_panels_left_their_old_pages(tmp_path: Path) -> None:
     assert 'id="health"' not in pages["efficiency.html"]
     assert 'id="log"' not in pages["activity.html"]
     assert "renderHealth, renderLog" in script
-    assert re.search(r"efficiency: \[renderHeadroom, renderTokens, renderRounds, renderSavings, renderRouting, "
-                     r"renderBalance, renderJobsLifetime\]", script)
-    assert [name for name, html in pages.items() if 'id="routing"' in html] == ["efficiency.html"]
+    assert re.search(r"efficiency: \[renderTokens, renderRounds, renderSavings, renderBalance, renderJobsLifetime\]",
+                     script)
+    assert re.search(r"health: \[renderBroken, renderComponents, renderDrift, renderHealth, renderLog, renderSettings, "
+                     r"renderHeadroom, renderAccounts, renderRouting, renderRules, renderNoWaiter\]", script)
+    assert re.search(r"evals: \[renderEvals\],\n", script)
+    assert re.search(r"settings: \[renderSettings, renderAccounts\]\n", script)
+    assert [name for name, html in pages.items() if 'id="routing"' in html] == ["health.html"]
+    assert [name for name, html in pages.items() if 'id="headroom"' in html] == ["health.html"]
     assert [name for name, html in pages.items() if 'id="balance"' in html] == ["efficiency.html"]
 
 

@@ -58,7 +58,7 @@ def _snapshot(tmp_path: Path, audit: list | None = AUDIT) -> dict:
 
 
 def _page(snapshot: dict) -> str:
-    return _no_script(render_pages(snapshot)["settings.html"])
+    return _no_script(render_pages(snapshot)["health.html"])
 
 
 def _panel(snapshot: dict) -> str:
@@ -287,10 +287,10 @@ def test_a_cursor_card_shows_plan_doctor_status_login_command_and_not_tracked_re
 
 def _run(tmp_path: Path, snapshot: dict) -> dict:
     from lib.dashboard_page import page_script
-    html = render_pages(snapshot)["settings.html"]
+    html = render_pages(snapshot)["health.html"]
     assert '<script src="/app.js" defer></script>' in html
     script = page_script(snapshot.get("statechart"))
-    return layout.run_harness(tmp_path, HARNESS, script, snapshot, "settings", BAR + ["settings", "accounts"], [])
+    return layout.run_harness(tmp_path, HARNESS, script, snapshot, "health", BAR + ["settings", "accounts"], [])
 
 
 @needs_node
@@ -349,10 +349,10 @@ def _signed_in(tmp_path: Path, actions: list | None = None, reply: dict | None =
                snapshot: dict | None = None) -> dict:
     from lib.dashboard_page import page_script
     snapshot = snapshot or _snapshot(tmp_path)
-    html = render_pages(snapshot)["settings.html"]
+    html = render_pages(snapshot)["health.html"]
     assert '<script src="/app.js" defer></script>' in html
     script = page_script(snapshot.get("statechart"))
-    return layout.run_harness(tmp_path / "run", _session_harness(SIGNED_IN, reply), script, snapshot, "settings",
+    return layout.run_harness(tmp_path / "run", _session_harness(SIGNED_IN, reply), script, snapshot, "health",
                               BAR + ["settings", "accounts"], actions or [])
 
 
@@ -385,11 +385,11 @@ def _set(within: dict, props: dict, **attr: str) -> list:
 def test_signed_out_the_accounts_panel_has_no_controls(tmp_path: Path) -> None:
     from lib.dashboard_page import page_script
     snapshot = _snapshot(tmp_path)
-    html = render_pages(snapshot)["settings.html"]
+    html = render_pages(snapshot)["health.html"]
     assert '<script src="/app.js" defer></script>' in html
     script = page_script(snapshot.get("statechart"))
     out = layout.run_harness(tmp_path / "run", _session_harness({"signed_in": False}), script, snapshot,
-                             "settings", BAR + ["settings", "accounts"], [])
+                             "health", BAR + ["settings", "accounts"], [])
     accounts = out["html"]["accounts"]
     assert "Sign in with GitHub" in out["text"]["settings"]
     for needle in ("st-ctl", "<button", "<input", "<select", "data-op"):
@@ -437,11 +437,11 @@ ADD_BUTTON = '<button type="button" data-op="add"( disabled="")?>Add account</bu
 def _add_form_after(tmp_path: Path, harness: list[str]) -> str:
     from lib.dashboard_page import page_script
     snapshot = _snapshot(tmp_path)
-    assert '<script src="/app.js" defer></script>' in render_pages(snapshot)["settings.html"]
+    assert '<script src="/app.js" defer></script>' in render_pages(snapshot)["health.html"]
     script = page_script(snapshot.get("statechart"))
     page = _session_harness(SIGNED_IN).replace(GENERATED, DISABLED + GENERATED, 1)
     actions = [_set(ADD, {"value": value}, **{"data-field": "harness"}) for value in harness]
-    out = layout.run_harness(tmp_path / "run", page, script, snapshot, "settings", BAR + ["settings", "accounts"],
+    out = layout.run_harness(tmp_path / "run", page, script, snapshot, "health", BAR + ["settings", "accounts"],
                              actions)
     accounts = out["html"]["accounts"]
     start = accounts.index('data-form="add"')
@@ -642,11 +642,11 @@ def _relay(tmp_path: Path, actions: list, replies: list | tuple = (), *, account
            snapshot: dict | None = None) -> dict:
     from lib.dashboard_page import page_script
     snapshot = snapshot or _snapshot(tmp_path)
-    html = render_pages(snapshot)["settings.html"]
+    html = render_pages(snapshot)["health.html"]
     assert '<script src="/app.js" defer></script>' in html
     script = page_script(snapshot.get("statechart"))
     return layout.run_harness(tmp_path / "run", _relay_harness(account_signin, list(replies)), script, snapshot,
-                              "settings", BAR + ["settings", "accounts"], actions)
+                              "health", BAR + ["settings", "accounts"], actions)
 
 
 def _requests(out: dict) -> list[tuple]:
