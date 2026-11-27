@@ -1117,6 +1117,160 @@ def test_collect_snapshot_reads_every_table_in_one_transaction(
     assert "late error" not in [item["error"] for item in snapshot["poller"]["errors"]["recent"]]
 
 
+TEXT_CAP = 64 * 1024
+LARGE_DETAIL = json.dumps({"round": "2/3", "pad": "x" * 300_000})
+
+
+class SqliteSpy:
+    def __init__(self) -> None:
+        self.longest_text = 0
+        self.statements: list[tuple[str, frozenset[tuple[str, str]]]] = []
+
+    def reading(self, table: str, column: str) -> list[str]:
+        return [sql for sql, reads in self.statements if (table, column) in reads]
+
+
+def spy_on_sqlite(monkeypatch: pytest.MonkeyPatch) -> SqliteSpy:
+    spy = SqliteSpy()
+    real_connect = sqlite3.connect
+
+    def seen(row):
+        if row is not None:
+            for value in row:
+                if isinstance(value, str):
+                    spy.longest_text = max(spy.longest_text, len(value.encode()))
+        return row
+
+    class Cursor(sqlite3.Cursor):
+        def __next__(self):
+            return seen(super().__next__())
+
+        def fetchone(self):
+            return seen(super().fetchone())
+
+        def fetchmany(self, *args, **kwargs):
+            return [seen(row) for row in super().fetchmany(*args, **kwargs)]
+
+        def fetchall(self):
+            return [seen(row) for row in super().fetchall()]
+
+    class Connection(sqlite3.Connection):
+        def cursor(self, factory=Cursor):
+            return super().cursor(factory)
+
+        def execute(self, *args):
+            return self.cursor().execute(*args)
+
+        def executemany(self, *args):
+            return self.cursor().executemany(*args)
+
+    def connect(*args, **kwargs):
+        connection = real_connect(*args, **{**kwargs, "factory": Connection, "cached_statements": 0})
+        pending: set[tuple[str, str]] = set()
+
+        def authorize(action, table, column, _db, _source):
+            if action == sqlite3.SQLITE_READ:
+                pending.add((table, column))
+            return sqlite3.SQLITE_OK
+
+        def trace(sql: str) -> None:
+            spy.statements.append((sql, frozenset(pending)))
+            pending.clear()
+
+        connection.set_authorizer(authorize)
+        connection.set_trace_callback(trace)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    return spy
+
+
+def large_detail_db(tmp_path: Path) -> Path:
+    db = tmp_path / "orch.db"
+    make_db(db)
+    with sqlite3.connect(db) as connection:
+        add_ticket(connection, "maxharris1/factory", "1", state="merged")
+        add_ticket(connection, "maxharris1/factory", "2", state="review", review_round=2)
+        add_job(connection, "merged01", state="done", repo="maxharris1/factory", ticket_id="1",
+                detail=LARGE_DETAIL, handoff_comment_id="h1")
+        add_job(connection, "review02", action="review", recipient="codex", state="done",
+                repo="maxharris1/factory", ticket_id="2", detail=LARGE_DETAIL, handoff_comment_id="h2")
+        add_job(connection, "running3", action="review", recipient="codex", state="running",
+                repo="maxharris1/factory", ticket_id="2", detail='{"round": "3/3"}')
+    return db
+
+
+def test_collect_snapshot_reads_job_rounds_inside_sqlite(tmp_path: Path, monkeypatch) -> None:
+    db = large_detail_db(tmp_path)
+    spy = spy_on_sqlite(monkeypatch)
+    snapshot = collect_snapshot(db, tmp_path / "poller.log", now=NOW)
+
+    assert spy.longest_text <= TEXT_CAP
+    bounded, live = sorted(spy.reading("jobs", "detail"), key=lambda sql: "json_each" not in sql)
+    assert "json_each(" in bounded
+    assert "state IN ('queued', 'running')" in live
+    rounds = {
+        key: {job["job"]: job["exposure"]["round"] for visit in record["visits"] for job in visit["jobs"]}
+        for key, record in snapshot["ticket_records"].items()
+    }
+    assert rounds == {
+        "maxharris1/factory#1": {"merged01": "2"},
+        "maxharris1/factory#2": {"review02": "2", "running3": "3"},
+    }
+    assert [(job["job"], job["round"]) for job in snapshot["running"]] == [("running3", "3/3")]
+
+
+def _replaced_detail_round(detail: object) -> str | None:
+    if not isinstance(detail, str):
+        return None
+    try:
+        value = json.loads(detail)
+    except ValueError:
+        return None
+    if not isinstance(value, dict):
+        return None
+    found = value.get("round")
+    return found if isinstance(found, str) and re.fullmatch(r"[0-9]{1,3}/[0-9]{1,3}", found) else None
+
+
+@pytest.mark.parametrize(
+    "detail, expected",
+    [
+        (None, None),
+        ("", None),
+        ("plain text", None),
+        ('["2/3"]', None),
+        ('"2/3"', None),
+        ('{"action": "review"}', None),
+        ('{"round": "2/3"}', "2/3"),
+        ('{"round": "two"}', None),
+        ('{"round": 2}', None),
+        ('{"round": null}', None),
+        ('{"round": true}', None),
+        ('{"round": ["2/3"]}', None),
+        ('{"round": {"round": "2/3"}}', None),
+        ('{"round": "1000/3"}', None),
+        ('{"round": "2/3 "}', None),
+        ('{"ROUND": "2/3"}', None),
+        ('{"pr": {"round": "1/3"}, "round": "2/3"}', "2/3"),
+        ('{"pr": {"round": "1/3"}}', None),
+        ('{"round": "2/3"', None),
+        (' \n{"round": "2/3"}\t ', "2/3"),
+        (LARGE_DETAIL, "2/3"),
+    ],
+    ids=lambda value: value[:40] if isinstance(value, str) else repr(value),
+)
+def test_the_sql_round_matches_the_python_reader_it_replaces(detail: str | None, expected: str | None) -> None:
+    connection = sqlite3.connect(":memory:")
+    try:
+        (value,) = connection.execute(
+            f"SELECT {dashboard._DETAIL_ROUND} FROM (SELECT ? AS detail)", (detail,)
+        ).fetchone()
+    finally:
+        connection.close()
+    assert dashboard._round(value) == _replaced_detail_round(detail) == expected
+
+
 # --- refresh ----------------------------------------------------------------
 
 
