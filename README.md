@@ -2105,6 +2105,7 @@ already listed as stuck, each once).
 - **Evals** (`evals.html`): the weekly eval reports as one table, a column
   per week, newest first, each value with its change from the previous
   available report, so a delta after a missing week spans two weeks.
+  It has no nav item; Efficiency is its current tab.
 - **Health** (`health.html`, issue #92): every component heartbeat as up,
   stale or down, with last seen in ET, its age, pid, device, version and
   start time, and each harness whose queued jobs have no live waiter (see
@@ -2554,10 +2555,10 @@ Threat model, in short:
   audit (both below) and has no chat path. Residual risk: someone who gets Max to type their device code on
   github.com gets a session as Max; only his own devices can start a sign-in.
 
-**Device settings (issue #777).** The Settings page (`settings.html`, in
-the nav) lists each `machines.yml` device: name, local or remote, enabled,
-`slot_max`, harnesses, slots held and drain state, with the last results of
-changes to it. Signed in as the approver, Max can turn `enabled` and `drain`
+**Device settings (issue #777).** The Settings page (`settings.html`, no
+nav item; System is its current tab) lists each `machines.yml` device:
+name, local or remote, enabled, `slot_max`, harnesses, slots held and
+drain state, with the last results of changes to it. Signed in as the approver, Max can turn `enabled` and `drain`
 on or off and set `slot_max` (1 to 64). Drain is the safe way to take a
 device out of placement; turning `enabled` off on a device that holds a
 running job is refused with "drain it first". That check and the file write
