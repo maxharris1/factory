@@ -11,6 +11,7 @@ import pytest
 
 import lib.dashboard as dashboard
 from lib import feeder
+from lib.branch_stack import stack_wait
 from lib.dashboard import (
     REFRESH_DEFAULT,
     DashboardError,
@@ -21,11 +22,10 @@ from lib.dashboard import (
     render_html,
     write_snapshot,
 )
-from lib.branch_stack import stack_wait
 from lib.dashboard_pages import tickets as tickets_page
-from lib.feeder_gates import GateLines, Holds, PathPolicy, Progress, Ref, RefStatus, blocker_waits
 from lib.dashboard_pages.ticket_detail import ticket_view
 from lib.dispatcher import Dispatcher
+from lib.feeder_gates import GateLines, Holds, PathPolicy, Progress, Ref, RefStatus, blocker_waits
 from lib.queue import SQLiteJobQueue
 
 ROOT = Path(__file__).resolve().parents[1]
