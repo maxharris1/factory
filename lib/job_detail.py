@@ -23,6 +23,18 @@ BATCH = 200
 INLINE_LIMIT = 1024
 FINISHED_TICKET_STATES = ("merged", "done", "abandoned")
 CLASSES = ("live", "replayable", "cold")
+_FINISHED = """EXISTS (
+    SELECT 1 FROM ticket_state
+    WHERE ticket_state.repo = lower(jobs.repo)
+      AND ticket_state.ticket_id = jobs.ticket_id
+      AND ticket_state.workflow_state IN ({states})
+)"""
+_CLASSIFY = """(CASE
+    WHEN (state IN ('done', 'cancelled') OR (state = 'failed' AND failure_handled = 1))
+         AND {finished} THEN 'cold'
+    WHEN state IN ('queued', 'running') OR (state = 'failed' AND failure_handled = 0) THEN 'live'
+    ELSE 'replayable'
+END)"""
 
 
 class JobDetailError(ValueError):
@@ -201,20 +213,6 @@ def _classification(connection: sqlite3.Connection) -> tuple[str, tuple[str, ...
         return _CLASSIFY.format(finished="0"), ()
     finished = _FINISHED.format(states=", ".join("?" * len(FINISHED_TICKET_STATES)))
     return _CLASSIFY.format(finished=finished), FINISHED_TICKET_STATES
-
-
-_FINISHED = """EXISTS (
-    SELECT 1 FROM ticket_state
-    WHERE ticket_state.repo = lower(jobs.repo)
-      AND ticket_state.ticket_id = jobs.ticket_id
-      AND ticket_state.workflow_state IN ({states})
-)"""
-_CLASSIFY = """(CASE
-    WHEN (state IN ('done', 'cancelled') OR (state = 'failed' AND failure_handled = 1))
-         AND {finished} THEN 'cold'
-    WHEN state IN ('queued', 'running') OR (state = 'failed' AND failure_handled = 0) THEN 'live'
-    ELSE 'replayable'
-END)"""
 
 
 def _key_sizes(data: dict[str, object]) -> Iterator[tuple[str, int]]:
