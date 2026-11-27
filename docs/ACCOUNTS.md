@@ -408,9 +408,11 @@ family.
 
 ### Gemini starts refused
 
-Gemini accounts sign in with Google for Gemini Code Assist, through the
-`gemini` CLI ([decision](decisions/1412-gemini-harness.md)). The doctor
-checks each gemini login, and a card row shows its sign-in command. The
+Gemini runs Google's Antigravity `agy` CLI on Max's Google AI Ultra plan
+([decision](decisions/1412-gemini-harness.md)). A Gemini account is each
+device's `gemini-bot` login, signed in with interactive `agy` (the command
+in §2). The doctor checks each gemini login with `agy models`, and a card
+row shows its sign-in command. The
 card has no Sign in button: the broker covers Claude and Codex only. Max
 decided that `orch.yml` lists `gemini` in `refused_harnesses` until its
 accounts are signed in on the devices, so a gemini row in `account_signins`
@@ -504,8 +506,8 @@ env -u GEMINI_API_KEY -u GOOGLE_API_KEY -u GOOGLE_CLOUD_ACCESS_TOKEN -u GOOGLE_A
 ```
 
 The `-u` flags keep every API key and token override out of the login, so
-no key in the login profile stands in for it. Sign in with the Google
-account, then quit `agy`.
+no key in the login profile stands in for it. Sign in with the Google AI
+Ultra account, then quit `agy`.
 
 The doctor runs `agy models` with the same variables unset. A model list
 reads `ok`. Exit 1 with `Please sign in to view available models` reads

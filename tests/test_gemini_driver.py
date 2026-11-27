@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
+import shutil
 import sqlite3
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,7 +80,7 @@ def test_the_docs_name_every_gemini_auth_override_the_job_drops(path: str) -> No
     assert [name for name in AUTH_OVERRIDES if f"`{name}`" not in text] == []
 
 
-@pytest.mark.parametrize("path", ["README.md", "docs/SPEC.md"])
+@pytest.mark.parametrize("path", ["README.md", "docs/SPEC.md", "bots/gemini-bot/SKILL.md"])
 def test_the_docs_name_a_gemini_account_as_the_devices_gemini_bot_login(path: str) -> None:
     text = " ".join((pstack_pin.ROOT / path).read_text(encoding="utf-8").split())
     assert "each device's `gemini-bot` login" in text
@@ -559,11 +562,90 @@ def test_a_gemini_account_signed_in_from_a_folder_is_refused(tmp_path: Path) -> 
     assert any("signed_in_on is not supported for a gemini account" in item.message for item in findings)
 
 
-@pytest.mark.parametrize("path", ["docs/ACCOUNTS.md", "docs/RUNBOOK-HARDENING.md", "bots/gemini-bot/SKILL.md"])
-def test_no_shipped_procedure_runs_a_gemini_auth_subcommand(path: str) -> None:
-    text = (pstack_pin.ROOT / path).read_text(encoding="utf-8")
-    blocks = re.findall(r"^\s*```[a-z]*\n(.*?)^\s*```", text, flags=re.MULTILINE | re.DOTALL)
-    assert [block for block in blocks if re.search(r"\bgemini\s+auth\b", block)] == []
+GEMINI_DECISION = "docs/decisions/1412-gemini-harness.md"
+GEMINI_BOT_SKILL = "bots/gemini-bot/SKILL.md"
+GEMINI_ADAPTER = "skills/factory/harness/gemini.md"
+GEMINI_DOCS = (GEMINI_DECISION, "docs/ACCOUNTS.md", "docs/RUNBOOK-HARDENING.md", GEMINI_BOT_SKILL, GEMINI_ADAPTER)
+SHELL_FENCES = {"", "sh", "bash", "shell", "console"}
+
+
+def _doc(path: str) -> str:
+    return (pstack_pin.ROOT / path).read_text(encoding="utf-8")
+
+
+def _fenced_blocks(text: str) -> list[tuple[str, str]]:
+    return re.findall(r"^\s*```([\w-]*)[^\n]*\n(.*?)^\s*```", text, flags=re.MULTILINE | re.DOTALL)
+
+
+def _command_word(part: str) -> str:
+    part = re.sub(r"^\s*(?:\$\s*)?sudo\s.*?\s-\w*c\s+['\"]", "", part)
+    words = part.split()
+    while words:
+        if words[0] == "-u" and len(words) > 1:
+            words = words[2:]
+        elif words[0] in {"$", "env", "sudo", "-H"} or re.fullmatch(r"[A-Za-z_]\w*=\S*", words[0]):
+            words = words[1:]
+        else:
+            break
+    return words[0].strip("'\"") if words else ""
+
+
+def _gemini_commands(text: str) -> list[str]:
+    return [
+        line.strip()
+        for tag, block in _fenced_blocks(text)
+        if tag in SHELL_FENCES
+        for line in block.splitlines()
+        for part in re.split(r";|&&|\|\||\||`", line)
+        if _command_word(part) == "gemini"
+    ]
+
+
+@pytest.mark.parametrize("line, runs_gemini", [
+    ("NO_BROWSER=true gemini", True),
+    ("env -u X gemini -p hi", True),
+    ("sudo -u gemini-bot -H bash -lc 'gemini'", True),
+    ("orch status && gemini auth", True),
+    ("- gemini", False),
+    ("sudo -u gemini-bot -H bash -lc 'env -u GEMINI_CLI_HOME agy'", False),
+])
+def test_the_fenced_command_scanner_finds_gemini_run_as_a_command(line: str, runs_gemini: bool) -> None:
+    assert bool(_gemini_commands(f"```sh\n{line}\n```\n")) is runs_gemini
+    assert _gemini_commands(f"```yaml\n{line}\n```\n") == []
+
+
+@pytest.mark.parametrize("path", GEMINI_DOCS)
+def test_no_fenced_block_runs_gemini_as_a_command(path: str) -> None:
+    assert _gemini_commands(_doc(path)) == []
+
+
+@pytest.mark.parametrize("path", GEMINI_DOCS)
+def test_the_gemini_docs_name_the_agy_models_probe(path: str) -> None:
+    assert "`agy models`" in " ".join(_doc(path).split())
+
+
+@pytest.mark.parametrize("path", [GEMINI_DECISION, "docs/ACCOUNTS.md", "docs/RUNBOOK-HARDENING.md"])
+def test_the_gemini_sign_in_docs_give_the_login_command_verbatim(path: str) -> None:
+    command = account_doctor.login_command("gemini", None)
+    assert any(command in block for _, block in _fenced_blocks(_doc(path)))
+
+
+@pytest.mark.parametrize("path", [GEMINI_BOT_SKILL, GEMINI_ADAPTER])
+def test_the_gemini_bot_skill_and_adapter_describe_headless_agy_on_the_device_login(path: str) -> None:
+    text = " ".join(_doc(path).split())
+    for needed in ("agy -p", "--dangerously-skip-permissions", "--output-format stream-json", "`agy models`",
+                   "each device's `gemini-bot` login"):
+        assert needed in text
+    for stale in ("GEMINI_CLI_HOME", ".factory-accounts", "--yolo", "gemini -p"):
+        assert stale not in text
+
+
+def test_the_gemini_decision_and_sign_in_docs_name_plan_a_on_google_ai_ultra() -> None:
+    decision = _doc(GEMINI_DECISION)
+    assert "#1639" in decision
+    assert "Google AI Ultra" in decision
+    for path in ("docs/ACCOUNTS.md", "docs/RUNBOOK-HARDENING.md"):
+        assert "Gemini Code Assist" not in _doc(path)
 
 
 def test_gemini_pstack_adapter_and_bot_skill_exist_and_verify() -> None:
@@ -579,3 +661,50 @@ def test_gemini_pstack_adapter_and_bot_skill_exist_and_verify() -> None:
     assert "## Skills" in brief
     assert "`/home/gemini-bot/factory/skills/factory/harness/gemini.md`" in brief
     assert "inherit-parent" in brief
+
+
+def _runbook_gemini_step() -> str:
+    text = _doc("docs/RUNBOOK-HARDENING.md")
+    return text[text.index("2. **Gemini (`agy`):**"):text.index("3. **Additional Same-Harness Accounts")]
+
+
+def test_the_runbook_gemini_step_writes_a_machines_local_yml_that_loads(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("ORCH_NO_LOCAL_OVERLAY", raising=False)
+    blocks = [block for tag, block in _fenced_blocks(_runbook_gemini_step()) if tag == "yaml"]
+    assert len(blocks) == 1
+    shutil.copy(ROOT / "machines.yml", tmp_path / "machines.yml")
+    (tmp_path / "machines.local.yml").write_text(blocks[0], encoding="utf-8")
+    config, findings = load_machines_yml(tmp_path / "machines.yml")
+    assert [f for f in findings if f.severity == "error"] == []
+    assert config is not None
+    assert "gemini" in config.device("pc").harnesses
+
+
+def _orch_job_run_commands() -> list[tuple[str, str]]:
+    paths = [*sorted(ROOT.glob("bots/*/SKILL.md")), *sorted(ROOT.glob("skills/factory/harness/*.md"))]
+    return [
+        (str(path.relative_to(ROOT)), span)
+        for path in paths
+        for span in re.findall(r"`(orch job run [^`]*)`", " ".join(path.read_text(encoding="utf-8").split()))
+        if "$ORCH_JOB_BRIEF" in span
+    ]
+
+
+def _shell_words(command: str) -> list[str]:
+    stubbed = re.sub(r"<[^>]*>", "X", command)
+    script = 'orch() { printf "%s\\0" "$@"; }; ' + stubbed
+    env = {key: value for key, value in os.environ.items() if key != "ORCH_JOB_BRIEF"}
+    out = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, check=True).stdout
+    return out.split("\0")[:-1]
+
+
+def test_the_shell_word_reader_sees_double_quotes_expand_the_brief_path() -> None:
+    assert not any("$ORCH_JOB_BRIEF" in word for word in _shell_words('orch job run b X -- agy -p "Read $ORCH_JOB_BRIEF"'))
+    assert "Read $ORCH_JOB_BRIEF" in _shell_words("orch job run b X -- agy -p 'Read $ORCH_JOB_BRIEF'")
+
+
+def test_every_shipped_orch_job_run_command_keeps_the_brief_path_for_orch_to_set() -> None:
+    commands = _orch_job_run_commands()
+    assert GEMINI_BOT_SKILL in {path for path, _ in commands}
+    for path, command in commands:
+        assert any("$ORCH_JOB_BRIEF" in word for word in _shell_words(command)), (path, command)
