@@ -2734,6 +2734,21 @@ def test_a_one_day_session_slides_while_the_device_is_active(
     assert client.session()["signed_in"] is True
 
 
+def test_load_config_memory_only_session_lasts_12_hours_unless_days_is_set(
+    site: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(server_module, "current_user", lambda: "factory-dash")
+    env = _env(site, **ACTIONS_ENV, USER="factory-dash")
+    *_, actions = server_module.load_config(env, process_user="factory-dash")
+    assert actions.session_store is None
+    assert actions.session_seconds == 12 * 3600
+
+    env_30 = _env(site, **ACTIONS_ENV, USER="factory-dash", DASHBOARD_SESSION_DAYS="30")
+    *_, actions_30 = server_module.load_config(env_30, process_user="factory-dash")
+    assert actions_30.session_store is None
+    assert actions_30.session_seconds == 30 * 86400
+
+
 def test_load_config_session_store_and_days(
     site: Path, session_store: Path, capsys, monkeypatch
 ) -> None:

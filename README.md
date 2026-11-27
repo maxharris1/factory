@@ -2410,9 +2410,9 @@ root on the PC: `deploy/dashboard-http-service.sh install|status|restart|rollbac
   `DASHBOARD_DIR` is not a directory, a path key is not an absolute path
   of only letters, digits and `. _ @ + -` with no `.` or `..` part, or
   `DASHBOARD_SESSION_STORE` is set but is not a directory (a symlink counts
-  as not one) of mode 0700 owned by `factory-dash`. Before that user exists,
-  any owner passes. It then
-  adds the system user `factory-dash` if it is missing, gives the group
+  as not one) of mode 0700 owned by `factory-dash`. It adds the system user
+  `factory-dash` if it is missing and checks that owner again before any
+  unit changes. It then gives the group
   read and search on `DASHBOARD_DIR`, copies the app to
   `/usr/local/lib/factory-dashboard/` and the unit to
   `/etc/systemd/system/`, and writes the drop-in
@@ -2515,7 +2515,9 @@ Threat model, in short:
   its session in an `HttpOnly; SameSite=Strict; Path=/api` cookie
   (`Path=/` under `DASHBOARD_REQUIRE_AUTH_READS=1`).
 - Without `DASHBOARD_SESSION_STORE`, sessions live only in the server's
-  memory. Each lasts 12 hours and ends when the server restarts.
+  memory and end when the server restarts. Each lasts 12 hours from
+  sign-in, or `DASHBOARD_SESSION_DAYS` days when that is set, and never
+  renews.
 - With `DASHBOARD_SESSION_STORE` set (a directory of mode 0700 owned by
   `factory-dash`), each device's session is sealed in its own file there.
   The key that opens it lives only in that device's cookie. No plaintext

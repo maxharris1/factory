@@ -634,6 +634,7 @@ def test_install_drop_in_binds_only_the_paths_http_env_sets(
     sessions = tmp_path / "sessions"
     sessions.mkdir(mode=0o700)
     sessions.chmod(0o700)
+    (node.bin / "factory-dash.exists").write_text(str(os.getuid()), encoding="utf-8")
     port = app.server_address[1]
     node.write_env(port, DASHBOARD_SETTINGS_SPOOL=str(spool), DASHBOARD_SIGNIN_RELAY=str(relay),
                    DASHBOARD_ACTIONS_AUDIT=str(audit), DASHBOARD_SESSION_STORE=str(sessions))
@@ -701,14 +702,30 @@ def test_install_refuses_an_unsafe_session_store_before_any_change(
     node.assert_untouched()
 
 
+def test_install_refuses_a_session_store_the_new_factory_dash_would_not_own(
+        tmp_path: Path, node: Node, app: HTTPServer) -> None:
+    store = tmp_path / "sessions"
+    store.mkdir(mode=0o700)
+    store.chmod(0o700)
+    (node.bin / "useradd").write_text(
+        FAKE_USERADD + f'echo {os.getuid() + 1} >"$dir/factory-dash.exists"\n', encoding="utf-8")
+    node.write_env(app.server_address[1], DASHBOARD_SESSION_STORE=str(store))
+    result = node.install()
+    assert result.returncode == 78, result.stdout + result.stderr
+    assert "DASHBOARD_SESSION_STORE" in result.stderr
+    assert "not owned by factory-dash" in result.stderr
+    assert node.units.calls() == []
+    assert not node.unit_dir.exists()
+    assert not node.lib_dir.exists()
+
+
 def test_install_rerun_refuses_a_session_store_opened_to_others(
         tmp_path: Path, node: Node, app: HTTPServer) -> None:
     store = tmp_path / "sessions"
     store.mkdir(mode=0o700)
     store.chmod(0o700)
-    node.write_env(app.server_address[1], DASHBOARD_SESSION_STORE=str(store))
-    assert node.install().returncode == 0
     (node.bin / "factory-dash.exists").write_text(str(os.getuid()), encoding="utf-8")
+    node.write_env(app.server_address[1], DASHBOARD_SESSION_STORE=str(store))
     assert node.install().returncode == 0
     calls = node.units.calls()
     store.chmod(0o755)

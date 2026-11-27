@@ -392,6 +392,14 @@ def test_dashboard_server_unit_is_documented_not_installed() -> None:
     assert "factory-dashboard" not in install
 
 
+def test_readme_dashboard_gives_the_memory_only_session_lifetime() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    start = readme.index("- Without `DASHBOARD_SESSION_STORE`")
+    bullet = " ".join(readme[start : readme.index("\n- ", start + 1)].split())
+    assert "12 hours" in bullet
+    assert "`DASHBOARD_SESSION_DAYS` days when that is set" in bullet
+
+
 def test_readme_dashboard_describes_live_http_server() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     start = readme.index("## Dashboard\n")

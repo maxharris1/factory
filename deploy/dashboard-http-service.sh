@@ -25,7 +25,7 @@
 # address and the paths (in the drop-in) leave it. install refuses (exit 78)
 # before changing anything if a required key is missing, a path is unsafe, or
 # DASHBOARD_SESSION_STORE is not a directory of mode 0700 owned by
-# factory-dash (any owner before that user exists).
+# factory-dash. It adds a missing factory-dash before checking that owner.
 # restart refuses (exit 3) unless the HTTP unit is enabled and
 # factory-dashboard.service is inactive or failed.
 # Overrides: DASHBOARD_SYSTEMCTL, DASHBOARD_ENV_FILE, DASHBOARD_PROBE_ADDR,
@@ -412,6 +412,7 @@ install_service() {
     if [[ -z "$(getent passwd factory-dash || true)" ]]; then
         say "adding system user factory-dash"
         useradd --system --no-create-home --shell /usr/sbin/nologin factory-dash
+        conf="$(paths_conf)" || return
     fi
     chmod g+rx "$dashboard_dir"
 
