@@ -855,6 +855,9 @@ class SQLiteJobQueue:
                 )
                 if "claim_token_hash" not in _columns(connection, "jobs"):
                     connection.execute("ALTER TABLE jobs ADD COLUMN claim_token_hash TEXT")
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_jobs_state_recipient ON jobs(state, recipient)"
+                )
                 ensure_priority_table(connection)
                 exposure.ensure_table(connection)
         except sqlite3.DatabaseError as exc:

@@ -678,3 +678,92 @@ def test_db_spill_detail_refuses_while_a_poller_holds_the_lock(
         assert cli.main(["db-spill-detail", "--db", str(path), "--vacuum"]) == 1
     assert "another orch poll owns" in capsys.readouterr().err
     assert _raw_detail(path, next(iter(details))) == next(iter(details.values()))
+
+
+_MAIN_JOBS_TABLE = """
+    CREATE TABLE IF NOT EXISTS jobs (
+        id TEXT PRIMARY KEY,
+        dedupe_key TEXT NOT NULL UNIQUE,
+        repo TEXT NOT NULL,
+        ticket_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        recipient TEXT NOT NULL,
+        source_comment_id TEXT NOT NULL,
+        timeout_seconds INTEGER NOT NULL,
+        generation INTEGER NOT NULL,
+        attempt INTEGER NOT NULL,
+        head TEXT,
+        detail TEXT,
+        state TEXT NOT NULL,
+        created_at REAL NOT NULL,
+        last_activity_at REAL NOT NULL,
+        finished_at REAL,
+        handoff_comment_id TEXT,
+        failure_handled INTEGER NOT NULL DEFAULT 0,
+        claim_token_hash TEXT
+    )
+"""
+
+
+def _claim_index(path: Path) -> list[tuple[str, str, str]]:
+    with sqlite3.connect(path) as connection:
+        return connection.execute(
+            "SELECT type, name, tbl_name FROM sqlite_master WHERE name = 'idx_jobs_state_recipient'"
+        ).fetchall()
+
+
+def _old_database(path: Path) -> None:
+    with sqlite3.connect(path) as connection:
+        connection.execute(_MAIN_JOBS_TABLE)
+        connection.execute(
+            """
+            INSERT INTO jobs (id, dedupe_key, repo, ticket_id, action, recipient, source_comment_id,
+                              timeout_seconds, generation, attempt, state, created_at, last_activity_at)
+            VALUES ('old-job', 'old', 'owner/repo', '42', 'build', 'claude', 'comment-1',
+                    5400, 1, 1, 'queued', 10.0, 10.0)
+            """
+        )
+
+
+def test_a_fresh_database_has_the_claim_index(tmp_path: Path) -> None:
+    path = tmp_path / "queue.sqlite3"
+    make_queue(path, [10.0])
+    assert _claim_index(path) == [("index", "idx_jobs_state_recipient", "jobs")]
+
+
+def test_opening_a_database_from_before_the_claim_index_adds_it_and_keeps_its_jobs(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "queue.sqlite3"
+    _old_database(path)
+    assert _claim_index(path) == []
+
+    queue = make_queue(path, [20.0])
+
+    assert _claim_index(path) == [("index", "idx_jobs_state_recipient", "jobs")]
+    claimed = queue.claim("claude")
+    assert claimed is not None and claimed.id == "old-job"
+
+
+@pytest.mark.parametrize("fresh", [True, False], ids=["fresh", "old"])
+@pytest.mark.parametrize("ticket_state", [False, True], ids=["no-ticket-state", "ticket-state"])
+def test_the_claim_order_plan_searches_the_claim_index(
+    tmp_path: Path, fresh: bool, ticket_state: bool
+) -> None:
+    path = tmp_path / "queue.sqlite3"
+    if not fresh:
+        _old_database(path)
+    queue = make_queue(path, [20.0])
+    statements: list[str] = []
+    with queue.connect() as connection:
+        if ticket_state:
+            connection.execute(
+                "CREATE TABLE ticket_state (repo TEXT, ticket_id TEXT, workflow_state TEXT)"
+            )
+        connection.set_trace_callback(statements.append)
+        queue_module.claim_order(connection, "claude", now=20.0)
+        connection.set_trace_callback(None)
+        (statement,) = [sql for sql in statements if "FROM jobs" in sql]
+        assert ("ticket_state" in statement) is ticket_state
+        plan = [str(row[3]) for row in connection.execute(f"EXPLAIN QUERY PLAN {statement}")]
+    assert "SEARCH jobs USING INDEX idx_jobs_state_recipient (state=? AND recipient=?)" in plan
