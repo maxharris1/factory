@@ -132,6 +132,12 @@ Ticket rows (#670, #671): each status.json `tickets` row carries
 the time is unknown). An `abandoned` ticket with a stored `closed_at` (#991)
 counts its current visit, and so its age and `stopped.at`, from that close.
 
+Titles (#1751): each feeder item and each `tickets` row carries `title`,
+the feeder_items title through `_clean` capped at 120. A ticket row's is
+looked up in the whole feeder_items table by repo (casefolded) and issue
+(its source without the leading `#`, else its ticket id), null with no
+match or no table.
+
 Ticket records (#530): tickets.json holds one record per tracked ticket
 (the tickets in status.json's `tickets`), built from the database whether
 or not the ticket has a job. The snapshot carries them under RECORDS, so
@@ -223,7 +229,7 @@ from lib.factory_md import QA_RUNNERS
 from lib.feeder import STATES as FEEDER_STATES
 from lib.dispatch.cycle_clock import LOCK_ERRORS, SLOW_CYCLE
 from lib.feeder_gates import ATTENTION_REASONS as FEEDER_ATTENTION_REASONS
-from lib.feeder import feeder_counts, feeder_items, last_feeder_poll
+from lib.feeder import FEEDER_TABLE, feeder_counts, feeder_items, last_feeder_poll
 from lib.handoff import STATES as WORKFLOW_STATES
 from lib.heal import POLLER_SERVICE
 from lib.job_state import (
@@ -1537,6 +1543,15 @@ def _ticket_ref(
     return ref
 
 
+def _feeder_titles(connection: sqlite3.Connection, tables: set[str]) -> dict[tuple[str, str], str]:
+    if FEEDER_TABLE not in tables:
+        return {}
+    return {
+        (str(row["repo"]).casefold(), str(row["issue"])): _clean(row["title"], 120)
+        for row in connection.execute(f"SELECT repo, issue, title FROM {FEEDER_TABLE}")
+    }
+
+
 def _acting(row: dict) -> dict:
     return {key: row[key] for key in ("state", "wait", "actions") if key in row}
 
@@ -2107,6 +2122,7 @@ def _read_db(
         external_at = "state.external_at" if "external_at" in state_columns else "NULL"
         closed_at = "state.closed_at" if "closed_at" in state_columns else "NULL"
         linear = "linear_states" in tables
+        titles = _feeder_titles(connection, tables)
         for row in connection.execute(
             f"""
             SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
@@ -2176,9 +2192,11 @@ def _read_db(
                 None if row["stuck_at"] is None else epoch.read(row["stuck_at"]),
                 epoch.cell(row["closed_at"]),
             )
+            issue = ref["source"].removeprefix("#") if ref.get("source") else str(row["ticket_id"])
             tickets.append(
                 {
                     **ref,
+                    "title": titles.get((str(row["repo"]).casefold(), issue)),
                     "tracker": _enum(row["tracker"], TRACKERS),
                     "state": state,
                     "round": int(row["review_round"]),
@@ -2325,6 +2343,7 @@ def _read_db(
                 {
                     "repo": _clean(item["repo"], 120),
                     "issue": _clean(item["issue"], 64),
+                    "title": _clean(item["title"], 120),
                     "state": _enum(item["state"], FEEDER_STATES),
                     "pr": _clean(item["pr_number"], 16) if item["pr_number"] is not None else None,
                     "reason": _clean(item["waiting_reason"], 200) if item["waiting_reason"] else None,

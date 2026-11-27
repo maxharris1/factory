@@ -1289,6 +1289,15 @@ the feeder's last poll, even an empty one: eligible, fed, waiting for
 capacity and waiting on blockers or files. With no `intake` anywhere the
 poller runs no feeder.
 
+**Dashboard snapshot fields (issue #1751).** Each item in status.json's
+`feeder.items` carries `title`, the feeder's recorded title redacted and cut to
+120 characters. Each `tickets` row carries `title` too, from the feeder row
+with the same repo, compared without case, and the same issue: the row's
+recorded source without its `#`, else its ticket id. The lookup reads every
+feeder row, not only those seen at the last poll, so a merged ticket keeps its
+title. A ticket with no feeder row, or a database without the feeder's table,
+has a null `title`. No page shows it yet.
+
 `ready_starts_review` defaults to `false`. When `true`, a trusted `ready` from
 `factory.md`'s builder (`from=<builder>-bot role=builder`, by a
 `trusted_logins` author) whose head names the PR head starts tracking an

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 import lib.dashboard as dashboard
+from lib import feeder
 from lib.dashboard import (
     REFRESH_DEFAULT,
     DashboardError,
@@ -70,6 +71,8 @@ KEY_BODY = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2"
 KEY_LAST = "d3h5" + "eg=="
 KEY_TAIL_ONLY = "c2Vj" + "cmV0"
 WORKFLOW_STATE_SECRET = "ws" + "-Leak-55"
+FEEDER_ITEM_TITLE_TOKEN = "gh" + "p_" + "F33d3rT1tl" * 4
+TICKET_ROW_TITLE_KEY = "lin" + "_api_" + "T1ck3tR0wQ" * 4
 
 JSON_SAMPLES = {
     "json password": (JSON_PASSWORD, '{"password":"' + JSON_PASSWORD + '"}'),
@@ -136,6 +139,8 @@ FREE_TEXT_SECRETS = {
     "linear key": LINEAR_KEY,
     "email": EMAIL,
     "key=value secret": KEY_VALUE,
+    "feeder item title token": FEEDER_ITEM_TITLE_TOKEN,
+    "ticket row title key": TICKET_ROW_TITLE_KEY,
     **{name: secret for name, (secret, _) in JSON_SAMPLES.items()},
     **{name: secret for name, (secret, _) in ENCODED_SAMPLES.items()},
     "private key body": KEY_BODY,
@@ -256,6 +261,29 @@ def add_poll_error(
         "INSERT INTO poll_errors (repo, ticket_id, error, recorded_at) "
         "VALUES (?, ?, ?, ?)",
         (repo, ticket_id, error, recorded_at),
+    )
+
+
+def add_feeder_item(
+    connection: sqlite3.Connection,
+    repo: str,
+    issue: str,
+    title: str,
+    *,
+    seen_at: float = NOW - 60,
+) -> None:
+    feeder.ensure_tables(connection)
+    connection.execute(
+        f"INSERT OR REPLACE INTO {feeder.POLL_TABLE} (id, at) VALUES (1, ?)", (NOW - 60,)
+    )
+    connection.execute(
+        f"""
+        INSERT INTO {feeder.FEEDER_TABLE} (
+            repo, issue, tracker, title, harness, state, risk,
+            issue_created_at, first_seen_at, seen_at
+        ) VALUES (?, ?, 'github', ?, 'claude', 'eligible', 'low', ?, ?, ?)
+        """,
+        (repo, issue, title, NOW - 7200, NOW - 7200, seen_at),
     )
 
 
@@ -676,6 +704,46 @@ def test_tickets_states_rounds_paused_and_stuck(tmp_path: Path) -> None:
     assert ("aut0-code/aut0", "AUT-7") in paused
 
 
+def test_feeder_items_carry_their_title_redacted_and_cut(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        add_feeder_item(connection, "maxharris1/cleffy", "107", "Plain title")
+        add_feeder_item(connection, "maxharris1/cleffy", "108", f"Rotate {GH_CLASSIC} out of CI")
+        add_feeder_item(connection, "maxharris1/cleffy", "109", "x" * 200)
+    items = collect_snapshot(db, log, now=NOW)["feeder"]["items"]
+    titles = {item["issue"]: item["title"] for item in items}
+    assert titles["107"] == "Plain title"
+    assert titles["108"] == "Rotate [redacted-token] out of CI"
+    assert titles["109"] == "x" * 119 + "…"
+
+
+def test_ticket_rows_carry_their_feeder_title(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        add_ticket(connection, "MaxHarris1/Cleffy", "111")
+        add_ticket(connection, "MaxHarris1/Cleffy", "112")
+        connection.executemany(
+            "INSERT INTO ticket_sources (repo, ticket_id, source, pr_number) VALUES (?, ?, ?, ?)",
+            [("MaxHarris1/Cleffy", "111", "#107", "111"), ("MaxHarris1/Cleffy", "112", "#108", "112")],
+        )
+        add_feeder_item(connection, "maxharris1/cleffy", "107", f"Rotate {GH_CLASSIC} out of CI")
+        add_feeder_item(connection, "maxharris1/cleffy", "108", "y" * 200, seen_at=NOW - 86400)
+        add_feeder_item(connection, "aut0-code/aut0", "AUT-7", "Linear ticket title", seen_at=NOW - 86400)
+    snapshot = collect_snapshot(db, log, now=NOW)
+    titles = {(row["repo"], row["ticket_id"]): row["title"] for row in snapshot["tickets"]}
+    assert titles[("MaxHarris1/Cleffy", "111")] == "Rotate [redacted-token] out of CI"
+    assert titles[("MaxHarris1/Cleffy", "112")] == "y" * 119 + "…"
+    assert titles[("aut0-code/aut0", "AUT-7")] == "Linear ticket title"
+    assert titles[("maxharris1/cleffy", "12")] is None
+    assert [item["issue"] for item in snapshot["feeder"]["items"]] == ["107"]
+
+
+def test_ticket_rows_have_a_null_title_without_a_feeder_table(tmp_path: Path) -> None:
+    tickets = snapshot_for(tmp_path)["tickets"]
+    assert tickets
+    assert all(row["title"] is None for row in tickets)
+
+
 def test_poller_section_reports_log_and_recent_errors(tmp_path: Path) -> None:
     poller = snapshot_for(tmp_path)["poller"]
     assert poller["log"]["present"] is True
@@ -988,6 +1056,8 @@ SHAPE_SAMPLES = {
     "linear key": (LINEAR_KEY, f"linear {LINEAR_KEY}"),
     "email": (EMAIL, f"mail from {EMAIL}"),
     "key=value secret": (KEY_VALUE, f"FACTORY_WEBHOOK_KEY={KEY_VALUE}"),
+    "feeder item title token": (FEEDER_ITEM_TITLE_TOKEN, f"Rotate {FEEDER_ITEM_TITLE_TOKEN} out of CI"),
+    "ticket row title key": (TICKET_ROW_TITLE_KEY, f"Revoke {TICKET_ROW_TITLE_KEY}"),
 }
 
 
@@ -1298,6 +1368,10 @@ def _plant_secrets(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
                 stuck=1,
                 stuck_reason=f"stuck: {sample}",
             )
+        add_feeder_item(connection, "maxharris1/cleffy", "4242", f"Rotate {FEEDER_ITEM_TITLE_TOKEN} out of CI")
+        add_feeder_item(
+            connection, "maxharris1/cleffy", "99", f"Revoke {TICKET_ROW_TITLE_KEY}", seen_at=NOW - 86400
+        )
     with log.open("a", encoding="utf-8") as handle:
         for line in KEY_BLOCK_LINES:
             handle.write(line + "\n")
