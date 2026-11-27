@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import copy
 import re
 from pathlib import Path
+
+import pytest
 
 import lib.dashboard_page as page
 from lib.ci_lane import ci_lane
 from lib.dashboard import render_pages
 from lib.dashboard_pages import cockpit, common, counts, tickets
+from tests import test_dashboard_layout as layout
+from tests.test_dashboard_activity import HARNESS, _inner
 from tests.test_dashboard_ci import ci_snapshot
 from tests.test_dashboard_layout import _no_script, _snapshot
 
@@ -66,9 +71,18 @@ def test_the_panel_holds_no_control(tmp_path: Path) -> None:
     assert not re.search(r"<(button|form|input|select|textarea)\b", counts._counts(_snapshot(tmp_path)))
 
 
-def test_the_css_is_served_after_the_cockpit_css_and_the_panel_is_on_no_page(tmp_path: Path) -> None:
+def test_the_css_is_served_after_the_cockpit_css_and_the_script_after_the_tickets_script() -> None:
     assert cockpit.CSS + counts.CSS in page.CSS
-    assert not any('id="counts"' in html for html in render_pages(_snapshot(tmp_path)).values())
+    assert tickets.SCRIPT_TICKETS + counts.SCRIPT in page.SCRIPT
+    assert "__COUNTS__" not in counts.SCRIPT
+
+
+def test_the_strip_is_the_first_panel_on_the_lanes_page_and_on_no_other(tmp_path: Path) -> None:
+    pages = render_pages(_snapshot(tmp_path))
+    assert [name for name, html in pages.items() if 'id="counts"' in html] == ["index.html"]
+    hud = layout._section(_no_script(pages["index.html"]), "hud")
+    after_heading = hud[hud.index("</h1>") + len("</h1>") :]
+    assert after_heading.startswith('<section class="panel" id="counts"'), after_heading[:200]
 
 
 def test_stage_counts_are_the_numbers_the_board_draws(tmp_path: Path) -> None:
@@ -129,3 +143,53 @@ def test_each_link_lands_on_a_panel_the_served_pages_draw(tmp_path: Path) -> Non
     for cell in counts.CELLS:
         if "#" in cell["href"]:
             assert f'id="{cell["href"].split("#")[1]}"' in index
+
+
+def busy(tmp_path: Path) -> dict:
+    snapshot = ci_snapshot(tmp_path)
+    snapshot["feeder"] = feeder("waiting-blocked", "fed", "waiting-blocked")
+    return snapshot
+
+
+def no_statechart(tmp_path: Path) -> dict:
+    snapshot = _snapshot(tmp_path)
+    snapshot["statechart"] = None
+    return snapshot
+
+
+MOUNTS = layout.BAR + ["hud", "counts", "needs-max", "intake", "lanes", "just-happened"]
+
+
+def served(snapshot: dict) -> str:
+    html = render_pages(snapshot)["index.html"]
+    assert layout._section(_no_script(html), "counts") == counts._counts(snapshot)
+    return _inner(html, "counts")
+
+
+def script(tmp_path: Path, snapshot: dict, actions: list) -> dict:
+    return layout.run_harness(tmp_path, HARNESS, page.page_script(snapshot.get("statechart")), snapshot, "main",
+                              MOUNTS, actions)
+
+
+@layout.needs_node
+@pytest.mark.parametrize("make", [_snapshot, busy, no_statechart])
+def test_the_script_draws_the_strip_the_server_draws(tmp_path: Path, make) -> None:
+    snapshot = make(tmp_path)
+    if make is busy:
+        assert counts.tally(snapshot)["blocked"] == 2 and counts.tally(snapshot)["ci"] > 0
+    assert script(tmp_path / "run", snapshot, [])["html"]["counts"] == served(snapshot)
+
+
+@layout.needs_node
+def test_a_poll_with_new_counts_redraws_the_strip_in_place(tmp_path: Path) -> None:
+    (tmp_path / "first").mkdir()
+    (tmp_path / "later").mkdir()
+    first = _snapshot(tmp_path / "first")
+    later = busy(tmp_path / "later")
+    later["generated_at_epoch"] = first["generated_at_epoch"] + 2
+    assert counts.tally(first) != counts.tally(later)
+    actions = [["record", "before"], ["snap", ["counts"]], ["poll", later], ["record", "after"], ["snap", ["counts"]]]
+    out = script(tmp_path / "run", copy.deepcopy(first), actions)
+    records = [step["kids"] for step in out["steps"] if "record" in step]
+    assert [kids.count("counts") for kids in records] == [1, 1]
+    assert [step["snap"]["counts"] for step in out["steps"] if "snap" in step] == [served(first), served(later)]
