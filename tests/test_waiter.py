@@ -766,6 +766,101 @@ def test_a_planted_symlink_and_undecodable_bytes_do_not_break_the_cleanup_row(
     ], "the symlinked clean pass is skipped and the undecodable pass counts"
 
 
+def seed_passes(tmp_path: Path, *passes: str) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(exist_ok=True)
+    names = ["cleanup.log", *(f"cleanup.log.{n}" for n in range(1, waiter_module.CLEANUP_LOGS))]
+    for name, text in zip(names, passes):
+        (state_dir / name).write_text(text)
+
+
+def raise_row(db: Path, detail: str) -> None:
+    with SQLiteJobQueue(db, clock=lambda: 7.0).connect() as connection:
+        attention.raise_flag(connection, CLEANUP_ROW, detail, 7.0)
+
+
+def test_a_fresh_waiter_reads_all_eight_kept_passes_before_rotating(tmp_path: Path) -> None:
+    seed_passes(tmp_path, *[finished_pass(75)] * 4,
+                *(finished_pass(1, f"failed {n}") for n in (4, 5, 6, 7)))
+
+    passes = CleanupPasses(tmp_path, [])
+
+    assert [row[3] for row in attention_rows(passes.db)] == [
+        "the last 4 cleanup passes failed: failed 4"]
+
+
+def test_a_restart_over_eight_failed_passes_keeps_the_count_of_eight(tmp_path: Path) -> None:
+    seed_passes(tmp_path, *(finished_pass(1, f"failed {n}") for n in range(8)))
+    raise_row(tmp_path / "orch.db", "the last 8 cleanup passes failed: failed 0")
+
+    passes = CleanupPasses(tmp_path, [])
+
+    assert attention_rows(passes.db) == [
+        (*CLEANUP_ROW, "the last 8 cleanup passes failed: failed 0", 7.0)]
+
+
+def test_a_restart_clears_the_row_when_the_oldest_kept_pass_was_clean(tmp_path: Path) -> None:
+    seed_passes(tmp_path, *[finished_pass(75)] * 7, finished_pass(0))
+    raise_row(tmp_path / "orch.db", "the last 4 cleanup passes failed: boom")
+
+    passes = CleanupPasses(tmp_path, [])
+
+    assert attention_rows(passes.db) == []
+
+
+def test_a_slow_failing_pass_is_counted_before_the_next_pass_rotates_the_logs(
+    tmp_path: Path
+) -> None:
+    seed_passes(tmp_path, *[finished_pass(75)] * 4,
+                *(finished_pass(1, f"failed {n}") for n in (4, 5, 6)))
+    passes = CleanupPasses(tmp_path, [])
+    assert attention_rows(passes.db) == [], "three failed passes raise nothing"
+
+    passes.finish(1)
+
+    assert [row[3] for row in attention_rows(passes.db)] == [
+        "the last 4 cleanup passes failed: pass 1"]
+
+
+def test_no_cleanup_pass_rotates_the_logs_while_a_row_write_waits_for_its_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(queue_module, "BUSY_TIMEOUT_SECONDS", 0.05)
+    seed_passes(tmp_path, *[finished_pass(75)] * 4,
+                *(finished_pass(1, f"failed {n}") for n in (4, 5, 6)))
+    passes = CleanupPasses(tmp_path, [])
+    holder = hold_write_lock(passes.db)
+    try:
+        passes.finish(1)
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    assert len(passes.cleanup.children) == 1, "the next pass waits for the row write"
+
+    passes.advance(waiter_module.CLEANUP_ALERT_RETRY_SECONDS)
+
+    assert [row[3] for row in attention_rows(passes.db)] == [
+        "the last 4 cleanup passes failed: pass 1"]
+    assert len(passes.cleanup.children) == 2
+
+
+@pytest.mark.parametrize("codes", [(0,), (1, 1, 1, 1)], ids=["cleared", "raised"])
+def test_orch_status_reads_a_cleanup_row_on_a_fresh_queue_database(
+    tmp_path: Path, codes: tuple[int, ...]
+) -> None:
+    passes = CleanupPasses(tmp_path, [])
+    passes.finish(*codes)
+
+    status = subprocess.run(
+        [sys.executable, str(ORCH), "status", "--db", str(passes.db),
+         "--machines", str(ROOT / "machines.yml")],
+        capture_output=True, text=True, env={**os.environ, "ORCH_DB": ""}, check=False,
+    )
+
+    assert status.returncode == 0, status.stderr
+    assert ("cleanup-failing" in status.stdout) == bool(attention_rows(passes.db))
+
+
 def set_state(db: Path, job_id: str, job_state: str) -> None:
     with sqlite3.connect(db) as connection:
         connection.execute("UPDATE jobs SET state = ? WHERE id = ?", (job_state, job_id))

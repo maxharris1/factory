@@ -745,8 +745,9 @@ class Waiter:
         if not self._recovered:
             self._recover()
         self._reap()
-        self._sweep_job_folders()
+        self._reap_cleanup()
         self._publish_cleanup_alert()
+        self._sweep_job_folders()
         self._reconcile_home()
         if self._draining():
             return None
@@ -764,18 +765,22 @@ class Waiter:
         job, placement, proof = claimed
         return self._start(job, placement, proof)
 
+    def _reap_cleanup(self) -> None:
+        if self._cleanup is None:
+            return
+        code = self._cleanup.poll()
+        if code is None:
+            return
+        self._cleanup = None
+        log_path = self.state_dir / CLEANUP_LOG
+        self._append_cleanup_log(log_path, f"{CLEANUP_EXITED}{code}")
+        self.log(f"{CLEANUP_EXITED}{code} ({log_path})")
+        self._cleanup_alert_due = self.clock()
+
     def _sweep_job_folders(self) -> None:
-        if not self.sweep_cleanup:
+        if not self.sweep_cleanup or self._cleanup is not None or self._cleanup_alert_due is not None:
             return
         log_path = self.state_dir / CLEANUP_LOG
-        if self._cleanup is not None:
-            code = self._cleanup.poll()
-            if code is None:
-                return
-            self._cleanup = None
-            self._append_cleanup_log(log_path, f"{CLEANUP_EXITED}{code}")
-            self.log(f"{CLEANUP_EXITED}{code} ({log_path})")
-            self._cleanup_alert_due = self.clock()
         now = self.clock()
         if self._cleanup_started_at is not None and now - self._cleanup_started_at < CLEANUP_SWEEP_SECONDS:
             return
