@@ -59,6 +59,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import math
 import os
 import re
 import shutil
@@ -71,6 +72,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import TextIO
 
@@ -88,6 +90,7 @@ FINISHED = ("done", "failed", "cancelled")
 ACTIVE = ("queued", "running")
 LIVE = "live"
 RECENT = "recent"
+BAD_FINISHED_AT = "bad-finished-at"
 RETRY_HELD = "retry-held"
 UNKNOWN = "unknown"
 NOT_NAMED = "not-finished"
@@ -114,13 +117,20 @@ _TAG = re.compile(r"[0-9a-f]{32}")
 _RECORD_TAG = re.compile(rf"{re.escape(WORKER_RECORD)}-([0-9a-f]{{32}})\.")
 
 
+class Unreadable(Enum):
+    VALUE = "unreadable"
+
+
+UNREADABLE = Unreadable.VALUE
+
+
 @dataclass(frozen=True)
 class JobRow:
     id: str
     repo: str
     ticket_id: str
     state: str
-    finished_at: float | None
+    finished_at: float | None | Unreadable
     recipient: str
     failure_handled: bool = True
 
@@ -128,6 +138,8 @@ class JobRow:
 def keep_reason(job: JobRow, ticket_active: bool, cutoff: float) -> str | None:
     if job.state not in FINISHED:
         return LIVE
+    if job.finished_at is UNREADABLE:
+        return BAD_FINISHED_AT
     if job.finished_at is None or job.finished_at >= cutoff:
         return RECENT
     if job.state == "failed" and (ticket_active or not job.failure_handled):
@@ -144,11 +156,19 @@ def keep_reasons(jobs: Iterable[JobRow], cutoff: float) -> dict[str, str | None]
     }
 
 
+def _finish_time(value: object) -> float | None | Unreadable:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)) and math.isfinite(value):
+        return float(value)
+    return UNREADABLE
+
+
 def read_jobs(db: Path) -> list[JobRow]:
     connection = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
         return [
-            JobRow(id, repo, ticket, state, finished_at, recipient, bool(handled))
+            JobRow(id, repo, ticket, state, _finish_time(finished_at), recipient, bool(handled))
             for id, repo, ticket, state, finished_at, recipient, handled in connection.execute(
                 "SELECT id, repo, ticket_id, state, finished_at, recipient, failure_handled"
                 " FROM jobs"
@@ -776,8 +796,11 @@ def run(db: Path, machines, transport: CaptureTransport, *, now: float, grace_ho
     reasons = keep_reasons(rows, cutoff)
     mine = [row for row in rows if bot is None or row.recipient == OWNING_BOTS[bot]]
     owned = None if bot is None else frozenset(row.id for row in mine)
+    for row in sorted(mine, key=lambda row: row.id):
+        if reasons[row.id] == BAD_FINISHED_AT:
+            print(f"orch cleanup run: kept {row.id} {BAD_FINISHED_AT}", flush=True)
     finished_at = {row.id: row.finished_at for row in mine
-                   if reasons[row.id] is None and row.finished_at is not None}
+                   if reasons[row.id] is None and isinstance(row.finished_at, float)}
     plan = Plan(frozenset(finished_at), cutoff, dry_run, HOLD, finished_at, unlink_lock=True,
                 owned=owned)
     found = {(t.device, t.remote.workdir_root): t for t in targets(machines)
