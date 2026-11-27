@@ -39,7 +39,10 @@ runs as the owning bot's own user and login, starts the job itself:
   `orch cleanup run --bot <bot>` (lib/job_cleanup.py) in a new session,
   never while its last pass still runs. Its output goes to
   `<state>/cleanup.log` between a start line and an exit line, and the
-  seven passes before it stay in cleanup.log.1 to cleanup.log.7;
+  seven passes before it stay in cleanup.log.1 to cleanup.log.7. Once the
+  last CLEANUP_ALERT_AFTER finished passes in those files failed, it raises
+  one needs_attention row ("orch", "cleanup-<bot>", "cleanup-failing"), and
+  deletes it when the newest finished pass exited 0 (#1764);
 * before each claim, whatever jobs it runs (#366), it brings its own box
   factory_root to the deployed box checkout's HEAD with lib/device_deploy.py's
   git steps, then its home's installed skills to that pin with the preflight's
@@ -150,7 +153,8 @@ from lib.dispatch.constants import LOCAL_GATE_WAITING
 from lib.factory_md import FactoryContext, parse_factory_context
 from lib.load import load_yaml
 from lib.machines_yml import Device, MachinesConfig, orch_host
-from lib import account_doctor, codex_sandbox, containers, device_deploy, job_token, leftovers, stacks
+from lib import account_doctor, attention, codex_sandbox, containers, device_deploy, job_token, leftovers
+from lib import stacks
 from lib.device_monitor import remote_target
 from lib.harness_env import ApproverProfileExposed, harness_environ
 from lib.handoff_check import (
@@ -242,6 +246,8 @@ CLEANUP_LOG = "cleanup.log"
 CLEANUP_LOGS = 8
 CLEANUP_STARTED = "cleanup run started "
 CLEANUP_EXITED = "cleanup run exited "
+CLEANUP_ALERT_AFTER = 4
+CLEANUP_ALERT_RETRY_SECONDS = 60.0
 _CLEANUP_EXIT = re.compile(rf"{CLEANUP_EXITED}(-?\d+)$")
 LOCAL_GATE_RETRY_SECONDS = 600
 UNSTARTED_CLAIM = (
@@ -678,6 +684,7 @@ class Waiter:
         transport: WaiterTransport | None = None,
         sweep_cleanup: bool = False,
         cleanup_spawn: Callable[..., Child] | None = None,
+        cleanup_alert_after: int = CLEANUP_ALERT_AFTER,
     ):
         if bot not in OWNING_BOTS:
             raise WaiterError(f"{bot!r} is not a harness bot")
@@ -727,6 +734,8 @@ class Waiter:
         self.cleanup_spawn = cleanup_spawn if cleanup_spawn is not None else spawn
         self._cleanup: Child | None = None
         self._cleanup_started_at: float | None = None
+        self.cleanup_alert_after = cleanup_alert_after
+        self._cleanup_alert_due: float | None = clock()
 
     def running(self) -> set[str]:
         return set(self._children)
@@ -737,6 +746,7 @@ class Waiter:
             self._recover()
         self._reap()
         self._sweep_job_folders()
+        self._publish_cleanup_alert()
         self._reconcile_home()
         if self._draining():
             return None
@@ -763,15 +773,16 @@ class Waiter:
             if code is None:
                 return
             self._cleanup = None
-            self._append_cleanup_log(log_path, f"cleanup run exited {code}")
-            self.log(f"cleanup run exited {code} ({log_path})")
+            self._append_cleanup_log(log_path, f"{CLEANUP_EXITED}{code}")
+            self.log(f"{CLEANUP_EXITED}{code} ({log_path})")
+            self._cleanup_alert_due = self.clock()
         now = self.clock()
         if self._cleanup_started_at is not None and now - self._cleanup_started_at < CLEANUP_SWEEP_SECONDS:
             return
         self._cleanup_started_at = now
         argv = [*self.orch, "cleanup", "run", "--bot", self.bot,
                 "--db", str(self.db), "--machines", str(self.machines)]
-        names = [log_path, *(log_path.with_name(f"{CLEANUP_LOG}.{n}") for n in range(1, CLEANUP_LOGS))]
+        names = self._cleanup_logs()
         started = datetime.fromtimestamp(self.queue.now(), timezone.utc).isoformat(timespec="seconds")
         try:
             self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -786,7 +797,7 @@ class Waiter:
             return
         try:
             with output:
-                output.write(f"cleanup run started {started}\n".encode())
+                output.write(f"{CLEANUP_STARTED}{started}\n".encode())
                 output.flush()
                 self._cleanup = self.cleanup_spawn(
                     argv,
@@ -801,6 +812,50 @@ class Waiter:
         except OSError as exc:
             self._append_cleanup_log(log_path, f"cleanup run not started: {_one_line(exc)}")
             self.log(f"cleanup run not started: {_one_line(exc)}")
+
+    def _cleanup_logs(self) -> list[Path]:
+        log_path = self.state_dir / CLEANUP_LOG
+        return [log_path, *(log_path.with_name(f"{CLEANUP_LOG}.{n}") for n in range(1, CLEANUP_LOGS))]
+
+    def _cleanup_pass_tails(self) -> Iterator[str]:
+        for path in self._cleanup_logs():
+            try:
+                with open(path, "rb", opener=_private_nofollow) as handle:
+                    handle.seek(0, os.SEEK_END)
+                    handle.seek(max(0, handle.tell() - MARKER_TAIL_BYTES))
+                    tail = handle.read()
+            except OSError:
+                continue
+            yield tail.decode("utf-8", errors="replace")
+
+    def _publish_cleanup_alert(self) -> None:
+        """Raise, update or delete this bot's cleanup-failing row from the
+        kept pass files. Never raises: it runs in the loop that claims jobs."""
+        due = self._cleanup_alert_due
+        if not self.sweep_cleanup or due is None or self.clock() < due:
+            return
+        self._cleanup_alert_due = None
+        streak = cleanup_streak(self._cleanup_pass_tails())
+        if streak is None or 0 < streak.failed < self.cleanup_alert_after:
+            return
+        key = ("orch", f"cleanup-{self.bot}", attention.CLEANUP_FAILING)
+        detail = f"the last {streak.failed} cleanup passes failed" + (
+            f": {streak.error}" if streak.error else " with no output")
+        try:
+            with self.queue.connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                if streak.failed:
+                    changed = attention.raise_flag(connection, key, detail, self.queue.now())
+                else:
+                    changed = attention.clear_flag(connection, key)
+        except (QueueError, sqlite3.Error, OSError) as exc:
+            self._cleanup_alert_due = self.clock() + CLEANUP_ALERT_RETRY_SECONDS
+            self.log(f"{attention.CLEANUP_FAILING} not written: {_one_line(exc)}")
+            return
+        if changed and streak.failed:
+            self.log(f"{attention.CLEANUP_FAILING} raised: {detail}")
+        elif changed:
+            self.log(f"{attention.CLEANUP_FAILING} cleared: a cleanup pass exited 0")
 
     def _append_cleanup_log(self, log_path: Path, line: str) -> None:
         try:
