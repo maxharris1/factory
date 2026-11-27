@@ -159,7 +159,7 @@ def keep_reasons(jobs: Iterable[JobRow], cutoff: float) -> dict[str, str | None]
 def _finish_time(value: object) -> float | None | Unreadable:
     if value is None:
         return None
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+    if isinstance(value, (int, float)) and math.isfinite(value):
         return float(value)
     return UNREADABLE
 
