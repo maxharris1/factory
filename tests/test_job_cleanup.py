@@ -463,8 +463,30 @@ def test_a_failing_target_does_not_stop_the_others(tmp_path: Path, capsys, monke
     lines = out.splitlines()
     assert f"pc claude-bot {work_root(tmp_path, 'pc')}: failed: ssh failed" in lines
     assert any(line.startswith("mac claude-bot") and "removed 1" in line for line in lines)
+    assert lines[-1] == (
+        f"orch cleanup run: failed: pc claude-bot {work_root(tmp_path, 'pc')}: ssh failed")
     assert (work_root(tmp_path, "pc") / "jobs" / "done1" / "repo").exists()
     assert not (work_root(tmp_path, "mac") / "jobs" / "done1" / "repo").exists()
+
+
+def test_a_crashed_pass_ends_with_the_exception_after_its_traceback(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    db = database(tmp_path, [("done1", "t1", "done", OLD)])
+
+    def broken(_):
+        raise RuntimeError("machines.yml\nis unreadable")
+
+    monkeypatch.setattr(job_cleanup.health, "load_machines", broken)
+
+    code = job_cleanup.main(["run", "--bot", "claude-bot", "--db", str(db)], clock=lambda: NOW)
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert captured.out == ""
+    assert captured.err.startswith("Traceback (most recent call last):\n")
+    assert captured.err.endswith(
+        "orch cleanup run: failed: RuntimeError: machines.yml is unreadable\n")
 
 
 class RequeueAndClaim:
@@ -2600,7 +2622,7 @@ def test_bot_pass_exits_when_another_pass_of_that_bot_runs(
         fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
         code, out = cleanup(["run", "--bot", "claude-bot", "--db", str(db)], NoCalls(), capsys)
 
-    assert code == 0
+    assert code == 75
     assert out == "orch cleanup run: cleanup for claude-bot already running\n"
     assert (root / "jobs" / "done1").exists()
     code, out = cleanup(["run", "--bot", "claude-bot", "--db", str(db)],

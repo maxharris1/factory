@@ -37,7 +37,9 @@ runs as the owning bot's own user and login, starts the job itself:
 * it goes straight back to waiting, and reaps each `orch job run` it started;
 * on its first step and every CLEANUP_SWEEP_SECONDS after, it starts
   `orch cleanup run --bot <bot>` (lib/job_cleanup.py) in a new session,
-  output to `<state>/cleanup.log`, never while its last pass still runs;
+  never while its last pass still runs. Its output goes to
+  `<state>/cleanup.log` between a start line and an exit line, and the
+  seven passes before it stay in cleanup.log.1 to cleanup.log.7;
 * before each claim, whatever jobs it runs (#366), it brings its own box
   factory_root to the deployed box checkout's HEAD with lib/device_deploy.py's
   git steps, then its home's installed skills to that pin with the preflight's
@@ -136,6 +138,7 @@ import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
@@ -235,6 +238,7 @@ HOME_RETRY_SECONDS = 60.0
 CONTAINER_SWEEP_SECONDS = 600.0
 CLEANUP_SWEEP_SECONDS = 900.0
 CLEANUP_LOG = "cleanup.log"
+CLEANUP_LOGS = 8
 LOCAL_GATE_RETRY_SECONDS = 600
 UNSTARTED_CLAIM = (
     "harness = ? AND autostart_pid = ? AND runner_pid IS NULL "
@@ -720,6 +724,7 @@ class Waiter:
             if code is None:
                 return
             self._cleanup = None
+            self._append_cleanup_log(log_path, f"cleanup run exited {code}")
             self.log(f"cleanup run exited {code} ({log_path})")
         now = self.clock()
         if self._cleanup_started_at is not None and now - self._cleanup_started_at < CLEANUP_SWEEP_SECONDS:
@@ -727,9 +732,23 @@ class Waiter:
         self._cleanup_started_at = now
         argv = [*self.orch, "cleanup", "run", "--bot", self.bot,
                 "--db", str(self.db), "--machines", str(self.machines)]
+        names = [log_path, *(log_path.with_name(f"{CLEANUP_LOG}.{n}") for n in range(1, CLEANUP_LOGS))]
+        started = datetime.fromtimestamp(self.queue.now(), timezone.utc).isoformat(timespec="seconds")
         try:
             self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-            with open(log_path, "wb", opener=_private_nofollow) as output:
+            for older, newer in reversed(list(zip(names, names[1:]))):
+                try:
+                    os.replace(older, newer)
+                except FileNotFoundError:
+                    pass
+            output = open(log_path, "xb", opener=_private_nofollow)
+        except OSError as exc:
+            self.log(f"cleanup run not started: {_one_line(exc)}")
+            return
+        try:
+            with output:
+                output.write(f"cleanup run started {started}\n".encode())
+                output.flush()
                 self._cleanup = self.cleanup_spawn(
                     argv,
                     stdin=subprocess.DEVNULL,
@@ -741,7 +760,15 @@ class Waiter:
                     shell=False,
                 )
         except OSError as exc:
+            self._append_cleanup_log(log_path, f"cleanup run not started: {_one_line(exc)}")
             self.log(f"cleanup run not started: {_one_line(exc)}")
+
+    def _append_cleanup_log(self, log_path: Path, line: str) -> None:
+        try:
+            with open(log_path, "ab", opener=_private_nofollow) as output:
+                output.write(f"{line}\n".encode())
+        except OSError as exc:
+            self.log(f"{log_path}: could not add {line!r} ({_one_line(exc)})")
 
     def _reconcile_home(self) -> None:
         if self.home is None:
