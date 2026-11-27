@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import copy
 import os
+import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -68,10 +70,17 @@ PANELS: dict[str, Callable[[dict], str]] = {
     "ticket_cockpit_html.visual-qa": lambda c: cockpit.ticket_cockpit_html({**c["asking"], **VISUAL_QA}),
 }
 
+REPRODUCE = """\
+    git worktree add --detach /tmp/golden-$sha $sha
+    cp tests/test_dashboard_golden.py /tmp/golden-$sha/tests/
+    (cd /tmp/golden-$sha && GOLDEN_UPDATE=1 python3 -m pytest -q -p no:cacheprovider tests/test_dashboard_golden.py)
+    diff -r tests/golden/dashboard /tmp/golden-$sha/tests/golden/dashboard"""
+
 README = f"""# Dashboard leaf panel goldens
 
 Server-rendered HTML of every leaf panel, one block per fixture variant. The 35 unsuffixed goldens were rendered
-from main {SOURCE}; the `.<kind>` and `.visual-qa` goldens from main {EXTENDED}, whose dashboard code is the same.
+from main {SOURCE}; the `.<kind>` and `.visual-qa` goldens from main {EXTENDED}. Run with this harness, both
+commits render all 51 goldens byte for byte.
 
 Each ticket page section is pinned for every ticket kind whose page shows it: running `{RUNNING}`, shipped
 `{SHIPPED}` (added by `_with_shipped`), stopped `{STOPPED}`, queued `{QUEUED}` and idle `{ASKING}`.
@@ -79,9 +88,15 @@ Each ticket page section is pinned for every ticket kind whose page shows it: ru
 `ticket_cockpit_html` renders waiting-max `{ASKING}` with one open question added, and
 `ticket_cockpit_html.visual-qa` the same ticket waiting on a visual QA review.
 
-Regenerate:
+Regenerate from the checked-out code:
 
     GOLDEN_UPDATE=1 python3 -m pytest -q -p no:cacheprovider tests/test_dashboard_golden.py
+
+Update mode deletes every `.html` here that the harness does not render. {SOURCE} has no harness and the one at
+{EXTENDED} renders only the 35 unsuffixed goldens, so copy this harness into a checkout of either commit before
+regenerating. From the repo root, with `sha` set to one of them:
+
+{REPRODUCE}
 """
 
 
@@ -138,3 +153,25 @@ def test_the_golden_files_are_exactly_the_leaf_panels(rendered: dict[str, str]) 
 @pytest.mark.parametrize("panel", PANELS)
 def test_the_panel_renders_byte_identical(rendered: dict[str, str], panel: str) -> None:
     assert rendered[panel] == (GOLDEN / f"{panel}.html").read_bytes().decode("utf-8")
+
+
+def test_the_committed_readme_is_the_one_update_mode_writes(rendered: dict[str, str]) -> None:
+    assert (GOLDEN / "README.md").read_text(encoding="utf-8") == README
+
+
+@pytest.mark.parametrize("sha", [SOURCE, EXTENDED])
+def test_the_documented_steps_reproduce_the_goldens_at_each_cited_commit(tmp_path: Path, sha: str) -> None:
+    if os.environ.get("GOLDEN_UPDATE") == "1":
+        pytest.skip("the documented steps run this harness in update mode")
+    root = Path(__file__).parent.parent
+    if subprocess.run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=root, capture_output=True).returncode:
+        pytest.skip(f"{sha} is not in this clone")
+    script = REPRODUCE.replace("/tmp/", f"{tmp_path}/").replace("python3 ", f"{sys.executable} ")
+    env = {key: value for key, value in os.environ.items() if not key.startswith(("PYTEST", "GOLDEN"))}
+    try:
+        steps = subprocess.run(["bash", "-euc", script], cwd=root, env={**env, "sha": sha},
+                               capture_output=True, text=True, timeout=100)
+    finally:
+        subprocess.run(["git", "worktree", "remove", "--force", tmp_path / f"golden-{sha}"], cwd=root,
+                       capture_output=True)
+    assert steps.returncode == 0, steps.stdout + steps.stderr
