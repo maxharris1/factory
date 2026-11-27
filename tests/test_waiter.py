@@ -438,7 +438,93 @@ class CleanupSpawn:
             raise self.error
         self.calls.append((list(argv), kwargs))
         self.children.append(FakeChild(20_000 + len(self.children)))
+        os.write(kwargs["stdout"].fileno(), f"pass {len(self.children)}\n".encode())
         return self.children[-1]
+
+
+PASS_STARTED = 1_795_000_000.0
+STARTED_LINE = "cleanup run started 2026-11-18T11:06:40+00:00"
+
+
+def run_passes(tmp_path: Path, count: int, *, exits: int = 0) -> tuple[Path, list[str]]:
+    db = tmp_path / "orch.db"
+    queue = SQLiteJobQueue(db, clock=lambda: PASS_STARTED)
+    cleanup = CleanupSpawn()
+    log: list[str] = []
+    waiter, now = sweeping_waiter(tmp_path, queue, db, log, cleanup=cleanup)
+    for n in range(count):
+        now[0] = n * waiter_module.CLEANUP_SWEEP_SECONDS
+        waiter.step()
+        cleanup.children[-1].returncode = exits + n
+    now[0] = count * waiter_module.CLEANUP_SWEEP_SECONDS - 1
+    waiter.step()
+    return tmp_path / "state", log
+
+
+def test_each_cleanup_pass_keeps_its_own_log_with_a_start_and_an_exit_line(
+    tmp_path: Path
+) -> None:
+    state_dir, _ = run_passes(tmp_path, 2)
+
+    assert (state_dir / "cleanup.log.1").read_text() == (
+        f"{STARTED_LINE}\npass 1\ncleanup run exited 0\n")
+    assert (state_dir / "cleanup.log").read_text() == (
+        f"{STARTED_LINE}\npass 2\ncleanup run exited 1\n")
+    for name in ("cleanup.log", "cleanup.log.1"):
+        assert stat.S_IMODE((state_dir / name).stat().st_mode) == 0o600
+
+
+def test_a_ninth_cleanup_pass_drops_the_oldest_log(tmp_path: Path) -> None:
+    state_dir, _ = run_passes(tmp_path, 9)
+
+    names = sorted(path.name for path in state_dir.iterdir() if path.name.startswith("cleanup"))
+    assert names == ["cleanup.log", *(f"cleanup.log.{n}" for n in range(1, 8))]
+    assert "pass 9\n" in (state_dir / "cleanup.log").read_text()
+    assert "pass 2\n" in (state_dir / "cleanup.log.7").read_text()
+
+
+def test_a_cleanup_pass_that_could_not_start_says_so_in_its_log(tmp_path: Path) -> None:
+    db, queue = make_queue(tmp_path)
+    log: list[str] = []
+    waiter, _ = sweeping_waiter(tmp_path, queue, db, log,
+                                cleanup=CleanupSpawn(OSError("cannot exec orch")))
+
+    waiter.step()
+
+    first, last = (tmp_path / "state" / "cleanup.log").read_text().splitlines()
+    assert first.startswith("cleanup run started ")
+    assert last == "cleanup run not started: cannot exec orch"
+
+
+def test_a_pass_whose_waiter_died_keeps_its_output_without_an_exit_line(
+    tmp_path: Path
+) -> None:
+    db, queue = make_queue(tmp_path)
+    sweeping_waiter(tmp_path, queue, db, [], cleanup=CleanupSpawn())[0].step()
+    restarted, _ = sweeping_waiter(tmp_path, queue, db, [], cleanup=CleanupSpawn())
+
+    restarted.step()
+
+    orphan = (tmp_path / "state" / "cleanup.log.1").read_text().splitlines()
+    assert orphan[0].startswith("cleanup run started ") and orphan[1:] == ["pass 1"]
+
+
+def test_a_planted_cleanup_log_symlink_is_moved_aside_not_written_through(
+    tmp_path: Path
+) -> None:
+    db, queue = make_queue(tmp_path)
+    target = tmp_path / "target"
+    target.write_text("untouched\n")
+    (tmp_path / "state").mkdir(mode=0o700)
+    (tmp_path / "state" / "cleanup.log").symlink_to(target)
+    waiter, _ = sweeping_waiter(tmp_path, queue, db, [], cleanup=CleanupSpawn())
+
+    waiter.step()
+
+    assert target.read_text() == "untouched\n"
+    assert (tmp_path / "state" / "cleanup.log.1").is_symlink()
+    assert not (tmp_path / "state" / "cleanup.log").is_symlink()
+    assert "pass 1\n" in (tmp_path / "state" / "cleanup.log").read_text()
 
 
 def test_the_waiter_starts_its_bots_cleanup_on_a_cadence_one_at_a_time(

@@ -51,7 +51,9 @@ unknown.
 that bot's targets, after a default 10 minute grace. Its plan names every id
 the bot owns, so on a work root several bots share the device leaves the rest
 alone. It holds a flock on `cleanup-<bot>.lock` beside orch.db for the whole
-pass, and exits at once when another pass for that bot holds it.
+pass, and exits 75 at once when another pass for that bot holds it. A pass
+that exits non-zero ends its output with one `orch cleanup run: failed:` line
+naming the first failing target, or the exception after its traceback.
 """
 
 from __future__ import annotations
@@ -67,6 +69,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import traceback
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -813,6 +816,8 @@ def run(db: Path, machines, transport: CaptureTransport, *, now: float, grace_ho
             lambda t: clean_target(transport, t, db, plan, reasons), work)))
 
 
+ALREADY_RUNNING = 75
+
 USAGE = """\
 orch cleanup run (--backlog | --bot BOT) [--dry-run] [--grace-hours H] [--db PATH]
                   [--machines PATH]
@@ -856,19 +861,30 @@ def main(argv: list[str], *, clock: Callable[[], float] = time.time,
     if not db.is_file():
         print(f"orch cleanup run: no orch.db at {db}", file=sys.stderr)
         return 1
-    with ExitStack() as held:
-        if args.bot:
-            lock = held.enter_context(open(db.parent / f"cleanup-{args.bot}.lock", "a"))
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                print(f"orch cleanup run: cleanup for {args.bot} already running")
-                return 0
-        outcomes = run(db, health.load_machines(args.machines),
-                       transport if transport is not None else SshTransport(),
-                       now=clock(), grace_hours=args.grace_hours, dry_run=args.dry_run,
-                       bot=args.bot)
-    for target, outcome in outcomes:
-        for line in report_lines(target, outcome):
-            print(line, flush=True)
-    return 1 if any(isinstance(outcome, str) for _, outcome in outcomes) else 0
+    try:
+        with ExitStack() as held:
+            if args.bot:
+                lock = held.enter_context(open(db.parent / f"cleanup-{args.bot}.lock", "a"))
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    print(f"orch cleanup run: cleanup for {args.bot} already running")
+                    return ALREADY_RUNNING
+            outcomes = run(db, health.load_machines(args.machines),
+                           transport if transport is not None else SshTransport(),
+                           now=clock(), grace_hours=args.grace_hours, dry_run=args.dry_run,
+                           bot=args.bot)
+        for target, outcome in outcomes:
+            for line in report_lines(target, outcome):
+                print(line, flush=True)
+    except Exception as exc:
+        traceback.print_exc()
+        print(f"orch cleanup run: failed: {type(exc).__name__}: {' '.join(str(exc).split())}",
+              file=sys.stderr, flush=True)
+        return 1
+    failed = next((f"{_label(target)}: {outcome}" for target, outcome in outcomes
+                   if isinstance(outcome, str)), None)
+    if failed is None:
+        return 0
+    print(f"orch cleanup run: failed: {failed}", flush=True)
+    return 1
