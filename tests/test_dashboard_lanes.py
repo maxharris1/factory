@@ -860,6 +860,28 @@ def test_fifteen_slots_fit_above_the_fold_at_1440x900(tmp_path: Path, browser: B
     assert not broken, f"round pips and their n/m label must both show on one row: {broken}"
 
 
+@needs_chrome
+@pytest.mark.parametrize("width", [1440, 900, 600])
+def test_needs_max_and_intake_are_full_width_rows(tmp_path: Path, browser: Browser, width: int) -> None:
+    browser.open(_page_with_status_stub(_tiles(tmp_path), "index.html"), width)
+    box = browser.eval("""(function () {
+      var hud = document.getElementById('hud'), style = getComputedStyle(hud), b = hud.getBoundingClientRect();
+      var out = {left: b.left + parseFloat(style.paddingLeft), right: b.right - parseFloat(style.paddingRight),
+                 scroll: document.documentElement.scrollWidth, viewport: innerWidth};
+      ['needs-max', 'intake', 'lanes', 'just-happened'].forEach(function (id) {
+        var r = document.getElementById(id).getBoundingClientRect();
+        out[id] = {left: r.left, right: r.right, top: r.top, bottom: r.bottom};
+      });
+      return out;
+    })()""")
+    for ident in ("needs-max", "intake", "just-happened"):
+        assert abs(box[ident]["left"] - box["left"]) <= 0.5, (ident, box)
+        assert abs(box[ident]["right"] - box["right"]) <= 0.5, (ident, box)
+    assert box["needs-max"]["bottom"] <= box["intake"]["top"], box
+    assert box["intake"]["bottom"] <= box["lanes"]["top"], box
+    assert box["scroll"] <= box["viewport"], box
+
+
 def _long_intake_reasons(tmp_path: Path) -> dict:
     from lib.feeder_gates import Holds, github_ref, parse_gate_lines
 

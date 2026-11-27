@@ -1,4 +1,4 @@
-#hud #lanes{grid-column:1/-1}
+#hud #lanes,#needs-max,#intake,#just-happened{grid-column:1/-1}
 #lanes h2{flex-wrap:wrap;gap:4px 8px}
 #lanes h2 .count{font-variant-numeric:tabular-nums}
 #lanes h2 .count b{font-weight:600;color:var(--text)}
@@ -69,10 +69,6 @@ font:500 11px/1 var(--mono);letter-spacing:.12em;color:var(--warn)}
 .lh2 .sub{margin-left:auto;white-space:nowrap}
 .lh2 .harness{flex-basis:100%}
 .tiles{grid-template-columns:1fr}}
-.lanes-first{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start}
-.lanes-first>.panel{min-width:0}
-.lanes-first>#needs-max{flex:2 1 520px}.lanes-first>#intake{flex:1 1 260px}
-.lanes-first~#just-happened{grid-column:1/-1}
 .wake{padding:0 4px;font-size:10px;color:var(--grok)}
 .intake{display:flex;flex-direction:column;gap:10px}
 .irow{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px}
