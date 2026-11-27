@@ -36,6 +36,7 @@ class HarnessDriver(Protocol):
     bot_user: str
     skills_dir: str
     end_events: frozenset[str]
+    wrapper_binaries: frozenset[str]
 
     def family_for_model(self, model: str | None) -> str | None:
         """Model family owned by this harness (e.g. 'anthropic', 'openai', 'google')."""
