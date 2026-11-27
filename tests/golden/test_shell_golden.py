@@ -10,7 +10,7 @@ import lib.dashboard_page as page
 from lib.dashboard_flow import load_chart
 from lib.dashboard_pages import (
     activity, ci, cockpit, common, counts, efficiency, evals, lanes, routing, settings, shell, system,
-    ticket_detail, tickets,
+    ticket_detail, tickets, usage_chip,
 )
 from tests.golden.pages import (
     PAGE_FILES, record, render, sha, snapshots, split, substitutions,
@@ -22,7 +22,8 @@ CSS_ORDER = (
     (common, "CSS_BASE"), (shell, "CSS"), (common, "CSS_PANEL"), (lanes, "CSS"),
     (common, "CSS_PARTS"), (shell, "CSS_NAV"), (system, "CSS"), (ticket_detail, "CSS"),
     (tickets, "CSS"), (common, "CSS_MISC"), (efficiency, "CSS"), (evals, "CSS"), (routing, "CSS"),
-    (activity, "CSS"), (ci, "CSS"), (cockpit, "CSS"), (counts, "CSS"), (settings, "CSS"), (shell, "CSS_PX"),
+    (activity, "CSS"), (ci, "CSS"), (cockpit, "CSS"), (counts, "CSS"), (settings, "CSS"), (usage_chip, "CSS"),
+    (shell, "CSS_PX"),
     (common, "CSS_TAIL"),
 )
 SCRIPT_ORDER = (
@@ -43,6 +44,7 @@ GOLDEN = {
     "common.CSS_MISC": "3ef1afa5b09c2e89dcdd3faca4dd5a2fdbe9a5de738f40e9b3966bff640849d5",
     "shell.CSS_PX": "66e50adc3d7ac0f6d3d17fe47305b9b533ebb810d1b8e535fd8c89ff9cd095e0",
     "common.CSS_TAIL": "2294685d9fc46b3e2f656db366bfe1d3e26684e291ceb97d6d04e31a58c42609",
+    "usage_chip.CSS": "5f484b515fb73d09efa162c60a88d3b4f268dee142074113e68bb1a4350d9c49",
     "common.SCRIPT_HEAD": "c04cf950b671b57d6e6af76acd291acd0252cc60c99869eec8ccfec692e90a87",
     "shell.SCRIPT": "efb4170fdde2f3d4fe762ed57ea6465c6539ceee9beefba62aff48d455943407",
     "common.SCRIPT_GITHUB": "0eb01bf0faff4f8dbcd44a4ff9dcb1d1b89284e89d16edf3a3ae85603b1726ae",
@@ -80,7 +82,7 @@ def key(module: ModuleType, attr: str) -> str:
 def digests(root: Path) -> dict[str, str]:
     found = {
         key(module, attr): sha(getattr(module, attr))
-        for module, attr in CSS_ORDER + SCRIPT_ORDER if module in (common, shell)
+        for module, attr in CSS_ORDER + SCRIPT_ORDER if module in (common, shell, usage_chip)
     }
     found["PX_SCRIPT"] = sha(page.PX_SCRIPT)
     values = substitutions(None)
