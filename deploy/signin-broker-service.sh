@@ -11,6 +11,8 @@
 #   signin-broker-service.sh install-autostart enable autostart (see below)
 #   signin-broker-service.sh remove-autostart  disable it
 #
+# start reports the broker started once it has run ORCH_SIGNIN_BROKER_SETTLE
+# seconds (default 2), so a broker that exits at startup fails start.
 # The broker writes to signin-broker.log beside the pidfile.
 # On a host retired as the orch host (~/.config/factory/orch-retired),
 # start, restart and ensure do nothing and exit 79; stop and status still work.
@@ -39,6 +41,7 @@ ORCH="${HOME}/.local/bin/orch"
 CONTAIN="${HERE}/contain.sh"
 START_WAIT="${ORCH_SIGNIN_BROKER_START_WAIT:-15}"
 STOP_WAIT="${ORCH_SIGNIN_BROKER_STOP_WAIT:-60}"
+SETTLE="${ORCH_SIGNIN_BROKER_SETTLE:-2}"
 PROC="${ORCH_PROC_DIR:-/proc}"
 export PATH="${HOME}/.local/bin${PATH:+:${PATH}}:/usr/local/bin:/usr/bin:/bin"
 
@@ -152,15 +155,16 @@ launch() {
     write_pidfile "$child"
     for ((i = 0; i < START_WAIT * 10; i++)); do
         if pid="$(running_pid)"; then
-            if ((pid == child)); then
-                say "started sign-in broker (pid ${pid})"
-            else
+            if ((pid != child)); then
                 write_pidfile "$pid"
                 say "sign-in broker already running (pid ${pid})"
+                return 0
             fi
-            return 0
-        fi
-        if ! kill -0 "$child" 2>/dev/null; then
+            if ((i >= SETTLE * 10)); then
+                say "started sign-in broker (pid ${pid})"
+                return 0
+            fi
+        elif ! kill -0 "$child" 2>/dev/null; then
             rm -f "$PIDFILE"
             say "sign-in broker exited at startup; see ${LOG}" >&2
             return 1
