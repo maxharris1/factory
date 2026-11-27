@@ -363,13 +363,29 @@ db-backup <label> [--db PATH] [--dir PATH]
   their -wal and -shm files; `orch poll` prunes the same way once a day.
   label: letters, digits, '.', '_' and '-', at most 64. Exit 1 on failure.
 
-db-spill-detail [--db PATH] [--vacuum]
-  One-time migration (#653): move the bulky keys of every older job's
-  detail (lib/job_detail.py SPILLED) to job-detail/<id>.json beside the
-  database. A rerun moves nothing new. --vacuum then runs VACUUM and prints
-  the database size before and after. Holds the poller's lock, so it
-  refuses to run while `orch poll` does; stop the waiters too before
-  --vacuum, which needs the database to itself.
+db-spill-detail [--db PATH] [--dir PATH] [--dry-run | --vacuum]
+  Move bulky job detail out of the database (#653, #1777). --dry-run opens
+  the database read-only, takes no lock and prints the survey: rows and
+  inline bytes for live, replayable and cold jobs, the bytes the cold spill
+  would move, the rows whose detail is not a JSON object, and the ten
+  largest inline keys. Without it the command holds the poller's lock (it
+  refuses while `orch poll` runs), writes --dir/orch-<UTC stamp>-pre-spill.db
+  with db-backup's labelled backup (--dir defaults to manual/ beside the
+  backup-db path) and exits 1, changing no row, unless that copy passes
+  PRAGMA integrity_check. It then moves the fixed keys (lib/job_detail.py
+  SPILLED) of every job and each key over 1 KB of every cold job to
+  job-detail/<id>.json beside the database, and prints the rows and inline
+  bytes moved and the backup path. A rerun moves nothing new. --vacuum then
+  runs VACUUM and wal_checkpoint(TRUNCATE) and prints the database size
+  before and after; it exits 1 before the backup while any `orch wait`
+  holds a waiter-<bot>.lock beside the database. Sequence: run --dry-run
+  against the live database, stop the poller and the waiters, run with
+  --vacuum, start them again. To undo, stop them, move orch.db and its -wal
+  and -shm aside, and run `orch restore-db --db PATH --backup <printed
+  backup path>`; leave job-detail/ in place. Afterwards merged readers (the
+  dispatcher, the dashboard, briefs) see each job's full detail as before;
+  a raw SQL read of jobs.detail sees the slim row, whose "spilled" key
+  names the keys now in job-detail/<id>.json.
 
 wait <bot> [--db PATH] [--machines PATH] [--orch PATH]
   <bot> is claude-bot, codex-bot, cursor-bot, or gemini-bot. Blocks until the
@@ -1619,26 +1635,87 @@ def _restore_db(argv: list[str]) -> int:
 def _db_spill_detail(argv: list[str]) -> int:
     parser = _Parser(prog="orch db-spill-detail", add_help=True)
     parser.add_argument("--db", type=Path)
-    parser.add_argument("--vacuum", action="store_true")
+    parser.add_argument("--dir", type=Path)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--vacuum", action="store_true")
     args = parser.parse_args(argv)
     try:
         path = _db_path(args.db)
-        with _poll_lock(path):
-            before = path.stat().st_size
-            connection = sqlite3.connect(path, timeout=BUSY_TIMEOUT_SECONDS, isolation_level=None)
+        if args.dry_run:
+            connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
             try:
-                moved = job_detail.spill_existing(connection)
-                print(f"moved the detail of {moved} jobs to {path.parent / job_detail.DIRECTORY}")
-                if args.vacuum:
-                    connection.execute("VACUUM")
-                    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                    print(f"vacuumed {path}: {before} -> {path.stat().st_size} bytes")
+                _print_survey(job_detail.survey(connection))
             finally:
                 connection.close()
-    except (ValueError, WaitError, OSError, sqlite3.Error) as exc:
+            return 0
+        with _poll_lock(path):
+            held = _held_waiter_locks(path) if args.vacuum else []
+            for lock in held:
+                print(f"orch db-spill-detail: a waiter holds {lock}; stop it before --vacuum", file=sys.stderr)
+            if held:
+                return 1
+            directory = args.dir or default_backup_path().parent / "manual"
+            backup, pruned = labelled_backup(path, directory, "pre-spill", datetime.now(timezone.utc))
+            for old in pruned:
+                print(f"pruned {old}")
+            _check_integrity(backup)
+            connection = sqlite3.connect(path, timeout=BUSY_TIMEOUT_SECONDS, isolation_level=None)
+            try:
+                inline = _inline_bytes(connection)
+                by_key = job_detail.spill_existing(connection)
+                cold = job_detail.spill_cold(connection)
+                print(f"moved {by_key} jobs by key, {cold} cold jobs")
+                print(f"moved {inline - _inline_bytes(connection)} inline bytes")
+                print(f"backup: {backup}")
+                print(f"restore with: orch restore-db --db {path} --backup {backup}")
+                if args.vacuum:
+                    before = _file_bytes(path)
+                    connection.execute("VACUUM")
+                    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    print(f"vacuumed {path}: {before} -> {_file_bytes(path)} bytes")
+            finally:
+                connection.close()
+    except (BackupError, ValueError, WaitError, OSError, sqlite3.Error) as exc:
         print(f"orch db-spill-detail: {' '.join(str(exc).split())}", file=sys.stderr)
         return 1
     return 0
+
+
+def _print_survey(survey: job_detail.Survey) -> None:
+    for name in job_detail.CLASSES:
+        share = survey.classes[name]
+        print(f"{name}: {share.rows} rows, {share.inline_bytes} inline bytes")
+    print(f"would move: {survey.movable_bytes} bytes")
+    print(f"non-object rows: {survey.non_object}")
+    print("largest inline keys:")
+    width = max((len(key) for key, _size in survey.largest_keys), default=0)
+    for key, size in survey.largest_keys:
+        print(f"  {key:<{width}}  {size}")
+
+
+def _check_integrity(backup: Path) -> None:
+    try:
+        connection = sqlite3.connect(f"{backup.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            result = connection.execute("PRAGMA integrity_check").fetchall()
+        finally:
+            connection.close()
+    except sqlite3.Error as exc:
+        raise BackupError(f"backup {backup} failed integrity_check: {exc}") from exc
+    if result != [("ok",)]:
+        raise BackupError(f"backup {backup} failed integrity_check: {result[0][0]}")
+
+
+def _inline_bytes(connection: sqlite3.Connection) -> int:
+    return connection.execute(
+        "SELECT coalesce(sum(length(CAST(detail AS BLOB))), 0) FROM jobs"
+    ).fetchone()[0]
+
+
+def _file_bytes(database: Path) -> int:
+    wal = Path(f"{database.resolve()}-wal")
+    return database.stat().st_size + (wal.stat().st_size if wal.exists() else 0)
 
 
 def _runtime(
@@ -1906,8 +1983,13 @@ def _lock_path(database: Path) -> Path:
 
 
 def _held_locks(database: Path) -> list[Path]:
+    poller = [] if _lock_free(_lock_path(database)) else [_lock_path(database)]
+    return [*poller, *_held_waiter_locks(database)]
+
+
+def _held_waiter_locks(database: Path) -> list[Path]:
     waiters = [waiter.lock_path(database, bot) for bot in OWNING_BOTS]
-    return [path for path in [_lock_path(database), *waiters] if not _lock_free(path)]
+    return [path for path in waiters if not _lock_free(path)]
 
 
 def _lock_free(path: Path) -> bool:

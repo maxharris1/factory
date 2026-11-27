@@ -1,6 +1,8 @@
+import ast
 import copy
 import json
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -12,10 +14,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from lib import cli
+from lib import cli, waiter
 from lib.github_actions import GitHubReviewActions
 from lib.orch_yml import OrchConfig, Project
 from lib.queue import SQLiteJobQueue
+from lib.state_backup import BackupError
+from tests.test_dashboard import add_job, add_ticket, make_db
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -266,6 +270,167 @@ def test_poll_lock_is_shared_by_a_symlinked_database(
     assert "another orch poll owns" in capsys.readouterr().err
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT detail FROM jobs").fetchone() == (original,)
+
+
+def _spill_db(tmp_path: Path, cold: int = 2, blob: int = 5000) -> Path:
+    db = tmp_path / "state" / "orch.db"
+    db.parent.mkdir()
+    make_db(db)
+    with sqlite3.connect(db) as connection:
+        add_ticket(connection, "maxharris1/cleffy", "90", state="merged")
+        add_job(connection, "live", state="running", ticket_id="90", detail='{"instruction":"go","round":"1/3"}')
+        for index in range(cold):
+            add_job(connection, f"cold-{index}", state="done", ticket_id="90", detail=f'{{"log":"{"x" * blob}","pr_number":"90"}}')
+    return db
+
+
+def _details(db: Path) -> dict[str, str]:
+    with sqlite3.connect(db) as connection:
+        return dict(connection.execute("SELECT id, detail FROM jobs"))
+
+
+def _size(db: Path) -> int:
+    wal = Path(f"{db}-wal")
+    return db.stat().st_size + (wal.stat().st_size if wal.exists() else 0)
+
+
+def test_db_spill_detail_dry_run_reads_without_the_poller_lock(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db = _spill_db(tmp_path)
+    before = db.read_bytes()
+
+    with cli._poll_lock(db):
+        rc = cli.main(["db-spill-detail", "--db", str(db), "--dry-run"])
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert re.search(r"^live: 1 rows, \d+ inline bytes$", out, re.M)
+    assert re.search(r"^replayable: 0 rows, 0 inline bytes$", out, re.M)
+    assert re.search(r"^cold: 2 rows, \d+ inline bytes$", out, re.M)
+    assert re.search(r"^would move: 10004 bytes$", out, re.M)
+    assert re.search(r"^non-object rows: 0$", out, re.M)
+    assert re.search(r"^  log +10004$", out, re.M)
+    assert re.search(r"^  pr_number +8$", out, re.M)
+    assert re.search(r"^  instruction +4$", out, re.M)
+    assert db.read_bytes() == before
+    assert not (db.parent / "job-detail").exists()
+
+
+def test_db_spill_detail_refuses_dry_run_with_vacuum(tmp_path: Path) -> None:
+    db = _spill_db(tmp_path)
+
+    assert cli.main(["db-spill-detail", "--db", str(db), "--dry-run", "--vacuum"]) == 2
+
+
+def test_db_spill_detail_spills_after_a_checked_backup(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db = _spill_db(tmp_path)
+
+    rc = cli.main(["db-spill-detail", "--db", str(db), "--dir", str(tmp_path / "backups")])
+
+    out = capsys.readouterr().out
+    [backup] = (tmp_path / "backups").glob("orch-*-pre-spill.db")
+    assert rc == 0
+    with sqlite3.connect(backup) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+    assert f"backup: {backup}" in out
+    assert f"restore with: orch restore-db --db {db} --backup {backup}" in out
+    assert re.search(r"^moved 1 jobs by key, 2 cold jobs$", out, re.M)
+    assert re.search(r"^moved \d+ inline bytes$", out, re.M)
+    assert sorted((db.parent / "job-detail").iterdir()) == [
+        db.parent / "job-detail" / f"{job}.json" for job in ("cold-0", "cold-1", "live")
+    ]
+    assert all(len(detail) < 100 for detail in _details(db).values())
+
+
+def _corrupt(path: Path) -> None:
+    with path.open("r+b") as handle:
+        handle.seek(path.stat().st_size // 2)
+        handle.write(b"\xff" * 8192)
+        handle.seek(0)
+        handle.write(b"\x00" * 100)
+
+
+@pytest.mark.parametrize(("failure", "message"), [("backup", "disk full"), ("check", "integrity")])
+def test_db_spill_detail_writes_nothing_when_the_backup_fails(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    message: str,
+) -> None:
+    db = _spill_db(tmp_path)
+    details = _details(db)
+    real = cli.labelled_backup
+
+    def failing(*args):
+        if failure == "backup":
+            raise BackupError("disk full")
+        target, pruned = real(*args)
+        _corrupt(target)
+        return target, pruned
+
+    monkeypatch.setattr(cli, "labelled_backup", failing)
+
+    rc = cli.main(["db-spill-detail", "--db", str(db), "--dir", str(tmp_path / "backups")])
+
+    assert rc == 1
+    assert message in capsys.readouterr().err
+    assert _details(db) == details
+    assert not (db.parent / "job-detail").exists()
+
+
+def test_db_spill_detail_vacuum_shrinks_the_database(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db = _spill_db(tmp_path, cold=300, blob=80_000)
+    before = _size(db)
+
+    rc = cli.main(["db-spill-detail", "--db", str(db), "--dir", str(tmp_path / "backups"), "--vacuum"])
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert _size(db) < before / 10
+    assert f"vacuumed {db}: {before} -> {_size(db)} bytes" in out
+
+
+def test_db_spill_detail_vacuum_refuses_while_a_waiter_holds_its_lock(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db = _spill_db(tmp_path)
+    details = _details(db)
+    fd = waiter.hold_waiter_lock(db, "claude-bot")
+    try:
+        rc = cli.main(["db-spill-detail", "--db", str(db), "--dir", str(tmp_path / "backups"), "--vacuum"])
+    finally:
+        os.close(fd)
+
+    assert rc == 1
+    assert str(waiter.lock_path(db, "claude-bot")) in capsys.readouterr().err
+    assert not (tmp_path / "backups").exists()
+    assert _details(db) == details
+    assert not (db.parent / "job-detail").exists()
+
+
+def test_vacuum_runs_only_inside_db_spill_detail() -> None:
+    hits = []
+    for path in sorted(Path(cli.__file__).parent.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        spill = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_db_spill_detail" and path.name == "cli.py"
+        ]
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if re.search(r"(?:^|;)\s*VACUUM\b", node.value, re.I):
+                    inside = any(f.lineno <= node.lineno <= f.end_lineno for f in spill)
+                    hits.append((path.name, node.lineno, inside))
+
+    assert hits
+    assert all(inside for _name, _line, inside in hits), hits
 
 
 def test_poll_reloads_the_machines_yml_it_was_started_with(tmp_path: Path) -> None:
@@ -935,3 +1100,23 @@ def test_qa_worker_posts_for_a_mixed_case_repo(tmp_path: Path, monkeypatch: pyte
 
     assert worker.post("MaxHarris1/Factory", 7, "body", "marker") == "comment-1"
     assert posted == [("MaxHarris1/Factory", 7, "body", "marker")]
+
+
+@pytest.mark.parametrize("doc", ["README.md", "USAGE"])
+def test_db_spill_detail_docs_name_the_sequence_and_the_restore(doc: str) -> None:
+    text = " ".join((cli.USAGE if doc == "USAGE" else (ROOT / doc).read_text(encoding="utf-8")).split())
+
+    for phrase in (
+        "db-spill-detail",
+        "--dry-run",
+        "--vacuum",
+        "--dir",
+        "pre-spill",
+        "waiter-<bot>.lock",
+        "restore-db --db",
+        "--backup <printed backup path>",
+        "job-detail/<id>.json",
+        "merged readers",
+        "raw SQL read",
+    ):
+        assert phrase in text, phrase
