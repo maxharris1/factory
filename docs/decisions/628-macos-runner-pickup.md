@@ -1,4 +1,4 @@
-- **Decision:** The 28-minute no-step `macos` cancel was a hosted macOS runner availability failure. It was not `timeout-minutes` and it was not a concurrency cancel. A new `macos-pickup` job in `.github/workflows/ci.yml` watches the `macos` job. If no runner picks the job up within 10 minutes of its creation, `macos-pickup` posts a `macos runner pickup` error, cancels the run and fails. Otherwise it waits for `macos` to finish and fails with it, so a failed-jobs rerun reruns both. A failed API poll never cancels the run.
+- **Decision:** The 28-minute no-step `macos` cancel was a hosted macOS runner availability failure. It was not `timeout-minutes` and it was not a concurrency cancel. A new `macos-pickup` job in `.github/workflows/ci.yml` watches the `macos` job. If no runner picks the job up within 10 minutes of its creation, `macos-pickup` waits for every other job in the run to finish, then posts a `macos runner pickup` error, cancels the run and fails. Otherwise it waits for `macos` to finish and fails with it, so a failed-jobs rerun reruns both. A failed API poll never cancels the run.
 - **When:** 2026-11-16 7:50 PM ET, by Factory decided (technical)
 - **Source:** https://github.com/maxharris1/factory/issues/628
 
@@ -14,6 +14,8 @@ The job is `macos` in run 43900570415, attempt 1, on head `ac22adab785df32c4f402
 ## Why a watchdog job
 
 No GitHub Actions setting bounds how long a job waits for a runner. A job's `timeout-minutes` starts at pickup, and a queued job waits up to 24 hours unless GitHub gives up first, as it did here. So an Ubuntu job polls the run's jobs API and counts from the `macos` job's `created_at`, not from its own start, because it can wait a few minutes for its own runner. The dispatcher treats a `cancelled` check the same as a failed one (`_CHECK_FAILED` in `lib/github_actions.py`). So cancelling the run ends it at once, and a red CI still reaches the builder. To retry, rerun the failed jobs.
+
+The watchdog cancels only once every other job in the run has finished. `gh run cancel` cancels the whole run, and the API has no per-job cancel. On main at `aca73d2d` (run 45962311467, issue #1740) the watchdog cancelled at 08:10:13Z, after both `test (1/3)` and `test (2/3)` had passed their pytest step but before their post steps ended. Both shards then reported `cancelled`, and the feeder read the Mac runner outage as red required checks. Waiting leaves `macos` as the only job the cancel reaches.
 
 Only a current observation cancels the run. Each poll reads the `macos` job's status, conclusion and `created_at` fresh, and keeps nothing from earlier polls. The watchdog cancels only when that poll shows `macos` not yet started and at least 10 minutes old. A failed API call or a missing `macos` row just waits for the next poll. Without this, a poll that failed just after pickup could cancel a running job.
 
