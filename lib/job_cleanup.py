@@ -723,18 +723,23 @@ def _owner(path: Path) -> int:
 
 def _guarded(root: Path, plan: Plan) -> tuple[Plan, dict[str, str]]:
     me = os.getuid()
-    entries: dict[str, list[Path]] = {}
-    for entry in (root / "jobs").iterdir():
-        entries.setdefault(entry.name.split(".", 1)[0], []).append(entry)
-    foreign = {job_id for job_id, paths in entries.items()
-               if any(_owner(path) != me for path in paths)}
-    universe = (plan.owned if plan.owned is not None
-                else set(entries) | job_leftovers.pending(root) | plan.finished)
     jobs = root / "jobs"
+    seen = [(entry.name.split(".", 1)[0], entry) for entry in jobs.iterdir()]
+    seen += [(job_id, root / job_leftovers.KEPT_ROOT / job_id)
+             for job_id in job_leftovers.pending(root)]
+    owners: dict[str, set[int]] = {}
+    for job_id, path in seen:
+        try:
+            uid = _owner(path)
+        except FileNotFoundError:
+            continue
+        owners.setdefault(job_id, set()).add(uid)
+    foreign = {job_id for job_id, uids in owners.items() if uids != {me}}
     kept = {job_id: NOT_OWNER for job_id in sorted(foreign) if plan.owns(job_id) and (
         job_id in plan.finished or any(
             (jobs / f"{job_id}{mark}").is_dir() for mark in ("", SET_ASIDE, GONE)))}
-    return replace(plan, owned=frozenset(universe) - foreign), kept
+    owned = frozenset(filter(plan.owns, owners)) - foreign
+    return replace(plan, owned=owned), kept
 
 
 def _may_prune(root: Path) -> bool:
@@ -910,9 +915,14 @@ def run(db: Path, machines, transport: CaptureTransport, *, now: float, grace_ho
     work = list(found.values()) if sweep is None else sweep
     if not work:
         return []
-    with ThreadPoolExecutor(max_workers=len(work)) as pool:
-        return list(zip(work, pool.map(
-            lambda t: clean_target(transport, t, db, plan, reasons, sweep is not None), work)))
+    by_root: dict[tuple[str, str], list[Target]] = {}
+    for target in work:
+        by_root.setdefault((target.device, target.remote.workdir_root), []).append(target)
+    with ThreadPoolExecutor(max_workers=len(by_root)) as pool:
+        done = pool.map(lambda group: [
+            (t, clean_target(transport, t, db, plan, reasons, sweep is not None)) for t in group],
+            by_root.values())
+        return [pair for group in done for pair in group]
 
 
 ALREADY_RUNNING = 75

@@ -2930,3 +2930,109 @@ def test_a_retired_root_dry_run_prints_the_same_lines_and_changes_nothing(
                    for line in rest), (job_id, rest)
     assert rest[-2:] == [f"{label}: kept running1 live", f"{label}: kept stray1 unknown"]
     assert tree(old) == before
+
+
+class SharedRootLogins:
+    def __init__(self, root: Path, monkeypatch):
+        self.root = root
+        self.login = threading.local()
+        self.lock = threading.Lock()
+        self.active = 0
+        self.most = 0
+        monkeypatch.setattr(job_cleanup, "_owner", self.owner)
+
+    def owner(self, path: Path) -> int:
+        path.lstat()
+        mine = path.name == "jobs-kept" or path.name.startswith(self.login.prefix)
+        return os.getuid() if mine else os.getuid() + 1
+
+    def call(self, argv, *, timeout: float, input: bytes | None = None) -> Called:
+        self.login.prefix = {"pc-claude-bot": "c", "pc-codex-bot": "x"}[argv[-2]]
+        with self.lock:
+            self.active += 1
+            self.most = max(self.most, self.active)
+        try:
+            time.sleep(0.05)
+            report = job_cleanup.device_step(self.root, Plan.parse(input.decode()),
+                                             scan=no_process_holds, owner_guard=True)
+        finally:
+            with self.lock:
+                self.active -= 1
+        return Called(0, f"{job_cleanup.MARK} {report.to_json()}\n", "")
+
+
+def test_logins_sweeping_one_retired_root_take_turns(tmp_path: Path, monkeypatch) -> None:
+    old = tmp_path / "old" / "work"
+    ids = [f"{prefix}{n}" for prefix in "cx" for n in range(1, 4)]
+    for job_id in ids:
+        job_folder(old, job_id)
+    db = database(tmp_path, [(job_id, f"t-{job_id}", "done", OLD) for job_id in ids])
+    config = two_login_pc(tmp_path)
+    transport = SharedRootLogins(old, monkeypatch)
+
+    outcomes = job_cleanup.run(db, config, transport, now=NOW, grace_hours=6, dry_run=False,
+                               sweep=job_cleanup.root_targets(config, f"pc:{old}"))
+
+    assert transport.most == 1, "two logins ran a device step on one root at once"
+    removed = {target.bot: set(report.removed) for target, report in outcomes}
+    assert removed == {"claude-bot": {"c1", "c2", "c3"}, "codex-bot": {"x1", "x2", "x3"}}, outcomes
+    assert sorted(path.name for path in (old / "jobs").iterdir()) == []
+
+
+def test_the_owner_guard_skips_an_entry_that_vanishes_while_it_looks(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = work_root(tmp_path)
+    job_folder(root, "mine1")
+    lock = root / "jobs" / "done1.lock"
+    lock.touch()
+    real = job_cleanup._owner
+
+    def owner(path: Path) -> int:
+        if path == lock:
+            lock.unlink()
+        return real(path)
+
+    monkeypatch.setattr(job_cleanup, "_owner", owner)
+    plan = Plan(frozenset({"mine1", "done1"}), NOW, False, unlink_lock=True)
+
+    hold = job_cleanup.device_step(root, plan, scan=no_process_holds, owner_guard=True)
+
+    assert hold.held == ("mine1",) and hold.kept == {}, hold
+
+
+def test_the_owner_guard_leaves_a_finished_id_it_did_not_see(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = work_root(tmp_path)
+    job_folder(root, "mine1")
+    late = root / "jobs" / "late1"
+    real = job_cleanup._owner
+
+    def owner(path: Path) -> int:
+        if not late.exists():
+            job_folder(root, "late1")
+        return os.getuid() + 1 if path.name.startswith("late1") else real(path)
+
+    monkeypatch.setattr(job_cleanup, "_owner", owner)
+    plan = Plan(frozenset({"mine1", "late1"}), NOW, False, unlink_lock=True)
+
+    hold = job_cleanup.device_step(root, plan, scan=no_process_holds, owner_guard=True)
+
+    assert hold.held == ("mine1",), hold
+    assert late.is_dir() and not (root / "jobs" / "late1.cleanup").exists()
+
+
+def test_the_owner_guard_leaves_a_pending_archive_another_user_owns(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = work_root(tmp_path)
+    (root / "jobs").mkdir(parents=True)
+    record = pending_record(root, "x4")
+    foreign(monkeypatch, record.parent)
+    plan = Plan(frozenset({"x4"}), NOW, False, unlink_lock=True)
+
+    hold = job_cleanup.device_step(root, plan, scan=no_process_holds, owner_guard=True)
+
+    assert "x4" not in hold.removed, hold
+    assert record.is_file() and not (record.parent / job_leftovers.KEPT_JSON).exists()
