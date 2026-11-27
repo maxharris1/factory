@@ -4,6 +4,7 @@ import math
 
 from lib import device_pool
 from lib.dashboard_pages.common import _b, _e, _num, _panel, _span, duration
+from lib.dashboard_pages.evals import _evals
 from lib.dashboard_telemetry import rollup_panel
 from lib.dashboard_static import read_asset
 
@@ -276,7 +277,7 @@ def _headroom(snapshot: dict) -> str:
 
 
 def top_row(snapshot: dict) -> str:
-    return _row(rollup_panel(snapshot))
+    return _row(f'<div style="display:grid;flex:3 1 560px;min-width:0">{_evals(snapshot)}</div>', rollup_panel(snapshot))
 
 
 def headroom_row(snapshot: dict) -> str:

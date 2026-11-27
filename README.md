@@ -2100,7 +2100,8 @@ already listed as stuck, each once).
   (scripted, bot-to-bot, failed), recent verdicts (handled `orch:v1`
   comments by outcome), every tracked ticket and the redacted log tail.
 - **Efficiency** (`efficiency.html`): poll health and Linear-budget health,
-  and handoff savings with a one-line definition of scripted share.
+  and handoff savings with a one-line definition of scripted share. The
+  weekly Evals table sits beside Cost at the top of the page.
 - **Evals** (`evals.html`): the weekly eval reports as one table, a column
   per week, newest first, each value with its change from the previous
   available report, so a delta after a missing week spans two weeks.

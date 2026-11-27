@@ -742,11 +742,34 @@ def test_efficiency_has_no_page_scroll_at_375_in_a_browser(tmp_path: Path) -> No
                 "[].map.call(document.querySelectorAll('main .panel'), function (n) {"
                 " return [n.id, n.getBoundingClientRect().left]; })"
             )
-            assert [ident for ident, _ in lefts] == PANELS, script
+            assert [ident for ident, _ in lefts] == ["evals", *PANELS], script
             assert len({left for _, left in lefts}) == 1, (script, lefts)
             _load(browser, snapshot, 375, script, "health.html")
             assert browser.eval(HEADROOM_VIEWS) == {
                 "table": "none", "blocks": [True, True], "notes": ["none", "block"]}, script
+    finally:
+        browser.close()
+
+
+TOP_ROW = """(function () {
+  var evals = document.getElementById('evals').getBoundingClientRect();
+  var cost = document.getElementById('tokens').getBoundingClientRect();
+  return {tops: [evals.top, cost.top], widths: [evals.width, cost.width], heights: [evals.height, cost.height]};
+})()"""
+
+
+@needs_chrome
+def test_evals_sits_beside_cost_at_three_fifths_of_the_top_row_in_a_browser(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path, telemetry=WIDE)
+    browser = Browser()
+    try:
+        for script in (False, True):
+            _load(browser, snapshot, 1440, script)
+            row = browser.eval(TOP_ROW)
+            share = row["widths"][0] / sum(row["widths"])
+            assert row["tops"][0] == row["tops"][1], (script, row)
+            assert 0.57 <= share <= 0.63, (script, f"evals share {share:.1%}", row)
+            assert row["heights"][0] == row["heights"][1], (script, row)
     finally:
         browser.close()
 
@@ -937,11 +960,12 @@ def test_efficiency_parts_carry_no_motion_of_their_own() -> None:
 
 def test_panels_are_in_the_artboard_order(tmp_path: Path) -> None:
     page = _page(_snapshot(tmp_path))
-    found = [page.index(f'id="{ident}"') for ident in PANELS]
+    found = [page.index(f'id="{ident}"') for ident in ["evals", *PANELS]]
     assert found == sorted(found)
-    rows = re.findall(r'<div class="ef-row">(.*?</section>)</div>', _section(page, "hud"))
+    rows = re.findall(r'<div class="ef-row">((?:<div style="[^"]*">.*?</section></div>)?.*?</section>)</div>',
+                      _section(page, "hud"))
     assert [re.findall(r'<section class="[^"]*" id="([^"]+)"', row) for row in rows] == [
-        ["tokens"], ["rounds", "savings"], ["balance"],
+        ["evals", "tokens"], ["rounds", "savings"], ["balance"],
     ]
 
 
