@@ -412,8 +412,8 @@ def evals_page(tmp_path: Path, evals_dir: Path | None) -> str:
         snapshot[EVALS] = collect_weekly(evals_dir)
     html = render_pages(snapshot)["evals.html"]
     nav = NAV.search(html).group(1)
-    assert re.findall(r'href="([^"]+)" aria-current="page"', nav) == ["evals.html"]
-    assert '<a href="evals.html" aria-current="page">Evals</a>' in nav
+    assert re.findall(r'href="([^"]+)" aria-current="page"', nav) == ["efficiency.html"]
+    assert '<a href="efficiency.html" aria-current="page">Efficiency</a>' in nav
     assert '<body data-page="evals" ' in html
     main = MAIN.search(html).group(1)
     assert main.startswith('<h1 class="vh">Evals</h1>')

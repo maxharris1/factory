@@ -46,9 +46,9 @@ ROOT = Path(__file__).resolve().parents[1]
 CHART = ROOT / "model" / "chart.mmd"
 MINI = ROOT / "tests" / "fixtures" / "statechart" / "mini.mmd"
 NAV = (  # nav order (#78, #92, #777)
-    "index.html", "job.html", "activity.html", "efficiency.html", "evals.html", "health.html", "settings.html",
+    "index.html", "job.html", "activity.html", "efficiency.html", "health.html",
 )
-PAGES = (*NAV, "ticket.html")
+PAGES = (*NAV, "evals.html", "settings.html", "ticket.html")
 
 
 def _slots_table(connection: sqlite3.Connection) -> None:

@@ -26,7 +26,7 @@ from tests.test_dashboard import NOW, TRACKED_AT, _fail_replacing, add_job, add_
 from tests.test_dashboard_telemetry import add_telemetry
 from tests.test_dispatcher import setup
 
-PAGES = ("index.html", "job.html", "activity.html", "efficiency.html", "evals.html", "health.html", "settings.html",
+PAGES = ("index.html", "job.html", "activity.html", "efficiency.html", "health.html", "evals.html", "settings.html",
          "ticket.html")
 CLEFFY = "maxharris1/cleffy"
 
