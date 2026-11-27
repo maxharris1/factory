@@ -78,7 +78,7 @@ def _bundle(comments, *, round_=3, bases=None):
     return findings_evidence(
         comments=comments,
         trusted_logins=TRUSTED,
-        reviewer="codex-bot",
+        reviewers={"codex-bot"},
         current_round=round_,
         bases={1: BASE_1, 2: BASE_2} if bases is None else bases,
     )

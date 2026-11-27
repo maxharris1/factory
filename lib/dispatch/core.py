@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable, Collection, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from lib.dispatch.bookkeeping import LockLedger
@@ -27,11 +28,13 @@ from lib.dispatch.helpers import (
     _route,
     _route_go,
     _route_picks,
+    _review_pick,
     _router_picks,
     trusted_bots,
 )
 from lib.dispatch.transitions import write_workflow_state
-from lib.role_router import RoutingError
+from lib.factory_md import family_findings
+from lib.role_router import Candidate, RoutingError
 from lib.dispatch.types import (
     BaseCheck,
     BaseMismatch,
@@ -51,6 +54,7 @@ from lib.dispatch.types import (
     RetryableStateError,
     ReviewActions,
     RouteError,
+    RouterPicks,
     RunJob,
     ShipError,
     StackBoundsProbe,
@@ -203,13 +207,47 @@ class DispatcherBase:
         comment: Comment,
         fields: Mapping[str, str],
     ) -> bool:
-        return self._trusted(
-            ticket,
-            comment,
-            fields,
-            f"{ticket.factory.reviewer_harness}-bot",
-            role="reviewer",
+        return (
+            self._trusted(
+                ticket,
+                comment,
+                fields,
+                f"{ticket.factory.reviewer_harness}-bot",
+                role="reviewer",
+            )
+            or self._rerouted_reviewer(ticket, comment, fields) is Registration.REGISTERED
         )
+
+    def _rerouted_reviewer(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        fields: Mapping[str, str],
+    ) -> Registration | None:
+        sender = fields.get("from") or ""
+        harness = sender.removesuffix("-bot")
+        if (
+            harness == sender
+            or harness in self.refused_harnesses
+            or not self._trusted(ticket, comment, fields, sender, role="reviewer")
+        ):
+            return None
+        registration, job = self._registering_job(ticket, comment, "verdict", recipient=harness)
+        if job is None:
+            return None
+        routing = _detail_routing(job["detail"])
+        model = routing[2].reviewer.model if routing is not None and routing[2] else None
+        if any(
+            finding.severity == "error"
+            for finding in family_findings(
+                ticket.factory.builder_harness,
+                ticket.factory.builder_model,
+                reviewer_harness=harness,
+                reviewer_model=model,
+            )
+        ):
+            return None
+        return registration
 
     def _counted_verdict(
         self,
@@ -225,33 +263,47 @@ class DispatcherBase:
     def _registration(
         self, ticket: TrackedTicket, comment: Comment, kind: str
     ) -> Registration:
+        return self._registering_job(ticket, comment, kind)[0]
+
+    def _registering_job(
+        self, ticket: TrackedTicket, comment: Comment, kind: str, recipient: str | None = None
+    ) -> tuple[Registration, sqlite3.Row | None]:
         actions = _REGISTERING_ACTIONS[kind]
         marks = ", ".join("?" for _ in actions)
         with self._connect() as connection:
-            rows = connection.execute(
-                f"""
-                SELECT id, state, failure_handled, handoff_comment_id, recipient, head, detail
-                FROM jobs
-                WHERE lower(repo) = ? AND ticket_id = ? AND action IN ({marks})
-                """,
-                (ticket.repo.lower(), ticket.ticket_id, *actions),
-            ).fetchall()
-        if any(row["handoff_comment_id"] == comment.id for row in rows):
-            return Registration.REGISTERED
-        if any(
-            row["state"] == "running" and self._can_register(row, comment, kind) for row in rows
-        ):
-            return Registration.PENDING
+            rows = [
+                row
+                for row in connection.execute(
+                    f"""
+                    SELECT id, state, failure_handled, handoff_comment_id, recipient, head, detail
+                    FROM jobs
+                    WHERE lower(repo) = ? AND ticket_id = ? AND action IN ({marks})
+                    """,
+                    (ticket.repo.lower(), ticket.ticket_id, *actions),
+                ).fetchall()
+                if recipient is None or row["recipient"] == recipient
+            ]
+        for row in rows:
+            if row["handoff_comment_id"] == comment.id:
+                return Registration.REGISTERED, row
+        for row in rows:
+            if row["state"] == "running" and self._can_register(row, comment, kind):
+                return Registration.PENDING, row
         failed = {
-            row["id"] for row in rows if row["state"] == "failed" and not row["failure_handled"]
+            row["id"]: row
+            for row in rows
+            if row["state"] == "failed" and not row["failure_handled"]
         }
         for job in self.queue.unhandled_failures():
             if job.id not in failed:
                 continue
             candidate = self._handoff_candidate(job)
             if candidate is not None and candidate.comment.id == comment.id:
-                return Registration.REGISTERED if candidate.unread else Registration.PENDING
-        return Registration.UNREGISTERED
+                registration = (
+                    Registration.REGISTERED if candidate.unread else Registration.PENDING
+                )
+                return registration, failed[job.id]
+        return Registration.UNREGISTERED, None
 
     @staticmethod
     def _can_register(job: sqlite3.Row, comment: Comment, kind: str) -> bool:
@@ -442,6 +494,23 @@ class DispatcherBase:
                 ) from error
             return ticket if picks is None else _route_picks(ticket, picks)
         builder, reviewer, picks = routing
+        if reviewer in self.refused_harnesses:
+            base = ticket.factory_md or ticket.factory
+            built_by = (
+                picks.builder
+                if picks is not None
+                else Candidate(
+                    builder, base.builder_model if builder == base.builder_harness else None
+                )
+            )
+            fresh = _review_pick(ticket, self.refused_harnesses, built_by)
+            if fresh is not None:
+                reviewer = fresh.harness
+                picks = (
+                    RouterPicks(built_by, fresh, None)
+                    if picks is None
+                    else replace(picks, reviewer=fresh)
+                )
         routed = (
             _route(ticket, builder, reviewer)
             if picks is None

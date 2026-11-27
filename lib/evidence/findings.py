@@ -3,11 +3,11 @@
 A pure function: the caller reads the PR's comments and the base it recorded
 for each review round, and passes them in. Round 1 has nothing to carry.
 
-Only the reviewer's earlier verdicts count: a `kind=verdict` comment with
-`role=reviewer`, `from=<reviewer>` and a `round` before the current one,
-whose author trusted_logins lets speak for that reviewer. When one round has
-more than one verdict, the last one counts, as a corrected repost replaces a
-rejected one. The caller passes only verdicts the dispatcher accepted.
+Only the reviewers' earlier verdicts count: a `kind=verdict` comment with
+`role=reviewer`, `from=` one of the reviewers and a `round` before the current
+one, whose author trusted_logins lets speak for that reviewer. When one round
+has more than one verdict, the last one counts, as a corrected repost replaces
+a rejected one. The caller passes only verdicts the dispatcher accepted.
 
 Each verdict is read in round order as CommonMark. A list item whose leading
 paragraph opens with `[blocking] f-<n>` raises or repeats that finding; one
@@ -26,7 +26,7 @@ verdict's round, else None.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 
 from markdown_it import MarkdownIt
@@ -68,12 +68,12 @@ def findings_evidence(
     *,
     comments: Sequence[Comment],
     trusted_logins: Mapping[str, Mapping[str, frozenset[str]]],
-    reviewer: str,
+    reviewers: Collection[str],
     current_round: int,
     bases: Mapping[int, str],
 ) -> FindingsEvidence:
     """The open earlier findings and the last reviewed head. See the module doc."""
-    verdicts = _verdicts(comments, trusted_logins, reviewer, current_round)
+    verdicts = _verdicts(comments, trusted_logins, reviewers, current_round)
     open_findings: dict[int, Finding] = {}
     for number, (fields, body, comment) in sorted(verdicts.items()):
         if fields.get("verdict") == "APPROVE":
@@ -105,7 +105,7 @@ def findings_evidence(
 def _verdicts(
     comments: Sequence[Comment],
     trusted_logins: Mapping[str, Mapping[str, frozenset[str]]],
-    reviewer: str,
+    reviewers: Collection[str],
     current: int,
 ) -> dict[int, tuple[dict[str, str], str, Comment]]:
     """The last trusted reviewer verdict of each earlier round, keyed by round."""
@@ -120,8 +120,8 @@ def _verdicts(
         if (
             fields["kind"] == "verdict"
             and fields.get("role") == "reviewer"
-            and fields.get("from") == reviewer
-            and reviewer in trusted_bots(trusted_logins, comment.author)
+            and fields.get("from") in reviewers
+            and fields["from"] in trusted_bots(trusted_logins, comment.author)
             and number is not None
             and int(number.group(1)) < current
         ):

@@ -92,7 +92,7 @@ def _open_findings(comments, current_round: int) -> tuple[Finding, ...]:
     return findings_evidence(
         comments=comments,
         trusted_logins=TRUSTED,
-        reviewer="codex-bot",
+        reviewers={"codex-bot"},
         current_round=current_round,
         bases={},
     ).findings

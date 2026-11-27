@@ -425,6 +425,26 @@ def _router_picks(
     return RouterPicks(builder, reviewer, _plan_pick(central, base, refused, on=builder.harness))
 
 
+def _review_pick(
+    ticket: TrackedTicket, refused: frozenset[str], built_by: Candidate
+) -> Candidate | None:
+    base = ticket.factory_md or ticket.factory
+    if base.routing is None:
+        return None
+    try:
+        slot = resolve_slot(
+            "review",
+            routing=central_routing(),
+            factory=base,
+            built_by=(built_by.harness, built_by.model),
+            refused_harnesses=refused,
+            unavailable_harnesses=_UNQUEUEABLE,
+        )
+    except RoutingError:
+        return None
+    return Candidate(slot.harness, slot.model, slot.effort)
+
+
 def _plan_pick(
     central: RoutingConfig | None,
     base: FactoryConfig,
