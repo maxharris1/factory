@@ -1,11 +1,15 @@
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from lib import dashboard_cli, device_pool, feeder, lane_limit, linear_webhook
-from lib.dashboard import _age, _read_db, collect_snapshot
+from lib import (
+    account_doctor, dashboard_cli, device_pool, device_sync, feeder, lane_limit, linear_webhook,
+    qa_evidence_push, telemetry,
+)
+from lib.dashboard import HANDED_OFF_EXTERNALLY, _age, _read_db, collect_snapshot
 from tests.test_dashboard import NOW, add_job, add_ticket, seeded
 from tests.test_dashboard_accounts import world
 from tests.test_dashboard_poll_seconds import _orch
@@ -481,3 +485,166 @@ def test_a_limit_that_lifted_at_a_datetime_string_no_longer_holds(tmp_path: Path
     with sqlite3.connect(db) as connection:
         assert lane_limit.account_limits(connection, STAMP_EPOCH) == {}
         assert lane_limit.all_active(connection, STAMP_EPOCH) == []
+
+
+STAMP_COLUMN = re.compile(r"(^at|_at|^until|since)$")
+
+
+def _insert(connection: sqlite3.Connection, table: str, **values: object) -> None:
+    for name, kind, notnull, default in (
+        (row[1], row[2], row[3], row[4]) for row in connection.execute(f"PRAGMA table_info({table})")
+    ):
+        if notnull and default is None and name not in values:
+            values[name] = "" if kind == "TEXT" else 0
+    connection.execute(
+        f"INSERT INTO {table} ({', '.join(values)}) VALUES ({', '.join('?' for _ in values)})",
+        tuple(values.values()),
+    )
+
+
+def _stamped_world(tmp_path: Path) -> tuple[Path, Path]:
+    db, machines = world(tmp_path)
+    with sqlite3.connect(db) as connection:
+        add_ticket(connection, "maxharris1/cleffy", "50", state=HANDED_OFF_EXTERNALLY)
+        add_ticket(connection, "maxharris1/cleffy", "51", state="building")
+        connection.execute(
+            "UPDATE ticket_state SET external_at = ?, closed_at = ? WHERE ticket_id = '50'", (NOW - 600, NOW - 500)
+        )
+        for at, before, after in ((NOW - 3000, None, "building"), (NOW - 600, "building", HANDED_OFF_EXTERNALLY)):
+            _insert(connection, "ticket_transitions", repo="maxharris1/cleffy", ticket_id="50",
+                    from_state=before, to_state=after, at=at, source="test")
+        for check, status, conclusion, created, started, completed in (
+            ("unit", "completed", "failure", NOW - 900, NOW - 880, NOW - 700),
+            ("lint", "in_progress", None, NOW - 400, NOW - 300, None),
+            ("e2e", "queued", None, NOW - 500, None, None),
+        ):
+            _insert(connection, "ci_jobs", repo="maxharris1/cleffy", ticket_id="51", head="a" * 40,
+                    workflow="ci", check_name=check, status=status, conclusion=conclusion,
+                    created_at=created, started_at=started, completed_at=completed, seen_at=NOW - 30)
+        for reason, raised in (("early", NOW - 5000), ("late", NOW - 50)):
+            _insert(connection, "needs_attention", repo="maxharris1/cleffy", ticket_id="51",
+                    reason=reason, detail=reason, raised_at=raised)
+        connection.execute(telemetry.DDL)
+        for job_id, updated, finished in (("job-b-pc", NOW - 40, None), ("job-codex-pc", NOW - 90, NOW - 80)):
+            _insert(connection, telemetry.TABLE, job_id=job_id, bot="claude-bot", harness="claude",
+                    repo="maxharris1/cleffy", started_at=NOW - 1000, updated_at=updated,
+                    last_event_at=updated, finished_at=finished, tool_calls="{}", steps="[]")
+        connection.execute(account_doctor._SIGNOUTS_SCHEMA)
+        _insert(connection, account_doctor.SIGNOUTS, account="claude-b", device="pc", since=NOW - 30)
+        connection.execute(lane_limit.ACCOUNT_DDL)
+        _insert(connection, lane_limit.ACCOUNT_TABLE, account="claude-b", harness="claude", bot="claude-bot",
+                recipient="claude", limited_at=NOW - 100, until=int(NOW) + 900, source="stream", job_id="j")
+    return db, machines
+
+
+def _all_as_datetime_strings(db: Path, where: str = "1") -> list[str]:
+    converted = []
+    with sqlite3.connect(db) as connection:
+        for (table,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall():
+            for column in [row[1] for row in connection.execute(f"PRAGMA table_info({table})")]:
+                if STAMP_COLUMN.search(column):
+                    changed = connection.execute(
+                        f"UPDATE {table} SET {column} = datetime({column}, 'unixepoch') "
+                        f"WHERE typeof({column}) IN ('integer', 'real') AND {where}"
+                    ).rowcount
+                    if changed:
+                        converted.append(f"{table}.{column}")
+    return converted
+
+
+def test_a_snapshot_is_the_same_when_every_timestamp_column_holds_a_datetime_string(tmp_path: Path) -> None:
+    db, machines = _stamped_world(tmp_path)
+    log = tmp_path / "poll.log"
+    as_epochs = collect_snapshot(db, log, now=NOW, machines_path=machines)
+    assert as_epochs["attention"]["count"] == 2
+    assert as_epochs["ci_runs"]["runs"] and as_epochs["ci_runs"]["failures"]
+    assert as_epochs["telemetry"]["recent"]
+    assert next(row for row in as_epochs["tickets"] if row["ticket_id"] == "50")["shipped_at"] == NOW - 600
+    usage = {entry["account"]: entry for entry in as_epochs["usage"]["accounts"]}
+    assert usage["claude-default"]["observed_at"] == NOW - 60
+    assert usage["claude-b"]["limited_until"] == int(NOW) + 900
+    converted = _all_as_datetime_strings(db)
+    assert {
+        "ticket_state.external_at", "ticket_state.closed_at", "ticket_transitions.at", "tracked_tickets.tracked_at",
+        "ci_jobs.created_at", "ci_jobs.started_at", "ci_jobs.completed_at", "ci_jobs.seen_at",
+        "needs_attention.raised_at", "job_telemetry.updated_at", "job_telemetry.finished_at",
+        "job_telemetry.last_event_at", "usage_readings.observed_at", "usage_readings.resets_at",
+        "account_signins.checked_at", "signout_locks.since", "lane_account_limits.limited_at",
+        "lane_account_limits.until", "device_slots.placed_at", "jobs.created_at", "jobs.last_activity_at",
+    } <= set(converted)
+    assert collect_snapshot(db, log, now=NOW, machines_path=machines) == as_epochs
+
+
+def test_a_snapshot_is_the_same_when_some_rows_of_each_timestamp_column_hold_datetime_strings(
+    tmp_path: Path,
+) -> None:
+    db, machines = _stamped_world(tmp_path)
+    log = tmp_path / "poll.log"
+    as_epochs = collect_snapshot(db, log, now=NOW, machines_path=machines)
+    assert {"ci_jobs.created_at", "needs_attention.raised_at"} <= set(_all_as_datetime_strings(db, "rowid % 2 = 1"))
+    assert collect_snapshot(db, log, now=NOW, machines_path=machines) == as_epochs
+
+
+def test_a_push_publishes_the_same_files_when_every_timestamp_column_holds_a_datetime_string(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sent = {}
+    for form in ("epoch", "datetime"):
+        run = tmp_path / form
+        run.mkdir()
+        db, machines = _stamped_world(run)
+        if form == "datetime":
+            _all_as_datetime_strings(db)
+        capture = _Capture()
+        monkeypatch.delenv("ORCH_DB", raising=False)
+        monkeypatch.setattr(dashboard_cli, "transport_for", lambda config, capture=capture: capture)
+        code = dashboard_cli.main(
+            ["push", "--once", "--db", str(db), "--log", str(run / "poll.log"),
+             "--out", str(run / "site"), "--orch", str(_orch(run, 60)), "--machines", str(machines)]
+        )
+        assert code == 0
+        sent[form] = sorted(path.name for path in capture.sent[0])
+    assert sent["datetime"] == sent["epoch"]
+
+
+@pytest.mark.parametrize("stamp", [STAMP_EPOCH, int(STAMP_EPOCH), STAMP])
+def test_device_sync_reads_since_and_checked_at_as_an_epoch_or_a_datetime_string(
+    tmp_path: Path, stamp: object
+) -> None:
+    with sqlite3.connect(tmp_path / "orch.db") as connection:
+        device_sync.ensure(connection)
+        _insert(connection, device_sync.TABLE, device="pc", bot="claude-bot", harness="claude",
+                checkout="/srv/factory", state=device_sync.SYNCED, detail="", since=stamp, checked_at=stamp)
+        rows = device_sync.read(connection)
+    assert [(row.since, row.checked_at) for row in rows] == [(STAMP_EPOCH, STAMP_EPOCH)]
+
+
+def test_qa_evidence_orders_settled_runs_by_instant_across_mixed_stamps(tmp_path: Path) -> None:
+    db, _log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        for run_id, started in (("old", STAMP_EPOCH - 60), ("new", STAMP), ("mid", int(STAMP_EPOCH - 30))):
+            _insert(connection, "qa_runs", run_id=run_id, repo="o/r", ticket_id="1", head=run_id, state="reported", scope="none", arm="primary",
+                    evidence_dir=f"/e/{run_id}", started_at=started)
+        runs = qa_evidence_push.settled_runs(connection)
+    assert [(run.run_id, run.started_at) for run in runs] == [
+        ("new", STAMP_EPOCH), ("mid", STAMP_EPOCH - 30), ("old", STAMP_EPOCH - 60),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("since", "held"),
+    [
+        (STAMP_EPOCH - 60, True),
+        ("2026-11-26 22:14:58", True),
+        (STAMP_EPOCH - 3600, False),
+        ("2026-11-26 21:15:58", False),
+    ],
+)
+def test_a_signout_lock_holds_for_its_lease_whether_since_is_an_epoch_or_a_datetime_string(
+    tmp_path: Path, since: object, held: bool
+) -> None:
+    with sqlite3.connect(tmp_path / "orch.db") as connection:
+        connection.execute(account_doctor._SIGNOUTS_SCHEMA)
+        _insert(connection, account_doctor.SIGNOUTS, account="claude-b", device="pc", since=since)
+        locked = account_doctor.signing_out(connection, STAMP_EPOCH)
+    assert (("claude-b", "pc") in locked) is held

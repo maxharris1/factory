@@ -201,7 +201,6 @@ from lib.dashboard_flow import (
     stop_facts,
 )
 from lib.dashboard_telemetry import attach as attach_telemetry
-from lib.dashboard_telemetry import _number as _telemetry_time
 from lib.dashboard_telemetry import read_telemetry, ticket_totals
 from lib.dashboard_usage import read_usage
 from lib.dispatch.constants import (
@@ -1205,7 +1204,7 @@ def _ci_runs(
     refs: dict[tuple[str, str, str], dict] = {}
     failures = []
     for row in connection.execute(
-        "SELECT * FROM ci_jobs ORDER BY COALESCE(created_at, seen_at), check_name"
+        f"SELECT * FROM ci_jobs ORDER BY {epoch.sql('COALESCE(created_at, seen_at)')}, check_name"
     ):
         key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
         head = str(row["head"])
@@ -1220,7 +1219,7 @@ def _ci_runs(
         status = _enum(row["status"], CI_JOB_STATUSES)
         conclusion = _enum(row["conclusion"], CI_CONCLUSIONS) if row["conclusion"] is not None else None
         created, started, completed = (
-            _telemetry_time(row[name]) for name in ("created_at", "started_at", "completed_at")
+            epoch.cell(row[name]) for name in ("created_at", "started_at", "completed_at")
         )
         queue_end = started if started is not None else (None if status == "completed" else now)
         job = {
@@ -1758,7 +1757,7 @@ def _handled(connection: sqlite3.Connection, tables: set[str]) -> list[sqlite3.R
             str(row["name"]) for row in connection.execute(f"PRAGMA table_info({table})")
         }:
             joins.append(
-                f"LEFT JOIN (SELECT lower(repo) AS repo, ticket_id, {comment} AS comment, {when}({column}) AS at "
+                f"LEFT JOIN (SELECT lower(repo) AS repo, ticket_id, {comment} AS comment, {when}({epoch.sql(column)}) AS at "
                 f"FROM {table} GROUP BY lower(repo), ticket_id, {comment}) AS t{index} "
                 f"ON t{index}.repo = lower(h.repo) AND t{index}.ticket_id = h.ticket_id "
                 f"AND t{index}.comment = h.comment_id"
@@ -2171,7 +2170,7 @@ def _read_db(
                 ref["repo"], ref["ticket_id"], int(row["review_round"]), reason,
                 f"{redact(str(row['repo']))}#{redact(str(row['ticket_id']))}",
                 None if row["stuck_at"] is None else epoch.read(row["stuck_at"]),
-                _telemetry_time(row["closed_at"]),
+                epoch.cell(row["closed_at"]),
             )
             tickets.append(
                 {
@@ -2185,7 +2184,7 @@ def _read_db(
                     **waiting,
                     **({"ci_wait": ci_wait} if ci_wait else {}),
                     **({"no_ci": no_ci} if no_ci else {}),
-                    **({"external_at": row["external_at"]} if row["external_at"] is not None else {}),
+                    **({"external_at": epoch.read(row["external_at"])} if row["external_at"] is not None else {}),
                     **({"linear_state": _clean(row["linear_state"], 64)} if row["linear_state"] else {}),
                     **acting,
                 }
@@ -2348,7 +2347,7 @@ def _read_db(
             SELECT flag.repo, flag.ticket_id, flag.reason, flag.detail
             FROM needs_attention AS flag
             {finished}
-            ORDER BY flag.raised_at, flag.repo, flag.ticket_id, flag.reason
+            ORDER BY {epoch.sql('flag.raised_at')}, flag.repo, flag.ticket_id, flag.reason
             """
         ):
             attention_flags.append(
@@ -2631,8 +2630,8 @@ def _ticket_flows(
                     _enum(row["action"], ACTIONS),
                     _enum(row["recipient"], RECIPIENTS),
                     epoch.read(row["created_at"]),
-                    _telemetry_time(row["started_at"]),
-                    _telemetry_time(row["finished_at"]),
+                    epoch.cell(row["started_at"]),
+                    epoch.cell(row["finished_at"]),
                     int(row["attempt"]),
                     _clean(str(row["id"])[:8], 8),
                     _exposure(
@@ -2646,7 +2645,7 @@ def _ticket_flows(
             f"ORDER BY {epoch.sql('at')}, id"
         ):
             key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
-            at = _telemetry_time(row["at"])
+            at = epoch.cell(row["at"])
             if key in recorded and at is not None:
                 recorded[key].append(Transition(
                     None if row["from_state"] is None
@@ -2659,7 +2658,7 @@ def _ticket_flows(
     if "tracked_tickets" in tables:
         for row in connection.execute("SELECT repo, ticket_id, tracked_at FROM tracked_tickets"):
             key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
-            at = _telemetry_time(row["tracked_at"])
+            at = epoch.cell(row["tracked_at"])
             if key in keys and at is not None:
                 tracked_at[key] = float(at)
     retries: dict[tuple[str, str], int] = {}

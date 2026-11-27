@@ -72,3 +72,8 @@ def test_sql_orders_mixed_storage_by_instant() -> None:
         ordered = [row[0] for row in connection.execute(f"SELECT v FROM t ORDER BY {epoch.sql('v')}")]
     assert plain != by_instant, "plain ORDER BY sorts every text above every number"
     assert ordered == by_instant
+
+
+@pytest.mark.parametrize("value", [True, False, float("nan"), float("inf"), "inf", "nan", 10**400, None, "soon"])
+def test_cell_reads_a_flag_an_infinity_or_no_time_as_none(value: object) -> None:
+    assert epoch.cell(value) is None

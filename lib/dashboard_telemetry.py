@@ -62,6 +62,7 @@ from lib.telemetry import (
     TASK_TEXT_LIMIT,
     effective_cost_usd,
 )
+from lib import epoch
 from lib.dashboard_static import read_asset
 
 WINDOW_DAYS = 7
@@ -128,8 +129,8 @@ def _text(value: object, limit: int = TEXT_LIMIT) -> str:
 
 
 def _age(now: float, then: object) -> int | None:
-    number = _number(then)
-    return None if number is None else int(max(0.0, now - float(number)))
+    moment = epoch.cell(then)
+    return None if moment is None else int(max(0.0, now - moment))
 
 
 def _json(value: object, kind: type) -> object:
@@ -316,6 +317,8 @@ def read_telemetry(connection: sqlite3.Connection, now: float) -> dict:
         is not None
     )
     cutoff = now - WINDOW_DAYS * 86400
+    epoch.register(connection)
+    updated_at, finished_at = epoch.sql("t.updated_at"), epoch.sql("t.finished_at")
     try:
         cols = {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}
         live = [
@@ -331,7 +334,7 @@ def read_telemetry(connection: sqlite3.Connection, now: float) -> dict:
             f"SELECT t.job_id, t.harness, t.repo, t.tokens_in, t.tokens_cached, t.tokens_out, "
             f"{'t.tokens_unknown' if 'tokens_unknown' in cols else 'NULL AS tokens_unknown'}, "
             f"t.cost_usd, t.exit_code, {job_state_col} "
-            f"FROM {TABLE} t {job_join} WHERE t.updated_at >= ? ORDER BY t.updated_at DESC",
+            f"FROM {TABLE} t {job_join} WHERE {updated_at} >= ? ORDER BY {updated_at} DESC",
             (cutoff,),
         )
         totals = _bucket(None)
@@ -366,13 +369,13 @@ def read_telemetry(connection: sqlite3.Connection, now: float) -> dict:
                     productive_usd += eff
         col_list = ", ".join([*(f"t.{c}" for c in _COLUMNS), *live])
         detail_rows = connection.execute(
-            f"SELECT {col_list} FROM {TABLE} t WHERE t.updated_at >= ? "
-            "ORDER BY t.updated_at DESC LIMIT ?",
+            f"SELECT {col_list} FROM {TABLE} t WHERE {updated_at} >= ? "
+            f"ORDER BY {updated_at} DESC LIMIT ?",
             (cutoff, ROW_LIMIT),
         ).fetchall()
         finished = connection.execute(
-            f"SELECT {col_list} FROM {TABLE} t WHERE t.updated_at >= ? AND t.finished_at IS NOT NULL "
-            "ORDER BY t.finished_at DESC LIMIT ?",
+            f"SELECT {col_list} FROM {TABLE} t WHERE {updated_at} >= ? AND t.finished_at IS NOT NULL "
+            f"ORDER BY {finished_at} DESC LIMIT ?",
             (cutoff, RECENT_JOBS),
         ).fetchall()
     except sqlite3.OperationalError:

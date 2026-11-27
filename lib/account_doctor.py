@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
-from lib import attention, lane_limit
+from lib import attention, epoch, lane_limit
 from lib.harness_env import account_tokens, harness_env
 from lib.harnesses.gemini import AUTH_OVERRIDES as GEMINI_AUTH_OVERRIDES, UNSET as _GEMINI_UNSET
 from lib.machines_yml import Device, MachinesConfig
@@ -669,10 +669,11 @@ def release_pair(connection: sqlite3.Connection, account: str, device: str, owne
 
 def signing_out(connection: sqlite3.Connection, now: float) -> frozenset[tuple[str, str]]:
     connection.execute(_SIGNOUTS_SCHEMA)
+    epoch.register(connection)
     return frozenset(
         (str(account), str(device))
         for account, device in connection.execute(
-            f"SELECT account, device FROM {SIGNOUTS} WHERE since > ?", (now - SIGNOUT_LEASE_SECONDS,)))
+            f"SELECT account, device FROM {SIGNOUTS} WHERE {epoch.sql('since')} > ?", (now - SIGNOUT_LEASE_SECONDS,)))
 
 
 def fence_signins(connection: sqlite3.Connection, pairs: Collection[tuple[str, str]], now: float) -> bool:

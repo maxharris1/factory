@@ -41,6 +41,8 @@ import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 
+from lib import epoch
+
 TABLE = "device_sync"
 
 SYNCED = "synced"
@@ -133,8 +135,8 @@ def read(connection: sqlite3.Connection) -> list[Row]:
             sha=None if row[5] is None else str(row[5]),
             state=str(row[6]),
             detail=str(row[7]),
-            since=float(row[8]),
-            checked_at=float(row[9]),
+            since=epoch.read(row[8]),
+            checked_at=epoch.read(row[9]),
         )
         for row in connection.execute(
             f"SELECT device, bot, harness, checkout, target, sha, state, detail, since, checked_at "

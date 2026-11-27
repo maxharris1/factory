@@ -1,3 +1,4 @@
+import math
 import sqlite3
 from datetime import datetime, timezone
 
@@ -13,10 +14,13 @@ def read(value: float | str) -> float:
 
 
 def cell(value: object) -> float | None:
-    try:
-        return read(value)
-    except (TypeError, ValueError):
+    if isinstance(value, bool):
         return None
+    try:
+        moment = read(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return moment if math.isfinite(moment) else None
 
 
 def register(connection: sqlite3.Connection) -> None:
