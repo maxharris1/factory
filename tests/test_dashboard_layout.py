@@ -29,6 +29,7 @@ import pytest
 import lib.dashboard as dashboard
 import lib.dashboard_flow as flow
 from lib.dashboard import collect_snapshot, render_pages, tickets_json, write_snapshot, write_snapshot_pages
+from lib.dashboard_pages import common, lanes
 from lib.dashboard_pages.common import ticket_address, ticket_page_href
 from lib.dashboard_pages.ticket_detail import ticket_view
 from tests.test_dashboard import (
@@ -122,6 +123,17 @@ def _section(html: str, ident: str) -> str:
     raise AssertionError(f"unclosed {ident}")
 
 
+def _section_by_class(html: str, cls: str) -> str:
+    match = re.search(rf'<div class="{re.escape(cls)}">', html)
+    assert match, cls
+    depth = 0
+    for item in re.finditer(r"<(/?)div\b[^>]*>", html[match.start() :]):
+        depth += -1 if item.group(1) else 1
+        if depth == 0:
+            return html[match.start() : match.start() + item.end()]
+    raise AssertionError(f"unclosed {cls}")
+
+
 def _text(markup: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", markup)).strip()
 
@@ -195,9 +207,9 @@ def test_static_server_serves_every_page() -> None:
 # --- main page --------------------------------------------------------------------------
 
 
-def test_main_page_has_status_lanes_just_happened_and_intake(tmp_path: Path) -> None:
+def test_main_page_has_needs_max_and_intake_then_lanes_then_just_happened(tmp_path: Path) -> None:
     html = _pages(tmp_path)["index.html"]
-    for panel in ("lanes", "queue", "just-happened", "intake"):
+    for panel in ("needs-max", "lanes", "queue", "just-happened", "intake"):
         assert f'id="{panel}"' in html, panel
     # Moved to the Activity and Efficiency pages.
     for panel in ("health", "handoffs", "verdicts", "tickets", "log", "savings"):
@@ -205,10 +217,36 @@ def test_main_page_has_status_lanes_just_happened_and_intake(tmp_path: Path) -> 
     for words in ("Poll and Linear budget", "Recent handoffs", "Recent verdicts",
                   "Handoff savings", "poller.log", "scripted share"):
         assert words.lower() not in _text(_no_script(html)).lower(), words
-    assert html.index('id="lanes"') < html.index('id="queue"')
-    assert html.index('id="queue"') < html.index('data-device="box"') < html.index('id="just-happened"')
-    assert html.index('id="just-happened"') < html.index('id="intake"')
-    assert 'id="queue" data-device="queue"' in _section(html, "lanes")
+    hud = _section(html, "hud")
+    heading_end = hud.index("</h1>") + len("</h1>")
+    assert hud[hud.index(">") + 1 :].startswith('<h1 class="vh"'), hud[:200]
+    assert hud[heading_end:].startswith('<div class="lanes-first">'), hud[heading_end : heading_end + 200]
+    order = ['id="needs-max"', 'id="intake"', 'id="lanes"', 'id="queue"', 'data-device="box"', 'id="just-happened"']
+    positions = [html.index(needle) for needle in order]
+    assert positions == sorted(positions), dict(zip(order, positions))
+    first = _section_by_class(html, "lanes-first")
+    assert 'id="needs-max"' in first and 'id="intake"' in first
+    assert 'id="just-happened"' not in first and 'id="lanes"' not in first
+    lane_panel = _section(html, "lanes")
+    assert 'id="queue" data-device="queue"' in lane_panel
+    assert re.findall(r'class="lane[^"]*" (?:id="[^"]*" )?data-device="([^"]+)"', lane_panel)[-1] == "ci"
+
+
+def test_lanes_first_row_splits_two_thirds_one_third() -> None:
+    for rule in (".lanes-first>#needs-max{flex:2 1 520px}", ".lanes-first>#intake{flex:1 1 260px}",
+                 ".lanes-first~#just-happened{grid-column:1/-1}"):
+        assert rule in lanes.CSS, rule
+    assert ".pair" not in lanes.CSS
+
+
+def test_script_renderer_order_matches_the_server_page(tmp_path: Path) -> None:
+    mounts = {"renderNeedsMax": "needs-max", "renderIntake": "intake", "renderLanes": "lanes",
+              "renderJustHappened": "just-happened"}
+    listed = re.search(r"\bmain: \[([^\]]*)\]", common.SCRIPT_TAIL)
+    assert listed, "PAGES.main"
+    script_order = [mounts[name.strip()] for name in listed.group(1).split(",")]
+    html = _pages(tmp_path)["index.html"]
+    assert script_order == sorted(mounts.values(), key=lambda ident: html.index(f'id="{ident}"'))
 
 
 def test_main_page_slot_shows_ticket_bot_step_round_and_elapsed(tmp_path: Path) -> None:
@@ -916,8 +954,13 @@ def attention_count(out: dict) -> str:
 @needs_node
 def test_script_renders_the_main_page_live(tmp_path: Path) -> None:
     snapshot = _held_more_than_running(tmp_path)
-    out = _run_page(tmp_path, snapshot, "main", BAR + ["hud", "lanes", "just-happened", "intake"])
+    panels = ["needs-max", "intake", "lanes", "just-happened"]
+    out = _run_page(tmp_path, snapshot, "main", BAR + ["hud"] + panels, actions=[["record", "after"]])
     assert "LIVE" in out["text"]["link-text"]
+    for panel in panels:
+        assert out["dump"][panel].count("\n h2") == 1, (panel, out["dump"][panel])
+    kids = out["steps"][0]["kids"]
+    assert [kids.index(panel) for panel in panels] == sorted(kids.index(panel) for panel in panels), kids
     assert attention_count(out) == "3"
     lanes = out["dump"]["lanes"]
     assert f"a.tile.codex[href={ticket_page_href(_job_row(snapshot, 'r-codex-'))}]" in lanes
