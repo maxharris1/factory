@@ -1,3 +1,4 @@
+import ast
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -5,8 +6,9 @@ from pathlib import Path
 
 import pytest
 
+import lib
 from lib import (
-    account_doctor, dashboard_cli, device_pool, device_sync, feeder, lane_limit, linear_webhook,
+    account_doctor, dashboard, dashboard_cli, device_pool, device_sync, feeder, lane_limit, linear_webhook,
     qa_evidence_push, telemetry,
 )
 from lib.dashboard import HANDED_OFF_EXTERNALLY, _age, _read_db, collect_snapshot
@@ -648,3 +650,40 @@ def test_a_signout_lock_holds_for_its_lease_whether_since_is_an_epoch_or_a_datet
         _insert(connection, account_doctor.SIGNOUTS, account="claude-b", device="pc", since=since)
         locked = account_doctor.signing_out(connection, STAMP_EPOCH)
     assert (("claude-b", "pc") in locked) is held
+
+
+READERS_THAT_ORDER_BY_EPOCH_IN_SQL = {
+    "_no_ci_bases": lambda connection, tables: dashboard._no_ci_bases(connection, tables),
+    "_ci_runs": lambda connection, tables: dashboard._ci_runs(connection, NOW, {}, {}),
+    "_handled": lambda connection, tables: dashboard._handled(connection, tables),
+    "_relay": lambda connection, tables: dashboard._relay(connection, tables, {}, [], {}, {}, 0, NOW),
+    "_ticket_flows": lambda connection, tables: dashboard._ticket_flows(
+        connection, {("maxharris1/cleffy", "50")}, {}, None, NOW, tables, {}, {}
+    ),
+}
+
+
+@pytest.mark.parametrize("reader", READERS_THAT_ORDER_BY_EPOCH_IN_SQL)
+def test_a_dashboard_reader_runs_on_a_connection_its_caller_opened(tmp_path: Path, reader: str) -> None:
+    db, _ = _stamped_world(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute("CREATE TABLE IF NOT EXISTS no_ci_bases (repo TEXT, ticket_id TEXT, base TEXT)")
+        connection.row_factory = sqlite3.Row
+        tables = dashboard._tables(connection)
+        READERS_THAT_ORDER_BY_EPOCH_IN_SQL[reader](connection, tables)
+
+
+def test_every_function_that_puts_epoch_in_its_sql_registers_it_on_the_connection() -> None:
+    unregistered = []
+    for path in sorted(Path(lib.__file__).parent.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            called = {
+                call.func.attr for call in ast.walk(node)
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name) and call.func.value.id == "epoch"
+            }
+            if "sql" in called and "register" not in called:
+                unregistered.append(f"{path.name}:{node.name}")
+    assert unregistered == []

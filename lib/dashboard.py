@@ -1103,6 +1103,7 @@ def _ci_attention(connection: sqlite3.Connection, tables: set[str]) -> dict[str,
 
 
 def _no_ci_bases(connection: sqlite3.Connection, tables: set[str]) -> dict[tuple[str, str], dict]:
+    epoch.register(connection)
     bases = {
         (str(row["repo"]).casefold(), str(row["ticket_id"])): {"base": _clean(row["base"], 80)}
         for row in connection.execute("SELECT repo, ticket_id, base FROM no_ci_bases")
@@ -1200,6 +1201,7 @@ def _ci_runs(
     sources: dict[tuple[str, str], tuple[str | None, str | None]],
     trackers: dict[tuple[str, str], str | None],
 ) -> dict:
+    epoch.register(connection)
     grouped: dict[tuple[str, str, str], list[dict]] = {}
     refs: dict[tuple[str, str, str], dict] = {}
     failures = []
@@ -1751,6 +1753,7 @@ def _handled(connection: sqlite3.Connection, tables: set[str]) -> list[sqlite3.R
     (_VERDICT_TIMES) or NULL. Joins on grouped tables, not a subquery per
     comment: lower(repo) leaves the subqueries no index (seconds on a live
     database)."""
+    epoch.register(connection)
     joins, times = [], []
     for index, (table, when, column, comment) in enumerate(_VERDICT_TIMES):
         if table in tables and {column, comment} <= {
@@ -1807,6 +1810,7 @@ def _relay(
     tracked: int,
     now: float,
 ) -> dict:
+    epoch.register(connection)
     seen: list[Iterable] = []
     if "tracked_tickets" in tables:
         seen.append(connection.execute("SELECT repo, ticket_id, NULL AS at FROM tracked_tickets"))
@@ -2605,6 +2609,7 @@ def _ticket_flows(
     """(flow, accepted retries, tracked_at) per ticket key (repo casefolded,
     ticket id). Each table is read once, whole, and kept for `keys` only: no
     `IN (...)` list, so the number of tickets never meets SQLite's variable cap."""
+    epoch.register(connection)
     histories: dict[tuple[str, str], list[JobStep]] = {key: [] for key in keys}
     if "jobs" in tables:
         columns = (
@@ -2651,7 +2656,7 @@ def _ticket_flows(
                     None if row["from_state"] is None
                     else _enum(row["from_state"], WORKFLOW_STATES),
                     _enum(row["to_state"], WORKFLOW_STATES),
-                    float(at),
+                    at,
                     str(row["source"]),
                 ))
     tracked_at: dict[tuple[str, str], float] = {}
@@ -2660,7 +2665,7 @@ def _ticket_flows(
             key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
             at = epoch.cell(row["tracked_at"])
             if key in keys and at is not None:
-                tracked_at[key] = float(at)
+                tracked_at[key] = at
     retries: dict[tuple[str, str], int] = {}
     if "ticket_retries" in tables:
         for row in connection.execute(
