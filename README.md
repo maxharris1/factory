@@ -2407,16 +2407,20 @@ root on the PC: `deploy/dashboard-http-service.sh install|status|restart|rollbac
 
 - `install` reads `http.env` first. It exits 78 before changing anything
   if the file is missing or unreadable, a required key is empty,
-  `DASHBOARD_DIR` is not a directory, or a path key is not an absolute path
-  of only letters, digits and `. _ @ + -` with no `.` or `..` part. It then
-  adds the system user `factory-dash` if it is missing, gives the group
+  `DASHBOARD_DIR` is not a directory, a path key is not an absolute path
+  of only letters, digits and `. _ @ + -` with no `.` or `..` part, or
+  `DASHBOARD_SESSION_STORE` is set but is not a directory (a symlink counts
+  as not one) of mode 0700 owned by `factory-dash`. It adds the system user
+  `factory-dash` if it is missing and checks that owner again before any
+  unit changes. It then gives the group
   read and search on `DASHBOARD_DIR`, copies the app to
   `/usr/local/lib/factory-dashboard/` and the unit to
   `/etc/systemd/system/`, and writes the drop-in
   `factory-dashboard-http.service.d/paths.conf` from the path keys:
   `BindReadOnlyPaths=` for `DASHBOARD_DIR`, and `BindPaths=` for
-  `DASHBOARD_SETTINGS_SPOOL`, `DASHBOARD_SIGNIN_RELAY` and the directory of
-  `DASHBOARD_ACTIONS_AUDIT` when each is set. Then it moves 8090 over. It
+  `DASHBOARD_SETTINGS_SPOOL`, `DASHBOARD_SIGNIN_RELAY`, the directory of
+  `DASHBOARD_ACTIONS_AUDIT` and `DASHBOARD_SESSION_STORE` when each is set.
+  Then it moves 8090 over. It
   disables `factory-dashboard.service`, enables and restarts the HTTP unit
   (whose `Conflicts=` stops the static server), and waits up to
   `DASHBOARD_START_WAIT` seconds for it to go live. If a step fails or the
@@ -2456,7 +2460,8 @@ Three keys are required: `TAILNET_IP` (the node's `tailscale ip -4`),
 `DASHBOARD_PORT=8090`. The GitHub actions below add optional keys:
 `DASHBOARD_GITHUB_CLIENT_ID`, `DASHBOARD_APPROVER`,
 `DASHBOARD_ACTION_CLIENTS`, `DASHBOARD_SETTINGS_SPOOL`,
-`DASHBOARD_ACTIONS_AUDIT` and `DASHBOARD_SIGNIN_RELAY`. The file holds no
+`DASHBOARD_ACTIONS_AUDIT`, `DASHBOARD_SIGNIN_RELAY`,
+`DASHBOARD_SESSION_STORE` and `DASHBOARD_SESSION_DAYS`. The file holds no
 secret. The client id of an OAuth App with device flow on is public.
 Any secret or OAuth value is Max's to create and set himself.
 Nothing in this repository, the script or a factory job reads, creates or
@@ -2505,9 +2510,24 @@ Threat model, in short:
   post and the token dropped. Each post's reply is checked again for the
   approver's login and no `performed_via_github_app`; a reply that fails
   that check ends the session.
-- The token lives only in the server's memory. The browser gets a random
-  session id in an `HttpOnly; SameSite=Strict; Path=/api` cookie (12 hours,
-  one session at a time). The user code appears once, in the sign-in reply;
+- Several of the allowed devices stay signed in at once, up to 16, each
+  with its own session. A 17th sign-in evicts the oldest. The browser holds
+  its session in an `HttpOnly; SameSite=Strict; Path=/api` cookie
+  (`Path=/` under `DASHBOARD_REQUIRE_AUTH_READS=1`).
+- Without `DASHBOARD_SESSION_STORE`, sessions live only in the server's
+  memory and end when the server restarts. Each lasts 12 hours from
+  sign-in, or `DASHBOARD_SESSION_DAYS` days when that is set, and never
+  renews.
+- With `DASHBOARD_SESSION_STORE` set (a directory of mode 0700 owned by
+  `factory-dash`), each device's session is sealed in its own file there.
+  The key that opens it lives only in that device's cookie. No plaintext
+  token, CSRF secret, session id or cookie key is written to disk. The
+  session survives restarts and reboots. It slides while the device is in
+  use, lasting `DASHBOARD_SESSION_DAYS` (1 to 365, default 90) from its
+  last renewal.
+- `POST /api/signout` ends only the calling device's session. With the
+  body `{"all": true}` it signs out every device and clears the store.
+- The user code appears once, in the sign-in reply;
   the device code and token never appear in a reply, a page, `status.json`
   or the log, which records only method, path, status and peer.
 - Only the listed client addresses reach `/api` (everyone else gets 404),

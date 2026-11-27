@@ -571,9 +571,11 @@ def test_evals_json_is_401_json_when_signed_out_like_the_other_snapshot_json(sit
     handler = object.__new__(server_module.SnapshotHandler)
     config = server_module.ActionsConfig("synthetic", "human", frozenset(), require_auth_reads=True)
     handler.server = SimpleNamespace(
-        actions=SimpleNamespace(config=config, current=lambda _: session),
+        actions=SimpleNamespace(config=config, current_with_renewal=lambda *_: (session, False)),
         root_fd=server_module.open_root(site),
     )
+    handler.client_address = ("127.0.0.1", 0)
+    handler._action_client = lambda: "127.0.0.1"
     handler._cookie = lambda _: None
     out: list[tuple[int, str, bytes]] = []
     handler._send = lambda code, data, content_type, **_: out.append((code, content_type, data))

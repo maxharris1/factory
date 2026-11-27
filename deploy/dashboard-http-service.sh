@@ -23,7 +23,9 @@
 # The env file is parsed as systemd 255 parses an EnvironmentFile. Only
 # TAILNET_IP, DASHBOARD_PORT and the path keys are read from it, and only the
 # address and the paths (in the drop-in) leave it. install refuses (exit 78)
-# before changing anything if a required key is missing or a path is unsafe.
+# before changing anything if a required key is missing, a path is unsafe, or
+# DASHBOARD_SESSION_STORE is not a directory of mode 0700 owned by
+# factory-dash. It adds a missing factory-dash before checking that owner.
 # restart refuses (exit 3) unless the HTTP unit is enabled and
 # factory-dashboard.service is inactive or failed.
 # Overrides: DASHBOARD_SYSTEMCTL, DASHBOARD_ENV_FILE, DASHBOARD_PROBE_ADDR,
@@ -324,8 +326,28 @@ safe_path() {
     [[ "$1" =~ ^(/[A-Za-z0-9._@+-]+)+$ && "$1/" != */./* && "$1/" != */../* ]]
 }
 
+session_store_problem() {
+    python3 -I -c '
+import os, stat, sys
+try:
+    info = os.lstat(sys.argv[1])
+except FileNotFoundError:
+    sys.exit("does not exist")
+except OSError:
+    sys.exit("cannot be checked; run as root")
+if stat.S_ISLNK(info.st_mode):
+    sys.exit("is a symlink")
+if not stat.S_ISDIR(info.st_mode):
+    sys.exit("is not a directory")
+if stat.S_IMODE(info.st_mode) != 0o700:
+    sys.exit(f"has mode {stat.S_IMODE(info.st_mode):04o}, not 0700")
+if sys.argv[2] and info.st_uid != int(sys.argv[2]):
+    sys.exit("is not owned by factory-dash")
+' "$1" "$2" 2>&1
+}
+
 paths_conf() {
-    local key value bind missing=()
+    local key value bind problem missing=()
     if [[ ! -e "$ENV_FILE" ]]; then
         refuse "${ENV_FILE} does not exist. Create it (owner root, group factory-dash, mode 0640) with:"
         for key in TAILNET_IP DASHBOARD_DIR DASHBOARD_PORT; do
@@ -352,7 +374,7 @@ paths_conf() {
         return 78
     fi
     echo "[Service]"
-    for key in DASHBOARD_DIR DASHBOARD_SETTINGS_SPOOL DASHBOARD_SIGNIN_RELAY DASHBOARD_ACTIONS_AUDIT; do
+    for key in DASHBOARD_DIR DASHBOARD_SETTINGS_SPOOL DASHBOARD_SIGNIN_RELAY DASHBOARD_ACTIONS_AUDIT DASHBOARD_SESSION_STORE; do
         value="$(env_value "$key")"
         [[ -n "$value" ]] || continue
         bind="$value"
@@ -369,6 +391,14 @@ paths_conf() {
                 fi
                 echo "BindReadOnlyPaths=${bind}"
                 ;;
+            DASHBOARD_SESSION_STORE)
+                problem="$(session_store_problem "$value" "$(getent passwd factory-dash | cut -d: -f3 || true)")"
+                if [[ -n "$problem" ]]; then
+                    refuse "${key} in ${ENV_FILE} ${problem}. Create it as a directory owned by factory-dash with mode 0700"
+                    return 78
+                fi
+                echo "BindPaths=${bind}"
+                ;;
             *) echo "BindPaths=${bind}" ;;
         esac
     done
@@ -382,6 +412,7 @@ install_service() {
     if [[ -z "$(getent passwd factory-dash || true)" ]]; then
         say "adding system user factory-dash"
         useradd --system --no-create-home --shell /usr/sbin/nologin factory-dash
+        conf="$(paths_conf)" || return
     fi
     chmod g+rx "$dashboard_dir"
 

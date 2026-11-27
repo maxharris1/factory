@@ -389,9 +389,11 @@ def test_require_auth_reads_protects_html_and_qa_routes_without_exposing_snapsho
     handler = object.__new__(server.SnapshotHandler)
     cfg = server.ActionsConfig("synthetic", "human", frozenset(), require_auth_reads=True)
     handler.server = SimpleNamespace(
-        actions=SimpleNamespace(config=cfg, current=lambda _: None),
+        actions=SimpleNamespace(config=cfg, current_with_renewal=lambda *_: (None, False)),
         root_fd=server.open_root(tmp_path / "site"),
     )
+    handler.client_address = ("127.0.0.1", 0)
+    handler._action_client = lambda: "127.0.0.1"
     handler._cookie = lambda _: None
     out: list[tuple[int, bytes]] = []
     handler._send = lambda code, data, *a, **kw: out.append((code, data))
