@@ -7,7 +7,7 @@ import lib.dashboard_page as page
 from lib.dashboard import render_pages
 from lib.dashboard_pages import efficiency, usage_chip
 from lib.dashboard_static import read_asset
-from tests.test_dashboard_efficiency import _accounts_snapshot, _usage_snapshot
+from tests.test_dashboard_efficiency import CLAUDE_ONLY, _accounts_snapshot, _usage_snapshot
 
 OPEN = '<a class="uchip" id="usage-chip" href="efficiency.html#headroom"'
 HIDDEN = f"{OPEN} hidden></a>"
@@ -145,26 +145,26 @@ def test_a_harness_with_no_fresh_reading_reads_stale(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(("five_hour", "tone"), [(0.5, "ok"), (0.51, "warn"), (0.8, "warn"), (0.81, "bad")])
 def test_tones_are_the_headroom_panels(tmp_path: Path, five_hour: float, tone: str) -> None:
-    snapshot = _usage_snapshot(tmp_path, five_hour=five_hour, seven_day=0.1)
+    snapshot = _usage_snapshot(tmp_path, CLAUDE_ONLY, five_hour=five_hour, seven_day=0.1)
     [segment] = _segments(snapshot)
     assert segment["tone"] == _panel_tone(snapshot) == tone
 
 
 def test_one_fresh_window_of_two_is_neutral(tmp_path: Path) -> None:
-    snapshot = _usage_snapshot(tmp_path, five_hour=0.41)
+    snapshot = _usage_snapshot(tmp_path, CLAUDE_ONLY, five_hour=0.41)
     [segment] = _segments(snapshot)
     assert segment["tone"] == _panel_tone(snapshot) == "neutral"
 
 
 def test_a_lane_limit_is_bad(tmp_path: Path) -> None:
-    snapshot = _usage_snapshot(tmp_path, five_hour=0.2, seven_day=0.1)
+    snapshot = _usage_snapshot(tmp_path, CLAUDE_ONLY, five_hour=0.2, seven_day=0.1)
     snapshot["usage"]["accounts"][0]["limit_label"] = "usage limit until 2026-11-17 03:00 UTC"
     [segment] = _segments(snapshot)
     assert (segment["pct"], segment["tone"]) == (80, "bad")
 
 
 def test_the_chip_follows_the_panels_rule(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    snapshot = _usage_snapshot(tmp_path, five_hour=0.2, seven_day=0.1)
+    snapshot = _usage_snapshot(tmp_path, CLAUDE_ONLY, five_hour=0.2, seven_day=0.1)
     monkeypatch.setattr(efficiency, "_tone", lambda room: "warn")
     [segment] = _segments(snapshot)
     assert segment["tone"] == _panel_tone(snapshot) == "warn"
@@ -177,7 +177,7 @@ def test_the_title_lists_every_account_with_both_windows(tmp_path: Path) -> None
 
 
 def test_the_title_ends_a_limited_accounts_line_with_its_limit_label(tmp_path: Path) -> None:
-    snapshot = _accounts_snapshot(tmp_path, limit="usage limit")
+    snapshot = _accounts_snapshot(tmp_path, limit="codex-a")
     [limited] = [e for e in snapshot["usage"]["accounts"] if e["limit_label"]]
     lines = usage_chip.chip_model(snapshot)["title"].split("\n")
     name = limited["label"] or limited["account"]
