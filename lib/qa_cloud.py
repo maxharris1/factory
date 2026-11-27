@@ -517,7 +517,13 @@ class QaWorker:
         waiting: Counter[str] = Counter()
         low: dict[str, bool] = {}
         with self.queue.connect() as connection:
-            jobs = [job_from_row(row, connection) for row in claim_order(connection, QA_RECIPIENT, now=now)]
+            jobs = [
+                job_from_row(
+                    connection.execute("SELECT * FROM jobs WHERE id = ?", (candidate.id,)).fetchone(),
+                    connection,
+                )
+                for candidate in claim_order(connection, QA_RECIPIENT, now=now)
+            ]
         for job in jobs:
             raw = json.loads(job.request.detail or "{}")
             if "live" not in raw:

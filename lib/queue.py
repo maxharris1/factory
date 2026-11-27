@@ -367,15 +367,15 @@ class SQLiteJobQueue:
         excluded = frozenset(excluded_job_ids)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = next(
+            candidate = next(
                 (
                     candidate
                     for candidate in claim_order(connection, recipient, now=now)
-                    if str(candidate["id"]) not in excluded
+                    if candidate.id not in excluded
                 ),
                 None,
             )
-            if row is None:
+            if candidate is None:
                 connection.commit()
                 return None
             changed = connection.execute(
@@ -384,13 +384,13 @@ class SQLiteJobQueue:
                 SET state = 'running', last_activity_at = ?, claim_token_hash = ?
                 WHERE id = ? AND state = 'queued'
                 """,
-                (now, token_hash, row["id"]),
+                (now, token_hash, candidate.id),
             ).rowcount
             if changed != 1:
-                raise QueueError(f"job {row['id']} is no longer queued")
+                raise QueueError(f"job {candidate.id} is no longer queued")
             updated = connection.execute(
                 "SELECT * FROM jobs WHERE id = ?",
-                (row["id"],),
+                (candidate.id,),
             ).fetchone()
             assert updated is not None
             job = _job(updated, connection)
@@ -922,6 +922,16 @@ class PriorityMark:
     own_tier: int | None = None
 
 
+@dataclass(frozen=True)
+class Candidate:
+    id: str
+    repo: str
+    ticket_id: str
+    action: str
+    created_at: float
+    resume: bool
+
+
 def priority_marks(connection: sqlite3.Connection) -> dict[tuple[str, str], PriorityMark]:
     """Every ticket's marks, keyed (repo, ticket_id); empty with no table,
     and a column from after the database was made reads as unset."""
@@ -985,7 +995,7 @@ def claim_order(
     *,
     now: float,
     serving: frozenset[str] | None = None,
-) -> list[sqlite3.Row]:
+) -> list[Candidate]:
     """Queued jobs for recipient in claim order (see the module doc); none
     while recipient's lane is paused by usage limits (#367): every account
     in `serving` is limited, or, with serving unknown (None), any is."""
@@ -1003,26 +1013,31 @@ def claim_order(
         if _has_table(connection, "ticket_state")
         else ""
     )
-    rows = connection.execute(
-        f"""
-        SELECT * FROM jobs
-        WHERE state = 'queued' AND recipient = ? {abandoned}
-        ORDER BY created_at, id
-        """,
-        (recipient,),
-    ).fetchall()
-    marks = priority_marks(connection) if rows else {}
+    candidates = [
+        Candidate(
+            str(job_id), str(repo), str(ticket_id), str(action), float(created_at), is_resume(detail)
+        )
+        for job_id, repo, ticket_id, action, created_at, detail in connection.execute(
+            f"""
+            SELECT id, repo, ticket_id, action, created_at, detail FROM jobs
+            WHERE state = 'queued' AND recipient = ? {abandoned}
+            ORDER BY created_at, id
+            """,
+            (recipient,),
+        )
+    ]
+    marks = priority_marks(connection) if candidates else {}
 
-    def key(row: sqlite3.Row) -> tuple[bool, int, bool, int, int, float, str]:
-        mark = marks.get((str(row["repo"]).lower(), str(row["ticket_id"])), PriorityMark())
+    def key(candidate: Candidate) -> tuple[bool, int, bool, int, int, float, str]:
+        mark = marks.get((candidate.repo.lower(), candidate.ticket_id), PriorityMark())
         return (
-            *rank(tier=mark.tier, urgent=mark.urgent, resume=is_resume(row["detail"]),
-                  bug=mark.bug, unblocks=mark.unblocks, finishing=row["action"] in FINISHING_ACTIONS),
-            float(row["created_at"]),
-            str(row["id"]),
+            *rank(tier=mark.tier, urgent=mark.urgent, resume=candidate.resume, bug=mark.bug,
+                  unblocks=mark.unblocks, finishing=candidate.action in FINISHING_ACTIONS),
+            candidate.created_at,
+            candidate.id,
         )
 
-    return sorted(rows, key=key)
+    return sorted(candidates, key=key)
 
 
 def _slot_columns(connection: sqlite3.Connection) -> set[str]:

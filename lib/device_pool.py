@@ -674,19 +674,19 @@ class DevicePool:
             if choose_pair(config, harness, used, blocked, loads) is None:
                 connection.commit()
                 return None
-            for row in claim_order(
+            for candidate in claim_order(
                 connection, harness, now=now, serving=config.serving(harness)
             ):
-                if str(row["id"]) in excluded:
+                if candidate.id in excluded:
                     continue
-                allowed = pins.get(str(row["repo"]).lower())
+                allowed = pins.get(candidate.repo.lower())
                 pair = choose_pair(config, harness, used, blocked, loads, allowed=allowed)
                 if pair is not None:
                     break
             else:
                 connection.commit()
                 return None
-            dropped = _lost_on(connection, str(row["id"]))
+            dropped = _lost_on(connection, candidate.id)
             if dropped == pair[1].name:
                 pair = choose_pair(
                     config, harness, used, blocked, loads, avoid={dropped}, allowed=allowed
@@ -699,10 +699,10 @@ class DevicePool:
                 SET state = 'running', last_activity_at = ?, claim_token_hash = ?
                 WHERE id = ? AND state = 'queued'
                 """,
-                (now, token_hash, row["id"]),
+                (now, token_hash, candidate.id),
             ).rowcount
             if changed != 1:
-                raise QueueError(f"job {row['id']} changed during claim")
+                raise QueueError(f"job {candidate.id} changed during claim")
             os_user = device.harnesses[harness]
             claimer_pid, claimer_start = autostart if autostart is not None else (None, None)
             connection.execute(
@@ -713,7 +713,7 @@ class DevicePool:
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (row["id"], device.name, harness, os_user, now, claimer_pid, claimer_start, account),
+                (candidate.id, device.name, harness, os_user, now, claimer_pid, claimer_start, account),
             )
             connection.execute(
                 f"""
@@ -722,7 +722,7 @@ class DevicePool:
                 )
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                (row["id"], account, harness, device.name, now),
+                (candidate.id, account, harness, device.name, now),
             )
             connection.execute(
                 f"DELETE FROM {PLACEMENTS_TABLE} WHERE placed_at < ?",
@@ -730,13 +730,13 @@ class DevicePool:
             )
             updated = connection.execute(
                 "SELECT * FROM jobs WHERE id = ?",
-                (row["id"],),
+                (candidate.id,),
             ).fetchone()
             assert updated is not None
             job = _job(updated, connection)
             connection.commit()
         return job, Placement(
-            job_id=str(row["id"]),
+            job_id=candidate.id,
             device=device.name,
             harness=harness,
             os_user=os_user,
