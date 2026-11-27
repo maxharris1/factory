@@ -721,10 +721,7 @@ def _owner(path: Path) -> int:
     return path.lstat().st_uid
 
 
-def _guarded(root: Path, plan: Plan) -> tuple[Plan, dict[str, str], bool]:
-    """The plan cut to job ids whose `jobs/` entries are all this user's,
-    each foreign id the step would have looked at kept as `not-owner`, and
-    whether `jobs-kept/` is this user's to prune."""
+def _guarded(root: Path, plan: Plan) -> tuple[Plan, dict[str, str]]:
     me = os.getuid()
     entries: dict[str, list[Path]] = {}
     for entry in (root / "jobs").iterdir():
@@ -737,9 +734,12 @@ def _guarded(root: Path, plan: Plan) -> tuple[Plan, dict[str, str], bool]:
     kept = {job_id: NOT_OWNER for job_id in sorted(foreign) if plan.owns(job_id) and (
         job_id in plan.finished or any(
             (jobs / f"{job_id}{mark}").is_dir() for mark in ("", SET_ASIDE, GONE)))}
+    return replace(plan, owned=frozenset(universe) - foreign), kept
+
+
+def _may_prune(root: Path) -> bool:
     archive = root / job_leftovers.KEPT_ROOT
-    prune = archive.is_dir() and _owner(archive) == me
-    return replace(plan, owned=frozenset(universe) - foreign), kept, prune
+    return archive.is_dir() and _owner(archive) == os.getuid()
 
 
 def device_step(root: Path, plan: Plan, *, scan: Callable[[Path], set[str] | None] = jobs_held_open,
@@ -747,7 +747,8 @@ def device_step(root: Path, plan: Plan, *, scan: Callable[[Path], set[str] | Non
     foreign: dict[str, str] = {}
     prune = True
     if owner_guard:
-        plan, foreign, prune = _guarded(root, plan)
+        plan, foreign = _guarded(root, plan)
+        prune = _may_prune(root)
     report = _finish(root, plan, scan) if plan.step == FINISH else _hold(root, plan, scan, prune)
     return replace(report, kept={**report.kept, **foreign})
 
@@ -848,11 +849,10 @@ def clean_target(transport: CaptureTransport, target: Target, db: Path, plan: Pl
 
 
 class BadRoot(ValueError):
-    """A `--root` the retired-root sweep cannot take. The message is one line."""
+    pass
 
 
 def root_targets(machines, spec: str) -> list[Target]:
-    """`[LOGIN@]DEVICE:PATH` as one target per ssh login, all aimed at PATH."""
     head, colon, path = spec.partition(":")
     login, at, name = head.rpartition("@")
     if not colon or not name or (at and not login):
