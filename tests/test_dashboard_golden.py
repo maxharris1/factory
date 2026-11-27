@@ -74,7 +74,9 @@ PANELS: dict[str, Callable[[dict], str]] = {
     "ticket_cockpit_html.visual-qa": lambda c: cockpit.ticket_cockpit_html({**c["asking"], **VISUAL_QA}),
 }
 
-NET_NEW = ("lib/dashboard_pages/counts.py", "lib/dashboard_static/css/counts.css")
+NET_NEW = (
+    "lib/dashboard_pages/counts.py", "lib/dashboard_static/css/counts.css", "lib/dashboard_static/js/counts.js",
+)
 COPIED = (*NET_NEW, "config/routing.yml")
 
 REPRODUCE = f"""\

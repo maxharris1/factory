@@ -27,7 +27,7 @@ CSS_ORDER = (
 )
 SCRIPT_ORDER = (
     (common, "SCRIPT_HEAD"), (shell, "SCRIPT"), (lanes, "SCRIPT"), (ci, "SCRIPT"), (activity, "SCRIPT"),
-    (tickets, "SCRIPT_TICKETS"), (system, "SCRIPT_LOG"), (system, "SCRIPT_HEALTH"),
+    (tickets, "SCRIPT_TICKETS"), (counts, "SCRIPT"), (system, "SCRIPT_LOG"), (system, "SCRIPT_HEALTH"),
     (efficiency, "SCRIPT"), (evals, "SCRIPT"), (routing, "SCRIPT"), (common, "SCRIPT_GITHUB"), (cockpit, "SCRIPT"),
     (ticket_detail, "SCRIPT"), (settings, "SCRIPT"), (common, "SCRIPT_TELEMETRY"),
     (system, "SCRIPT_COMPONENTS"), (common, "SCRIPT_TAIL"),

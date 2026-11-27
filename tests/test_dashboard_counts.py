@@ -66,8 +66,13 @@ def test_the_panel_holds_no_control(tmp_path: Path) -> None:
     assert not re.search(r"<(button|form|input|select|textarea)\b", counts._counts(_snapshot(tmp_path)))
 
 
-def test_the_css_is_served_after_the_cockpit_css_and_the_panel_is_on_no_page(tmp_path: Path) -> None:
+def test_the_css_is_served_after_the_cockpit_css_and_the_script_after_the_tickets_script() -> None:
     assert cockpit.CSS + counts.CSS in page.CSS
+    assert tickets.SCRIPT_TICKETS + counts.SCRIPT in page.SCRIPT
+    assert "__COUNTS__" not in counts.SCRIPT
+
+
+def test_the_panel_is_on_no_page_yet(tmp_path: Path) -> None:
     assert not any('id="counts"' in html for html in render_pages(_snapshot(tmp_path)).values())
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from lib.ci_lane import ci_lane
 from lib.dashboard_pages import tickets
 from lib.dashboard_pages.common import _e, _panel
@@ -7,6 +9,7 @@ from lib.dashboard_static import read_asset
 
 CSS = read_asset("css/counts.css")
 
+TITLE = "Where jobs are"
 BLOCKED = "waiting-blocked"
 BAD = ("Stop",)
 _BEFORE = ({"key": "blocked", "label": "blocked by a dependency", "href": "index.html#intake"},)
@@ -19,6 +22,9 @@ CELLS = _BEFORE + tuple(
         *_AFTER.get(phase, ()),
     )
 )
+SCRIPT = read_asset("js/counts.js").replace("__COUNTS__", json.dumps(
+    {"title": TITLE, "cells": CELLS, "blocked": BLOCKED, "bad": BAD}, separators=(",", ":"),
+))
 
 
 def tally(snapshot: dict) -> dict[str, int | None]:
@@ -41,4 +47,4 @@ def _cell(cell: dict, count: int | None) -> str:
 
 def _counts(snapshot: dict) -> str:
     found = tally(snapshot)
-    return _panel("counts", "Where jobs are", "".join(_cell(cell, found[cell["key"]]) for cell in CELLS))
+    return _panel("counts", TITLE, "".join(_cell(cell, found[cell["key"]]) for cell in CELLS))
