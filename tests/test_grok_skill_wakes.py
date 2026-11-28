@@ -117,7 +117,7 @@ def test_no_ok_as_max():
 
 
 def test_the_engine_notice_marker_the_code_posts_is_named_in_commands():
-    from lib.dispatch.rule_engine import engine_marker
+    from lib.dispatch.review import engine_marker
 
     commands = SKILL.read_text(encoding="utf-8").split("\n## Commands\n", 1)[1].split("\n## ", 1)[0]
     marker = engine_marker("cap", "1").split()[1]

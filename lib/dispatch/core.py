@@ -32,6 +32,7 @@ from lib.dispatch.helpers import (
     _router_picks,
     trusted_bots,
 )
+from lib.dispatch.review import ReviewCoordinator
 from lib.dispatch.transitions import write_workflow_state
 from lib.factory_md import family_findings
 from lib.role_router import Candidate, RoutingError
@@ -169,6 +170,7 @@ class DispatcherBase:
         # not be recorded yet, so an after: ok's ship waits for the pass end.
         self._ticket_pass = False
         self._deferred_ships: dict[tuple[str, str], TrackedTicket] = {}
+        self.review = ReviewCoordinator(queue=queue, connect=self._connect, port=self)
         self._initialize()
         for hook in self.hooks:
             hook.initialize(self)

@@ -32,7 +32,7 @@ def rows(dispatcher: Dispatcher) -> list[dict]:
 
 def log(dispatcher: Dispatcher, ruling: Ruling, subject: str = "verdict-7") -> bool:
     with dispatcher._connect() as connection:
-        return dispatcher._log_ruling(connection, ticket(), "cap", subject, ruling, (F1, AC2))
+        return dispatcher.review.log_ruling(connection, ticket(), "cap", subject, ruling, (F1, AC2))
 
 
 def engine_lines(capsys: pytest.CaptureFixture[str]) -> list[str]:

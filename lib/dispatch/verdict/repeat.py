@@ -464,7 +464,7 @@ class RepeatBlockMixin:
         qa: QaFix | None,
         states: tuple[str, ...] = REVISE_ROUND_STATES,
     ) -> tuple[bool, str]:
-        from lib.dispatch.rule_engine import prior_grants
+        from lib.dispatch.review import prior_grants
         from lib.evidence.findings import blocking_ids
 
         key = (ticket.repo.lower(), ticket.ticket_id)
@@ -491,7 +491,7 @@ class RepeatBlockMixin:
                 granted = _released_by(connection, ticket, comment.id, "repeat") == "engine"
                 connection.commit()
                 if granted:
-                    self._apply_engine_grants(ticket)
+                    self.review.apply_engine_grants(ticket)
                 else:
                     self._write_state_label(ticket, "waiting-max")
                 return True, str(prior["outcome"])
@@ -534,7 +534,7 @@ class RepeatBlockMixin:
                 """,
                 (*key, comment.id, failed_column(qa), json.dumps(sorted(repeated_ids))),
             )
-            granted = engine and self._rule_on_repeat(
+            granted = engine and self.review.on_repeat(
                 connection, ticket, comment, repeated_ids, stops, prior_grant, reported_round
             )
             if granted:
@@ -555,7 +555,7 @@ class RepeatBlockMixin:
                     RoundGrant.engine(comment),
                 )
                 connection.commit()
-                self._apply_engine_grants(ticket)
+                self.review.apply_engine_grants(ticket)
                 return True, "waiting-max-repeat"
             self.queue.enqueue_in_transaction(
                 connection,

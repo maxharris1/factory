@@ -388,7 +388,7 @@ class HoldsMixin:
         ruling = engine_decide(MovedHeadFacts(ok_head, new_head, probe, held, ci))
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            self._log_ruling(connection, ticket, "moved-head", f"{ok}..{head}", ruling, ())
+            self.review.log_ruling(connection, ticket, "moved-head", f"{ok}..{head}", ruling, ())
             connection.commit()
         return ruling.outcome
 
