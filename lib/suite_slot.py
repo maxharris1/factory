@@ -8,8 +8,9 @@ from pathlib import Path
 LIMIT_ENV = "ORCH_TEST_SUITE_MAX"
 WAIT_SECONDS = 90
 BUSY_EXIT = 75
+HELPER = "bin/suite-slot"
 
-_HELPER_RE = re.compile(r"(?:^|[\s/;&|('\"])suite-slot(?=[\s;&|)'\"]|$)")
+_HELPER_RE = re.compile(rf"(?:^|[\s/;&|('\"]){re.escape(Path(HELPER).name)}(?=[\s;&|)'\"]|$)")
 _LINE_RE = re.compile(r"^ORCH-SUITE-SLOT: waited (\d+)s, (?:running|busy)\r?$", re.MULTILINE)
 
 
