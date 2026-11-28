@@ -651,3 +651,35 @@ after the account leaves the device's `signed_in_on`. A flag still raised
 keeps its first raise time and takes the new detail. When the checkout's
 `origin` is not a GitHub repo, the doctor writes its rows and raises no
 flags.
+
+## When a sign-in drops
+
+A drop starts when a doctor pass reads a pair `signed-out` for a known reason.
+`status reply not understood` and `status command exited nonzero` do not
+start one. A pair under a sign-in hold that reads anything but `ok` drops
+too, so a held pair that turns `unreachable` counts. The drop ends when a
+pass reads the pair `ok`, or when the pair leaves `machines.yml`. A drop
+read again keeps the time it started.
+
+The poller wakes Grok once per drop. After each of its doctor passes it
+queues one `account-signin` wake for each drop not yet announced, and
+delivers it in the same poll. The wake names the account, the device, the
+harness and the doctor's reading. It says whether jobs are still placed
+there and links to this section. Grok asks Max once to sign in from the
+dashboard Settings page. A pair that stays down is not woken again. Once it
+reads `ok` and then drops again, that is a new drop, and it wakes once more.
+
+Neither the doctor nor the wake runs a login or copies one between devices.
+Max signs in. The wake goes to the factory's own repo, the `origin` of the
+orch checkout. When that `origin` is not a GitHub repo, no wake goes out.
+
+A sign-out from Settings does not wake. Its doctor pass records the drop as
+already announced. The pair's `account-signin` flag still goes up.
+
+`orch accounts doctor`, `orch usage refresh`, the sign-in broker, Settings
+Prepare and Settings Run doctor record drops but queue no wake. The poller's
+next doctor pass announces them. That pass comes within 2 minutes while a
+sign-in hold is open, and within 30 minutes otherwise.
+
+A wake that is not delivered within 24 hours fails. The poller closes it
+with no retry and no stuck ticket. The `account-signin` flag stays raised.
