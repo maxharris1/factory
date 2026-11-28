@@ -7,7 +7,7 @@ import json
 import logging
 import sqlite3
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import NamedTuple, get_args
@@ -1457,3 +1457,147 @@ def test_extend_signin_fence_covers_pairs_added_during_active_fence(tmp_path: Pa
         account_doctor.unfence_signins(connection)
         assert account_doctor.signing_out(connection, NOW + 1) == frozenset()
         assert account_doctor.reserve_pair(connection, "claude-new", "pc", "signin-1", NOW + 2)
+
+
+def drops(connection: sqlite3.Connection) -> list[tuple[object, ...]]:
+    return [tuple(row) for row in connection.execute(
+        f"SELECT account, device, since, announced FROM {account_doctor.DROPS} ORDER BY account, device")]
+
+
+@pytest.mark.parametrize("opened", [connect, lambda path: SQLiteJobQueue(path, clock=lambda: NOW).connect()],
+                         ids=["cli", "queue"])
+def test_a_definite_signed_out_row_records_an_unannounced_drop(
+    tmp_path: Path, opened: Callable[[Path], sqlite3.Connection]
+) -> None:
+    transport = DoctorTransport()
+    transport.replies["pc-claude-bot"] = framed((0, 0, claude_reply(method="oauth_token")), (1, 1, SIGNED_OUT_CLAUDE))
+    with contextlib.closing(opened(tmp_path / "orch.db")) as connection:
+        account_doctor.run(connection, poller_config(tmp_path), transport, NOW, "Owner/Factory")
+    with contextlib.closing(connect(tmp_path / "orch.db")) as connection:
+        assert drops(connection) == [("claude-b", "pc", NOW, 0), ("claude-default", "pc", NOW, 0)]
+
+
+def test_a_held_pair_that_reads_unreachable_is_a_drop(tmp_path: Path) -> None:
+    connection = connect(tmp_path / "orch.db")
+    account_doctor.hold(connection, "claude-b", "pc", "runtime", account_doctor.AUTHENTICATION_FAILED, NOW - 1)
+    transport = DoctorTransport()
+    transport.replies = {alias: b"" for alias in transport.replies}
+    rows = account_doctor.run(connection, poller_config(tmp_path), transport, NOW, "Owner/Factory")
+    assert {row.status for row in rows} == {"unreachable"}
+    assert drops(connection) == [("claude-b", "pc", NOW, 0)]
+
+
+def test_a_drop_read_again_keeps_its_since(tmp_path: Path) -> None:
+    connection = connect(tmp_path / "orch.db")
+    config = poller_config(tmp_path)
+    transport = DoctorTransport()
+    sign_out_claude_b(transport)
+    account_doctor.run(connection, config, transport, NOW, "Owner/Factory")
+    account_doctor.run(connection, config, transport, NOW + 120, "Owner/Factory")
+    assert drops(connection) == [("claude-b", "pc", NOW, 0)]
+    transport.replies = {alias: b"" for alias in transport.replies}
+    account_doctor.run(connection, config, transport, NOW + 240, "Owner/Factory")
+    assert drops(connection) == [("claude-b", "pc", NOW, 0)]
+
+
+def test_an_ok_row_deletes_the_drop_and_the_next_drop_takes_a_new_since(tmp_path: Path) -> None:
+    connection = connect(tmp_path / "orch.db")
+    config = poller_config(tmp_path)
+    transport = DoctorTransport()
+    sign_out_claude_b(transport)
+    account_doctor.run(connection, config, transport, NOW, "Owner/Factory")
+    assert drops(connection) == [("claude-b", "pc", NOW, 0)]
+    account_doctor.run(connection, config, DoctorTransport(), NOW + 120, "Owner/Factory")
+    assert drops(connection) == []
+    account_doctor.run(connection, config, transport, NOW + 240, "Owner/Factory")
+    assert drops(connection) == [("claude-b", "pc", NOW + 240, 0)]
+
+
+def test_a_pair_that_leaves_machines_config_loses_its_drop(tmp_path: Path) -> None:
+    connection = connect(tmp_path / "orch.db")
+    config = poller_config(tmp_path)
+    transport = DoctorTransport()
+    sign_out_claude_b(transport)
+    rows = account_doctor.run(connection, config, transport, NOW, "Owner/Factory")
+    assert drops(connection) == [("claude-b", "pc", NOW, 0)]
+    account_doctor.write(connection, [row for row in rows if row.account != "claude-b"], config,
+                         "Owner/Factory", NOW + 120)
+    assert drops(connection) == []
+
+
+@pytest.mark.parametrize("status, detail", [
+    ("unreachable", account_doctor.SSH_DOWN),
+    ("mismatch", "same sign-in as account claude-default"),
+    ("signed-out", account_doctor.NOT_UNDERSTOOD),
+    ("signed-out", account_doctor.EXIT_NONZERO),
+], ids=["unreachable", "mismatch", "not-understood", "exit-nonzero"])
+def test_an_unreachable_mismatch_or_inconclusive_row_with_no_hold_leaves_the_drops_as_they_are(
+    tmp_path: Path, status: str, detail: str
+) -> None:
+    connection = connect(tmp_path / "orch.db")
+    config = poller_config(tmp_path)
+    pairs = ("claude-b", "claude-default")
+    account_doctor.write(connection, [sign_in(account, status, detail) for account in pairs], config, None, NOW)
+    assert drops(connection) == []
+    account_doctor.write(connection, [sign_in(account, "signed-out", account_doctor.TOKEN_AUTH) for account in pairs],
+                         config, None, NOW + 1, deliberate=("claude-b", "pc"))
+    account_doctor.write(connection, [sign_in(account, status, detail) for account in pairs], config, None, NOW + 2)
+    assert holds(connection) == []
+    assert drops(connection) == [("claude-b", "pc", NOW + 1, 1), ("claude-default", "pc", NOW + 1, 0)]
+
+
+def test_a_deliberate_pair_is_recorded_announced(tmp_path: Path) -> None:
+    connection = connect(tmp_path / "orch.db")
+    config = poller_config(tmp_path)
+    rows = [sign_in(account, "signed-out", account_doctor.NOT_LOGGED_IN) for account in ("claude-b", "claude-default")]
+    account_doctor.write(connection, rows, config, None, NOW, deliberate=("claude-b", "pc"))
+    assert drops(connection) == [("claude-b", "pc", NOW, 1), ("claude-default", "pc", NOW, 0)]
+    account_doctor.write(connection, rows, config, None, NOW + 1, deliberate=("claude-default", "pc"))
+    assert drops(connection) == [("claude-b", "pc", NOW, 1), ("claude-default", "pc", NOW, 1)]
+    account_doctor.write(connection, rows, config, None, NOW + 2)
+    assert drops(connection) == [("claude-b", "pc", NOW, 1), ("claude-default", "pc", NOW, 1)]
+    other = connect(tmp_path / "other.db")
+    for row in (sign_in("codex-default", "ok", ""), sign_in("codex-default", "unreachable", account_doctor.SSH_DOWN)):
+        account_doctor.write(other, [row], config, None, NOW, deliberate=("codex-default", "pc"))
+        assert drops(other) == []
+
+
+TOKEN_READING = ("signed-out; run: remove the token export from claude-bot's login profile on pc, "
+                 f"then orch accounts doctor; {account_doctor.TOKEN_AUTH}")
+HELD_READING = (f"signed-out; run: sign in as claude-bot on pc: env -u CLAUDE_CODE_OAUTH_TOKEN "
+                f"CLAUDE_CONFIG_DIR={CLAUDE_B_HOME} claude auth login, then orch accounts doctor; "
+                f"{account_doctor.AUTHENTICATION_FAILED}")
+
+
+def test_take_unannounced_marks_in_the_callers_transaction(tmp_path: Path) -> None:
+    connection = connect(tmp_path / "orch.db")
+    config = poller_config(tmp_path)
+    account_doctor.hold(connection, "claude-b", "pc", "runtime", account_doctor.AUTHENTICATION_FAILED, NOW - 1)
+    transport = DoctorTransport()
+    transport.replies["pc-claude-bot"] = framed((0, 0, claude_reply(method="oauth_token")), (1, 0, b"not json"))
+    account_doctor.run(connection, config, transport, NOW, "Owner/Factory")
+    expected = [account_doctor.Drop("claude-b", "pc", "claude", NOW, HELD_READING),
+                account_doctor.Drop("claude-default", "pc", "claude", NOW, TOKEN_READING)]
+    assert {row[1]: row[3] for row in attention_rows(connection)} == {
+        "claude-b@pc": HELD_READING, "claude-default@pc": TOKEN_READING}
+    connection.execute("BEGIN IMMEDIATE")
+    assert account_doctor.take_unannounced(connection, config) == expected
+    connection.execute("ROLLBACK")
+    assert drops(connection) == [("claude-b", "pc", NOW, 0), ("claude-default", "pc", NOW, 0)]
+    connection.execute("BEGIN IMMEDIATE")
+    assert account_doctor.take_unannounced(connection, config) == expected
+    connection.execute("COMMIT")
+    assert drops(connection) == [("claude-b", "pc", NOW, 1), ("claude-default", "pc", NOW, 1)]
+    assert account_doctor.take_unannounced(connection, config) == []
+
+
+def test_take_unannounced_skips_a_pair_the_config_does_not_declare(tmp_path: Path) -> None:
+    connection = connect(tmp_path / "orch.db")
+    config = poller_config(tmp_path)
+    account_doctor.write(connection, [sign_in("claude-b", "signed-out", account_doctor.TOKEN_AUTH)], config, None, NOW)
+    connection.execute(f"INSERT INTO {account_doctor.TABLE} (account, device, status, checked_at, detail) "
+                       "VALUES ('claude-gone', 'pc', 'signed-out', ?, 'not logged in')", (NOW,))
+    connection.execute(f"INSERT INTO {account_doctor.DROPS} VALUES ('claude-gone', 'pc', ?, 0)", (NOW - 5,))
+    assert account_doctor.take_unannounced(connection, config) == [
+        account_doctor.Drop("claude-b", "pc", "claude", NOW, TOKEN_READING)]
+    assert drops(connection) == [("claude-b", "pc", NOW, 1), ("claude-gone", "pc", NOW - 5, 0)]

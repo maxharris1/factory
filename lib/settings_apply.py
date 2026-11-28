@@ -813,7 +813,8 @@ class Applier:
                 try:
                     error = blocked or self._logout(
                         device, harness, config.account_home(device.name, harness, request.account))
-                    account_doctor.run(connection, config, self.transport, self.clock(), self.repo)
+                    account_doctor.run(connection, config, self.transport, self.clock(), self.repo,
+                                       deliberate=(request.account, device.name))
                     new = _signin(connection, request)
                 finally:
                     account_doctor.release_pair(connection, request.account, device.name, request.id)
