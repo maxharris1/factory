@@ -364,9 +364,10 @@ class JobsMixin:
                 for account in loads.signed_in_on(config, device.name, "gemini")
             }
             paused = {item.id for item in config.accounts if item.paused}
+            unheld = signed_in - (loads.held | paused)
             fresh = {
                 account: usage_readings.headroom(list(newest.get(account, {}).values()), now)
-                for account in signed_in - loads.closed
+                for account in unheld
             }
             room = {account: UNREAD_HEADROOM if left is None else left for account, left in fresh.items()}
             roomiest = min(room, key=lambda account: (-room[account], account), default=None)
@@ -374,7 +375,7 @@ class JobsMixin:
             return GuardFacts(
                 refused="gemini" in self.refused_harnesses,
                 signed_out=not signed_in,
-                usage_held=bool(signed_in) and (lane_held or signed_in <= loads.held | paused),
+                usage_held=bool(signed_in) and (lane_held or not unheld),
                 readings=tuple(
                     HeadroomReading(window, round(1.0 - reading.used, 6), reading.observed_at)
                     for window, reading in sorted(windows.items())

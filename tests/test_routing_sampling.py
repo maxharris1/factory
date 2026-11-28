@@ -8,6 +8,7 @@ import pytest
 
 from lib import account_doctor, lane_limit, usage_readings
 from lib.dispatch.helpers import _route_go, _ticket_facts
+from lib.device_pool import DevicePool
 from lib.dispatcher import CIResult, Dispatcher
 from lib.factory_md import FactoryRouting
 from lib.machines_yml import Account, Device, MachinesConfig
@@ -538,6 +539,15 @@ def _builds_in_flight(queue: SQLiteJobQueue) -> None:
     _gemini_job(queue, "10", "build", state="done")
 
 
+GEMINI_AT_ONE_JOB = replace(ONE_GEMINI_DEVICE, accounts=(Account("gemini-default", "gemini", max_jobs=1),))
+
+
+def _review_at_max_jobs(queue: SQLiteJobQueue) -> None:
+    _gemini_job(queue, "9", "review")
+    assert DevicePool(queue, GEMINI_AT_ONE_JOB).claim("gemini") is not None
+    _read_usage(queue, "gemini-default", 0.9)
+
+
 def _five_and_seven_day(headroom: float) -> tuple[HeadroomReading, ...]:
     return tuple(HeadroomReading(window, headroom, NOW - 60) for window in usage_readings.WINDOWS)
 
@@ -583,6 +593,13 @@ SEEDS = (
         GuardFacts(readings=_five_and_seven_day(0.1)),
         "low-headroom",
         lambda q: _read_usage(q, "gemini-default", 0.9),
+    ),
+    Seed(
+        "low-headroom-at-max-jobs",
+        GuardFacts(readings=_five_and_seven_day(0.1)),
+        "low-headroom",
+        _review_at_max_jobs,
+        config=GEMINI_AT_ONE_JOB,
     ),
     Seed("builds-in-flight", GuardFacts(builds_in_flight=2), "builds-in-flight", _builds_in_flight),
     Seed(
