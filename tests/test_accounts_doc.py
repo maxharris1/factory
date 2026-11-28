@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import importlib.util
+import json
 import re
 from functools import cache
 from pathlib import Path
@@ -12,10 +14,13 @@ import sqlite3
 
 import pytest
 
-from lib import account_doctor, account_requests, account_signin, signin_attempt, signin_broker
+from lib import account_doctor, account_requests, account_signin, device_monitor, signin_attempt, signin_broker
 from lib.dashboard_accounts import read_accounts
 from lib.dashboard_pages.settings import ADD_HARNESSES
 from lib.machines_yml import Account, Device, MachinesConfig
+from lib.queue import SQLiteJobQueue
+from lib.signin_wake import announce
+from tests.test_account_doctor import NOW, DoctorTransport, poller_config, sign_out_claude_b
 
 ROOT = Path(__file__).resolve().parents[1]
 DOC = ROOT / "docs" / "ACCOUNTS.md"
@@ -381,3 +386,38 @@ def test_the_cli_fallback_gives_the_command_every_card_shows() -> None:
     assert [harness for harness, command in rows if command is None] == []
     assert [command for harness, command in rows
             if harness == "cursor" and command not in section] == []
+
+
+DROP_CLAIMS = (
+    "A drop starts when a doctor pass reads a pair `signed-out` for a known reason.",
+    "The drop ends when a pass reads the pair `ok`, or when the pair leaves `machines.yml`.",
+    "The poller wakes Grok once per drop.",
+    "Grok asks Max once to sign in from the dashboard Settings page.",
+    "Neither the doctor nor the wake runs a login or copies one between devices.",
+    "A sign-out from Settings does not wake.",
+    "`orch accounts doctor`, `orch usage refresh`, the sign-in broker, Settings Prepare and Settings Run doctor "
+    "record drops but queue no wake. The poller's next doctor pass announces them.",
+    "A wake that is not delivered within 24 hours fails.",
+)
+
+
+def slug(heading: str) -> str:
+    return re.sub(r"[^\w\- ]", "", heading.lower()).replace(" ", "-")
+
+
+def test_the_doc_says_what_happens_when_a_sign_in_drops(tmp_path: Path) -> None:
+    job_queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: NOW)
+    config = poller_config(tmp_path)
+    transport = DoctorTransport()
+    sign_out_claude_b(transport)
+    with contextlib.closing(job_queue.connect()) as connection:
+        account_doctor.run(connection, config, transport, NOW, "Owner/Factory")
+    [job] = announce(job_queue, config, "Owner/Factory")
+    anchor = json.loads(job.request.detail or "")["link"].partition("#")[2]
+    headings = [line for line in doc().splitlines()
+                if line.startswith("#") and slug(line.lstrip("#").strip()) == anchor]
+    section = " ".join(doc().partition("\n## When a sign-in drops\n")[2].split("\n## ", 1)[0].split())
+
+    assert headings == ["## When a sign-in drops"]
+    assert [claim for claim in DROP_CLAIMS if claim not in section] == []
+    assert "lib/signin_wake.py" in (device_monitor.__doc__ or "")

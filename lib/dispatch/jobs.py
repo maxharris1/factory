@@ -960,7 +960,7 @@ class JobsMixin:
         if job.request.recipient == QA_RECIPIENT:
             self._qa_job_failed(job)
             return
-        if job.request.action == "stuck":
+        if job.request.action in ("stuck", "account-signin"):
             self.queue.mark_failure_handled(job.id)
             return
         if job.request.recipient != "grok" and self._finished_identity(

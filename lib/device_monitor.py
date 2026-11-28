@@ -75,7 +75,9 @@ Sign-ins. After reconcile, `check_sign_ins` runs the account doctor
 (lib/account_doctor.py) on the first poll, at once on the poll after a new
 sign-in hold appears, every `HELD_INTERVAL_SECONDS` while any hold is
 open, every `INTERVAL_SECONDS` otherwise, and once on the poll after reload
-adopts a changed machines.yml.
+adopts a changed machines.yml. After the doctor, the pass runs the sign-in
+wake (lib/signin_wake.py), which queues one Grok wake for each drop not yet
+announced.
 
 Memory. After reconcile and before `check_sign_ins`, `check_memory` reads
 /proc/meminfo and /proc/pressure/memory on each enabled device not
