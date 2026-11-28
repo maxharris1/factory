@@ -24,8 +24,15 @@ A card shows these facts:
 - The running jobs, each with its ticket, kind and device.
 - One row per device the account is signed in on. Each row has the doctor's
   status (`unchecked` before the first check), the auth method, the plan,
-  the check time and any other account with the same sign-in. A row that is
-  not `ok` shows the sign-in command and the login to run it as.
+  the check time, how old that device's usage reading is, and any other
+  account with the same sign-in. A row that is not `ok` shows the sign-in
+  command and the login to run it as. The reading age is one of three texts.
+  `read 4m 12s ago` means a usage number from that device is still live.
+  `stale, read 1d 1h ago` means its newest number is older than 24 hours or
+  every window it reported has reset. `no reading` means no job there has
+  reported a number yet. For Codex the age is the age of the session event
+  the number came from, so an idle Codex device ages even when it is read
+  again. A Cursor row shows no reading age.
 - The account's last 5 settings results. A change that a later change
   replaced reads `superseded by <id>`.
 

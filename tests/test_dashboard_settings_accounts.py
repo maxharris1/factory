@@ -22,6 +22,7 @@ from tests.test_dashboard_accounts import (
     cursor_snapshot,
     recorded_cursor_snapshot,
     sign_in,
+    stale_world,
     world,
 )
 from tests.test_remote_start import config_of
@@ -49,8 +50,8 @@ AUDIT = [
 ]
 
 
-def _snapshot(tmp_path: Path, audit: list | None = AUDIT) -> dict:
-    db, machines = world(tmp_path)
+def _snapshot(tmp_path: Path, audit: list | None = AUDIT, make=world) -> dict:
+    db, machines = make(tmp_path)
     if audit is not None:
         (tmp_path / "settings-audit.jsonl").write_text(
             "".join(json.dumps(entry) + "\n" for entry in audit), encoding="utf-8")
@@ -117,14 +118,29 @@ def test_one_row_per_signed_in_device_with_the_doctor_status(tmp_path: Path) -> 
     assert re.findall(r'<li class="ac-dev" data-device="([^"]+)">', default) == ["box", "pc", "mac"]
     assert re.findall(r'<li class="ac-dev" data-device="([^"]+)">', claude_b) == ["pc", "mac"]
     assert re.findall(r'<li class="ac-dev" data-device="([^"]+)">', codex) == ["box", "pc"]
-    assert _text(_device(default, "box")) == f"box ok claude.ai max checked {CHECKED}"
-    assert _text(_device(codex, "box")) == f"box ok chatgpt — checked {CHECKED}"
+    assert _text(_device(default, "box")) == f"box ok claude.ai max checked {CHECKED} read 1m 00s ago"
+    assert _text(_device(codex, "box")) == f"box ok chatgpt — checked {CHECKED} no reading"
     assert '<span class="chip ok">ok</span>' in _device(default, "box")
     assert '<span class="chip warn">mismatch</span>' in _device(claude_b, "pc")
     assert '<span class="chip bad">signed-out</span>' in _device(claude_b, "mac")
     assert '<span class="chip warn">unreachable</span>' in _device(default, "mac")
     assert '<span class="chip muted">unchecked</span>' in _device(codex, "pc")
     assert "not signed in on any device" in _text(_card(panel, "ext-grok"))
+
+
+def test_a_device_row_shows_reading_age_or_no_reading_or_stale(tmp_path: Path) -> None:
+    panel = _panel(_snapshot(tmp_path, make=stale_world))
+    default = _card(panel, "claude-default")
+    for device, span in (("box", '<span class="ac-when">read 1m 00s ago</span>'),
+                         ("pc", '<span class="warn">stale, read 1d 1h ago</span>'),
+                         ("mac", '<span class="ac-when">no reading</span>')):
+        row = _device(default, device)
+        assert row.index(f"checked {CHECKED}") < row.index(span), row
+    claude_b_pc = _device(_card(panel, "claude-b"), "pc")
+    assert claude_b_pc.index("no reading") < claude_b_pc.index("same login as claude-default")
+    cursor = _card(_panel(cursor_snapshot(tmp_path / "cursor")), "cursor-ultra")
+    for device in ("box", "mac", "pc"):
+        assert "read " not in _text(_device(cursor, device)) and "no reading" not in _device(cursor, device)
 
 
 def test_a_mismatch_names_the_account_with_the_same_login(tmp_path: Path) -> None:
@@ -285,21 +301,24 @@ def test_a_cursor_card_shows_plan_doctor_status_login_command_and_not_tracked_re
     assert "plan" not in _facts(_card(_panel(_cursor_snapshot(tmp_path / "again")), "claude-b"))
 
 
-def _run(tmp_path: Path, snapshot: dict) -> dict:
+def _run(tmp_path: Path, snapshot: dict, actions: list | None = None) -> dict:
     from lib.dashboard_page import page_script
     html = render_pages(snapshot)["health.html"]
     assert '<script src="/app.js" defer></script>' in html
     script = page_script(snapshot.get("statechart"))
-    return layout.run_harness(tmp_path, HARNESS, script, snapshot, "health", BAR + ["settings", "accounts"], [])
+    return layout.run_harness(tmp_path, HARNESS, script, snapshot, "health", BAR + ["settings", "accounts"],
+                              actions or [])
 
 
 @needs_node
 def test_script_draws_the_accounts_like_the_server(tmp_path: Path) -> None:
-    snapshot = _snapshot(tmp_path)
+    snapshot = _snapshot(tmp_path, make=stale_world)
     account = next(a for a in snapshot["accounts"] if a["id"] == "claude-default")
     account["seven_day_used"], account["headroom"] = 0.97, 0.03
-    out = _run(tmp_path / "run", snapshot)
+    out = _run(tmp_path / "run", snapshot, [["advance", 3600]])
     server = _panel(snapshot)
+    for text in ("read 1m 00s ago", "stale, read 1d 1h ago", "no reading"):
+        assert text in out["html"]["accounts"]
     assert out["html"]["accounts"] == server[server.index(">") + 1:server.rindex("<")]
     for flag in NOT_DOCUMENTED:
         assert flag not in out["html"]["accounts"]

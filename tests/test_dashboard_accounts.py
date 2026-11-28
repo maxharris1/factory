@@ -12,7 +12,7 @@ from lib.account_doctor import SignIn
 from lib.dashboard import collect_snapshot
 from lib.dashboard_accounts import read_accounts
 from lib.device_pool import FLOOR
-from lib.usage_readings import Reading
+from lib.usage_readings import UNREAD, Freshness, Reading, StoredRow, freshness_by_pair
 from tests.test_dashboard import add_job, make_db
 from tests.test_remote_start import config_of
 
@@ -166,6 +166,16 @@ def recorded_cursor_snapshot(tmp_path: Path, **kwargs: object) -> dict:
     return collect_snapshot(db, tmp_path / "poll.log", now=NOW, machines_path=machines)
 
 
+def stale_world(tmp_path: Path) -> tuple[Path, Path]:
+    db, machines = world(tmp_path)
+    with contextlib.closing(sqlite3.connect(db)) as connection, connection:
+        usage_readings.store(
+            connection, harness="claude", bot="claude-bot", device="pc", job_id="job-default-pc",
+            readings=[Reading("five_hour", 0.1, FIVE_HOUR_RESET, NOW - 90_000)],
+        )
+    return db, machines
+
+
 def snapshot_accounts(tmp_path: Path, **kwargs: object) -> list[dict]:
     db, machines = world(tmp_path, **kwargs)
     return collect_snapshot(db, tmp_path / "poll.log", now=NOW, machines_path=machines)["accounts"]
@@ -200,6 +210,8 @@ def test_each_signed_in_device_carries_the_doctor_status_and_a_sign_in_command_w
             "same_login_as": ["claude-default"],
             "command": f"env -u CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR={CLAUDE_B_PC} claude auth login",
             "login": "claude-bot",
+            "reading": "no reading",
+            "reading_age": None,
         },
         {
             "device": "mac",
@@ -210,6 +222,8 @@ def test_each_signed_in_device_carries_the_doctor_status_and_a_sign_in_command_w
             "same_login_as": [],
             "command": f"env -u CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR={CLAUDE_B_MAC} claude auth login",
             "login": "claude-bot",
+            "reading": "no reading",
+            "reading_age": None,
         },
     ]
     default = accounts["claude-default"]["signed_in_on"]
@@ -223,6 +237,35 @@ def test_each_signed_in_device_carries_the_doctor_status_and_a_sign_in_command_w
         ("box", "ok", "chatgpt", None),
         ("pc", None, None, "env -u CODEX_HOME codex login --device-auth"),
     ]
+
+
+ENTRY_KEYS = ["device", "status", "auth_method", "subscription_type", "checked_at", "same_login_as", "command",
+              "login", "reading", "reading_age"]
+ACCOUNT_KEYS = ["id", "harness", "plan", "not_tracked", "max_jobs", "paused", "read_only", "signed_in_on",
+                "five_hour_used", "seven_day_used", "headroom", "floor", "running"]
+
+
+def test_an_expected_pair_carries_its_sign_in_state_and_reading_age(tmp_path: Path) -> None:
+    accounts = by_id(snapshot_accounts(tmp_path))
+    box = accounts["claude-default"]["signed_in_on"][0]
+    assert (box["device"], box["status"], box["reading"], box["reading_age"]) == ("box", "ok", "ok", 60)
+    assert all(list(entry) == ENTRY_KEYS for a in accounts.values() for entry in a["signed_in_on"])
+    assert all(list(a) == ACCOUNT_KEYS for a in accounts.values())
+    unrecorded = cursor_snapshot(tmp_path / "unrecorded")["accounts"]
+    recorded = recorded_cursor_snapshot(tmp_path / "recorded")["accounts"]
+    for cursor in (by_id(unrecorded)["cursor-ultra"], by_id(recorded)["cursor-ultra"]):
+        assert [(d["reading"], d["reading_age"]) for d in cursor["signed_in_on"]] == [(None, None)] * 3
+
+
+def test_a_pair_with_no_row_says_no_reading_and_an_old_one_says_stale(tmp_path: Path) -> None:
+    db, machines = stale_world(tmp_path)
+    accounts = by_id(collect_snapshot(db, tmp_path / "poll.log", now=NOW, machines_path=machines)["accounts"])
+    default = accounts["claude-default"]
+    assert [(d["device"], d["reading"], d["reading_age"]) for d in default["signed_in_on"]] == [
+        ("box", "ok", 60), ("pc", "stale", 90_000), ("mac", "no reading", None)]
+    assert (default["five_hour_used"], default["seven_day_used"]) == (0.25, 0.6)
+    assert [(d["device"], d["reading"], d["reading_age"]) for d in accounts["claude-b"]["signed_in_on"]] == [
+        ("pc", "no reading", None), ("mac", "no reading", None)]
 
 
 def test_each_account_carries_its_usage_floor_and_running_jobs(tmp_path: Path) -> None:
@@ -291,9 +334,11 @@ def test_a_cursor_account_shows_its_doctor_status_and_the_cursor_login_command(t
     assert accounts["cursor-default"]["signed_in_on"] == [
         {"device": "box", "status": "signed-out", "auth_method": None, "subscription_type": None,
          "checked_at": NOW - 300, "same_login_as": [], "login": "cursor-bot",
-         "command": "env -u CURSOR_API_KEY -u CURSOR_AUTH_TOKEN -u CURSOR_CONFIG_DIR cursor-agent login"},
+         "command": "env -u CURSOR_API_KEY -u CURSOR_AUTH_TOKEN -u CURSOR_CONFIG_DIR cursor-agent login",
+         "reading": None, "reading_age": None},
         {"device": "pc", "status": "ok", "auth_method": "login", "subscription_type": None,
-         "checked_at": NOW - 300, "same_login_as": [], "login": "cursor-bot", "command": None},
+         "checked_at": NOW - 300, "same_login_as": [], "login": "cursor-bot", "command": None,
+         "reading": None, "reading_age": None},
     ]
 
 
@@ -413,7 +458,7 @@ def test_a_device_that_stops_taking_work_keeps_its_account_sign_in_and_running_j
         "claude-default",
         [{"device": "box", "status": "signed-out", "auth_method": "none", "subscription_type": None,
           "checked_at": NOW - 300, "same_login_as": [], "command": "env -u CLAUDE_CODE_OAUTH_TOKEN -u CLAUDE_CONFIG_DIR claude auth login",
-          "login": "claude-bot"}],
+          "login": "claude-bot", "reading": "no reading", "reading_age": None}],
         [{"ticket": "17", "kind": "build", "device": "box"}],
     )]
 
@@ -432,3 +477,42 @@ def test_without_a_reading_the_cursor_reason_points_at_orch_usage_record() -> No
     reason = usage_readings.NOT_TRACKED["cursor"]
     assert "orch usage record" in reason
     assert "shared" not in reason and "pool" not in reason and "external account" not in reason
+
+
+def stored_row(window: str, used: float | None, resets_at: int | None, observed_at: float,
+               account: object = "claude-default", device: object = "box") -> StoredRow:
+    return StoredRow(account, device, "claude", "claude-bot", window, used, resets_at, observed_at, 0, None)
+
+
+DAY = 86_400
+
+
+@pytest.mark.parametrize(("rows", "expected"), [
+    ([], {}),
+    ([stored_row("five_hour", 0.2, FIVE_HOUR_RESET, NOW - 252)], {("claude-default", "box"): Freshness("ok", 252)}),
+    ([stored_row("five_hour", 0.2, int(NOW) - 60, NOW - 21_600),
+      stored_row("seven_day", 0.4, SEVEN_DAY_RESET, NOW - 21_600)],
+     {("claude-default", "box"): Freshness("ok", 21_600)}),
+    ([stored_row("five_hour", 0.2, FIVE_HOUR_RESET, NOW - DAY - 3600),
+      stored_row("seven_day", 0.4, SEVEN_DAY_RESET, NOW - DAY - 7200)],
+     {("claude-default", "box"): Freshness("stale", DAY + 3600)}),
+    ([stored_row("five_hour", 0.2, int(NOW) - 60, NOW - 72_000),
+      stored_row("seven_day", 0.4, int(NOW) - 60, NOW - 72_000)],
+     {("claude-default", "box"): Freshness("stale", 72_000)}),
+    ([stored_row("seven_day", 0.4, SEVEN_DAY_RESET, NOW - DAY)], {("claude-default", "box"): Freshness("ok", DAY)}),
+    ([stored_row("five_hour", None, None, NOW - 60), stored_row("seven_day", None, None, NOW - 60)], {}),
+    ([stored_row("five_hour", 0.2, FIVE_HOUR_RESET, NOW + 30)], {("claude-default", "box"): Freshness("ok", 0)}),
+    ([stored_row("hourly", 0.2, FIVE_HOUR_RESET, NOW - 60), stored_row("five_hour", 0.2, FIVE_HOUR_RESET, "soon"),
+      stored_row("five_hour", 0.2, FIVE_HOUR_RESET, NOW - 60, account=7),
+      stored_row("five_hour", 0.2, FIVE_HOUR_RESET, NOW - 60, device=None)], {}),
+    ([stored_row("five_hour", 0.2, FIVE_HOUR_RESET, NOW - 60),
+      stored_row("five_hour", 0.3, FIVE_HOUR_RESET, NOW - 90, device="pc"),
+      stored_row("five_hour", 0.3, FIVE_HOUR_RESET, NOW - DAY - 60, account="claude-b", device="pc")],
+     {("claude-default", "box"): Freshness("ok", 60), ("claude-default", "pc"): Freshness("ok", 90),
+      ("claude-b", "pc"): Freshness("stale", DAY + 60)}),
+], ids=["no-row", "fresh", "five-hour-reset", "older-than-a-day", "all-windows-reset", "exactly-a-day",
+        "only-no-reading-rows", "clock-skew", "ignored-cells", "per-pair"])
+def test_freshness_by_pair_reads_each_pair_from_its_numbers(rows: list[StoredRow], expected: dict) -> None:
+    found = freshness_by_pair(rows, NOW)
+    assert found == expected
+    assert found.get(("claude-default", "mac"), UNREAD) == Freshness("no reading", None)
