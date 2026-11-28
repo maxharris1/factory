@@ -20,10 +20,10 @@ import json
 import math
 import re
 from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, get_args
 
 import yaml
 
@@ -123,6 +123,7 @@ class ResolvedSlot:
     family: str
     budget: str
     source: str
+    draw: Draw | None = None
 
 
 def family_for(harness: str, model: str | None) -> tuple[str | None, str | None]:
@@ -429,6 +430,7 @@ def resolve_slot(
     built_by: tuple[str, str | None] | None = None,
     refused_harnesses: Collection[str] = (),
     unavailable_harnesses: Collection[str] = (),
+    drawn: Draw | None = None,
 ) -> ResolvedSlot:
     """Resolve the best eligible `(harness, model, effort)` for `role`.
 
@@ -440,6 +442,10 @@ def resolve_slot(
     For `role == "review"` with `built_by` provided, mechanically filters out
     every candidate sharing `built_by`'s model family and fails closed if none
     remains eligible.
+
+    A picked `drawn` moves its harness to the front of a `routing.yml` pool.
+    A review draw whose harness shares the builder's family is recorded as
+    lost with reason `same-family`, unless a guard already skipped it.
     """
     if role not in _ROLE_SET:
         raise RoutingError(f"unknown routing role {role!r}")
@@ -485,6 +491,12 @@ def resolve_slot(
             source = "factory-fallback"
             clamp_budget = False
 
+    applied = drawn
+    if drawn is not None and excluded_family is not None and family_for(drawn.harness, None)[0] == excluded_family:
+        applied = replace(drawn, picked=False, skipped_reason=drawn.skipped_reason or "same-family")
+    if source == "routing.yml" and applied is not None and applied.picked:
+        pool = tuple(sorted(pool, key=lambda c: c.harness != applied.harness))
+
     for candidate in pool:
         if candidate.harness in blocked:
             continue
@@ -504,6 +516,7 @@ def resolve_slot(
             family=fam,
             budget=effective_budget,
             source=source,
+            draw=applied,
         )
 
     reasons: list[str] = []
@@ -569,8 +582,17 @@ class GuardFacts:
     builds_in_flight: int = 0
 
 
-SkipReason = Literal["refused", "signed-out", "usage-held", "low-headroom", "builds-in-flight"]
+SkipReason = Literal["refused", "signed-out", "usage-held", "low-headroom", "builds-in-flight", "same-family"]
 DrawRole = Literal["build", "review"]
+
+
+@dataclass(frozen=True)
+class Hardness:
+    risk: str | None
+    plan_first: bool
+    touches: int
+    ticket_type: str | None
+    weight: float
 
 
 @dataclass(frozen=True)
@@ -583,6 +605,7 @@ class Draw:
     chance: float
     picked: bool
     skipped_reason: SkipReason | None
+    hardness: Hardness | None = None
 
 
 def _low_headroom(guards: GuardFacts, shares: HarnessShares) -> bool:
@@ -632,7 +655,114 @@ def draw(
         chance=chance,
         picked=skipped is None and value < chance,
         skipped_reason=skipped,
+        hardness=(
+            Hardness(ticket.risk, ticket.plan_first, len(set(ticket.touches)), ticket.ticket_type, ticket.weight)
+            if role == "build"
+            else None
+        ),
     )
+
+
+@dataclass(frozen=True)
+class Sample:
+    build: Draw | None = None
+    review: Draw | None = None
+
+
+def _draw_json(d: Draw) -> dict:
+    entry = {
+        "role": d.role,
+        "harness": d.harness,
+        "seed": d.seed,
+        "draw": d.draw,
+        "share": d.share,
+        "chance": d.chance,
+        "picked": d.picked,
+        "skipped_reason": d.skipped_reason,
+    }
+    if d.hardness is not None:
+        h = d.hardness
+        entry["hardness"] = {
+            "risk": h.risk,
+            "plan_first": h.plan_first,
+            "touches": h.touches,
+            "type": h.ticket_type,
+            "weight": h.weight,
+        }
+    return entry
+
+
+def sample_json(sample: Sample) -> dict:
+    pairs = (("build", sample.build), ("review", sample.review))
+    return {role: _draw_json(d) for role, d in pairs if d is not None}
+
+
+def _number(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _optional_str(value: object) -> bool:
+    return value is None or isinstance(value, str)
+
+
+_SKIP_REASONS = frozenset(get_args(SkipReason))
+_DRAW_FIELDS: Mapping[str, Callable[[object], bool]] = MappingProxyType({
+    "harness": lambda v: isinstance(v, str),
+    "seed": lambda v: isinstance(v, str),
+    "draw": _number,
+    "share": _number,
+    "chance": _number,
+    "picked": lambda v: isinstance(v, bool),
+    "skipped_reason": lambda v: v is None or (isinstance(v, str) and v in _SKIP_REASONS),
+})
+_HARDNESS_FIELDS: Mapping[str, Callable[[object], bool]] = MappingProxyType({
+    "risk": _optional_str,
+    "plan_first": lambda v: isinstance(v, bool),
+    "touches": lambda v: isinstance(v, int) and not isinstance(v, bool) and v >= 0,
+    "type": _optional_str,
+    "weight": _number,
+})
+
+
+def _fields_ok(raw: object, fields: Mapping[str, Callable[[object], bool]]) -> bool:
+    return isinstance(raw, dict) and all(key in raw and ok(raw[key]) for key, ok in fields.items())
+
+
+def _parse_draw(role: DrawRole, raw: object) -> Draw | None:
+    if not _fields_ok(raw, _DRAW_FIELDS) or raw.get("role") != role:
+        return None
+    hardness = None
+    if role == "build":
+        h = raw.get("hardness")
+        if not _fields_ok(h, _HARDNESS_FIELDS):
+            return None
+        hardness = Hardness(h["risk"], h["plan_first"], h["touches"], h["type"], float(h["weight"]))
+    return Draw(
+        role=role,
+        harness=raw["harness"],
+        seed=raw["seed"],
+        draw=float(raw["draw"]),
+        share=float(raw["share"]),
+        chance=float(raw["chance"]),
+        picked=raw["picked"],
+        skipped_reason=raw["skipped_reason"],
+        hardness=hardness,
+    )
+
+
+def parse_sample(raw: object) -> Sample | None:
+    """The stored sample record, or None when it is malformed."""
+    if not isinstance(raw, dict) or not raw or set(raw) - {"build", "review"}:
+        return None
+    draws = {role: _parse_draw(role, entry) for role, entry in raw.items()}
+    if any(d is None for d in draws.values()):
+        return None
+    return Sample(**draws)
 
 
 def resolve_pair(
