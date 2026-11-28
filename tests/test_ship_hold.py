@@ -58,7 +58,6 @@ TRUSTED = {
         "grok-login": {"grok-bot"},
         "claude-login": {"claude-bot"},
         "codex-login": {"codex-bot"},
-        "gemini-login": {"gemini-bot"},
         APPROVER: {"grok-bot"},
         "maxharris1": {"grok-bot"},
     },
@@ -114,19 +113,11 @@ def setup(
     return dispatcher, queue, actions
 
 
-def approve(
-    head: str = HEAD,
-    comment_id: str = "approve-1",
-    *,
-    reviewer: str = "codex",
-) -> Comment:
-    body = VERDICT.format(round=1, head=head, verdict="APPROVE", risk="high")
-    if reviewer != "codex":
-        body = body.replace("from=codex-bot", f"from={reviewer}-bot")
+def approve(head: str = HEAD, comment_id: str = "approve-1") -> Comment:
     return comment(
         comment_id,
-        body,
-        author=f"{reviewer}-login",
+        VERDICT.format(round=1, head=head, verdict="APPROVE", risk="high"),
+        author="codex-login",
         created_at=10,
     )
 

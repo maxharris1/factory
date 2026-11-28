@@ -81,6 +81,10 @@ def test_shipped_config_routing_yml_loads_cleanly() -> None:
         "helper:fast",
     ):
         assert slot in cfg.roles
+    assert cfg.shares == {
+        "gemini": HarnessShares(build=0.25, review=0.25, min_headroom=0.15, max_builds_in_flight=2)
+    }
+    assert [c.harness for c in cfg.roles["review"]] == ["codex", "claude", "gemini", "cursor"]
 
 
 def test_role_slot_selection_across_ticket_types() -> None:
@@ -101,11 +105,11 @@ def test_role_slot_selection_across_ticket_types() -> None:
 @pytest.mark.parametrize(
     ("built_by", "excluded_family", "expected_harness", "expected_family"),
     [
-        (("claude", "claude-opus-4-6"), "anthropic", "gemini", "google"),
-        (("codex", "gpt-5.4"), "openai", "gemini", "google"),
+        (("claude", "claude-opus-4-6"), "anthropic", "codex", "openai"),
+        (("codex", "gpt-5.4"), "openai", "claude", "anthropic"),
         (("gemini", "gemini-2.5-pro"), "google", "codex", "openai"),
-        (("cursor", "claude-sonnet-4-6"), "anthropic", "gemini", "google"),
-        (("cursor", "gpt-5.4"), "openai", "gemini", "google"),
+        (("cursor", "claude-sonnet-4-6"), "anthropic", "codex", "openai"),
+        (("cursor", "gpt-5.4"), "openai", "claude", "anthropic"),
         (("cursor", "gemini-2.5-pro"), "google", "codex", "openai"),
     ],
 )
@@ -238,8 +242,8 @@ def test_orchestrate_choose_route_integrates_role_router() -> None:
         "openai",
     )
     assert (decision.reviewer_harness, decision.reviewer_family) == (
-        "gemini",
-        "google",
+        "claude",
+        "anthropic",
     )
     assert decision.builder_family != decision.reviewer_family
 

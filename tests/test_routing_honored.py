@@ -831,9 +831,9 @@ def test_build_queued_before_routing_keeps_its_actual_builder(tmp_path: Path) ->
         reviews = connection.execute(
             "SELECT recipient FROM jobs WHERE action = 'review'"
         ).fetchall()
-    assert [row["recipient"] for row in reviews] == ["gemini"]
+    assert [row["recipient"] for row in reviews] == ["codex"]
     restored = dispatcher._routed(ticket(brief, go, factory_config=routed)).factory
-    assert (restored.builder_harness, restored.reviewer_harness) == ("claude", "gemini")
+    assert (restored.builder_harness, restored.reviewer_harness) == ("claude", "codex")
 
 
 def test_a_dispatched_plan_runs_on_the_plan_slot_and_the_build_keeps_the_build_slot(

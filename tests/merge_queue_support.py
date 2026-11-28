@@ -225,19 +225,9 @@ class Board:
         self.post(pr, comment_id, READY.format(head=head), "claude-login")
         return comment_id
 
-    def approve(
-        self,
-        pr: PR,
-        round_text: str = "1/3",
-        comment_id: str | None = None,
-        *,
-        reviewer: str = "codex",
-    ) -> str:
+    def approve(self, pr: PR, round_text: str = "1/3", comment_id: str | None = None) -> str:
         comment_id = comment_id or f"approve-{pr.number}-{pr.head[-6:]}"
-        body = APPROVE.format(round=round_text, head=pr.head)
-        if reviewer != "codex":
-            body = body.replace("from=codex-bot", f"from={reviewer}-bot")
-        self.post(pr, comment_id, body, f"{reviewer}-login")
+        self.post(pr, comment_id, APPROVE.format(round=round_text, head=pr.head), "codex-login")
         return comment_id
 
     def revise(self, pr: PR, round_text: str) -> str:
@@ -265,9 +255,7 @@ class Board:
         self.queue.finish(job.id, owner=recipient, handoff_comment_id=None)
         return job
 
-    def build_and_approve(
-        self, pr: PR, *, mergeable: bool | None = True, reviewer: str = "codex"
-    ) -> str:
+    def build_and_approve(self, pr: PR, *, mergeable: bool | None = True) -> str:
         """go, build, ready, review, APPROVE at round 1: the APPROVE's id."""
         pr.mergeable = mergeable
         pr.mergeable_state = None if mergeable is None else ("clean" if mergeable else "dirty")
@@ -276,8 +264,8 @@ class Board:
         self.finish("claude")
         self.ready(pr, pr.head)
         self.poll()
-        self.finish(reviewer)
-        approve = self.approve(pr, reviewer=reviewer)
+        self.finish("codex")
+        approve = self.approve(pr)
         self.poll()
         return approve
 

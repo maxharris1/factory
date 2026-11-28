@@ -49,10 +49,7 @@ def _go(extra: str = "", state: str = "building") -> str:
 
 
 def _table(*, build: float, review: float):
-    shipped = central_routing()
-    roles = dict(shipped.roles)
-    roles["review"] = tuple(sorted(roles["review"], key=lambda c: c.harness == "gemini"))
-    return replace(shipped, roles=roles, shares={"gemini": HarnessShares(build=build, review=review)})
+    return replace(central_routing(), shares={"gemini": HarnessShares(build=build, review=review)})
 
 
 NOW = 1_800_000_000.0

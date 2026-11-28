@@ -249,7 +249,7 @@ def test_waiter_writes_succeed_while_a_poll_gh_call_blocks(tmp_path: Path) -> No
     world = FactoryPrWorld(tmp_path)
     world.gh.comments = [gh_comment(9001, DOCUMENTED_READY.format(head=PR_HEAD))]
     world.poll()
-    assert [job[:2] for job in world.jobs()] == [("review", "gemini")]
+    assert [job[:2] for job in world.jobs()] == [("review", "codex")]
 
     gh = BlockingGh(world, "/pulls/51")
     world.source.gh_runner = gh
@@ -260,9 +260,9 @@ def test_waiter_writes_succeed_while_a_poll_gh_call_blocks(tmp_path: Path) -> No
         try:
             assert gh.blocked.wait(5), "the poll cycle never read the tracked PR"
             queue = ExistingJobQueue(world.path, clock=lambda: 200.0)
-            claimed = queue.claim("gemini")
+            claimed = queue.claim("codex")
             assert claimed is not None
-            beat = queue.heartbeat(claimed.id, owner="gemini")
+            beat = queue.heartbeat(claimed.id, owner="codex")
             writes.append((beat.state, writable(world.path), gh.release.is_set()))
         except BaseException as exc:
             waiter_errors.append(exc)
