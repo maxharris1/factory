@@ -914,26 +914,29 @@ def _long_intake_reasons(tmp_path: Path) -> dict:
     return snapshot
 
 
+def _open_rendered(browser: Browser, snapshot: dict, render: str, width: int) -> None:
+    if render == "script":
+        browser.open(_page_with_status_stub(snapshot, "index.html"), width)
+        return
+    from lib.dashboard_page import app_css
+    page = Path(browser.tmp.name) / "page.html"
+    page.write_text(
+        _no_script(render_pages(snapshot)["index.html"]).replace(
+            '<link rel="stylesheet" href="/app.css">', f"<style>{app_css()}</style>", 1
+        ),
+        encoding="utf-8",
+    )
+    browser.call("Emulation.setDeviceMetricsOverride", width=width, height=FOLD, deviceScaleFactor=1, mobile=False)
+    browser.call("Page.navigate", url=page.as_uri())
+    browser.eval("""new Promise(function (done) { (function wait() {
+      if (document.readyState === 'complete' && document.getElementById('intake')) done(true);
+      else setTimeout(wait, 50); })(); })""")
+
+
 @needs_chrome
 @pytest.mark.parametrize("render", ["script", "server"])
 def test_long_intake_reasons_wrap_on_a_phone(tmp_path: Path, browser: Browser, render: str) -> None:
-    snapshot = _long_intake_reasons(tmp_path)
-    if render == "script":
-        browser.open(_page_with_status_stub(snapshot, "index.html"), 375)
-    else:
-        from lib.dashboard_page import app_css
-        page = Path(browser.tmp.name) / "page.html"
-        page.write_text(
-            _no_script(render_pages(snapshot)["index.html"]).replace(
-                '<link rel="stylesheet" href="/app.css">', f"<style>{app_css()}</style>", 1
-            ),
-            encoding="utf-8",
-        )
-        browser.call("Emulation.setDeviceMetricsOverride", width=375, height=FOLD, deviceScaleFactor=1, mobile=False)
-        browser.call("Page.navigate", url=page.as_uri())
-        browser.eval("""new Promise(function (done) { (function wait() {
-          if (document.readyState === 'complete' && document.getElementById('intake')) done(true);
-          else setTimeout(wait, 50); })(); })""")
+    _open_rendered(browser, _long_intake_reasons(tmp_path), render, 375)
     browser.eval("[].forEach.call(document.querySelectorAll('#intake details'), function (d) { d.open = true; })")
     shown = browser.eval("""[].filter.call(document.querySelectorAll('#intake .what'),
       function (e) { return e.textContent.indexOf('test_factory_dashboard') >= 0 && e.getClientRects().length; }).length""")
@@ -941,6 +944,32 @@ def test_long_intake_reasons_wrap_on_a_phone(tmp_path: Path, browser: Browser, r
     width = browser.eval("document.documentElement.scrollWidth")
     assert width <= 375, f"phone page scrolls sideways: scrollWidth={width}"
 
+
+
+@needs_chrome
+@pytest.mark.parametrize("render", ["script", "server"])
+@pytest.mark.parametrize("width", [375, 560, 700])
+@pytest.mark.parametrize("webhook", [
+    {"last_event": "Issue"},
+    {"last_received_age_seconds": None, "listener_age_seconds": None},
+    {"last_event": "x" * 64},
+])
+def test_the_intake_heading_wraps_the_webhook_line_under_its_title(
+    tmp_path: Path, browser: Browser, render: str, width: int, webhook: dict
+) -> None:
+    snapshot = _tiles(tmp_path)
+    snapshot["poller"]["linear_webhook"].update(webhook)
+    _open_rendered(browser, snapshot, render, width)
+    heading = browser.eval("""(function () {
+      var title = document.querySelector('#intake h2 > span:first-child');
+      return {text: title.textContent, height: title.getBoundingClientRect().height,
+              lineHeight: parseFloat(getComputedStyle(title).lineHeight),
+              count: document.getElementById('linear-webhook').textContent,
+              scroll: document.documentElement.scrollWidth};
+    })()""")
+    assert heading["text"] == "Intake" and heading["count"].startswith("Linear webhook"), heading
+    assert heading["height"] <= heading["lineHeight"] + 1, f"the Intake title splits across lines at {width}px: {heading}"
+    assert heading["scroll"] <= width, f"the page scrolls sideways at {width}px: {heading}"
 
 def write_screenshots(out: Path) -> list[Path]:
     html = _page_with_status_stub(_held_for_ci(fifteen_slot_snapshot(Path(tempfile.mkdtemp()))), "index.html")

@@ -71,6 +71,8 @@ font:500 11px/1 var(--mono);letter-spacing:.12em;color:var(--warn)}
 .tiles{grid-template-columns:1fr}}
 .wake{padding:0 4px;font-size:10px;color:var(--grok)}
 .intake{display:flex;flex-direction:column;gap:10px}
+#intake h2{flex-wrap:wrap;gap:4px 8px}
+#intake h2 .count{min-width:0;overflow-wrap:anywhere}
 .intake>p.bad,.intake>p.muted{margin:0;font-size:12px}
 .itrouble{display:flex;flex-wrap:wrap;gap:2px 16px;margin:0;padding:0;list-style:none;font:12px/1.4 var(--mono);color:var(--bad)}
 .itrouble li{display:flex;flex-wrap:wrap;gap:0 6px;min-width:0}

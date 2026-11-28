@@ -353,7 +353,8 @@ def test_the_dashboard_shows_the_tier_in_the_feeder_and_the_queue(tmp_path: Path
     index = _no_script(render_pages(snapshot)["index.html"])
     intake = _section(index, "intake")
     assert intake.count("tier") == 1
-    assert f'<li><span class="ticket">app#1</span>{CHIP}<span class="what">fed</span>' in intake
+    assert ('<li><span class="ticket">app#1</span><span class="ititle" title="Issue 1">Issue 1</span>'
+            f'{CHIP}<span class="what">fed</span>') in intake
     assert _section(index, "queue").count(CHIP) == 1
 
 
