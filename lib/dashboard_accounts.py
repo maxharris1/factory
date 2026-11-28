@@ -87,14 +87,17 @@ def _signed_in_on(
     account: Account,
     sign_ins: dict[tuple[str, str], _SignInRow],
     listed: frozenset[str],
+    freshness: dict[tuple[str, str], usage_readings.Freshness],
 ) -> list[dict]:
     entries = []
+    tracked = account.harness not in usage_readings.NOT_TRACKED
     methods = account_doctor.AUTH_METHODS.get(account.harness, frozenset())
     for device in declared_devices(machines, account):
         status, method, subscription, checked_at, detail = sign_ins.get(
             (account.id, device.name), (None, None, None, None, None)
         )
         status = status if status in _STATUSES else None
+        reading, age = freshness.get((account.id, device.name), usage_readings.UNREAD) if tracked else (None, None)
         entries.append({
             "device": device.name,
             "status": status,
@@ -106,16 +109,17 @@ def _signed_in_on(
             "same_login_as": _same_login(detail, account.id, listed),
             "command": None if status == "ok" else _command(machines, device.name, account),
             "login": device.login_for(account.harness),
+            "reading": reading,
+            "reading_age": age,
         })
     return entries
 
 
-def _windows(connection: sqlite3.Connection) -> dict[str, dict[str, usage_readings.Reading]]:
+def _stored(connection: sqlite3.Connection) -> list[usage_readings.StoredRow]:
     try:
-        rows = usage_readings.stored(connection) or []
+        return usage_readings.stored(connection) or []
     except sqlite3.OperationalError:
-        rows = []
-    return usage_readings.newest_by_account(rows)
+        return []
 
 
 def _used(reading: usage_readings.Reading | None, now: float) -> float | None:
@@ -153,7 +157,9 @@ def read_accounts(
     listed = frozenset(account.id for account in accounts)
     declared = frozenset(account.id for account in machines.accounts)
     sign_ins = _sign_ins(connection)
-    windows = _windows(connection)
+    stored = _stored(connection)
+    windows = usage_readings.newest_by_account(stored)
+    freshness = usage_readings.freshness_by_pair(stored, now)
     running = _running(connection, machines)
     entries = []
     for account in accounts:
@@ -172,7 +178,7 @@ def read_accounts(
             "max_jobs": account.max_jobs,
             "paused": account.paused,
             "read_only": read_only,
-            "signed_in_on": _signed_in_on(machines, account, sign_ins, listed),
+            "signed_in_on": _signed_in_on(machines, account, sign_ins, listed, freshness),
             **{f"{window}_used": _used(readings.get(window), now) for window in usage_readings.WINDOWS},
             "headroom": usage_readings.headroom(list(readings.values()), now),
             "floor": device_pool.FLOOR,
