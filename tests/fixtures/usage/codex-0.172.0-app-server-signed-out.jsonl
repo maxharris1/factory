@@ -1,0 +1,4 @@
+{"id":1,"result":{"userAgent":"factory-usage/0.172.0 (Ubuntu 24.4.0; x86_64) unknown (factory-usage; 1)","codexHome":"/home/test/.codex","platformFamily":"unix","platformOs":"linux"}}
+{"method":"configWarning","params":{"summary":"Codex could not find bubblewrap on PATH. Install bubblewrap with your OS package manager. See the sandbox prerequisites: https://developers.openai.com/codex/concepts/sandboxing#prerequisites. Codex will use the bundled bubblewrap in the meantime.","details":null},"emittedAtMs":1795831455270}
+{"method":"remoteControl/status/changed","params":{"status":"disabled","serverName":"test-host","installationId":"00000000-0000-4000-8000-000000001873","environmentId":null},"emittedAtMs":1795831455270}
+{"error":{"code":-32600,"message":"codex account authentication required to read rate limits"},"id":2}
