@@ -63,8 +63,11 @@ INTAKE = {
     "rows": 4,
     "columns": [
         {"key": "next", "label": "Next in line", "more": "more", "empty": "no ticket is waiting for capacity"},
-        {"key": "blocked", "label": "Waiting on a blocker or files", "more": "more",
-         "empty": "no ticket is waiting on a blocker or files"},
+        {"key": "blocked", "label": "Waiting on a blocker or files",
+         "empty": "no ticket is waiting on a blocker or files",
+         "groups": 4, "chips": 6, "none": "no blocker named", "count": "{n} waiting",
+         "spread": "{n} more, spread over {m} other blockers",
+         "spread_one": "{n} more, spread over {m} other blocker"},
         {"key": "fed", "label": "Fed today", "more": "more today", "empty": "no ticket was fed today"},
     ],
 }
@@ -521,7 +524,54 @@ def _fed_rows(col: dict, items: list[dict]) -> str:
     return _intake_rows(col, items, _fed_row)
 
 
-_INTAKE_BODY = {"next": _intake_rows, "blocked": _intake_rows, "fed": _fed_rows}
+class BlockerGroups(NamedTuple):
+    drawn: list[tuple[str | None, list[dict]]]
+    more: int
+    others: int
+
+
+def _blocker_refs(item: dict) -> list[str | None]:
+    refs = list(dict.fromkeys(entry["ref"] for entry in item.get("blocked_by") or []))
+    return refs or [None]
+
+
+def blocker_groups(items: list[dict], limit: int) -> BlockerGroups:
+    groups: dict[str | None, list[dict]] = {}
+    for item in items:
+        for ref in _blocker_refs(item):
+            groups.setdefault(ref, []).append(item)
+    drawn = sorted(groups.items(), key=lambda group: -len(group[1]))[:limit]
+    shown = {ref for ref, _ in drawn}
+    left = [refs for refs in map(_blocker_refs, items) if not shown.intersection(refs)]
+    return BlockerGroups(drawn, len(left), len({ref for refs in left for ref in refs}))
+
+
+def _fill(text: str, n: int, m: int = 0) -> str:
+    return text.replace("{n}", str(n)).replace("{m}", str(m))
+
+
+def _blocker_chip(item: dict) -> str:
+    hover = " · ".join(text for text in (item.get("title"), item.get("reason")) if text)
+    title = f' title="{_e(hover)}"' if hover else ""
+    return f'<span class="chip muted"{title}>{_e(_short(item["repo"]))}#{_e(item["issue"])}</span>'
+
+
+def _blocked_groups(col: dict, items: list[dict]) -> str:
+    groups = blocker_groups(items, col["groups"])
+    chips = col["chips"]
+    blocks = []
+    for ref, members in groups.drawn:
+        head = _span("ticket", col["none"] if ref is None else _short(ref))
+        head += _span("what", _fill(col["count"], len(members)))
+        rest = _span("what", f"+{len(members) - chips}") if members[chips:] else ""
+        row = "".join(_blocker_chip(x) for x in members[:chips])
+        blocks.append(f'<div class="iblock"><div class="ihead">{head}</div><div class="ichips">{row}{rest}</div></div>')
+    spread = col["spread_one"] if groups.others == 1 else col["spread"]
+    more = f'<p class="more">{_e(_fill(spread, groups.more, groups.others))}</p>' if groups.more else ""
+    return "".join(blocks) + more
+
+
+_INTAKE_BODY = {"next": _intake_rows, "blocked": _blocked_groups, "fed": _fed_rows}
 
 
 def _intake_column(col: dict, items: list[dict]) -> str:

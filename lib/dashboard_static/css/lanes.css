@@ -90,4 +90,10 @@ font:500 11px/1 var(--mono);letter-spacing:.12em;color:var(--warn)}
 .igroup{margin:14px 0 2px;font:11px/1.3 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 .icols{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0 20px}
 .icol>.more,.icol>.empty{padding:0 6px}
+.iblock{padding:7px 6px;border-bottom:1px solid var(--line)}
+.ihead{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px}
+.ihead .ticket{min-width:0;overflow-wrap:anywhere;font:600 13px/1.25 var(--mono);color:var(--text)}
+.ihead .what,.ichips .what{font-size:12px;color:var(--text-2)}
+.ichips{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 6px;margin-top:5px}
+.ichips .chip{max-width:100%;white-space:normal;overflow-wrap:anywhere;text-transform:none}
 @media (width<760px){.icols{grid-template-columns:minmax(0,1fr)}}

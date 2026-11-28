@@ -8,15 +8,15 @@ from tests.golden.pages import page_digests, page_name, record, substitutions
 NAME = page_name(__file__)
 
 GOLDEN = {
-    "lanes.CSS": "71e3d350d0b99e6959706a85febebb023f62a8bec2a7e4a91d0adef240624bbf",
-    "lanes.SCRIPT": "0957ea96c4fb5a6bbb3c87ecf994bb040a697a5477a993c1e1ccabc1ec9cb173",
+    "lanes.CSS": "84c6d0cbd94d42a64b9756d984837a8fdbaa39f2b90ca253d9e32971aa21d829",
+    "lanes.SCRIPT": "2fff1c74050f757528e32870f3a5dcde326584c08f231ddd5f99a166f9393dd2",
     "ci.CSS": "544cfa203943aaabe9f99f5e42e54dfed2fb9d9d4a505db18a8b125e2b12c883",
     "ci.SCRIPT": "b911e0070f5debca7d894695d5484929f5abc168b05e1665bc793351c463bc34",
     "cockpit.CSS": "b4a22253c8f8d79d52557f43efaf97b8d99fe8ec71eb5eb295234e5ee1d84f4c",
     "cockpit.SCRIPT": "a245bfe1f23fdcb617d61bf79fe4aae343d73fa875f33468e1735dd6ee60e904",
     "counts.CSS": "fc5e8cfaa290c726bc5d6a5fb5bff25dd9bbff75864feb867f4419cbabc0ca02",
     "counts.SCRIPT": "c65d30a7f29d994eb2324ccc339defe2ad8edc7da28db9f6d21b854f4af30c0a",
-    "__LANES__": "f8e5d3ecd09ca056127c8e3611f845cb804623bae1dd87e3287387706ed3409a",
+    "__LANES__": "bc3cee1b106fa22bdd902b9750f3f5e820a22a479e6e624a1fd88e77091b4976",
     "seeded/main": "772139303fa08489da4933b14a7053046a6f30ad6aff0a016cb66dd514b31f7b",
     "seeded/chrome": "93ad3ca0eb36a1d294ab167bcb6b1242ae900fe0db81c0cefcdd119288ef6308",
     "hostile/main": "772139303fa08489da4933b14a7053046a6f30ad6aff0a016cb66dd514b31f7b",

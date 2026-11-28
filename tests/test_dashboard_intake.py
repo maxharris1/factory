@@ -10,8 +10,8 @@ from lib.dashboard_pages import lanes
 from lib.dashboard_page import intake_groups
 from lib.dashboard_pages.lanes import FUNNEL, INTAKE, IntakeGroups, lanes_table
 from tests.test_dashboard_lanes import (
-    COLUMNS, EMPTY, Browser, FOLD, _assert_columns, _intake_item, _page_with_status_stub, _six_and_nine, _tiles,
-    needs_chrome,
+    BLOCKER_ITEMS, COLUMNS, EMPTY, Browser, FOLD, _assert_columns, _blocked_item, _blockers,
+    _intake_item, _page_with_status_stub, _six_and_nine, _tiles, needs_chrome,
 )
 from tests.test_dashboard_layout import BAR, NODE, _no_script, _run_page, _section
 from tests.test_dashboard_shell import AT_SNAPSHOT
@@ -215,10 +215,9 @@ def _assert_header_trouble_and_titles(intake: str) -> None:
     assert intake.count('class="itrouble"') == 1
     assert intake.index("</ol>") < intake.index(TROUBLE) < intake.index('<div class="igroup">'), intake
     assert intake.index(TROUBLE) < intake.index("</div>", intake.index('<div class="intake">'))
-    assert intake.count('class="ititle"') == 2, intake
-    for issue, title in ((2, "Header line"), (1, "Funnel row")):
-        assert (f'<span class="ticket">factory#{issue}</span>'
-                f'<span class="ititle" title="{title}">{title}</span>') in intake
+    assert intake.count('class="ititle"') == 1, intake
+    assert '<span class="ticket">factory#1</span><span class="ititle" title="Funnel row">Funnel row</span>' in intake
+    assert '<span class="chip muted" title="Header line · waiting on #1">factory#2</span>' in intake
     assert '<span class="ticket">factory#4</span><span class="what">waiting for capacity</span>' in intake
 
 
@@ -331,7 +330,7 @@ def test_a_long_title_is_one_cut_line_from_760_px_and_wraps_below(
 ) -> None:
     _open(browser, _long(tmp_path), width)
     box = browser.eval(TITLES)
-    assert len(box["titles"]) == 7, box
+    assert len(box["titles"]) == 4, box
     for title in box["titles"]:
         assert title["space"] == space and title["cut"] is cut, title
         assert title["overflow"] == "ellipsis" and title["title"] == title["text"] == LONG_TITLE, title
@@ -346,7 +345,7 @@ def test_a_long_title_and_a_long_reason_do_not_scroll_a_phone_sideways(
 ) -> None:
     _open(browser, _long(tmp_path), 375, render)
     box = browser.eval(TITLES)
-    assert len(box["titles"]) == 7, box
+    assert len(box["titles"]) == 4, box
     assert all(t["lines"] > 1 and not t["cut"] for t in box["titles"]), box
     assert len(box["trouble"]) == 2 and box["trouble"][1] > box["trouble"][0], box
     assert box["scroll"] <= 375, f"phone page scrolls sideways: {box}"
@@ -395,15 +394,14 @@ def test_each_column_shows_four_rows_and_then_a_more_line(tmp_path: Path, render
                     ["+2 more", None, "+5 more today"])
     assert ('<li><span class="ticket">factory#21</span><span class="ititle" title="Next row">Next row</span>'
             '<span class="chip accent">tier 2</span><span class="what">waiting for capacity</span></li>') in intake
-    assert ('<li><span class="ticket">factory#2</span><span class="ititle" title="Header line">Header line</span>'
-            '<span class="what">waiting on #1</span></li>') in intake
+    assert '<span class="chip muted" title="Header line · waiting on #1">factory#2</span>' in intake
     assert ('<li><span class="ticket">factory#35</span><span class="ititle" title="Fed row">Fed row</span>'
             '<span class="chip accent">tier 1</span><span class="what">fed, job queued</span>'
             '<span>→ PR #135</span><span class="when">fed 1m 00s ago</span></li>') in intake
     assert '<li><span class="ticket">factory#32</span><span class="what">fed</span><span class="when">fed 5m 00s ago</span></li>' in intake
     snapshot["feeder"]["items"] += [_intake_item(issue, "waiting-blocked", reason="waiting on #21") for issue in (41, 42, 43)]
-    _assert_columns(_render(render, tmp_path, snapshot), [["21", "22", "23", "24"], ["2", "5", "8", "41"],
-                    ["35", "32", "34", "31"]], ["+2 more", "+2 more", "+5 more today"])
+    _assert_columns(_render(render, tmp_path, snapshot), [["21", "22", "23", "24"], ["2", "5", "8", "41", "42", "43"],
+                    ["35", "32", "34", "31"]], ["+2 more", None, "+5 more today"])
 
 
 @pytest.mark.parametrize("render", RENDERS)
@@ -421,20 +419,148 @@ def test_the_limit_comes_from_the_table(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.setitem(INTAKE, "rows", 2)
     snapshot = _six_and_nine(tmp_path)
     for render in RENDERS:
-        _assert_columns(_render(render, tmp_path, snapshot), [["21", "22"], ["2", "5"], ["35", "32"]],
-                        ["+4 more", "+1 more", "+7 more today"])
+        _assert_columns(_render(render, tmp_path, snapshot), [["21", "22"], ["2", "5", "8"], ["35", "32"]],
+                        ["+4 more", None, "+7 more today"])
 
 
 def test_the_script_keeps_no_copy_of_the_column_table() -> None:
     assert lanes_table()["intake"] == INTAKE
     assert [col["label"] for col in INTAKE["columns"]] == COLUMNS
     assert [col["empty"] for col in INTAKE["columns"]] == EMPTY
-    for words in (*COLUMNS[1:], *EMPTY, "more today", "' more", " fed today", "intake-fed", "intake-waiting"):
+    for words in (*COLUMNS[1:], *EMPTY, "more today", "' more", " fed today", "intake-fed", "intake-waiting",
+                  "no blocker named", "spread over", "} waiting"):
         assert words not in lanes.SCRIPT, words
     for gone in ("fed-more", "#intake details"):
         assert gone not in lanes.CSS and gone not in lanes.SCRIPT, gone
     keys = [col["key"] for col in INTAKE["columns"]]
     assert keys == list(lanes._INTAKE_BODY) == list(IntakeGroups._fields[1:])
+
+
+def _issues(groups: lanes.BlockerGroups) -> list[tuple[str | None, list[str]]]:
+    return [(ref, [x["issue"] for x in items]) for ref, items in groups.drawn]
+
+
+FOUR_GROUPS = [
+    ("o/factory#50", ["101", "102", "103", "104", "105", "106", "107", "108"]),
+    ("o/factory#51", ["109", "110", "115"]),
+    ("o/factory#52", ["110", "111", "116"]),
+    (None, ["112", "117"]),
+]
+
+
+def test_blocker_groups_ranks_cuts_and_counts_the_rest() -> None:
+    four = lanes.blocker_groups(BLOCKER_ITEMS, 4)
+    assert _issues(four) == FOUR_GROUPS
+    assert (four.more, four.others) == (3, 3)
+    seven = lanes.blocker_groups(BLOCKER_ITEMS, 7)
+    assert _issues(seven) == FOUR_GROUPS + [("o/factory#53", ["113"]), ("AUT-7", ["114"]), ("o/factory#55", ["116"])]
+    assert (seven.more, seven.others) == (1, 1)
+
+
+BLOCK = re.compile(r'<div class="iblock"><div class="ihead"><span class="ticket">([^<]*)</span>'
+                   r'<span class="what">([^<]*)</span></div><div class="ichips">(.*?)</div></div>')
+CHIP = re.compile(r'<span class="chip muted"(?: title="[^"]*")?>factory#(\d+)</span>')
+WAITING = '<div class="igroup">Waiting on a blocker or files</div>'
+
+
+def _waiting_column(intake: str) -> str:
+    col = intake.split('<div class="icol">')[2]
+    assert col.startswith(WAITING), col
+    return col[len(WAITING) :]
+
+
+def _assert_blockers(intake: str, groups: list[tuple[str, str, list[str], str | None]], summary: str | None) -> None:
+    body = _waiting_column(intake)
+    tail = (f'<p class="more">{summary}</p>' if summary else "") + "</div>"
+    assert body.endswith(tail), body
+    assert summary or 'class="more"' not in body, body
+    blocks = body[: -len(tail)]
+    found = list(BLOCK.finditer(blocks))
+    assert "".join(m.group(0) for m in found) == blocks, blocks
+    assert [(m[1], m[2], CHIP.findall(m[3]), CHIP.sub("", m[3])) for m in found] == [
+        (head, count, chips, f'<span class="what">{rest}</span>' if rest else "") for head, count, chips, rest in groups
+    ]
+
+
+DRAWN = [
+    ("factory#50", "8 waiting", ["101", "102", "103", "104", "105", "106"], "+2"),
+    ("factory#51", "3 waiting", ["109", "110", "115"], None),
+    ("factory#52", "3 waiting", ["110", "111", "116"], None),
+    ("no blocker named", "2 waiting", ["112", "117"], None),
+]
+
+
+@pytest.mark.parametrize("render", RENDERS)
+def test_the_waiting_column_draws_the_four_biggest_groups(tmp_path: Path, render: str) -> None:
+    intake = _render(render, tmp_path, _blockers(tmp_path))
+    _assert_blockers(intake, DRAWN, "3 more, spread over 3 other blockers")
+    for chip in ('<span class="chip muted" title="Blocker row · waiting on #51">factory#109</span>',
+                 '<span class="chip muted" title="Two blockers">factory#110</span>',
+                 '<span class="chip muted" title="waiting on file lib/x.py held by #52">factory#111</span>',
+                 '<span class="chip muted">factory#112</span>'):
+        assert chip in intake, chip
+
+
+def test_the_group_and_chip_limits_come_from_the_table(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    col = lanes_table()["intake"]["columns"][1]
+    assert (col["groups"], col["chips"]) == (4, 6)
+    monkeypatch.setitem(INTAKE["columns"][1], "groups", 2)
+    monkeypatch.setitem(INTAKE["columns"][1], "chips", 3)
+    snapshot = _blockers(tmp_path)
+    for render in RENDERS:
+        _assert_blockers(_render(render, tmp_path, snapshot),
+                         [("factory#50", "8 waiting", ["101", "102", "103"], "+5"),
+                          ("factory#51", "3 waiting", ["109", "110", "115"], None)],
+                         "7 more, spread over 6 other blockers")
+
+
+@pytest.mark.parametrize("render", RENDERS)
+@pytest.mark.parametrize(
+    ("groups", "last", "summary"),
+    [(4, 118, "3 more, spread over 3 other blockers"), (7, 118, "1 more, spread over 1 other blocker"),
+     (4, 112, None)],
+    ids=["three-over-three", "one-over-one", "none-left"],
+)
+def test_the_summary_line_counts_tickets_in_no_drawn_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, render: str, groups: int, last: int, summary: str | None
+) -> None:
+    monkeypatch.setitem(INTAKE["columns"][1], "groups", groups)
+    items = [x for x in BLOCKER_ITEMS if int(x["issue"]) <= last]
+    body = _waiting_column(_render(render, tmp_path, _blockers(tmp_path, items)))
+    assert body.count('<div class="iblock">') == groups, body
+    if summary:
+        assert body.endswith(f'</div></div><p class="more">{summary}</p></div>'), body
+    else:
+        assert body.endswith("</div></div></div>") and 'class="more"' not in body, body
+
+
+PHONE_REPO = "o/Factory-Dashboard-Phone-Width"
+PHONE_ITEMS = [
+    _blocked_item(200 + n, f"{PHONE_REPO}#{1 + n // 10 if n < 40 else 5 + n % 10}",
+                  repo=PHONE_REPO, title=LONG_TITLE, reason=LONG_REASON)
+    for n in range(80)
+]
+WAITING_LAYOUT = """(function () {
+  var col = document.querySelectorAll('#intake .icols > .icol')[1];
+  var chips = col.querySelectorAll('.ichips .chip');
+  return {scroll: document.documentElement.scrollWidth, blocks: col.querySelectorAll('.iblock').length,
+          chips: chips.length, transform: getComputedStyle(chips[0]).textTransform, text: chips[0].innerText,
+          more: col.querySelector('.more').textContent,
+          right: Math.max.apply(null, [].map.call(col.querySelectorAll('.iblock *'), function (n) {
+            return n.getBoundingClientRect().right; }))};
+})()"""
+
+
+@needs_chrome
+@pytest.mark.parametrize("render", RENDERS)
+def test_eighty_blocked_tickets_do_not_scroll_a_phone_sideways(tmp_path: Path, browser: Browser, render: str) -> None:
+    _open(browser, _blockers(tmp_path, PHONE_ITEMS), 375, render)
+    box = browser.eval(WAITING_LAYOUT)
+    assert box["blocks"] == 4 and box["chips"] == 24, box
+    assert box["transform"] == "none" and box["text"] == "Factory-Dashboard-Phone-Width#200", box
+    assert box["more"] == "40 more, spread over 10 other blockers", box
+    assert box["right"] <= 375, box
+    assert box["scroll"] <= 375, f"phone page scrolls sideways: {box}"
 
 
 def test_the_fed_age_ticks_in_the_script(tmp_path: Path) -> None:
