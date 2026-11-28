@@ -6,7 +6,7 @@ import json
 import re
 import sqlite3
 import zlib
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 
 from lib.dispatch.constants import (
@@ -26,16 +26,24 @@ from lib.dispatch.types import (
     TrackedTicket,
 )
 from lib.factory_md import FactoryConfig, family_findings
+from lib.feeder_gates import parse_gate_lines
 from lib.handoff import matching_head as _matching_head
 from lib.queue import RECIPIENTS, Job
 from lib.role_router import (
     Candidate,
+    Draw,
+    GuardFacts,
     KNOWN_HARNESSES,
     RoutingConfig,
     RoutingError,
+    Sample,
+    TicketFacts,
     build_role_for_ticket_type,
     central_routing,
+    draw,
+    parse_sample,
     resolve_slot,
+    slot_source,
 )
 from lib.schema import HARNESSES
 from lib.ticket_type import ticket_type_of
@@ -323,7 +331,8 @@ def _detail_routing(
     builder, reviewer = routing.get("builder"), routing.get("reviewer")
     if builder not in HARNESSES or reviewer not in HARNESSES:
         return None
-    if not any(isinstance(routing.get(key), str) for key in _PICK_KEYS):
+    sample = parse_sample(routing.get("sample"))
+    if sample is None and not any(isinstance(routing.get(key), str) for key in _PICK_KEYS):
         return builder, reviewer, None
 
     def text(key: str) -> str | None:
@@ -339,6 +348,7 @@ def _detail_routing(
             if planner in HARNESSES
             else None
         ),
+        sample=sample,
     )
     return builder, reviewer, picks
 
@@ -376,11 +386,40 @@ def _route_picks(ticket: TrackedTicket, picks: RouterPicks) -> TrackedTicket:
     )
 
 
+def _ticket_block(body: str) -> str | None:
+    lines = body.splitlines()
+    for index, line in enumerate(lines[:-1]):
+        fence = lines[index + 1]
+        if line == "### Ticket" and re.fullmatch(r"`{3,}", fence):
+            rest = lines[index + 2 :]
+            return "\n".join(rest[: rest.index(fence)]) if fence in rest else None
+    return None
+
+
+def _ticket_facts(ticket: TrackedTicket) -> TicketFacts:
+    from lib.feeder import parse_intake
+
+    brief = ticket.brief_comment
+    block = None if brief is None else _ticket_block(brief.body)
+    return TicketFacts(
+        repo=ticket.repo,
+        ticket=ticket.ticket_id,
+        risk=ticket.risk,
+        plan_first=block is not None and parse_intake(block, ()).plan_first is True,
+        touches=() if block is None else tuple(sorted(parse_gate_lines(block, ticket.repo).touches)),
+        ticket_type=None if brief is None else ticket_type_of(brief.body),
+    )
+
+
 def _router_picks(
     ticket: TrackedTicket,
     refused: frozenset[str],
     builder_only: str | None = None,
     reviewer_only: str | None = None,
+    *,
+    sample: Sample | None = None,
+    guards: Callable[[], GuardFacts] | None = None,
+    built_outside: bool = False,
 ) -> RouterPicks | None:
     base = ticket.factory_md or ticket.factory
     if base.routing is None:
@@ -388,6 +427,25 @@ def _router_picks(
     central = central_routing()
     brief = ticket.brief_comment
     build_role = build_role_for_ticket_type(None if brief is None else ticket_type_of(brief.body))
+    roles = [role for role, only in (("build", builder_only), ("review", reviewer_only)) if only is None]
+    draws: dict[str, Draw | None] = {}
+    if sample is not None:
+        draws = {role: getattr(sample, role) for role in roles}
+    elif guards is not None and central is not None:
+        slots = {"build": build_role, "review": "review"}
+        drawing = [
+            role
+            for role in roles
+            if central.share("gemini", role) > 0
+            and not (role == "build" and built_outside)
+            and slot_source(slots[role], routing=central, factory=base) == "routing.yml"
+        ]
+        if drawing:
+            facts, guard_facts = _ticket_facts(ticket), guards()
+            for role in drawing:
+                draws[role] = draw(
+                    role, facts, central.shares["gemini"], guard_facts, build=draws.get("build")
+                )
 
     def pick(
         role: str,
@@ -395,7 +453,8 @@ def _router_picks(
         base_harness: str,
         base_model: str | None,
         built_by: tuple[str, str | None] | None = None,
-    ) -> Candidate:
+        drawn: Draw | None = None,
+    ) -> tuple[Candidate, Draw | None]:
         blocked = set(_UNQUEUEABLE)
         if only is not None:
             blocked |= set(KNOWN_HARNESSES) - {only}
@@ -407,26 +466,35 @@ def _router_picks(
                 built_by=built_by,
                 refused_harnesses=refused,
                 unavailable_harnesses=blocked,
+                drawn=drawn,
             )
         except RoutingError:
             if only is None:
                 raise
-            return Candidate(only, base_model if only == base_harness else None)
-        return Candidate(slot.harness, slot.model, slot.effort)
+            return Candidate(only, base_model if only == base_harness else None), None
+        return Candidate(slot.harness, slot.model, slot.effort), slot.draw
 
-    builder = pick(build_role, builder_only, base.builder_harness, base.builder_model)
-    reviewer = pick(
+    builder, build_draw = pick(
+        build_role, builder_only, base.builder_harness, base.builder_model, drawn=draws.get("build")
+    )
+    reviewer, review_draw = pick(
         "review",
         reviewer_only,
         base.reviewer_harness,
         base.reviewer_model,
         built_by=(builder.harness, builder.model),
+        drawn=draws.get("review"),
     )
-    return RouterPicks(builder, reviewer, _plan_pick(central, base, refused, on=builder.harness))
+    return RouterPicks(
+        builder,
+        reviewer,
+        _plan_pick(central, base, refused, on=builder.harness),
+        sample=None if build_draw is None and review_draw is None else Sample(build_draw, review_draw),
+    )
 
 
 def _review_pick(
-    ticket: TrackedTicket, refused: frozenset[str], built_by: Candidate
+    ticket: TrackedTicket, refused: frozenset[str], built_by: Candidate, drawn: Draw | None = None
 ) -> Candidate | None:
     base = ticket.factory_md or ticket.factory
     if base.routing is None:
@@ -439,6 +507,7 @@ def _review_pick(
             built_by=(built_by.harness, built_by.model),
             refused_harnesses=refused,
             unavailable_harnesses=_UNQUEUEABLE,
+            drawn=drawn,
         )
     except RoutingError:
         return None
@@ -478,6 +547,7 @@ def _route_go(
         refused,
         builder_only=fields.get("builder", base.builder_harness) if named else None,
         reviewer_only=fields.get("reviewer", base.reviewer_harness) if named else None,
+        sample=ticket.router_picks.sample if ticket.router_picks is not None else None,
     )
     if picks is not None:
         routed = _route_picks(ticket, picks)

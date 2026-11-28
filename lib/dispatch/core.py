@@ -34,7 +34,7 @@ from lib.dispatch.helpers import (
 )
 from lib.dispatch.transitions import write_workflow_state
 from lib.factory_md import family_findings
-from lib.role_router import Candidate, RoutingError
+from lib.role_router import Candidate, GuardFacts, RoutingError
 from lib.dispatch.types import (
     BaseCheck,
     BaseMismatch,
@@ -466,33 +466,10 @@ class DispatcherBase:
         factory.md model hints, fails the cross-family rule."""
         if ticket.factory_md is not None:
             return ticket
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT detail, recipient, source_comment_id FROM jobs
-                WHERE lower(repo) = ? AND ticket_id = ?
-                  AND action IN ('plan', 'build', 'fix') AND attempt = 1
-                ORDER BY created_at DESC, id DESC
-                LIMIT 1
-                """,
-                (ticket.repo.lower(), ticket.ticket_id),
-            ).fetchone()
+        row = self._stored_route(ticket)
         routing = _detail_routing(None if row is None else row["detail"])
         if routing is None:
-            built_by = None if row is None else str(row["recipient"])
-            try:
-                picks = _router_picks(
-                    ticket, self.refused_harnesses, builder_only=built_by
-                )
-            except RoutingError as error:
-                named = self._routed_by_pending_go(ticket)
-                if named is not None:
-                    return named
-                raise RouteError(
-                    f"{ticket.repo}#{ticket.ticket_id} routing: {error}",
-                    ticket.comments[-1].id if ticket.comments else "",
-                ) from error
-            return ticket if picks is None else _route_picks(ticket, picks)
+            return self._fresh_route(ticket, None if row is None else str(row["recipient"]))
         builder, reviewer, picks = routing
         if reviewer in self.refused_harnesses:
             base = ticket.factory_md or ticket.factory
@@ -503,7 +480,12 @@ class DispatcherBase:
                     builder, base.builder_model if builder == base.builder_harness else None
                 )
             )
-            fresh = _review_pick(ticket, self.refused_harnesses, built_by)
+            fresh = _review_pick(
+                ticket,
+                self.refused_harnesses,
+                built_by,
+                drawn=picks.sample.review if picks is not None and picks.sample is not None else None,
+            )
             if fresh is not None:
                 reviewer = fresh.harness
                 picks = (
@@ -524,6 +506,65 @@ class DispatcherBase:
                 str(row["source_comment_id"]),
             )
         return routed
+
+    def _stored_route(self, ticket: TrackedTicket) -> sqlite3.Row | None:
+        """The latest plan, build or fix job, else the latest review job that
+        names its routing: a ticket built outside the queue stores its route
+        on its first review."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT detail, recipient, source_comment_id FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ?
+                  AND action IN ('plan', 'build', 'fix') AND attempt = 1
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+            if row is not None:
+                return row
+            reviews = connection.execute(
+                """
+                SELECT detail, recipient, source_comment_id FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
+                ORDER BY created_at DESC, id DESC
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchall()
+        return next((review for review in reviews if _detail_routing(review["detail"]) is not None), None)
+
+    def _fresh_route(
+        self, ticket: TrackedTicket, built_by: str | None, *, built_outside: bool = False
+    ) -> TrackedTicket:
+        try:
+            picks = _router_picks(
+                ticket,
+                self.refused_harnesses,
+                builder_only=built_by,
+                guards=self._guard_facts if built_by is None else None,
+                built_outside=built_outside,
+            )
+        except RoutingError as error:
+            named = self._routed_by_pending_go(ticket)
+            if named is not None:
+                return named
+            raise RouteError(
+                f"{ticket.repo}#{ticket.ticket_id} routing: {error}",
+                ticket.comments[-1].id if ticket.comments else "",
+            ) from error
+        return ticket if picks is None else _route_picks(ticket, picks)
+
+    def _routed_outside_queue(self, ticket: TrackedTicket) -> TrackedTicket:
+        """A ticket with no stored route, routed for a build the queue did not
+        run: its review is drawn and its builder is not."""
+        if ticket.factory_md is None or self._stored_route(ticket) is not None:
+            return ticket
+        unrouted = replace(ticket, factory=ticket.factory_md, factory_md=None, router_picks=None)
+        return self._fresh_route(unrouted, None, built_outside=True)
+
+    def _guard_facts(self) -> GuardFacts:
+        return GuardFacts(refused="gemini" in self.refused_harnesses)
 
     def _routed_by_pending_go(self, ticket: TrackedTicket) -> TrackedTicket | None:
         for comment in sorted(ticket.comments, key=_comment_order, reverse=True):
