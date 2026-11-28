@@ -370,6 +370,26 @@ def _write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
         raise
 
 
+def _write_json_if_absent(path: Path, data: Mapping[str, object]) -> bool:
+    """Atomically write JSON only if `path` does not already exist."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = json.dumps(data, sort_keys=True) + "\n"
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        try:
+            os.link(tmp_name, path)
+            return True
+        except FileExistsError:
+            return False
+    finally:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+
+
 def _lane_record(session_record: Mapping[str, object]) -> dict[str, object]:
     return {key: value for key, value in session_record.items() if key != "state"}
 
@@ -764,14 +784,17 @@ class ClaudeCloudRunner:
         except OSError as exc:
             raise LaunchFailed(f"git invocation failed: {exc}") from None
 
+    def _raise_git_failure(self, subcommand: str, proc: subprocess.CompletedProcess[str]) -> None:
+        combined = "\n".join(part for part in (proc.stderr, proc.stdout) if part)
+        err = _sanitize_error_text(combined) or f"exit {proc.returncode}"
+        if not _is_access_denied(combined) and (_is_outage(combined) or _is_git_transport_failure(combined)):
+            raise RunnerOutage(f"git {subcommand} failed: {err}")
+        raise LaunchFailed(f"git {subcommand} failed: {err}")
+
     def _git_ok(self, *args: str, cwd: Path | None = None, timeout: int = DEFAULT_GIT_TIMEOUT_SECONDS) -> str:
         proc = self._git(*args, cwd=cwd, timeout=timeout)
         if proc.returncode != 0:
-            combined = "\n".join(part for part in (proc.stderr, proc.stdout) if part)
-            err = _sanitize_error_text(combined) or f"exit {proc.returncode}"
-            if not _is_access_denied(combined) and (_is_outage(combined) or _is_git_transport_failure(combined)):
-                raise RunnerOutage(f"git {args[0]} failed: {err}")
-            raise LaunchFailed(f"git {args[0]} failed: {err}")
+            self._raise_git_failure(args[0], proc)
         return (proc.stdout or "").strip()
 
     def _prepare_checkout(self, lane: Lane, remote_url: str) -> Path:
@@ -790,8 +813,17 @@ class ClaudeCloudRunner:
                 self._git_ok("remote", "set-url", "origin", remote_url, cwd=repo_cache)
 
             if _SHA.fullmatch(lane.base_ref):
-                self._git_ok("fetch", "origin", f"+{lane.base_ref}:{temp_ref}", cwd=repo_cache)
-                is_branch = False
+                branch_proc = self._git(
+                    "fetch", "origin", f"+refs/heads/{lane.base_ref}:{temp_ref}", cwd=repo_cache
+                )
+                if branch_proc.returncode == 0:
+                    is_branch = True
+                else:
+                    combined = "\n".join(part for part in (branch_proc.stderr, branch_proc.stdout) if part)
+                    if _is_access_denied(combined) or _is_outage(combined) or _is_git_transport_failure(combined):
+                        self._raise_git_failure("fetch", branch_proc)
+                    self._git_ok("fetch", "origin", f"+{lane.base_ref}:{temp_ref}", cwd=repo_cache)
+                    is_branch = False
             else:
                 self._git_ok(
                     "fetch", "origin", f"+refs/heads/{lane.base_ref}:{temp_ref}", cwd=repo_cache
@@ -827,7 +859,7 @@ class ClaudeCloudRunner:
         if self._git("rev-parse", "--verify", "HEAD", cwd=checkout).returncode == 0:
             self._git_ok("reset", "--hard", "--quiet", "HEAD", cwd=checkout)
         self._git_ok("clean", "-ffdx", "-q", cwd=checkout)
-        if is_branch or not _SHA.fullmatch(lane.base_ref):
+        if is_branch:
             self._git_ok("checkout", "--quiet", "-B", lane.base_ref, base_sha, cwd=checkout)
             self._git_ok("config", f"branch.{lane.base_ref}.remote", "origin", cwd=checkout)
             self._git_ok("config", f"branch.{lane.base_ref}.merge", f"refs/heads/{lane.base_ref}", cwd=checkout)
@@ -865,8 +897,10 @@ class ClaudeCloudRunner:
             if isinstance(agent_id, str) and isinstance(url, str) and agent_id and url:
                 session_marker = self._session_marker(agent_id)
                 config_dir = saved.get("config_dir")
-                if not session_marker.exists() and isinstance(config_dir, str) and config_dir:
-                    _write_json_atomic(session_marker, {**saved, "state": "running"})
+                if isinstance(config_dir, str) and config_dir:
+                    with self._lock(self._session_lock(agent_id)):
+                        if not session_marker.exists():
+                            _write_json_if_absent(session_marker, {**saved, "state": "running"})
                 return Launched(agent_id=agent_id, url=url)
         sessions_dir = self._sessions_dir()
         if sessions_dir.is_dir():
