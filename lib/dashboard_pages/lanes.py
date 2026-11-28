@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import math
+from typing import NamedTuple
 
 from lib.dashboard_pages.activity import _health_link
 from lib.dashboard_pages.common import (
@@ -53,10 +54,20 @@ _BAD = "#f7768e"
 INTAKE_GROUP = {
     "error": "trouble",
     "refused-intake": "trouble",
-    "waiting-blocked": "waiting",
-    "waiting-capacity": "waiting",
+    "waiting-blocked": "blocked",
+    "waiting-capacity": "next",
 }
 FED_TODAY_SECONDS = 86400
+
+INTAKE = {
+    "rows": 4,
+    "columns": [
+        {"key": "next", "label": "Next in line", "more": "more", "empty": "no ticket is waiting for capacity"},
+        {"key": "blocked", "label": "Waiting on a blocker or files", "more": "more",
+         "empty": "no ticket is waiting on a blocker or files"},
+        {"key": "fed", "label": "Fed today", "more": "more today", "empty": "no ticket was fed today"},
+    ],
+}
 
 FUNNEL = [
     {"key": "eligible", "label": "Labelled ready"},
@@ -73,7 +84,8 @@ FUNNEL = [
 def lanes_table() -> dict:
     return {"tiles": TILE_STATE, "glyph": GLYPH_ORDER, "speed": QUEUE_SPEED,
             "queue_tint": QUEUE_TINT, "belt_tint": BELT_TINT,
-            "intake_group": INTAKE_GROUP, "fed_today": FED_TODAY_SECONDS, "funnel": FUNNEL}
+            "intake_group": INTAKE_GROUP, "fed_today": FED_TODAY_SECONDS, "funnel": FUNNEL,
+            "intake": INTAKE}
 
 
 def queue_speed(age: object) -> float:
@@ -431,21 +443,29 @@ def _linear_webhook(snapshot: dict) -> tuple[str | None, str]:
     return f"Linear webhook · last received {received} · dirty queue {webhook['dirty']}", notes
 
 
-def intake_groups(items: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
-    groups: dict[str, list[dict]] = {"trouble": [], "waiting": [], "fed": []}
+class IntakeGroups(NamedTuple):
+    trouble: list[dict]
+    next: list[dict]
+    blocked: list[dict]
+    fed: list[dict]
+
+
+def intake_groups(items: list[dict]) -> IntakeGroups:
+    groups: dict[str, list[dict]] = {"trouble": [], "next": [], "blocked": [], "fed": []}
     for item in items:
         age = item.get("fed_age_seconds")
         group = INTAKE_GROUP.get(item["state"]) or ("fed" if age is not None and age < FED_TODAY_SECONDS else None)
         if group:
             groups[group].append(item)
-    return groups["trouble"], groups["waiting"], groups["fed"]
+    groups["fed"].sort(key=lambda item: item["fed_age_seconds"])
+    return IntakeGroups(**groups)
 
 
 def _feeder(snapshot: dict) -> str:
     feeder = snapshot.get("feeder")
     if not feeder:
         return ""
-    numbers = {**feeder, "fed_today": len(intake_groups(feeder["items"])[2])}
+    numbers = {**feeder, "fed_today": len(intake_groups(feeder["items"]).fed)}
     stages = []
     for stage in FUNNEL:
         parts = [(part, numbers.get(part["key"], 0)) for part in stage.get("parts", [])]
@@ -491,6 +511,24 @@ def _fed_row(item: dict) -> str:
     return _intake_row(item, tail=pr + _when(item["fed_age_seconds"], prefix="fed ", suffix=" ago"))
 
 
+def _intake_rows(col: dict, items: list[dict], draw=_intake_row) -> str:
+    rows = INTAKE["rows"]
+    more = f'<p class="more">+{len(items) - rows} {_e(col["more"])}</p>' if items[rows:] else ""
+    return f'<ul class="feed">{"".join(draw(x) for x in items[:rows])}</ul>{more}'
+
+
+def _fed_rows(col: dict, items: list[dict]) -> str:
+    return _intake_rows(col, items, _fed_row)
+
+
+_INTAKE_BODY = {"next": _intake_rows, "blocked": _intake_rows, "fed": _fed_rows}
+
+
+def _intake_column(col: dict, items: list[dict]) -> str:
+    body = _INTAKE_BODY[col["key"]](col, items) if items else f'<p class="empty">{_e(col["empty"])}</p>'
+    return f'<div class="icol"><div class="igroup">{_e(col["label"])}</div>{body}</div>'
+
+
 def _intake(snapshot: dict) -> str:
     feeder = snapshot.get("feeder")
     line, notes = _linear_webhook(snapshot)
@@ -501,26 +539,11 @@ def _intake(snapshot: dict) -> str:
     if not feeder:
         empty = "no feeder has run" if line else "no listener or feeder has run"
         return panel(f'<div class="intake">{notes}<p class="empty">{empty}</p></div>')
-    trouble, waiting, fed = intake_groups(feeder["items"])
-    entries = "".join(f"<li>{_intake_ticket(x)}{_intake_what(x)}</li>" for x in trouble)
-    trouble_html = f'<ul class="itrouble">{entries}</ul>' if trouble else ""
-    inner = f'<div class="intake">{notes}{_feeder(snapshot)}{trouble_html}</div>'
-    if waiting:
-        inner += (
-            f'<div class="igroup">{len(waiting)} waiting</div>'
-            f'<ul class="feed">{"".join(_intake_row(x) for x in waiting[:3])}</ul>'
-        )
-    if waiting[3:]:
-        inner += (
-            f"<details><summary>{len(waiting) - 3} more</summary>"
-            f'<ul class="feed">{"".join(_intake_row(x) for x in waiting[3:])}</ul></details>'
-        )
-    if fed:
-        inner += (
-            f"<details><summary>{len(fed)} fed today</summary>"
-            f'<ul class="fed-more">{"".join(_fed_row(x) for x in fed)}</ul></details>'
-        )
-    return panel(inner)
+    groups = intake_groups(feeder["items"])
+    entries = "".join(f"<li>{_intake_ticket(x)}{_intake_what(x)}</li>" for x in groups.trouble)
+    trouble_html = f'<ul class="itrouble">{entries}</ul>' if groups.trouble else ""
+    columns = "".join(_intake_column(col, getattr(groups, col["key"])) for col in INTAKE["columns"])
+    return panel(f'<div class="intake">{notes}{_feeder(snapshot)}{trouble_html}</div><div class="icols">{columns}</div>')
 
 
 def lanes_script(script: str) -> str:

@@ -96,6 +96,46 @@ def _tiles(tmp_path: Path) -> dict:
     return snapshot
 
 
+NEXT_ITEMS = [_intake_item(21, "waiting-capacity", tier=2, own_tier=2, title="Next row")] + [
+    _intake_item(issue, "waiting-capacity") for issue in range(22, 27)]
+FED_AGES = {31: 900, 32: 300, 33: 1500, 34: 300, 36: 2400, 37: 1200, 38: 3000, 39: 1800}
+FED_ITEMS = [_intake_item(35, "done", pr="135", fed_age_seconds=60, tier=1, own_tier=1, title="Fed row")] + [
+    _intake_item(issue, "fed", fed_age_seconds=age) for issue, age in FED_AGES.items()]
+
+
+def _six_and_nine(tmp_path: Path) -> dict:
+    snapshot = _tiles(tmp_path)
+    kept = [x for x in INTAKE_ITEMS if x["state"] in ("waiting-blocked", "error", "refused-intake")]
+    snapshot["feeder"].update(waiting_capacity=6, items=copy.deepcopy(
+        FED_ITEMS[1:5] + NEXT_ITEMS[:3] + kept + FED_ITEMS[:1] + FED_ITEMS[5:] + NEXT_ITEMS[3:]))
+    return snapshot
+
+
+COLUMNS = ["Next in line", "Waiting on a blocker or files", "Fed today"]
+EMPTY = ["no ticket is waiting for capacity", "no ticket is waiting on a blocker or files", "no ticket was fed today"]
+
+
+def _assert_columns(intake: str, rows: list[list[str]], more: list[str | None]) -> None:
+    assert "<details" not in intake and "fed-more" not in intake and "<button" not in intake, intake
+    assert intake.count("<a ") == 1, intake
+    assert intake.count('<div class="icols">') == 1, intake
+    cols = intake[intake.index('<div class="icols">') :]
+    assert intake.index('<div class="intake">') < intake.index('<div class="icols">')
+    if "itrouble" in intake:
+        assert intake.index('<ul class="itrouble">') < intake.index('<div class="icols">')
+    parts = cols.split('<div class="icol">')[1:]
+    assert len(parts) == 3, cols
+    for part, label, issues, last, empty in zip(parts, COLUMNS, rows, more, EMPTY):
+        assert part.startswith(f'<div class="igroup">{label}</div>'), part
+        assert re.findall(r'<span class="ticket">factory#(\d+)</span>', part) == issues, (label, part)
+        if not issues:
+            assert f'<div class="igroup">{label}</div><p class="empty">{empty}</p></div>' in part, part
+            continue
+        assert part.count("<li>") == len(issues) and part.count('<ul class="feed">') == 1, part
+        tail = part[part.index("</ul>") + len("</ul>") :]
+        assert tail.startswith(f'<p class="more">{last}</p></div>' if last else "</div>"), (label, tail)
+
+
 def _job_tile(html: str, job: str) -> str:
     match = re.search(rf'<a class="tile [^"]*" href="[^"]*" title="[^"]*\(job {re.escape(job)}\)">.*?</a>', html, re.S)
     assert match, job
@@ -537,14 +577,15 @@ def _assert_intake_order(intake: str) -> None:
     head, body = intake.split("</h2>", 1)
     assert 'id="linear-webhook"' in head and "waiting" not in head
     t = _ticket_span
-    marks = ['id="feeder"', t(3), t(6), "5 waiting", t(2), t(4), t(5),
-             "<details><summary>2 more</summary>", t(8), t(9), "<details><summary>2 fed today</summary>", t(1), t(10)]
+    marks = ['id="feeder"', t(3), t(6), '<div class="icols">', '<div class="igroup">Next in line</div>', t(4), t(9),
+             '<div class="igroup">Waiting on a blocker or files</div>', t(2), t(5), t(8),
+             '<div class="igroup">Fed today</div>', t(1), t(10)]
     at = [body.index(mark) for mark in marks]
     assert at == sorted(at), [marks[i] for i, _ in sorted(enumerate(at), key=lambda x: x[1])]
     assert t(7) not in intake and t(11) not in intake
-    assert intake.count("<details>") == 2 and "<details open" not in intake
+    assert "<details" not in intake
     assert "what bad" not in intake
-    fed = intake[intake.index("2 fed today") :]
+    fed = intake[intake.index('<div class="igroup">Fed today</div>') :]
     assert "<span>→ PR #101</span>" in fed and "PR #107" not in intake
     assert fed.count('<span class="when">fed ') == 2
 
@@ -552,7 +593,7 @@ def _assert_intake_order(intake: str) -> None:
 def test_intake_order_server(tmp_path: Path) -> None:
     _assert_intake_order(_section(_no_script(render_pages(_tiles(tmp_path))["index.html"]), "intake"))
     assert [[x["issue"] for x in group] for group in intake_groups(INTAKE_ITEMS)] == [
-        ["3", "6"], ["2", "4", "5", "8", "9"], ["1", "10"]]
+        ["3", "6"], ["4", "9"], ["2", "5", "8"], ["1", "10"]]
 
 
 @needs_node
@@ -617,8 +658,8 @@ def _feeder_only(tmp_path: Path) -> dict:
 @pytest.mark.parametrize(
     ("panel", "build"),
     [("lanes", _tiles), ("just-happened", _tiles), ("intake", _tiles),
-     ("intake", _webhook_only), ("intake", _feeder_only)],
-    ids=["lanes", "just-happened", "intake", "intake-webhook-only", "intake-feeder-only"],
+     ("intake", _webhook_only), ("intake", _feeder_only), ("intake", _six_and_nine)],
+    ids=["lanes", "just-happened", "intake", "intake-webhook-only", "intake-feeder-only", "intake-six-and-nine"],
 )
 def test_server_render_equals_script_render(tmp_path: Path, panel: str, build) -> None:
     snapshot = build(tmp_path)
@@ -937,10 +978,12 @@ def _open_rendered(browser: Browser, snapshot: dict, render: str, width: int) ->
 @pytest.mark.parametrize("render", ["script", "server"])
 def test_long_intake_reasons_wrap_on_a_phone(tmp_path: Path, browser: Browser, render: str) -> None:
     _open_rendered(browser, _long_intake_reasons(tmp_path), render, 375)
-    browser.eval("[].forEach.call(document.querySelectorAll('#intake details'), function (d) { d.open = true; })")
     shown = browser.eval("""[].filter.call(document.querySelectorAll('#intake .what'),
       function (e) { return e.textContent.indexOf('test_factory_dashboard') >= 0 && e.getClientRects().length; }).length""")
     assert shown == 5, f"expected the long reason on five visible Intake rows, saw {shown}"
+    lines = browser.eval("""[].map.call(document.querySelectorAll('#intake .icol .what'), function (e) {
+      return Math.round(e.getBoundingClientRect().height / parseFloat(getComputedStyle(e).lineHeight)); })""")
+    assert any(n > 1 for n in lines), f"no long reason in a column wraps at 375px: {lines}"
     width = browser.eval("document.documentElement.scrollWidth")
     assert width <= 375, f"phone page scrolls sideways: scrollWidth={width}"
 
