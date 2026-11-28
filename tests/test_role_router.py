@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -14,9 +15,16 @@ from lib.orchestrate import RouteError, RouteRequest, choose_route
 from lib.pstack_pin import ROOT
 from lib.role_router import (
     BUDGETS,
+    REFERENCE_MEAN_WEIGHT,
     ROUTING_PATH,
+    Draw,
+    GuardFacts,
+    HarnessShares,
+    HeadroomReading,
     RoutingError,
+    TicketFacts,
     apply_argv_flags,
+    draw,
     family_for,
     load_routing_yml,
     parse_routing_yml,
@@ -738,3 +746,175 @@ def test_a_plan_pick_leaves_the_fields_it_omits_to_the_waiter_not_the_build_pick
 def test_non_harness_command_is_left_unchanged() -> None:
     detail = _build_detail("claude", "claude-opus-4-6", effort="high")
     assert routing_argv_for_detail(["bash", "run.sh"], harness="claude", detail=detail) == ["bash", "run.sh"]
+
+
+_REFERENCE_MIX = [
+    (risk, plan_first, touches, ticket_type)
+    for risk in ("high", "high", "low")
+    for plan_first in (True, False, False, False, False, False)
+    for touches in (("a", "b", "c", "d"), ("a", "a", "b"))
+    for ticket_type in ("feature", "feature", "refactor", "perf-issue", None, "bug-fix")
+]
+
+
+def _ticket(number: int, risk: str = "high", plan_first: bool = False, touches=(), ticket_type=None) -> TicketFacts:
+    return TicketFacts(
+        repo="MaxHarris1/Factory",
+        ticket=number,
+        risk=risk,
+        plan_first=plan_first,
+        touches=tuple(touches),
+        ticket_type=ticket_type,
+    )
+
+
+def _synthetic_tickets(count: int = 2000) -> list[TicketFacts]:
+    return [_ticket(n, *_REFERENCE_MIX[n % len(_REFERENCE_MIX)]) for n in range(1, count + 1)]
+
+
+_SHARES = HarnessShares(build=0.25, review=0.25)
+
+
+def _draws(
+    tickets: list[TicketFacts], guards: GuardFacts = GuardFacts()
+) -> list[tuple[Draw, Draw]]:
+    pairs = []
+    for ticket in tickets:
+        build = draw("build", ticket, _SHARES, guards)
+        pairs.append((build, draw("review", ticket, _SHARES, guards, build=build)))
+    return pairs
+
+
+def _review_load(pairs: list[tuple[Draw, Draw]]) -> float:
+    return sum(review.picked and not build.picked for build, review in pairs) / len(pairs)
+
+
+def test_the_draw_is_a_pure_function_of_repo_ticket_and_role() -> None:
+    ticket = _ticket(1851)
+    expected = int.from_bytes(hashlib.sha256(b"maxharris1/factory#1851:build").digest()[:8], "big") / 2**64
+    first = draw("build", ticket, _SHARES)
+    assert first.seed == "maxharris1/factory#1851:build"
+    assert first.draw == expected
+    assert first.harness == "gemini"
+    assert draw("build", replace(ticket, repo="maxharris1/factory"), _SHARES) == first
+    assert draw("review", ticket, _SHARES).seed == "maxharris1/factory#1851:review"
+    assert draw("review", ticket, _SHARES).draw != first.draw
+
+
+def test_gemini_takes_a_quarter_of_builds_and_of_the_whole_review_load() -> None:
+    tickets = _synthetic_tickets()
+    pairs = _draws(tickets)
+    assert _draws(tickets) == pairs
+    build_share = sum(build.picked for build, _ in pairs) / len(pairs)
+    assert 0.20 <= build_share <= 0.30
+    assert 0.20 <= _review_load(pairs) <= 0.30
+
+
+def test_reference_mean_weight_is_the_mean_weight_of_the_reference_mix() -> None:
+    weights = [_ticket(1, *mix).weight for mix in _REFERENCE_MIX]
+    assert sum(risk == "high" for risk, *_ in _REFERENCE_MIX) * 3 == len(_REFERENCE_MIX) * 2
+    assert REFERENCE_MEAN_WEIGHT == pytest.approx(sum(weights) / len(weights))
+
+
+@pytest.mark.parametrize(
+    ("facts", "weight"),
+    [
+        ({"risk": "low", "ticket_type": "bug-fix"}, 0.5),
+        ({"risk": "low", "ticket_type": "bug"}, 0.5),
+        ({"risk": "low", "ticket_type": None}, 0.75),
+        ({"risk": "high", "ticket_type": "bug-fix"}, 1.0),
+        ({"risk": "low", "plan_first": True, "ticket_type": "bug-fix"}, 1.0),
+        ({"risk": "low", "touches": ("a", "b", "c", "d"), "ticket_type": "bug-fix"}, 0.75),
+        ({"risk": "low", "touches": ("a", "b", "c", "c"), "ticket_type": "bug-fix"}, 0.5),
+        ({"risk": "high", "plan_first": True, "touches": ("a", "b", "c", "d"), "ticket_type": "feature"}, 2.0),
+    ],
+)
+def test_ticket_weight_scores_risk_plan_first_touches_and_type(facts: dict, weight: float) -> None:
+    ticket = _ticket(1, **facts)
+    assert ticket.weight == weight
+    assert draw("build", ticket, _SHARES).chance == pytest.approx(0.25 * weight / REFERENCE_MEAN_WEIGHT)
+
+
+def test_hard_tickets_draw_gemini_builds_more_often_than_easy_ones() -> None:
+    tickets = _synthetic_tickets()
+    pairs = _draws(tickets)
+
+    def rate(risk: str, plan_first: bool) -> float:
+        group = [build for (build, _), t in zip(pairs, tickets) if t.risk == risk and t.plan_first is plan_first]
+        return sum(build.picked for build in group) / len(group)
+
+    assert rate("high", True) >= 1.5 * rate("low", False)
+    assert 0.20 <= sum(build.picked for build, _ in pairs) / len(pairs) <= 0.30
+
+
+def test_review_chance_corrects_for_this_tickets_build_chance() -> None:
+    ticket = _ticket(7, plan_first=True, touches=("a", "b", "c", "d"), ticket_type="feature")
+    build = draw("build", ticket, HarnessShares(build=0.5, review=0.25))
+    assert build.chance == pytest.approx(0.8)
+    review = draw("review", ticket, HarnessShares(build=0.5, review=0.25), build=build)
+    assert review.chance == pytest.approx(1.0)
+    lost = draw("build", ticket, _SHARES)
+    assert not lost.picked
+    assert draw("review", ticket, _SHARES, build=lost).chance == pytest.approx(0.25 / (1 - 0.4))
+    assert draw("review", ticket, _SHARES).chance == 0.25
+    held = draw("build", ticket, _SHARES, GuardFacts(builds_in_flight=2))
+    assert draw("review", ticket, _SHARES, build=held).chance == 0.25
+
+
+def test_gemini_keeps_a_quarter_of_reviews_when_build_draws_are_skipped() -> None:
+    pairs = _draws(_synthetic_tickets(), GuardFacts(builds_in_flight=2))
+    assert not any(build.picked for build, _ in pairs)
+    assert all(review.chance == 0.25 for _, review in pairs)
+    assert 0.20 <= _review_load(pairs) <= 0.30
+
+
+_LOW = (HeadroomReading("five_hour", 0.1, 100.0),)
+
+
+@pytest.mark.parametrize(
+    ("guards", "reason"),
+    [
+        (GuardFacts(refused=True, signed_out=True, usage_held=True, readings=_LOW, builds_in_flight=2), "refused"),
+        (GuardFacts(signed_out=True, usage_held=True, readings=_LOW, builds_in_flight=2), "signed-out"),
+        (GuardFacts(usage_held=True, readings=_LOW, builds_in_flight=2), "usage-held"),
+        (GuardFacts(readings=_LOW, builds_in_flight=2), "low-headroom"),
+        (GuardFacts(readings=(HeadroomReading("seven_day", 0.05, 100.0),)), "low-headroom"),
+        (
+            GuardFacts(readings=(HeadroomReading("five_hour", 0.9, 50.0), HeadroomReading("seven_day", 0.1, 100.0))),
+            "low-headroom",
+        ),
+        (GuardFacts(builds_in_flight=2), "builds-in-flight"),
+        (GuardFacts(builds_in_flight=3), "builds-in-flight"),
+    ],
+)
+def test_a_guard_skips_the_draw_in_order_and_still_records_it(guards: GuardFacts, reason: str) -> None:
+    ticket = _ticket(3, plan_first=True, touches=("a", "b", "c", "d"), ticket_type="feature")
+    shares = HarnessShares(build=0.625, review=0.25)
+    open_draw = draw("build", ticket, shares)
+    assert open_draw.picked and open_draw.skipped_reason is None
+    skipped = draw("build", ticket, shares, guards)
+    assert skipped == replace(open_draw, picked=False, skipped_reason=reason)
+
+
+@pytest.mark.parametrize(
+    "readings",
+    [
+        (),
+        (HeadroomReading("five_hour", 0.15, 100.0),),
+        (HeadroomReading("five_hour", 0.1, 50.0), HeadroomReading("seven_day", 0.9, 100.0)),
+    ],
+)
+def test_no_reading_or_a_fresh_reading_at_the_floor_proceeds(readings: tuple[HeadroomReading, ...]) -> None:
+    ticket = _ticket(3, plan_first=True, touches=("a", "b", "c", "d"), ticket_type="feature")
+    result = draw("build", ticket, HarnessShares(build=0.625), GuardFacts(readings=readings))
+    assert result.skipped_reason is None
+    assert result.picked
+
+
+def test_builds_in_flight_do_not_hold_a_review_draw() -> None:
+    ticket = _ticket(3)
+    shares = HarnessShares(review=1.0, max_builds_in_flight=2)
+    review = draw("review", ticket, shares, GuardFacts(builds_in_flight=5))
+    assert review.skipped_reason is None
+    assert review.picked
+    assert draw("build", ticket, shares, GuardFacts(builds_in_flight=1)).skipped_reason is None
