@@ -197,6 +197,7 @@ class JobStep(NamedTuple):
     attempt: int = 1
     job: str = ""
     exposure: dict | None = None
+    suite_wait_seconds: int | None = None
 
 
 class Visit(NamedTuple):
@@ -587,7 +588,8 @@ def job_flow(
             "reason": None if hop is None else labels.get(hop, OFF_CHART),
             "current": i == at,
             "jobs": [
-                {"job": step.job, "action": step.action, "recipient": step.recipient, "exposure": step.exposure}
+                {"job": step.job, "action": step.action, "recipient": step.recipient, "exposure": step.exposure,
+                 "suite_wait_seconds": step.suite_wait_seconds}
                 for step in sorted(jobs[i], key=lambda step: step.created_at)
             ],
         })

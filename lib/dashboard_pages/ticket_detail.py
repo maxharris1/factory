@@ -464,8 +464,10 @@ def _runlog_row(key: str, visit: dict, model: dict) -> str:
 def _runlog_job(job: dict) -> str:
     found = job["exposure"]
     number = "" if found["round"] == UNKNOWN else _span("rnd", f'round {found["round"]}')
+    waited = job.get("suite_wait_seconds")
+    wait = "" if waited is None else _span("wait", f"suite wait {waited}s")
     return (f'<span class="exp-job">{_span("job", job["job"])}{_span("act", job["action"])}{number}'
-            f'{_span("model", model_effort(found) or "unknown")}</span>')
+            f'{_span("model", model_effort(found) or "unknown")}{wait}</span>')
 
 
 def _runlog_jobs(key: str, visit: dict) -> str:

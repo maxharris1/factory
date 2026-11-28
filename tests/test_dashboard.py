@@ -2149,4 +2149,5 @@ def test_tickets_json_carries_a_finished_job_s_exposure(tmp_path: Path) -> None:
             "host": "pc",
             "factory_revision": ["d" * 16, "d" * 16, "d" * 8],
         },
+        "suite_wait_seconds": None,
     }]]
