@@ -25,6 +25,7 @@ from lib.role_router import (
     central_routing,
     sample_json,
 )
+from lib.wait import format_job
 from tests.test_dispatcher import (
     TRUSTED_LOGINS,
     FakeGrokDelivery,
@@ -40,10 +41,10 @@ HEAD = "a" * 40
 ROUTED = replace(factory(), routing=FactoryRouting(budget="medium"))
 
 
-def _go(extra: str = "") -> str:
+def _go(extra: str = "", state: str = "building") -> str:
     return (
         "<!-- orch:v1 kind=go from=grok-bot role=orchestrator "
-        f"state=building {extra}-->\nGo.\n"
+        f"state={state} {extra}-->\nGo.\n"
     )
 
 
@@ -57,6 +58,7 @@ def _table(*, build: float, review: float):
 NOW = 1_800_000_000.0
 BOX = Device("box", 4, {"claude": "claude-bot", "codex": "codex-bot", "gemini": "gemini-bot"}, local=True)
 ONE_GEMINI_DEVICE = MachinesConfig(devices=(BOX,))
+TRUSTED = {**TRUSTED_LOGINS, "github": {**TRUSTED_LOGINS["github"], "gemini-login": {"gemini-bot"}}}
 
 
 def setup(
@@ -69,7 +71,7 @@ def setup(
     dispatcher = Dispatcher(
         path,
         queue,
-        trusted_logins=TRUSTED_LOGINS,
+        trusted_logins=TRUSTED,
         review_actions=FakeReviewActions(),
         grok_delivery=FakeGrokDelivery(),
         projects=projects,
@@ -683,3 +685,139 @@ def test_a_dispatcher_with_no_machines_config_makes_no_draw(
     assert (routing["builder"], routing["reviewer"]) == ("claude", "codex")
     assert "sample" not in routing
     assert guard_reads == []
+
+
+def _clear_sign_in_holds(queue: SQLiteJobQueue) -> None:
+    with queue.connect() as connection:
+        connection.execute(f"DELETE FROM {account_doctor.HOLDS}")
+
+
+@pytest.fixture
+def routed_samples(monkeypatch: pytest.MonkeyPatch) -> list[Sample | None]:
+    samples: list[Sample | None] = []
+    real = Dispatcher._routed
+
+    def spied(self: Dispatcher, ticket: object) -> object:
+        routed = real(self, ticket)
+        samples.append(None if routed.router_picks is None else routed.router_picks.sample)
+        return routed
+
+    monkeypatch.setattr(Dispatcher, "_routed", spied)
+    return samples
+
+
+def test_the_draw_routed_makes_on_the_go_poll_is_stored_once_and_replayed_after_a_sign_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    guard_reads: list[GuardFacts],
+    routed_samples: list[Sample | None],
+) -> None:
+    _shares(monkeypatch, build=1.0, review=0.0)
+    dispatcher, queue = setup(tmp_path)
+    go = comment("go-1", _go(), author="grok-login")
+    _sign_in_hold(queue)
+
+    dispatcher.process(ticket(factory_config=ROUTED))
+
+    with queue.connect() as connection:
+        assert connection.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
+
+    _clear_sign_in_holds(queue)
+    del routed_samples[:]
+    dispatcher.process(ticket(go, factory_config=ROUTED))
+
+    stored = _routing(queue, "build")
+    drawn = [sample_json(sample) for sample in routed_samples if sample is not None]
+    assert drawn and all(sample == stored["sample"] for sample in drawn)
+    assert stored["builder"] == "gemini" and stored["sample"]["build"]["picked"] is True
+    assert guard_reads[-1] == GuardFacts()
+
+    _sign_in_hold(queue)
+    reads = len(guard_reads)
+    del routed_samples[:]
+    dispatcher.process(ticket(go, factory_config=ROUTED))
+
+    assert len(guard_reads) == reads
+    assert routed_samples and all(sample_json(sample) == stored["sample"] for sample in routed_samples)
+    assert _routing(queue, "build") == stored
+
+
+def _handoff(
+    comment_id: str, kind: str, bot: str, role: str, created_at: int, fields: str = "", body: str = ""
+) -> object:
+    return comment(
+        comment_id,
+        f"<!-- orch:v1 kind={kind} from={bot}-bot role={role} {fields}-->\n{body}{kind}.\n",
+        author=f"{bot}-login",
+        created_at=created_at,
+    )
+
+
+def _claimed(queue: SQLiteJobQueue, recipient: str, action: str, handoff: str) -> tuple[dict, dict]:
+    job = queue.claim(recipient)
+    assert job is not None and job.request.action == action
+    queue.finish(job.id, owner=recipient, handoff_comment_id=handoff)
+    printed = json.loads(format_job(job))
+    return json.loads(job.request.detail)["routing"], json.loads(printed["detail"])["routing"]
+
+
+@pytest.mark.parametrize(
+    ("build", "review", "builder", "reviewer"),
+    [(1.0, 0.0, "gemini", "codex"), (0.0, 1.0, "claude", "gemini")],
+    ids=["gemini-builder", "gemini-reviewer"],
+)
+def test_the_drawn_sample_is_stored_on_the_build_and_review_and_printed_by_orch_wait(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    guard_reads: list[GuardFacts],
+    build: float,
+    review: float,
+    builder: str,
+    reviewer: str,
+) -> None:
+    _shares(monkeypatch, build=build, review=review)
+    dispatcher, queue = setup(tmp_path)
+    go = comment("go-1", _go(), author="grok-login")
+    dispatcher.process(ticket(go, factory_config=ROUTED))
+
+    stored_build, printed_build = _claimed(queue, builder, "build", "ready-1")
+    ready = _handoff("ready-1", "ready", builder, "builder", 2, f"head={HEAD} ")
+    dispatcher.process(ticket(go, ready, head=HEAD, ci={HEAD: CIResult("success")}, factory_config=ROUTED))
+    stored_review, printed_review = _claimed(queue, reviewer, "review", "verdict-1")
+
+    sample = stored_build["sample"]
+    drawn = "build" if builder == "gemini" else "review"
+    assert sample[drawn]["harness"] == "gemini" and sample[drawn]["picked"] is True
+    assert (stored_build["builder"], stored_build["reviewer"]) == (builder, reviewer)
+    assert printed_build["sample"] == stored_review["sample"] == printed_review["sample"] == sample
+
+
+def test_a_gemini_drawn_build_keeps_its_plan_and_fix_on_gemini_with_another_family_reviewing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, guard_reads: list[GuardFacts]
+) -> None:
+    _shares(monkeypatch, build=1.0, review=0.0)
+    dispatcher, queue = setup(tmp_path)
+    go = comment("go-1", _go(state="planning"), author="grok-login")
+    plan = _handoff("plan-1", "plan", "gemini", "builder", 2, "round=1/2 ac=met ", "Estimate: 40\n")
+    ready = _handoff("ready-1", "ready", "gemini", "builder", 3, f"head={HEAD} ")
+    verdict = _handoff(
+        "verdict-1", "verdict", "codex", "reviewer", 4, f"round=1/3 head={HEAD} verdict=REVISE risk=high "
+    )
+
+    def poll(*comments: object) -> None:
+        dispatcher.process(ticket(go, *comments, head=HEAD, ci={HEAD: CIResult("success")}, factory_config=ROUTED))
+
+    poll()
+    planned, _ = _claimed(queue, "gemini", "plan", "plan-1")
+    poll(plan)
+    built, _ = _claimed(queue, "gemini", "build", "ready-1")
+    poll(plan, ready)
+    reviewed, _ = _claimed(queue, "codex", "review", "verdict-1")
+    poll(plan, ready, verdict)
+    fixed, _ = _claimed(queue, "gemini", "fix", "fix-1")
+
+    assert [r["builder"] for r in (planned, built, fixed)] == ["gemini"] * 3
+    assert planned["planner"] == "gemini"
+    assert reviewed["reviewer"] in {"claude", "codex"}
+    assert planned["sample"]["build"]["picked"] is True
+    assert built["sample"] == reviewed["sample"] == fixed["sample"] == planned["sample"]
