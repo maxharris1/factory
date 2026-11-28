@@ -13,3 +13,5 @@
 .uc-name.cursor{color:var(--cursor)}
 .uc-seg.stale .uc-name{color:var(--muted)}
 .uc-stale{font-style:italic;color:var(--muted)}
+.uc-seg.uc-phone{display:none}
+@media (width<760px){.uc-seg{display:none}.uc-seg.uc-phone{display:inline-flex}}

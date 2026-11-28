@@ -1,3 +1,5 @@
+import copy
+import html
 import re
 from pathlib import Path
 
@@ -5,8 +7,10 @@ import pytest
 
 import lib.dashboard_page as page
 from lib.dashboard import render_pages
-from lib.dashboard_pages import efficiency, usage_chip
+from lib.dashboard_pages import efficiency, shell, usage_chip
 from lib.dashboard_static import read_asset
+from tests import test_dashboard_layout as layout
+from tests.test_dashboard_activity import HARNESS
 from tests.test_dashboard_efficiency import CLAUDE_ONLY, _accounts_snapshot, _usage_snapshot
 
 OPEN = '<a class="uchip" id="usage-chip" href="efficiency.html#headroom"'
@@ -17,6 +21,12 @@ CODEX_A_SEGMENT = (
     '<span class="uc-bar" aria-hidden="true"><i style="width:10%"></i></span>'
     '<b>10%</b><span class="uc-reset">30m 00s</span></span>'
 )
+PHONE = (
+    '<span class="uc-seg uc-phone bad"><span class="uc-name">usage</span>'
+    '<span class="uc-bar" aria-hidden="true"><i style="width:10%"></i></span>'
+    '<b>10%</b><span class="uc-reset">30m 00s</span></span>'
+)
+STALE_PHONE = '<span class="uc-seg uc-phone stale"><span class="uc-name">usage</span><span class="uc-stale">stale</span></span>'
 STALE_CLAUDE = '<span class="uc-seg stale"><span class="uc-name claude">claude</span><span class="uc-stale">stale</span></span>'
 TITLE = (
     "Subscription headroom\n"
@@ -66,9 +76,14 @@ def test_no_tracked_account_draws_a_hidden_empty_link(tmp_path: Path) -> None:
     assert usage_chip._usage_chip(snapshot) == HIDDEN
 
 
-def test_no_page_draws_the_chip_yet(tmp_path: Path) -> None:
-    pages = render_pages(_accounts_snapshot(tmp_path))
-    assert not [name for name, html in pages.items() if "usage-chip" in html]
+def test_every_page_mounts_the_chip_just_before_the_link_badge(tmp_path: Path) -> None:
+    snapshot = _accounts_snapshot(tmp_path)
+    chip = usage_chip._usage_chip(snapshot)
+    pages = {name: text for name, text in render_pages(snapshot).items() if "usage-chip" in text}
+    assert set(pages) == {*shell.NAV_PAGES, "ticket.html", "evals.html", "settings.html"}
+    for text in pages.values():
+        assert text.count('id="usage-chip"') == 1
+        assert f'</nav>{chip}<div class="link boot" id="link"' in text
 
 
 def test_the_css_is_served() -> None:
@@ -222,3 +237,148 @@ def _own_colour(css: str, classes: set[str]) -> str | None:
 def test_a_harness_with_no_token_keeps_the_text_colour(harness: str) -> None:
     assert _own_colour(page.app_css(), {"ok"}) == "var(--ok)"
     assert _own_colour(page.app_css(), {"uc-name", harness}) == "var(--text-2)"
+
+
+def _go_all_stale(snapshot: dict) -> None:
+    for entry in snapshot["usage"]["accounts"]:
+        if entry["headroom"] is not None:
+            _go_stale(entry)
+
+
+def test_the_phone_segment_is_the_lowest_harness_labelled_usage(tmp_path: Path) -> None:
+    snapshot = _accounts_snapshot(tmp_path)
+    model = usage_chip.chip_model(snapshot)
+    [codex] = [s for s in model["segments"] if s["harness"] == "codex"]
+    assert model["phone"] == {**codex, "harness": "usage"}
+    assert usage_chip._usage_chip(snapshot).endswith(f"{PHONE}</a>")
+
+
+def test_the_phone_segment_reads_usage_stale_when_no_harness_is_fresh(tmp_path: Path) -> None:
+    snapshot = _accounts_snapshot(tmp_path)
+    _go_all_stale(snapshot)
+    assert usage_chip.chip_model(snapshot)["phone"] == {"harness": "usage", "pct": None}
+    chip = usage_chip._usage_chip(snapshot)
+    assert chip.endswith(f"{STALE_PHONE}</a>")
+
+
+def test_no_tracked_account_has_no_phone_segment(tmp_path: Path) -> None:
+    snapshot = _usage_snapshot(tmp_path, CURSOR_ONLY)
+    assert usage_chip.chip_model(snapshot)["phone"] is None
+    assert "uc-phone" not in usage_chip._usage_chip(snapshot)
+
+
+def _display(css: str, classes: set[str], narrow: bool) -> str:
+    rules = [(sel, body, False) for sel, body in re.findall(r"([^{}@]+)\{([^{}]*)\}", re.sub(r"@media[^{]*\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}", "", css))]
+    for query, block in re.findall(r"@media\s*([^{]*)\{((?:[^{}]*\{[^{}]*\})*)[^{}]*\}", css):
+        assert query.strip() == "(width<760px)", query
+        if narrow:
+            rules += [(sel, body, True) for sel, body in re.findall(r"([^{}]+)\{([^{}]*)\}", block)]
+    best = ((0, -1), "inline")
+    for order, (selectors, body, _) in enumerate(rules):
+        declared = re.search(r"(?:^|;)display:([^;]+)", body)
+        for compound in (s.strip() for s in selectors.split(",")):
+            if declared and re.fullmatch(r"(\.[\w-]+)+", compound) and set(compound[1:].split(".")) <= classes:
+                best = max(best, ((compound.count("."), order), declared.group(1)))
+    return best[1]
+
+
+def test_only_the_phone_segment_shows_below_760() -> None:
+    harness, phone = {"uc-seg", "ok"}, {"uc-seg", "uc-phone", "bad"}
+    assert [_display(usage_chip.CSS, harness, False), _display(usage_chip.CSS, phone, False)] == ["inline-flex", "none"]
+    assert [_display(usage_chip.CSS, harness, True), _display(usage_chip.CSS, phone, True)] == ["none", "inline-flex"]
+
+
+CHIP_HARNESS = HARNESS.replace("global.window = global;", "const chipMount = ids['usage-chip'];\nglobal.window = global;", 1).replace(
+    "    } else if (kind === 'poll') {",
+    "    } else if (kind === 'chip') {\n"
+    "      const mount = ids['usage-chip'];\n"
+    "      steps.push({chip: {html: mount.children.map(c => c.html()).join(''), hidden: !!mount.hidden,\n"
+    "        title: 'title' in mount.attrs ? mount.attrs.title : null,\n"
+    "        aria: 'aria-label' in mount.attrs ? mount.attrs['aria-label'] : null, same: mount === chipMount}});\n"
+    "    } else if (kind === 'poll') {",
+    1,
+)
+CHIP_IDS = [*layout.BAR, "usage-chip"]
+
+
+def _served(snapshot: dict) -> dict:
+    chip = usage_chip._usage_chip(snapshot)
+    head, inner = chip[: chip.index(">")], chip[chip.index(">") + 1 : -len("</a>")]
+    attrs = {name: html.unescape(value) for name, value in re.findall(r' ([\w-]+)="([^"]*)"', head)}
+    return {"html": inner, "hidden": head.endswith(" hidden"), "title": attrs.get("title"),
+            "aria": attrs.get("aria-label"), "same": True}
+
+
+def _chips(tmp_path: Path, snapshot: dict, actions: list, page_key: str = "main", script: str | None = None) -> list[dict]:
+    from lib.dashboard_page import page_script
+    assert "kind === 'chip'" in CHIP_HARNESS and "chipMount = ids" in CHIP_HARNESS
+    script = script or page_script(snapshot.get("statechart"))
+    out = layout.run_harness(tmp_path, CHIP_HARNESS, script, snapshot, page_key, CHIP_IDS, actions)
+    return [step["chip"] for step in out["steps"] if "chip" in step]
+
+
+def _limited(tmp_path: Path) -> dict:
+    return _accounts_snapshot(tmp_path, limit="codex-a")
+
+
+def _codex_stale(tmp_path: Path) -> dict:
+    snapshot = _accounts_snapshot(tmp_path)
+    for account in ("codex-a", "codex-b"):
+        _go_stale(_entry(snapshot, account))
+    return snapshot
+
+
+def _untracked(tmp_path: Path) -> dict:
+    return _usage_snapshot(tmp_path, CURSOR_ONLY)
+
+
+def _one_window(tmp_path: Path) -> dict:
+    return _usage_snapshot(tmp_path, CLAUDE_ONLY, five_hour=0.41)
+
+
+def _hostile(tmp_path: Path) -> dict:
+    snapshot = _accounts_snapshot(tmp_path)
+    _entry(snapshot, "codex-a")["label"] = 'a<b"&c\'d'
+    return snapshot
+
+
+@layout.needs_node
+@pytest.mark.parametrize(("make", "page_key"), [
+    (_accounts_snapshot, "main"), (_accounts_snapshot, "settings"), (_limited, "main"), (_codex_stale, "main"),
+    (_untracked, "main"), (_one_window, "main"), (_hostile, "main"),
+])
+def test_the_script_draws_the_chip_the_server_draws(tmp_path: Path, make, page_key: str) -> None:
+    snapshot = make(tmp_path / "snap")
+    assert _chips(tmp_path / "run", snapshot, [["chip", None]], page_key) == [_served(snapshot)]
+
+
+@layout.needs_node
+def test_the_script_takes_its_tones_from_usage_tone(tmp_path: Path) -> None:
+    from lib.dashboard_page import page_script
+    snapshot = _usage_snapshot(tmp_path / "snap", CLAUDE_ONLY, five_hour=0.2, seven_day=0.1)
+    rule = "function usageTone(x) { return x >= 0.5 ? 'ok' : x >= 0.2 ? 'warn' : 'bad'; }"
+    script = page_script(snapshot.get("statechart"))
+    assert script.count(rule) == 1
+    [stock] = _chips(tmp_path / "stock", snapshot, [["chip", None]])
+    [swapped] = _chips(tmp_path / "swapped", snapshot, [["chip", None]],
+                       script=script.replace(rule, "function usageTone(x) { return 'warn'; }"))
+    assert stock == _served(snapshot)
+    assert re.findall(r'class="uc-seg (?:uc-phone )?(\w+)"', stock["html"]) == ["ok", "ok"]
+    assert re.findall(r'class="uc-seg (?:uc-phone )?(\w+)"', swapped["html"]) == ["warn", "warn"]
+
+
+@layout.needs_node
+def test_a_poll_with_new_usage_redraws_the_chip_in_place(tmp_path: Path) -> None:
+    first = _accounts_snapshot(tmp_path / "snap")
+    lower = copy.deepcopy(first)
+    lower["generated_at_epoch"] += 2
+    _entry(lower, "codex-b")["headroom"] = 0.05
+    gone = copy.deepcopy(first)
+    gone["generated_at_epoch"] += 4
+    gone["usage"]["accounts"] = []
+    back = copy.deepcopy(first)
+    back["generated_at_epoch"] += 6
+    assert len({usage_chip._usage_chip(s) for s in (first, lower, gone)}) == 3
+    actions = [["chip", None], ["poll", lower], ["chip", None], ["poll", gone], ["chip", None], ["poll", back], ["chip", None]]
+    chips = _chips(tmp_path / "run", copy.deepcopy(first), actions)
+    assert chips == [_served(s) for s in (first, lower, gone, back)]
