@@ -8,6 +8,11 @@ file: the CLI or the rollout reader runs as the account and only its stdout
 comes back. Every reading is stored through `usage_readings.store` in one
 transaction, under its own account and device, with JOB_ID and the
 harness's bot user.
+
+Before its first ssh call `run` stamps its `now` into the one-row
+`usage_refresh` table, kept as a maximum, and commits. `due(connection,
+now)` is true when no pass has started or when `now` falls in a later
+SLOT_SECONDS slot of the wall clock than the stored start.
 """
 
 from __future__ import annotations
@@ -29,6 +34,17 @@ from lib.usage_readings import NOT_TRACKED, SOURCES, Reading
 JOB_ID = "orch-usage-refresh"
 DEADLINE_SECONDS = 30.0
 NO_READING = "no reading in the reply"
+TABLE = "usage_refresh"
+SLOT_SECONDS = 30 * 60
+
+_SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS {TABLE} (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    started_at REAL NOT NULL
+)
+"""
+_STAMP = (f"INSERT INTO {TABLE} (id, started_at) VALUES (1, ?) "
+          "ON CONFLICT(id) DO UPDATE SET started_at = MAX(started_at, excluded.started_at)")
 
 Outcome = Literal["read", "signed-out", "mismatch", "unreachable", "not tracked", "probe failed"]
 
@@ -99,6 +115,12 @@ def _not_read(row: account_doctor.SignIn, harness: str) -> Result | None:
     return None
 
 
+def due(connection: sqlite3.Connection, now: float) -> bool:
+    connection.execute(_SCHEMA)
+    row = connection.execute(f"SELECT started_at FROM {TABLE}").fetchone()
+    return row is None or now // SLOT_SECONDS > row[0] // SLOT_SECONDS
+
+
 def run(
     connection: sqlite3.Connection,
     config: MachinesConfig,
@@ -106,6 +128,9 @@ def run(
     now: float,
     repo: str | None,
 ) -> list[Result]:
+    connection.execute(_SCHEMA)
+    connection.execute(_STAMP, (now,))
+    connection.commit()
     rows = account_doctor.run(connection, config, transport, now, repo)
     results: dict[tuple[str, str], Result] = {}
     pairs: list[_Pair] = []
