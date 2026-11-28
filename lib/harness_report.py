@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -308,3 +309,62 @@ def _order(row: Row) -> tuple:
         row.plan_first,
         row.mark,
     )
+
+
+def _text(value: object) -> str:
+    return "-" if value is None else str(value)
+
+
+def _yes_no(value: bool) -> str:
+    return "yes" if value else "no"
+
+
+def _measure(measure: Measure) -> str:
+    return "-" if measure.value is None else f"{measure.value:.2f} ({measure.of})"
+
+
+def _verdicts(mix: VerdictMix | None) -> str:
+    return "-" if mix is None else f"A{mix.approve} R{mix.revise} B{mix.blocked}"
+
+
+def _field(name: str, show: Callable[..., str] = _text) -> Callable[[Row], str]:
+    return lambda row: show(getattr(row, name))
+
+
+COLUMNS: tuple[tuple[str, Callable[[Row], str]], ...] = (
+    ("role", _field("role")),
+    ("harness", _field("harness")),
+    ("model", _field("model")),
+    ("risk", _field("risk")),
+    ("plan-first", _field("plan_first", _yes_no)),
+    ("mark", _field("mark")),
+    ("tickets", _field("tickets")),
+    ("jobs", _field("jobs")),
+    ("share", _field("share", _measure)),
+    ("rounds", _field("rounds_to_approve", _measure)),
+    ("verdicts", _field("verdicts", _verdicts)),
+    ("fix-rounds", _field("fix_rounds", _measure)),
+    ("first-push-ci", _field("first_push_ci", _measure)),
+    ("lines", _field("changed_lines", _measure)),
+    ("minutes", _field("elapsed_minutes", _measure)),
+    ("tokens-in", _field("tokens_in", _measure)),
+    ("tokens-cached", _field("tokens_cached", _measure)),
+    ("tokens-out", _field("tokens_out", _measure)),
+    ("cost-usd", _field("cost_usd", _measure)),
+)
+
+FOOTER = (
+    "first-push CI is approximate because it reads the first CI status the dispatcher "
+    "recorded for each ticket, not necessarily the first push.\n"
+    "- means unknown; (n) is the count measured."
+)
+
+
+def render(rows: list[Row]) -> str:
+    table = [[header for header, _ in COLUMNS]]
+    table += [[cell(row) for _, cell in COLUMNS] for row in rows]
+    widths = [max(len(line[i]) for line in table) for i in range(len(COLUMNS))]
+    lines = ["  ".join(c.ljust(w) for c, w in zip(line, widths)).rstrip() for line in table]
+    if not rows:
+        lines.append("no jobs ran in this window")
+    return "\n".join(lines) + "\n\n" + FOOTER

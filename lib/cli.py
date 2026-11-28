@@ -34,6 +34,7 @@ from lib import (
     containers,
     doctor_live,
     exposure,
+    harness_report,
     health,
     job_detail,
     job_run,
@@ -229,6 +230,7 @@ commands:
   status           read-only snapshot of the queue, devices and paused tickets
   retry            ask the dispatcher to restart a stuck ticket (kind=retry)
   trace            read-only: every job attempt on a ticket and its handoff verdict
+  harness-report   read-only per-role, per-harness, per-model outcome report
   usage            per-account usage readings: migrate orch.db, record an external reading, refresh every pair (#772)
   accounts         prepare account folders, check sign-ins, run the dashboard sign-in broker
 
@@ -613,6 +615,19 @@ trace <owner/repo>#<n> [--db PATH] [--json]
   --json prints a JSON list. Exits 2 on a bad ticket, 1 when the database
   cannot be read.
 
+harness-report [--db PATH] [--since TIME] [--repo OWNER/NAME] [--json]
+  Print one row per role, harness and model, split by the ticket's risk and
+  whether a plan job ran first, marked sampled when a Gemini draw picked the
+  job and default otherwise. Each row counts tickets and jobs and shows the
+  share, rounds to approve, verdicts, fix rounds, first-push CI, changed
+  lines, minutes, tokens and cost; a measure shows its mean and (n), the
+  count measured, and - means unknown. --since YYYY-MM-DDTHH:MM:SSZ counts
+  jobs created at or after it. --repo matches case-insensitively. --json
+  prints the same rows as a JSON list.
+  Read-only: opens --db (default $ORCH_DB) with mode=ro, no GitHub call,
+  starts no job. Exits 2 on a bad --since or a missing database, 1 when the
+  database cannot be read.
+
 usage migrate [--db PATH]
   Key the usage readings on the account (#772). Takes the labelled backup
   usage-accounts (as db-backup does) first, then adds usage_readings.account
@@ -772,6 +787,8 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_retry, argv[1:])
     if argv[0] == "trace":
         return _call(_trace, argv[1:])
+    if argv[0] == "harness-report":
+        return _call(_harness_report, argv[1:])
     if argv[0] == "usage":
         return _call(_usage, argv[1:])
     if argv[0] == "accounts":
@@ -2458,6 +2475,46 @@ def _trace(argv: list[str]) -> int:
             "; ".join(row.earlier_exits),
         )
         print("\t".join(field or "-" for field in fields))
+    return 0
+
+
+_UTC_SECOND = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+
+
+def _harness_report(argv: list[str]) -> int:
+    parser = _Parser(prog="orch harness-report", add_help=True)
+    parser.add_argument("--db", type=Path, default=os.environ.get(DB_ENV) or None)
+    parser.add_argument("--since")
+    parser.add_argument("--repo")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    since = None
+    if args.since is not None:
+        try:
+            if not _UTC_SECOND.fullmatch(args.since):
+                raise ValueError(args.since)
+            since = (
+                datetime.strptime(args.since, "%Y-%m-%dT%H:%M:%SZ")
+                .replace(tzinfo=timezone.utc)
+                .timestamp()
+            )
+        except ValueError:
+            parser.error(f"--since {args.since!r} is not YYYY-MM-DDTHH:MM:SSZ")
+    if args.db is None:
+        parser.error(f"no dispatcher database (pass --db or set {DB_ENV})")
+    database: Path = args.db
+    if not database.is_file():
+        parser.error(f"{database}: no such database")
+    try:
+        rows = harness_report.rows(database, since=since, repo=args.repo)
+    except (sqlite3.Error, OSError) as exc:
+        why = " ".join(str(exc).split()) or type(exc).__name__
+        print(f"orch harness-report: {database}: {why}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps([asdict(row) for row in rows], indent=2))
+    else:
+        print(harness_report.render(rows))
     return 0
 
 
