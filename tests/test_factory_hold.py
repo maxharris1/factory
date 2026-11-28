@@ -176,7 +176,7 @@ def test_the_factory_repo_applies_its_hold_on_ship_handoff(tmp_path: Path) -> No
     assert would_block.blocks is True
 
     held = snapshot(
-        approve(reviewer="gemini"),
+        approve(),
         factory=config,
         labels=("factory:hold",),
         files=("orch.yml",),

@@ -296,7 +296,6 @@ class FactoryPrWorld:
                         "claude-bot",
                         "codex-bot",
                         "cursor-bot",
-                        "gemini-bot",
                     },
                 },
                 "linear": {},
@@ -345,7 +344,7 @@ def test_a_labelled_factory_pr_with_only_a_builder_ready_is_tracked_and_reviewed
     assert tracked_rows(queue) == [(FACTORY_REPO, "51", "github")]
     assert outcomes(queue) == {"9001": "queued-review"}
     assert actions.states == ["review"]
-    review = queue.claim("gemini")
+    review = queue.claim("codex")
     assert review is not None
     assert (review.request.repo, review.request.ticket_id) == (FACTORY_REPO, "51")
     assert (review.request.action, review.request.head) == ("review", PR_HEAD)
@@ -359,7 +358,7 @@ def test_a_short_ready_head_that_prefixes_the_pr_head_is_tracked(
     queue, _actions = factory_pr_poll(tmp_path, DOCUMENTED_READY.format(head=PR_HEAD[:12]))
 
     assert tracked_rows(queue) == [(FACTORY_REPO, "51", "github")]
-    review = queue.claim("gemini")
+    review = queue.claim("codex")
     assert review is not None and review.request.head == PR_HEAD
 
 
@@ -409,7 +408,6 @@ def test_a_ready_that_fails_any_intake_rule_does_not_start_tracking(
     assert tracked_rows(queue) == []
     assert outcomes(queue) == {}
     assert actions.states == []
-    assert queue.claim("gemini") is None
     assert queue.claim("codex") is None
 
 
@@ -434,7 +432,7 @@ def test_an_unlabelled_factory_pr_with_a_trusted_ready_is_tracked_and_reviewed(
     assert outcomes(queue) == {"9001": "queued-review"}
     # The poller writes the state label once tracking has started.
     assert actions.states == ["review"]
-    review = queue.claim("gemini")
+    review = queue.claim("codex")
     assert review is not None
     assert (review.request.repo, review.request.ticket_id) == (FACTORY_REPO, "51")
     assert (review.request.action, review.request.head) == ("review", PR_HEAD)
@@ -520,10 +518,10 @@ def test_the_same_ready_comment_or_head_never_queues_a_second_review(
     world.poll()
 
     assert tracked_rows(world.queue) == [(FACTORY_REPO, "51", "github")]
-    assert world.jobs() == [("review", "gemini", PR_HEAD, "queued")]
+    assert world.jobs() == [("review", "codex", PR_HEAD, "queued")]
     assert outcomes(world.queue)["9001"] == "queued-review"
-    assert world.queue.claim("gemini") is not None
-    assert world.queue.claim("gemini") is None
+    assert world.queue.claim("codex") is not None
+    assert world.queue.claim("codex") is None
 
 
 def test_a_ready_naming_a_new_head_queues_a_new_review(tmp_path: Path) -> None:
@@ -531,15 +529,13 @@ def test_a_ready_naming_a_new_head_queues_a_new_review(tmp_path: Path) -> None:
     world = FactoryPrWorld(tmp_path, labels=())
     world.gh.comments = [gh_comment(9001, DOCUMENTED_READY.format(head=PR_HEAD))]
     world.poll()
-    first = world.queue.claim("gemini")
+    first = world.queue.claim("codex")
     assert first is not None and first.request.head == PR_HEAD
-    world.queue.finish(first.id, owner="gemini", handoff_comment_id="9002")
+    world.queue.finish(first.id, owner="codex", handoff_comment_id="9002")
     world.gh.comments.append(
         gh_comment(
             9002,
-            VERDICT.format(round="1/3", head=PR_HEAD, verdict="REVISE", risk="high").replace(
-                "from=codex-bot", "from=gemini-bot"
-            ),
+            VERDICT.format(round="1/3", head=PR_HEAD, verdict="REVISE", risk="high"),
             minute=5,
         )
     )
@@ -562,11 +558,11 @@ def test_a_ready_naming_a_new_head_queues_a_new_review(tmp_path: Path) -> None:
         "9003": "queued-review",
     }
     assert world.jobs() == [
-        ("review", "gemini", PR_HEAD, "done"),
+        ("review", "codex", PR_HEAD, "done"),
         ("fix", "claude", PR_HEAD, "done"),
-        ("review", "gemini", new_head, "queued"),
+        ("review", "codex", new_head, "queued"),
     ]
-    second = world.queue.claim("gemini")
+    second = world.queue.claim("codex")
     assert second is not None
     assert json.loads(str(second.request.detail))["round"] == "2/3"
 
@@ -591,7 +587,7 @@ def test_a_stale_ready_does_not_track_but_a_ready_for_the_new_tip_does(
         "9001": "stale-ready-head",
         "9002": "queued-review",
     }
-    assert world.jobs() == [("review", "gemini", new_head, "queued")]
+    assert world.jobs() == [("review", "codex", new_head, "queued")]
 
 
 # Codex PR #64 r1 F1.1: an unlabelled PR is admitted only through the #59
@@ -655,7 +651,7 @@ def test_an_unlabelled_pr_with_only_a_trusted_matching_ready_is_still_tracked(
     assert tracked_rows(world.queue) == [(FACTORY_REPO, "51", "github")]
     assert outcomes(world.queue) == {"9002": "queued-review"}
     assert world.actions.states == ["review"]
-    assert world.jobs() == [("review", "gemini", PR_HEAD, "queued")]
+    assert world.jobs() == [("review", "codex", PR_HEAD, "queued")]
 
 
 def test_a_labelled_pr_with_a_grok_go_is_still_tracked_on_the_go(
@@ -704,14 +700,14 @@ def test_review_and_fix_work_from_an_unlabelled_pr_hold_a_slot_on_the_dashboard(
         (FACTORY_REPO, "51", "review")
     ]
 
-    review = world.queue.claim("gemini")
+    review = world.queue.claim("codex")
     assert review is not None
     reviewing = snapshot()
     assert reviewing["slots"]["box"] == {"name": "box", "running": 1, "slot_max": 3}
     assert [
         (item["repo"], item["ticket_id"], item["action"], item["recipient"], item["device"])
         for item in reviewing["running"]
-    ] == [(FACTORY_REPO, "51", "review", "gemini", "box")]
+    ] == [(FACTORY_REPO, "51", "review", "codex", "box")]
     assert {
         (item["repo"], item["ticket_id"], item["tracker"], item["state"])
         for item in reviewing["tickets"]
@@ -720,13 +716,11 @@ def test_review_and_fix_work_from_an_unlabelled_pr_hold_a_slot_on_the_dashboard(
     devices = {item["name"]: item["enabled"] for item in reviewing["slots"]["devices"]}
     assert (devices["pc"], devices["mac"]) == (False, False)
 
-    world.queue.finish(review.id, owner="gemini", handoff_comment_id="9002")
+    world.queue.finish(review.id, owner="codex", handoff_comment_id="9002")
     world.gh.comments.append(
         gh_comment(
             9002,
-            VERDICT.format(round="1/3", head=PR_HEAD, verdict="REVISE", risk="high").replace(
-                "from=codex-bot", "from=gemini-bot"
-            ),
+            VERDICT.format(round="1/3", head=PR_HEAD, verdict="REVISE", risk="high"),
             minute=10,
         )
     )

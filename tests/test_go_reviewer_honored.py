@@ -45,6 +45,17 @@ def _gemini_builds(config: FactoryConfig) -> FactoryConfig:
     )
 
 
+def _gemini_reviews(config: FactoryConfig) -> FactoryConfig:
+    assert config.routing is not None
+    return replace(
+        config,
+        routing=replace(
+            config.routing,
+            slots={"review": (("gemini", "gemini-4-neon", "high"),)},
+        ),
+    )
+
+
 def _dispatcher(tmp_path: Path, refused: tuple[str, ...]) -> tuple[Dispatcher, SQLiteJobQueue]:
     path = tmp_path / "d.db"
     queue = SQLiteJobQueue(path, clock=lambda: 100.0)
@@ -66,11 +77,17 @@ def _dispatcher(tmp_path: Path, refused: tuple[str, ...]) -> tuple[Dispatcher, S
 @pytest.mark.parametrize(
     ("configure", "refused", "reviewer"),
     [
-        (lambda config: config, lambda: (), ("gemini", "gemini-4-neon")),
+        (lambda config: config, lambda: (), ("codex", "gpt-6.2-sol")),
+        (_gemini_reviews, lambda: (), ("gemini", "gemini-4-neon")),
         (lambda config: config, _checked_in_refused, ("codex", "gpt-6.2-sol")),
         (_gemini_builds, lambda: (), ("codex", "gpt-6.2-sol")),
     ],
-    ids=["gemini-eligible", "gemini-refused-in-orch-yml", "after-a-gemini-build"],
+    ids=[
+        "codex-heads-the-list",
+        "gemini-review-slot",
+        "gemini-refused-in-orch-yml",
+        "after-a-gemini-build",
+    ],
 )
 def test_review_is_queued_for_the_reviewer_choose_route_picked(
     tmp_path: Path, configure, refused, reviewer: tuple[str, str]

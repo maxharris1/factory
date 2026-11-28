@@ -32,7 +32,7 @@ The `build` lists are unchanged. A ticket that does not win the build draw build
 
 ## How the draw works
 
-The dispatcher draws when it first routes a ticket in a repo whose `factory.md` has a `routing:` block, and only for a side whose pool comes from `config/routing.yml`. A side a `go` names (`builder=` or `reviewer=`), or a side a `factory.md` slot overrides, takes no draw.
+The dispatcher draws when it first routes a ticket in a repo whose `factory.md` has a `routing:` block, and only for a side whose pool comes from `config/routing.yml`. A `go` that names `builder=` or `reviewer=` routes both sides as it says, so neither side draws, even the side it leaves out. A side a `factory.md` slot overrides takes no draw either.
 
 1. Each role draws once per ticket. The value is the first 8 bytes of `sha256("<repo>#<ticket>:<role>")` read as a fraction of 2^64, with the repo in lower case. It never uses the clock or a shared random generator, so the same ticket always gets the same value.
 2. The draw wins when the value is below the role's chance and no guard holds. A won draw moves Gemini to the front of that role's pool. The rest of the pool keeps its order, and the refused, unavailable and same-family filters still apply.
@@ -51,7 +51,7 @@ The build chance is `min(1, build * weight / 1.25)`. A ticket's weight is `0.5 +
 
 The weight runs from 0.5 to 2.0, and 1.25 is the reference mean, so the long-run build share stays near `build`. With `build: 0.25`, a low-risk bug fix that needs no plan wins 10% of the time, and a high-risk, plan-first feature that touches 4 or more paths wins 40% of the time.
 
-A Gemini-built ticket never reviews on Gemini, because the reviewer must be outside the builder's family. The review chance is therefore raised for the other tickets to keep the long-run review share near `review`. It is `min(1, review / (1 - c))`, where `c` is the ticket's build chance when the build draw was not skipped by a guard, and 0 otherwise. A won review draw on a Gemini-built ticket is recorded as lost with `skipped_reason: same-family`.
+A Gemini-built ticket never reviews on Gemini, because the reviewer must be outside the builder's family. The review chance is therefore raised for the other tickets to keep the long-run review share near `review`. It is `min(1, review / (1 - c))`, where `c` is the ticket's build chance when the build draw was not skipped by a guard, and 0 otherwise. On a Gemini-built ticket every review draw that no guard skipped, won or lost, is recorded as lost with `skipped_reason: same-family`.
 
 ### Guards
 
@@ -67,8 +67,10 @@ A guard skips the draw. The role keeps its list order, and the first guard that 
 
 ## Turning a share off
 
-- Set `shares.gemini.build: 0` to stop Gemini builds. No build draw is made or recorded, and builds take the `build` lists.
-- Set `shares.gemini.review: 0` to stop Gemini reviews. No review draw is made or recorded, and reviews take `roles.review` in order, Codex first.
+- Set `shares.gemini.build: 0` to turn the build share off. No build draw is made or recorded, and builds take the `build` lists in order.
+- Set `shares.gemini.review: 0` to turn the review share off. No review draw is made or recorded, and reviews take `roles.review` in order, Codex first.
 - Remove the `shares:` block to turn both off. The block's absence means both shares are 0.
+
+A share of 0 stops the draw, not Gemini. Gemini stays a fallback in the `build` and `review` lists, so it still runs a job when every candidate above it is refused, unavailable or same-family: a build when `claude` and `codex` are refused, or a review of a Claude-built ticket when `codex` is refused. To keep Gemini off every job, add `gemini` to `orch.yml` `refused_harnesses`.
 
 A ticket already routed keeps its stored route either way.

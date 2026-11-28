@@ -6,10 +6,11 @@ import pytest
 from lib.factory_md import HoldConfig
 from lib.hold import decide
 from tests.test_dispatcher import FakeReviewActions, comment
-from tests.test_hold_blocks_handoff import MAX, assert_root_held, root_approve, root_snapshot
+from tests.test_hold_blocks_handoff import MAX, assert_root_held, root_snapshot
 from tests.test_ship_hold import (
     HEAD,
     NEW_HEAD,
+    approve,
     ready,
     setup,
     workflow_state,
@@ -38,10 +39,10 @@ def test_a_maxharris1_slash_ok_at_the_head_hands_off_on_the_factory_repo(
 ) -> None:
     dispatcher, queue, actions = setup(tmp_path)
     ready(dispatcher, queue)
-    dispatcher.process(root_snapshot(root_approve()))
+    dispatcher.process(root_snapshot(approve()))
     assert_root_held(queue, actions)
 
-    dispatcher.process(root_snapshot(root_approve(), slash_ok(f"/ok {HEAD}")))
+    dispatcher.process(root_snapshot(approve(), slash_ok(f"/ok {HEAD}")))
 
     assert actions.handoffs == [HEAD]
     assert workflow_state(queue) == "merge-queue"
@@ -121,6 +122,6 @@ def test_the_factory_repo_stays_held_on_a_slash_ok_that_does_not_count(
     )
     ready(dispatcher, queue, head)
 
-    dispatcher.process(root_snapshot(root_approve(head), held_ok, head=head))
+    dispatcher.process(root_snapshot(approve(head), held_ok, head=head))
 
     assert_root_held(queue, actions, head)
