@@ -9,7 +9,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from lib import account_doctor, account_signin, signin_wake, usage_probe, usage_readings, usage_refresh
+from lib import account_doctor, account_signin, usage_probe, usage_readings, usage_refresh
 from lib.queue import SQLiteJobQueue
 from lib.remote import Exchanged
 from tests.test_account_doctor import CURSOR_SIGNED_IN, SIGNED_OUT_CLAUDE, claude_reply, framed
@@ -119,8 +119,8 @@ def test_the_scheduled_pass_runs_no_login_command_and_moves_no_reply(tmp_path: P
 
     transport = Recording()
     with contextlib.closing(queue.connect()) as connection:
-        usage_refresh.run(connection, config, transport, NOW, REPO)
-        jobs = signin_wake.announce(queue, config, REPO)
+        assert usage_refresh.due(connection, NOW), "the pass is due"
+        jobs = usage_refresh.poll_pass(queue, transport, REPO, config, NOW, True)
 
         assert set(transport.exchanges) <= allowed, "every exchange is a status probe or a usage read"
         assert transport.runs == [], "the pass runs no ssh command outside exchange"

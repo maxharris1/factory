@@ -12,11 +12,15 @@ harness's bot user.
 Before its first ssh call `run` stamps its `now` into the one-row
 `usage_refresh` table, kept as a maximum, and commits. `due(connection,
 now)` is true when no pass has started or when `now` falls in a later
-SLOT_SECONDS slot of the wall clock than the stored start.
+SLOT_SECONDS slot of the wall clock than the stored start. `poll_pass` is
+the poller's sign-in entry. It runs `run` or `account_doctor.run`, as the
+device monitor decided, then `signin_wake.announce` even when the pass
+raised.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import time
@@ -25,8 +29,9 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Literal, get_args
 
-from lib import account_doctor, harnesses, usage_probe, usage_readings
+from lib import account_doctor, harnesses, signin_wake, usage_probe, usage_readings
 from lib.machines_yml import MachinesConfig
+from lib.queue import Job, SQLiteJobQueue
 from lib.remote import ByteTransport
 from lib.usage_probe import ProbeFailed
 from lib.usage_readings import NOT_TRACKED, SOURCES, Reading
@@ -188,6 +193,22 @@ def run(
         connection.execute("ROLLBACK")
         raise
     return [results[row.account, row.device] for row in rows]
+
+
+def poll_pass(
+    queue: SQLiteJobQueue,
+    transport: ByteTransport,
+    repo: str | None,
+    config: MachinesConfig,
+    now: float,
+    usage: bool,
+) -> list[Job]:
+    try:
+        with contextlib.closing(queue.connect()) as connection:
+            (run if usage else account_doctor.run)(connection, config, transport, now, repo)
+    finally:
+        wakes = signin_wake.announce(queue, config, repo)
+    return wakes
 
 
 @dataclass(frozen=True)

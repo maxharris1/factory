@@ -17,7 +17,7 @@ from lib.queue import JobRequest, SQLiteJobQueue
 from lib.remote import SSH_UNREACHABLE, Exchanged
 from lib.usage_probe import REQUEST
 from tests.pool_helpers import poller_adopts
-from tests.test_account_doctor import EMAIL_B, ORG_B, SIGNED_OUT_CLAUDE, claude_reply, framed
+from tests.test_account_doctor import EMAIL_B, ORG_B, SIGNED_OUT_CLAUDE, claude_reply, framed, poller
 from tests.test_remote_start import config_of
 
 NOW = 1_800_000_000.0
@@ -369,6 +369,19 @@ def test_a_pass_is_due_once_per_half_hour_slot(world) -> None:
     refresh(world, Transport(), NOW + SLOT + 45)
     assert not usage_refresh.due(connection, NOW + 2 * SLOT - 1)
     assert usage_refresh.due(connection, NOW + 2 * SLOT), "due by the clock slot, 1755 seconds after the last start"
+
+
+def test_a_restart_does_not_rerun_the_pass(tmp_path: Path) -> None:
+    first = poller(tmp_path)
+    first.poll(0.0)
+    assert len(first.transport.reads) == 3
+
+    restarted = poller(tmp_path)
+    restarted.poll(600.0)
+    assert sorted(restarted.transport.exchanges) == ["pc-claude-bot", "pc-codex-bot"]
+    assert restarted.transport.reads == []
+    restarted.poll(float(SLOT))
+    assert len(restarted.transport.reads) == 3
 
 
 def test_an_on_demand_run_keeps_the_next_slot(world, monkeypatch) -> None:

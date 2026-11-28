@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import json
 import re
@@ -11,7 +10,7 @@ from collections import defaultdict
 from collections.abc import Callable, Collection, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 from lib import attention, epoch, lane_limit
 from lib.harness_env import account_tokens, harness_env
@@ -26,9 +25,6 @@ from lib.remote import (
     ByteTransport,
     _login,
 )
-
-if TYPE_CHECKING:
-    from lib.queue import SQLiteJobQueue
 
 Status = Literal["ok", "signed-out", "mismatch", "unreachable"]
 Harness = Literal["claude", "codex", "cursor", "gemini"]
@@ -887,10 +883,3 @@ def run(
     rows = observe(config, transport, now)
     write(connection, rows, config, repo, now, deliberate=deliberate)
     return rows
-
-
-def check(
-    queue: SQLiteJobQueue, transport: ByteTransport, repo: str | None, config: MachinesConfig, now: float
-) -> None:
-    with contextlib.closing(queue.connect()) as connection:
-        run(connection, config, transport, now, repo)

@@ -71,13 +71,17 @@ device ends its sweep for the poll after one failed check. A requeue
 placed back on the same device carries a new tag and is never stopped by
 mistake.
 
-Sign-ins. After reconcile, `check_sign_ins` runs the account doctor
-(lib/account_doctor.py) on the first poll, at once on the poll after a new
-sign-in hold appears, every `HELD_INTERVAL_SECONDS` while any hold is
-open, every `INTERVAL_SECONDS` otherwise, and once on the poll after reload
-adopts a changed machines.yml. After the doctor, the pass runs the sign-in
-wake (lib/signin_wake.py), which queues one Grok wake for each drop not yet
-announced.
+Sign-ins. After reconcile, `check_sign_ins` reads two clocks. The usage
+clock (lib/usage_refresh.py `due`) is due once per `SLOT_SECONDS` slot of
+the wall clock, by the start time the last pass stored, so a restart does
+not rerun a pass. When it is due the whole usage refresh pass runs: the
+account doctor (lib/account_doctor.py), then the usage reads. Otherwise the
+doctor's clock (`account_doctor.due`) runs the doctor alone on the first
+poll, at once on the poll after a new sign-in hold appears, every
+`HELD_INTERVAL_SECONDS` while any hold is open, every `INTERVAL_SECONDS`
+otherwise, and once on the poll after reload adopts a changed
+machines.yml. After either, the sign-in wake (lib/signin_wake.py) queues
+one Grok wake for each drop not yet announced, even when the pass raised.
 
 Memory. After reconcile and before `check_sign_ins`, `check_memory` reads
 /proc/meminfo and /proc/pressure/memory on each enabled device not
@@ -98,7 +102,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from lib import account_doctor, live_settings
+from lib import account_doctor, live_settings, usage_refresh
 from lib.device_memory import HOLD_SECONDS, READ_TIMEOUT_SECONDS, over_limit
 from lib.device_pool import (
     DevicePool,
@@ -139,7 +143,7 @@ from lib.worktrees import pid_alive
 Log = Callable[[str], None]
 OnLost = Callable[[str, str, str], None]  # job_id, device, reason
 Alive = Callable[[int | None, str | None], bool]
-SignIns = Callable[[MachinesConfig, float], object]
+SignIns = Callable[[MachinesConfig, float, bool], object]
 Reading = tuple[str | None, str | None]
 MemoryRead = Callable[[Device, bool], Reading]
 
@@ -294,10 +298,11 @@ class DeviceMonitor:
         last = self._signed[0] if self._signed is not None and self._signed[1] == self._stamp else None
         with contextlib.closing(self.pool.queue.connect()) as connection:
             newest = account_doctor.newest_hold(connection)
-        if not account_doctor.due(last, newest, now):
+            usage = usage_refresh.due(connection, now)
+        if not (usage or account_doctor.due(last, newest, now)):
             return False
         self._signed = (now, self._stamp)
-        self.sign_ins(self.config, now)
+        self.sign_ins(self.config, now, usage)
         return True
 
     def check_memory(self, log: Log) -> tuple[tuple[str, str], ...]:
