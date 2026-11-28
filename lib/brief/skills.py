@@ -82,9 +82,14 @@ _READ_WITH = {
 BUILDER_ROUTER = _factory("factory-builder/SKILL.md")
 
 
+def deployed_path(rel: str, factory_root: str | None) -> str | None:
+    if factory_root is None or _root_problem(factory_root) is not None:
+        return None
+    return f"{factory_root}/{rel}"
+
+
 def method_only_note(factory_root: str | None) -> str:
-    usable = factory_root is not None and _root_problem(factory_root) is None
-    path = BUILDER_ROUTER.under(factory_root) if usable else f"{BUILDER_ROUTER.path} in the deployed factory checkout"
+    path = deployed_path(BUILDER_ROUTER.path, factory_root) or f"{BUILDER_ROUTER.path} in the deployed factory checkout"
     return (
         f"Your router is `{path}`. It gives a merge-only or rebase job no playbook and no helpers, "
         "so this Method is the whole job."

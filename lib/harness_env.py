@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from lib.orch_yml import Approvals
 
 CPU_CAP = 4
+TEST_WORKERS = 2
 
 _BY_HARNESS = {
     driver.name: dict(driver.extra_env())
@@ -51,7 +52,7 @@ ACCOUNT_ISOLATION = MappingProxyType(
 def cpu_cap_env(cap: int = CPU_CAP) -> dict[str, str]:
     """Vitest 1 and 2 default a pool's minimum to host CPUs - 1 and refuse a
     maximum below it, so each maximum goes with a minimum of 1."""
-    workers = str(max(cap - 1, 1))
+    workers = str(max(min(TEST_WORKERS, cap - 1), 1))
     return {
         "ORCH_CPU_CAP": str(cap),
         "PYTEST_XDIST_AUTO_NUM_WORKERS": workers,

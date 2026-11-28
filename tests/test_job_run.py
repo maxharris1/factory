@@ -15,7 +15,7 @@ import pytest
 
 from lib import exposure, job_run, process_tree, usage_readings
 from lib.brief.skills import Router, resolve, section
-from lib.harness_env import CPU_CAP, cpu_cap_env
+from lib.harness_env import CPU_CAP, TEST_WORKERS, cpu_cap_env
 from lib.job_state import JobStateConfig
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
 from tests.fake_docker import Docker
@@ -732,7 +732,7 @@ def test_cli_job_run_heartbeats_and_passes_the_job_to_the_command(tmp_path: Path
         "ORCH_JOB_BOT": "codex-bot",
         "ORCH_DB": str(tmp_path / "orch.db"),
         "ORCH_CPU_CAP": "4",
-        "PYTEST_XDIST_AUTO_NUM_WORKERS": "3",
+        "PYTEST_XDIST_AUTO_NUM_WORKERS": str(TEST_WORKERS),
         "ORCH_TEST_SUITE_MAX": "1",
     }
     after = _last_activity(queue, job.id)
@@ -1620,9 +1620,9 @@ def test_cli_job_run_runs_a_box_job_as_its_slots_account_and_reads_every_account
 
 CAPPED_ENV = {
     "ORCH_CPU_CAP": "4",
-    "PYTEST_XDIST_AUTO_NUM_WORKERS": "3",
-    "VITEST_MAX_THREADS": "3",
-    "VITEST_MAX_FORKS": "3",
+    "PYTEST_XDIST_AUTO_NUM_WORKERS": str(TEST_WORKERS),
+    "VITEST_MAX_THREADS": str(TEST_WORKERS),
+    "VITEST_MAX_FORKS": str(TEST_WORKERS),
     "VITEST_MIN_THREADS": "1",
     "VITEST_MIN_FORKS": "1",
 }
