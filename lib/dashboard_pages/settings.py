@@ -12,7 +12,7 @@ import math
 import time
 
 from lib.account_requests import ADD_REFUSED
-from lib.dashboard_pages.common import _chip, _e, _panel, _span
+from lib.dashboard_pages.common import _chip, _e, _panel, _span, duration
 from lib.dashboard_static import read_asset
 
 RESULT_TONE = {"applied": "ok", "pending": "warn", "ok": "ok", "signed-out": "muted", "mismatch": "warn",
@@ -25,6 +25,8 @@ WAITING = "waiting for the poller's next cycle"
 NO_CHANGES = "no changes yet"
 SIGN_IN_TONE = {"ok": "ok", "mismatch": "warn", "signed-out": "bad", "unreachable": "warn"}
 UNCHECKED = "unchecked"
+READING = {"ok": ("read {} ago", "ac-when"), "stale": ("stale, read {} ago", "warn"),
+           "no reading": ("no reading", "ac-when")}
 ACCOUNT_READ_ONLY = {"default": "read-only: default account", "external": "read-only: external account"}
 NOT_SIGNED_IN = "not signed in on any device"
 NO_ACCOUNTS = "no accounts: machines.yml lists none"
@@ -178,12 +180,14 @@ def _sign_in(entry: dict) -> str:
     checked = entry.get("checked_at")
     same = entry.get("same_login_as") or []
     command = entry.get("command")
+    read = READING.get(entry.get("reading"))
     return (
         f'<li class="ac-dev" data-device="{_e(entry["device"])}">{_span("ac-name", entry["device"])}'
         + _chip(status or UNCHECKED, SIGN_IN_TONE.get(status, "muted"))
         + _span(None, entry.get("auth_method")) + _span(None, entry.get("subscription_type"))
         + (_span("ac-when", "checked " + time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(checked)))
            if checked is not None else "")
+        + (_span(read[1], read[0].format(duration(entry.get("reading_age")))) if read else "")
         + (_span(None, "same login as " + ", ".join(same)) if same else "")
         + (f'<span class="ac-sign">{_e(sign_in_label(entry))}<code class="ac-cmd">{_e(command)}</code></span>'
            if command is not None else "")
@@ -221,7 +225,7 @@ _SCRIPT = read_asset("js/settings.js")
 SCRIPT = _SCRIPT.replace("__ST__", json.dumps(
     {"tone": RESULT_TONE, "perCard": RESULTS_PER_CARD, "queued": QUEUED, "readOnly": READ_ONLY,
      "waiting": WAITING, "noChanges": NO_CHANGES, "signIn": SIGN_IN_TONE, "unchecked": UNCHECKED,
-     "accountReadOnly": ACCOUNT_READ_ONLY, "notSignedIn": NOT_SIGNED_IN, "noAccounts": NO_ACCOUNTS,
+     "reading": READING, "accountReadOnly": ACCOUNT_READ_ONLY, "notSignedIn": NOT_SIGNED_IN, "noAccounts": NO_ACCOUNTS,
      "harnesses": ADD_HARNESSES, "signinHarnesses": SIGNIN_HARNESSES, "remind": SIGNIN_REMIND,
      "addRefused": dict(ADD_REFUSED)}
 ))
