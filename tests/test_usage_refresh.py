@@ -5,12 +5,13 @@ import json
 import re
 import sqlite3
 import threading
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 
-from lib import lane_limit, schema, usage_readings, usage_refresh
+from lib import cli, lane_limit, schema, self_deploy, usage_readings, usage_refresh
 from lib.device_pool import DevicePool
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.remote import SSH_UNREACHABLE, Exchanged
@@ -281,3 +282,54 @@ def test_a_read_still_running_at_the_deadline_fails_only_its_own_pair(world, mon
     assert results["claude-default", "far"].outcome == "read"
     _, connection, _ = world
     assert "codex-default" not in {account for account, _, _ in stored(connection)}
+
+
+REFRESHED = [
+    "claude-default@pc unreachable 5h - 7d - unreachable: no ssh_alias for claude on pc",
+    "claude-default@far ok 5h 20% 7d 20% read now",
+    "claude-b@far signed-out 5h 40% 7d 40% 2h old (get_usage); signed-out: not logged in",
+    "codex-default@far ok 5h 30% 7d 30% 1h old (rollout)",
+    "cursor-default@far ok 5h - 7d - not tracked: " + usage_readings.NOT_TRACKED["cursor"],
+    "gemini-default@far ok 5h - 7d - probe failed: ssh exit 1",
+    "6 pairs: 2 read, 1 signed-out, 1 unreachable, 1 not tracked, 1 probe failed",
+]
+
+
+def test_orch_usage_refresh_prints_the_pairs_and_creates_no_job_row(world, monkeypatch, capsys) -> None:
+    queue, connection, path = world
+    transport = Transport()
+    transport.status["far-claude-bot"] = framed((0, 0, claude_reply()), (1, 1, SIGNED_OUT_CLAUDE))
+    transport.usage["far-gemini-bot", None] = Exchanged(1, b"", "boom")
+    usage_readings.store(
+        connection, harness="claude", bot="claude-bot", device="far", job_id="job-1",
+        readings=usage_readings.parse_get_usage(get_usage(40), NOW - 7200), account="claude-b",
+    )
+    connection.commit()
+    monkeypatch.setattr(cli, "SshTransport", lambda: transport)
+    monkeypatch.setattr(time, "time", lambda: NOW)
+    monkeypatch.setattr(self_deploy, "own_repo", lambda _root: "owner/factory")
+    argv = ["usage", "refresh", "--db", str(queue.path), "--machines", str(path)]
+
+    assert cli.main(argv) == 0
+    assert capsys.readouterr().out.splitlines() == REFRESHED
+    assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+
+    assert cli.main([*argv, "--json"]) == 0
+    pairs = {(p["account"], p["device"]): p for p in json.loads(capsys.readouterr().out)}
+    assert len(pairs) == 6
+    assert all(set(p) == {"account", "device", "harness", "status", "outcome", "detail",
+                          "five_hour", "seven_day", "reading_age", "source"} for p in pairs.values())
+    assert {key: pairs["claude-b", "far"][key] for key in ("status", "five_hour", "reading_age", "source")} == {
+        "status": "signed-out", "five_hour": 0.4, "reading_age": 7200, "source": "get_usage"}
+    assert (pairs["cursor-default", "far"]["status"], pairs["cursor-default", "far"]["five_hour"]) == ("ok", None)
+
+
+def test_orch_usage_refresh_exit_codes(world, tmp_path: Path, monkeypatch) -> None:
+    queue, _, path = world
+    monkeypatch.setattr(cli, "SshTransport", Transport)
+    db, machines = ["--db", str(queue.path)], ["--machines", str(path)]
+
+    assert cli.main(["usage", "refresh", *db, *machines, "--bogus"]) == 2
+    assert cli.main(["usage", "refresh", *db, "--machines", str(tmp_path / "absent.yml")]) == 2
+    assert cli.main(["usage", "refresh", "--db", str(tmp_path / "missing-dir" / "d.db"), *machines]) == 1
+    assert cli.main(["usage", "refresh", "--db", str(tmp_path), *machines]) == 1
