@@ -19,6 +19,7 @@ e0183d64d82d37d7a87ac7b1b6754224f8d19db0 renders only the 35 unsuffixed goldens,
 regenerating.
 Neither commit has the panels added since, so copy their files too: `lib/dashboard_pages/counts.py`, `lib/dashboard_static/css/counts.css`, `lib/dashboard_static/js/counts.js`.
 `_routing.html` renders the checked-in `config/routing.yml`, so copy it too.
+`_needs_max.html` draws the inbox cards added since, so copy `lib/dashboard_pages/cockpit.py` too.
 From the repo root, with `sha` set to one of them:
 
     git worktree add --detach /tmp/golden-$sha $sha
@@ -27,5 +28,6 @@ From the repo root, with `sha` set to one of them:
     cp lib/dashboard_static/css/counts.css /tmp/golden-$sha/lib/dashboard_static/css/counts.css
     cp lib/dashboard_static/js/counts.js /tmp/golden-$sha/lib/dashboard_static/js/counts.js
     cp config/routing.yml /tmp/golden-$sha/config/routing.yml
+    cp lib/dashboard_pages/cockpit.py /tmp/golden-$sha/lib/dashboard_pages/cockpit.py
     (cd /tmp/golden-$sha && GOLDEN_UPDATE=1 python3 -m pytest -q -p no:cacheprovider tests/test_dashboard_golden.py)
     diff -r tests/golden/dashboard /tmp/golden-$sha/tests/golden/dashboard

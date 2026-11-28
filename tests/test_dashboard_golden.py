@@ -77,7 +77,7 @@ PANELS: dict[str, Callable[[dict], str]] = {
 NET_NEW = (
     "lib/dashboard_pages/counts.py", "lib/dashboard_static/css/counts.css", "lib/dashboard_static/js/counts.js",
 )
-COPIED = (*NET_NEW, "config/routing.yml")
+COPIED = (*NET_NEW, "config/routing.yml", "lib/dashboard_pages/cockpit.py")
 
 REPRODUCE = f"""\
     git worktree add --detach /tmp/golden-$sha $sha
@@ -107,6 +107,7 @@ Update mode deletes every `.html` here that the harness does not render. {SOURCE
 regenerating.
 Neither commit has the panels added since, so copy their files too: {", ".join(f"`{path}`" for path in NET_NEW)}.
 `_routing.html` renders the checked-in `config/routing.yml`, so copy it too.
+`_needs_max.html` draws the inbox cards added since, so copy `lib/dashboard_pages/cockpit.py` too.
 From the repo root, with `sha` set to one of them:
 
 {REPRODUCE}
