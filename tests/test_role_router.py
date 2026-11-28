@@ -978,6 +978,8 @@ def test_a_zero_share_gives_the_defaults_table_no_entry_for_that_role() -> None:
 
 
 _THREE = ("claude", "codex", "gemini")
+_SHIPPED, _ = load_routing_yml(ROOT / ROUTING_PATH)
+_POOLS = (_SHIPPED.roles["build"], _SHIPPED.roles["review"])
 
 
 def test_an_all_any_table_totalling_one_gives_each_harness_its_share() -> None:
@@ -1089,20 +1091,46 @@ def test_the_defaults_table_gives_gemini_exactly_todays_review_chance() -> None:
     for ticket in _synthetic_tickets():
         build = draw("build", ticket, shares)
         today = draw("review", ticket, shares, build=build).chance
-        assert review_chances(table, build_chances(table, ticket, _THREE), "anthropic")["gemini"] == today
-        assert review_chances(table, {}, "anthropic")["gemini"] == draw("review", ticket, shares).chance == 0.25
+        assert review_chances(table, build_chances(table, ticket, _THREE), "anthropic", *_POOLS)["gemini"] == today
+        assert review_chances(table, {}, "anthropic", *_POOLS)["gemini"] == draw("review", ticket, shares).chance == 0.25
 
 
 def test_a_reviewer_in_the_builders_family_gets_no_review_chance() -> None:
     table = ShareTable(review=(ReviewShare("gemini", 0.25),))
-    assert review_chances(table, {}, "google") == {"gemini": 0.0}
+    assert review_chances(table, {}, "google", *_POOLS) == {"gemini": 0.0}
+
+
+def test_a_cursor_reviewer_takes_its_family_from_the_review_pool_model() -> None:
+    table = ShareTable(
+        review=(
+            ReviewShare("cursor", 0.25),
+            ReviewShare("codex", 0.25),
+            ReviewShare("claude", 0.25),
+            ReviewShare("gemini", 0.25),
+        ),
+        version=1,
+    )
+    built = {"codex": 0.5, "claude": 0.25, "gemini": 0.25}
+    chances = review_chances(table, built, "openai", *_POOLS)
+    assert chances["cursor"] == 0.0 == chances["codex"]
+
+
+def test_a_cursor_builder_counts_toward_its_build_pool_models_family() -> None:
+    table = ShareTable(
+        review=(ReviewShare("claude", 0.25), ReviewShare("codex", 0.25), ReviewShare("gemini", 0.5)), version=1
+    )
+    built = {"claude": 0.25, "cursor": 0.25, "gemini": 0.5}
+    chances = review_chances(table, built, "google", *_POOLS)
+    assert chances["claude"] == 0.5
+    assert chances["codex"] == 0.25
+    assert chances["gemini"] == 0.0
 
 
 def test_review_chances_over_one_are_scaled_to_total_one() -> None:
     table = ShareTable(
         review=(ReviewShare("codex", 0.5), ReviewShare("claude", 0.25), ReviewShare("gemini", 0.25)), version=1
     )
-    chances = review_chances(table, {"claude": 0.5, "codex": 0.25, "gemini": 0.25}, "google")
+    chances = review_chances(table, {"claude": 0.5, "codex": 0.25, "gemini": 0.25}, "google", *_POOLS)
     assert chances["gemini"] == 0.0
     assert sum(chances.values()) == pytest.approx(1.0)
     assert chances["codex"] / chances["claude"] == pytest.approx((0.5 / 0.75) / (0.25 / 0.5))
@@ -1122,7 +1150,7 @@ def test_picks_from_review_chances_meet_each_reviewer_share_of_all_reviews() -> 
         builder = _pick(built, draw("build", ticket, HarnessShares()).draw, _THREE[0])
         family = family_for(builder, None)[0]
         fallback = next(h for h in review_pool if family_for(h, None)[0] != family)
-        chances = review_chances(review_table, built, family)
+        chances = review_chances(review_table, built, family, *_POOLS)
         reviewers.append(_pick(chances, draw("review", ticket, HarnessShares()).draw, fallback))
     for harness, target in {"codex": 0.5, "claude": 0.25, "gemini": 0.25}.items():
         assert abs(reviewers.count(harness) / len(reviewers) - target) <= 0.06

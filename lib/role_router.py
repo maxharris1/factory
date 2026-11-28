@@ -730,14 +730,29 @@ def build_chances(table: ShareTable, ticket: TicketFacts, pool: Collection[str])
     return {e.harness: leaning[e.harness] if e.difficulty != "any" else rest[e.harness] for e in entries}
 
 
-def review_chances(table: ShareTable, build_chances: Mapping[str, float], builder_family: str) -> dict[str, float]:
+def _pool_families(pool: Collection[Candidate]) -> Callable[[str], str | None]:
+    families = {c.harness: family_for(c.harness, c.model)[0] for c in pool}
+    return lambda harness: families[harness] if harness in families else family_for(harness, None)[0]
+
+
+def review_chances(
+    table: ShareTable,
+    build_chances: Mapping[str, float],
+    builder_family: str,
+    build_pool: Collection[Candidate],
+    review_pool: Collection[Candidate],
+) -> dict[str, float]:
+    build_family = _pool_families(build_pool)
+    review_family = _pool_families(review_pool)
     chances = {}
     for entry in table.review:
-        family = family_for(entry.harness, None)[0]
+        family = review_family(entry.harness)
         if family == builder_family:
             chances[entry.harness] = 0.0
             continue
-        taken = sum(c for h, c in build_chances.items() if family_for(h, None)[0] == family)
+        taken = (
+            sum(c for h, c in build_chances.items() if build_family(h) == family) if family is not None else 0.0
+        )
         if taken >= 1:
             chances[entry.harness] = 1.0 if entry.share > 0 else 0.0
         else:
