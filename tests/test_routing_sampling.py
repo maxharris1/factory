@@ -18,7 +18,7 @@ from lib.role_router import (
     central_routing,
     sample_json,
 )
-from tests.test_dispatcher import comment, factory, setup, ticket
+from tests.test_dispatcher import comment, factory, setup, ticket, track
 
 HEAD = "a" * 40
 ROUTED = replace(factory(), routing=FactoryRouting(budget="medium"))
@@ -395,3 +395,29 @@ def test_a_factory_md_slots_pool_takes_no_draw_and_leaves_the_review_chance_alon
     assert routing["builder"] == "claude"
     assert "build" not in routing["sample"]
     assert routing["sample"]["review"]["chance"] == 0.25
+
+
+@pytest.mark.parametrize(
+    ("ci", "job", "action"), [("success", "codex", "review"), ("failure", "claude", "fix")]
+)
+def test_a_ready_on_a_newer_head_keeps_the_outside_queue_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ci: str, job: str, action: str
+) -> None:
+    _shares(monkeypatch, build=1.0, review=0.0)
+    dispatcher, queue = setup(tmp_path)
+    ready = _ready_comment()
+    newer = replace(
+        ticket(ready, head=HEAD, ci={HEAD: CIResult(ci)}, factory_config=ROUTED),
+        ready_starts_review=True,
+    )
+    track(queue)
+    dispatcher._fresh_reader = lambda ref: newer
+    stale = replace(newer, current_head="b" * 40, ci={})
+
+    dispatcher.process(stale)
+
+    assert _outcome(queue, "ready-1") == f"queued-{'review' if ci == 'success' else 'ci-fix'}"
+    routing = _routing(queue, action)
+    assert (routing["builder"], routing["reviewer"]) == ("claude", "codex")
+    assert "build" not in routing.get("sample", {})
+    assert queue.claim(job) is not None

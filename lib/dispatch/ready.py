@@ -145,15 +145,20 @@ class ReadyMixin:
             ),
         )
 
+    def _ready_route(self, ticket: TrackedTicket) -> TrackedTicket:
+        if not ticket.ready_starts_review or self._job_builder_harness(ticket) is not None:
+            return ticket
+        routed = self._routed_outside_queue(ticket)
+        self._polled[(routed.repo.lower(), routed.ticket_id)] = routed
+        return routed
+
     def _ready(
         self,
         ticket: TrackedTicket,
         comment: Comment,
         fields: Mapping[str, str],
     ) -> tuple[bool, str]:
-        if ticket.ready_starts_review and self._job_builder_harness(ticket) is None:
-            ticket = self._routed_outside_queue(ticket)
-            self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
+        ticket = self._ready_route(ticket)
         builder_harness = (
             ticket.factory.builder_harness
             if ticket.factory_md is not None
@@ -250,8 +255,8 @@ class ReadyMixin:
             if _at_base(fresh, reported_head):
                 self._ready_at_base(fresh, comment)
                 return True, "rejected-ready-at-base"
-            ticket = fresh
-            self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
+            self._polled[(fresh.repo.lower(), fresh.ticket_id)] = fresh
+            ticket = self._ready_route(fresh)
         if state == "fixing":
             self._restart_ci(ticket, head)
         if rebase is not None and _matching_head(head, rebase.from_head) is not None:
