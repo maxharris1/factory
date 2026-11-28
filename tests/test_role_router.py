@@ -348,6 +348,78 @@ def test_parse_routing_yml_rejects_bad_configs_and_check_config_validates(tmp_pa
     assert cli.main(["check-config", "--allow-placeholders", "--routing", str(bad_file)]) == 1
 
 
+_ROLES_BLOCK = "roles:\n  build:\n    - harness: claude\n"
+
+
+def test_shares_values_reach_the_routing_config() -> None:
+    cfg, findings = parse_routing_yml(
+        _ROLES_BLOCK
+        + "shares:\n  gemini:\n    build: 0.25\n    review: 1\n"
+        "    min_headroom: 0.3\n    max_builds_in_flight: 4\n"
+    )
+    assert findings == []
+    assert cfg is not None
+    assert cfg.share("gemini", "build") == 0.25
+    assert cfg.share("gemini", "review") == 1
+    assert cfg.shares["gemini"].min_headroom == 0.3
+    assert cfg.shares["gemini"].max_builds_in_flight == 4
+
+
+def test_a_gemini_block_with_only_build_takes_the_defaults() -> None:
+    cfg, findings = parse_routing_yml(_ROLES_BLOCK + "shares:\n  gemini:\n    build: 0.5\n")
+    assert findings == []
+    assert cfg is not None
+    assert cfg.share("gemini", "build") == 0.5
+    assert cfg.share("gemini", "review") == 0.0
+    assert cfg.shares["gemini"].min_headroom == 0.15
+    assert cfg.shares["gemini"].max_builds_in_flight == 2
+
+
+@pytest.mark.parametrize(
+    ("shares", "message"),
+    [
+        ("shares:\n  gemini:\n    build: -0.1\n", "shares.gemini.build must be a number from 0 to 1"),
+        ("shares:\n  gemini:\n    review: 1.5\n", "shares.gemini.review must be a number from 0 to 1"),
+        ("shares:\n  gemini:\n    min_headroom: 2\n", "shares.gemini.min_headroom must be a number from 0 to 1"),
+        ("shares:\n  gemini:\n    build: .nan\n", "shares.gemini.build must be a number from 0 to 1"),
+        ("shares:\n  gemini:\n    build: true\n", "shares.gemini.build must be a number from 0 to 1"),
+        ("shares:\n  gemini:\n    build: lots\n", "shares.gemini.build must be a number from 0 to 1"),
+        ("shares:\n  gemini:\n    foo: 0.1\n", "unknown field shares.gemini.'foo'"),
+        ("shares:\n  codex:\n    build: 0.1\n", "shares.'codex' must be one of gemini"),
+        ("shares: 0.5\n", "shares must be a mapping"),
+        ("shares:\n  gemini: 0.5\n", "shares.gemini must be a mapping"),
+        (
+            "shares:\n  gemini:\n    max_builds_in_flight: 2.0\n",
+            "shares.gemini.max_builds_in_flight must be a whole number of at least 0",
+        ),
+        (
+            "shares:\n  gemini:\n    max_builds_in_flight: -1\n",
+            "shares.gemini.max_builds_in_flight must be a whole number of at least 0",
+        ),
+        (
+            "shares:\n  gemini:\n    max_builds_in_flight: true\n",
+            "shares.gemini.max_builds_in_flight must be a whole number of at least 0",
+        ),
+    ],
+)
+def test_an_invalid_shares_block_is_refused(shares: str, message: str) -> None:
+    cfg, findings = parse_routing_yml(_ROLES_BLOCK + shares)
+    assert cfg is None
+    assert [f.message for f in findings if f.severity == "error"] == [message]
+
+
+@pytest.mark.parametrize(
+    "shares",
+    ["", "shares:\n", "shares:\n  gemini:\n    build: 0\n    review: 0\n"],
+)
+def test_a_zero_or_absent_share_means_no_draw(shares: str) -> None:
+    cfg, findings = parse_routing_yml(_ROLES_BLOCK + shares)
+    assert findings == []
+    assert cfg is not None
+    assert cfg.share("gemini", "build") == 0.0
+    assert cfg.share("gemini", "review") == 0.0
+
+
 def _build_detail(harness: str, model: str, effort: str | None = None) -> str:
     routing = {"builder": harness, "builder_model": model}
     if effort is not None:

@@ -16,6 +16,7 @@ Codex, Gemini, and Cursor, with:
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
@@ -61,10 +62,21 @@ ROLE_SLOTS: tuple[str, ...] = (
 )
 _ROLE_SET = frozenset(ROLE_SLOTS)
 
-_TOP_KEYS = frozenset({"budget", "roles", "budget_overrides"})
+_TOP_KEYS = frozenset({"budget", "roles", "budget_overrides", "shares"})
 _CANDIDATE_KEYS = frozenset({"harness", "model", "effort"})
 _MODEL_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _GOOGLE_WORD = re.compile(r"^gemini(?=$|[-._:0-9])")
+_SHARE_HARNESSES = frozenset({"gemini"})
+_SHARE_FIELDS: Mapping[str, Literal["fraction", "count"]] = MappingProxyType({
+    "build": "fraction",
+    "review": "fraction",
+    "min_headroom": "fraction",
+    "max_builds_in_flight": "count",
+})
+_SHARE_RULES: Mapping[str, str] = MappingProxyType({
+    "fraction": "a number from 0 to 1",
+    "count": "a whole number of at least 0",
+})
 
 
 class RoutingError(ValueError):
@@ -82,10 +94,23 @@ SlotEntry = tuple[Candidate, ...] | Literal["inherit"]
 
 
 @dataclass(frozen=True)
+class HarnessShares:
+    build: float = 0.0
+    review: float = 0.0
+    min_headroom: float = 0.15
+    max_builds_in_flight: int = 2
+
+
+@dataclass(frozen=True)
 class RoutingConfig:
     budget: str
     roles: Mapping[str, SlotEntry]
     budget_overrides: Mapping[str, Mapping[str, SlotEntry]] = MappingProxyType({})
+    shares: Mapping[str, HarnessShares] = MappingProxyType({})
+
+    def share(self, harness: str, role: Literal["build", "review"]) -> float:
+        shares = self.shares.get(harness)
+        return 0.0 if shares is None else getattr(shares, role)
 
 
 @dataclass(frozen=True)
@@ -208,6 +233,42 @@ def _validate_slots_map(
     return parsed
 
 
+def _share_value_ok(kind: Literal["fraction", "count"], value: object) -> bool:
+    if isinstance(value, bool):
+        return False
+    if kind == "count":
+        return isinstance(value, int) and value >= 0
+    return isinstance(value, (int, float)) and math.isfinite(value) and 0 <= value <= 1
+
+
+def _validate_shares(raw: object, findings: list[Finding]) -> dict[str, HarnessShares]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        findings.append(Finding("error", "shares must be a mapping"))
+        return {}
+    parsed: dict[str, HarnessShares] = {}
+    for harness, block in raw.items():
+        if harness not in _SHARE_HARNESSES:
+            findings.append(
+                Finding("error", f"shares.{harness!r} must be one of {', '.join(sorted(_SHARE_HARNESSES))}")
+            )
+            continue
+        where = f"shares.{harness}"
+        if not isinstance(block, dict):
+            findings.append(Finding("error", f"{where} must be a mapping"))
+            continue
+        for key in sorted(str(k) for k in set(block) - set(_SHARE_FIELDS)):
+            findings.append(Finding("error", f"unknown field {where}.{key!r}"))
+        values = {key: block[key] for key in _SHARE_FIELDS if key in block}
+        bad = [key for key, value in values.items() if not _share_value_ok(_SHARE_FIELDS[key], value)]
+        for key in bad:
+            findings.append(Finding("error", f"{where}.{key} must be {_SHARE_RULES[_SHARE_FIELDS[key]]}"))
+        if not bad:
+            parsed[harness] = HarnessShares(**values)
+    return parsed
+
+
 def parse_routing_yml(text: str) -> tuple[RoutingConfig | None, list[Finding]]:
     try:
         data = load_yaml(text)
@@ -247,6 +308,7 @@ def parse_routing_yml(text: str) -> tuple[RoutingConfig | None, list[Finding]]:
                 overrides[tier] = MappingProxyType(
                     _validate_slots_map(slot_map, f"budget_overrides.{tier}", findings)
                 )
+    shares = _validate_shares(data.get("shares"), findings)
     if any(f.severity == "error" for f in findings):
         return None, findings
     return (
@@ -254,6 +316,7 @@ def parse_routing_yml(text: str) -> tuple[RoutingConfig | None, list[Finding]]:
             budget=budget,
             roles=MappingProxyType(roles),
             budget_overrides=MappingProxyType(overrides),
+            shares=MappingProxyType(shares),
         ),
         findings,
     )
