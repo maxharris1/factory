@@ -378,3 +378,54 @@ def test_show_more_reveals_the_rest_and_stays_open_across_polls(tmp_path: Path, 
     assert browser.eval(shown) == 11
     assert browser.eval("""document.activeElement.tagName + ' ' + document.activeElement.textContent""") == \
         "SUMMARY show 2 more"
+
+
+OPEN = """(function () {
+  var card = document.querySelector('#needs-max [data-cockpit-ticket="%s"]');
+  var main = card.querySelector('.ck-main').getBoundingClientRect(), text = card.querySelector('.ck-qtext');
+  var area = card.querySelector('.ck-form textarea'), box = area.getBoundingClientRect();
+  return {width: card.getBoundingClientRect().width, grid: card.parentElement.getBoundingClientRect().width,
+          index: [].indexOf.call(document.querySelectorAll('#needs-max .ck-card'), card),
+          scroll: text ? text.scrollHeight : 0, client: text ? text.clientHeight : 0,
+          beside: box.left >= main.right, below: box.top >= main.bottom, shown: card.checkVisibility(),
+          open: !!card.closest('details') && card.closest('details').open,
+          value: area.value, focused: document.activeElement === area};
+})()"""
+
+
+def _answer(browser: Browser, ticket: str) -> None:
+    browser.eval(f"""document.querySelector('#needs-max [data-cockpit-ticket="{ticket}"] [data-ck-act="answer"]').click()""")
+
+
+@needs_chrome
+@pytest.mark.parametrize("width", [1440, 760, 759])
+def test_an_open_composer_takes_the_full_row_beside_the_whole_question(tmp_path: Path, browser: Browser,
+                                                                       width: int) -> None:
+    ticket = "maxharris1/aut0#11"
+    browser.open(_stubbed(_with_questions(_inbox(tmp_path), 9), signed_in=True), width)
+    _wait_for_buttons(browser)
+    _answer(browser, ticket)
+    opened = browser.eval(OPEN % ticket)
+    assert abs(opened["width"] - opened["grid"]) <= 1, opened
+    assert opened["scroll"] <= opened["client"], opened
+    assert opened["below" if width < 760 else "beside"], opened
+    browser.call("Input.insertText", text="Ship OAuth first.")
+    _poll(browser)
+    polled = browser.eval(OPEN % ticket)
+    assert (polled["index"], polled["width"], polled["value"], polled["focused"]) == \
+        (opened["index"], opened["width"], "Ship OAuth first.", True), polled
+    _answer(browser, ticket)
+    closed = browser.eval(OPEN % ticket)
+    assert closed["scroll"] > closed["client"], closed
+    if width >= 760:
+        assert closed["width"] < closed["grid"] / 1.5, closed
+    if width != 1440:
+        return
+    ninth = "maxharris1/zeta#105"
+    _answer(browser, ninth)
+    browser.call("Input.insertText", text="Keep it.")
+    _poll(browser, """var rows = window.snapshot.tickets, row = JSON.parse(JSON.stringify(rows.filter(function (t) {
+        return t.repo === 'maxharris1/zeta' && t.ticket_id === '105'; })[0]));
+      row.repo = 'maxharris1/alpha'; row.ticket_id = '1'; row.record = 'maxharris1/alpha#1'; rows.push(row);""")
+    moved = browser.eval(OPEN % ninth)
+    assert (moved["open"], moved["shown"], moved["value"]) == (True, True, "Keep it."), moved

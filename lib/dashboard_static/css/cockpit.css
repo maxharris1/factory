@@ -48,3 +48,9 @@
 .ck-status.ck-conflict{color:#ff9e64}
 .ck-status.ck-ok{color:#9ece6a}
 .ck-ticket{margin-top:14px}
+.ck-inbox:has(>.ck-form>textarea:not([hidden])){grid-column:1/-1}
+.ck-inbox:has(>.ck-form>textarea:not([hidden])) .ck-qtext{display:block;overflow:visible}
+@media (min-width:760px){.ck-inbox:has(>.ck-form>textarea:not([hidden])){display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);grid-template-rows:auto 1fr;gap:10px 16px;align-content:start}}
+@media (min-width:760px){.ck-inbox:has(>.ck-form>textarea:not([hidden]))>.ck-main{grid-column:1;grid-row:1/span 2}}
+@media (min-width:760px){.ck-inbox:has(>.ck-form>textarea:not([hidden]))>.ck-actions,.ck-inbox:has(>.ck-form>textarea:not([hidden]))>.ck-form{grid-column:2;align-self:start}}
+@media (min-width:760px){.ck-inbox:has(>.ck-form>textarea:not([hidden])) .ck-media img,.ck-inbox:has(>.ck-form>textarea:not([hidden])) .ck-media video{height:220px}}
