@@ -2378,10 +2378,13 @@ claiming a job, a heartbeat, a job finishing, the poller recording a
 verdict) and the end of every poll cycle start `orch dashboard push --once
 --status-only --last-cycle <time>`: a fresh snapshot, of which only
 `status.json` is sent, through the same temp-name upload and one `ssh ... mv`
-rename, so a reader never sees a half-written file. Pushes start at most
-once a second and never while the previous one is still running; a change
-that arrives meanwhile is pushed as soon as both allow, so the last change
-is never dropped. An empty `-wal` counts as none, so the push child's own
+rename, so a reader never sees a half-written file. No push starts while
+the previous one is still running, nor until 5 seconds after the later of
+its start and the watcher tick that saw it end, so even a slow push is
+followed by 5 idle seconds. The watcher settles a finished push on every
+tick, so a change after a quiet spell goes out on the tick that sees it. A
+change that arrives meanwhile is pushed as soon as all of this allows, so
+the last change is never dropped. An empty `-wal` counts as none, so the push child's own
 read-only snapshot never looks like a change. The full set (the four pages
 too) still goes out on the first cycle and then after every cycle, or every
 `every_minutes`. A failed start is one redacted line at most once a

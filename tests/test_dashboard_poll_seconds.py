@@ -133,7 +133,7 @@ def test_live_pushes_pass_the_poll_interval_on_every_status_push(seconds: int) -
     pusher()  # a cycle end: the first push is the full set, with --last-cycle
     assert len(spawned) == 1 and "--status-only" not in spawned[0]
     commits[0] += 1  # a database change seen by the watcher
-    pusher.tick()  # still inside the 1 s live throttle: nothing new starts
+    pusher.tick()
     assert len(spawned) == 1
     now[0] += pusher.min_interval + 0.5  # past the throttle
     pusher.tick()
