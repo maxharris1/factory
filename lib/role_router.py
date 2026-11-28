@@ -888,6 +888,16 @@ def apply_argv_flags(
     return [*argv[:idx], *extra, *argv[idx:]]
 
 
+def routed_slot(routing: dict, *, action: object, harness: str) -> tuple[object, object]:
+    """The (model, effort) a job's routing names for the harness that runs it."""
+    side = "reviewer" if action == "review" else "builder"
+    side_harness = routing.get(side)
+    if side_harness is not None and side_harness != harness:
+        return None, None
+    pick = "plan" if action == "plan" and isinstance(routing.get("planner"), str) else side
+    return routing.get(f"{pick}_model"), routing.get(f"{pick}_effort")
+
+
 def routing_argv_for_detail(
     command: Sequence[str],
     *,
@@ -912,14 +922,7 @@ def routing_argv_for_detail(
     routing = parsed.get("routing")
     if not isinstance(routing, dict):
         return list(command)
-    action = parsed.get("action")
-    side = "reviewer" if action == "review" else "builder"
-    side_harness = routing.get(side)
-    if side_harness is not None and side_harness != harness:
-        return list(command)
-    pick = "plan" if action == "plan" and isinstance(routing.get("planner"), str) else side
-    model = routing.get(f"{pick}_model")
-    effort = routing.get(f"{pick}_effort")
+    model, effort = routed_slot(routing, action=parsed.get("action"), harness=harness)
     if model is None and effort is None:
         return list(command)
     return apply_argv_flags(
