@@ -58,11 +58,22 @@ INTAKE_GROUP = {
 }
 FED_TODAY_SECONDS = 86400
 
+FUNNEL = [
+    {"key": "eligible", "label": "Labelled ready"},
+    {"key": "waiting", "label": "Waiting", "parts": [
+        {"key": "waiting_blocked", "cls": "fb-blocked", "label": "on a blocker or files"},
+        {"key": "waiting_capacity", "cls": "fb-capacity", "label": "for capacity"},
+    ]},
+    {"key": "waiting_capacity", "label": "Next in line"},
+    {"key": "fed_today", "label": "Fed today"},
+    {"key": "fed", "label": "Into the factory", "href": "#counts"},
+]
+
 
 def lanes_table() -> dict:
     return {"tiles": TILE_STATE, "glyph": GLYPH_ORDER, "speed": QUEUE_SPEED,
             "queue_tint": QUEUE_TINT, "belt_tint": BELT_TINT,
-            "intake_group": INTAKE_GROUP, "fed_today": FED_TODAY_SECONDS}
+            "intake_group": INTAKE_GROUP, "fed_today": FED_TODAY_SECONDS, "funnel": FUNNEL}
 
 
 def queue_speed(age: object) -> float:
@@ -437,21 +448,27 @@ def intake_groups(items: list[dict]) -> tuple[list[dict], list[dict], list[dict]
 
 
 def _feeder(snapshot: dict) -> str:
-    """The backlog feeder (#85), Intake's second line and its meter; only once a feeder has run."""
-    from lib.dashboard_pages.shell import px_strip
-
     feeder = snapshot.get("feeder")
     if not feeder:
         return ""
-    meter = px_strip("intake-meter", effect="meter", tint="#9ece6a", used=feeder["fed"],
-                     slots=max(1, feeder["eligible"]), seed=24, height=8, still=True)
-    return (
-        '<div class="irow" id="feeder"><span class="ilabel">Feeder</span>'
-        f'<span class="itext">eligible {_e(feeder["eligible"])} · fed {_e(feeder["fed"])} · '
-        f'waiting for capacity {_e(feeder["waiting_capacity"])} · '
-        f'waiting on blockers or files {_e(feeder.get("waiting_blocked", 0))}</span></div>'
-        f'<div class="imeter" aria-hidden="true">{meter}</div>'
-    )
+    numbers = {**feeder, "fed_today": len(intake_groups(feeder["items"])[2])}
+    stages = []
+    for stage in FUNNEL:
+        parts = [(part, numbers.get(part["key"], 0)) for part in stage.get("parts", [])]
+        count = sum(n for _, n in parts) if parts else numbers.get(stage["key"], 0)
+        body = f'<span class="flabel">{_e(stage["label"])}</span><b class="fnum">{_e(count)}</b>'
+        if parts:
+            body += (
+                '<span class="fbar" aria-hidden="true">'
+                + "".join(f'<i class="{part["cls"]}" style="flex-grow:{_e(n)}"></i>' for part, n in parts)
+                + '</span><span class="fsplit">'
+                + "".join(f'<span>{_e(n)} {_e(part["label"])}</span>' for part, n in parts)
+                + "</span>"
+            )
+        if "href" in stage:
+            body = f'<a href="{_e(stage["href"])}">{body}</a>'
+        stages.append(f'<li class="fstage">{body}</li>')
+    return f'<ol class="funnel" id="feeder">{"".join(stages)}</ol>'
 
 
 def _tier_chip(item: dict) -> str:

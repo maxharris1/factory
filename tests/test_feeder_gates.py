@@ -695,7 +695,7 @@ def test_dashboard_page_renders_the_feeder_reason(tmp_path: Path) -> None:
     )["index.html"]
     assert ('<span class="ticket">app#3</span>'
             '<span class="what">waiting on file lib/dashboard.py held by #1</span>') in page
-    assert "waiting on blockers or files 4" in page
+    assert "4 on a blocker or files" in page
     assert "x.reason || FEEDER_STATE[x.state]" in SCRIPT
 
 
