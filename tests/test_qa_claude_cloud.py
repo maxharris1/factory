@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,7 @@ from lib import qa_runners, qa_smoke
 from lib.factory_md import QA_RUNNERS, QaRunner, parse_factory_md
 from lib.handoff import parse_comment
 from lib.orch_yml import load_orch_yml
-from lib.qa_runners import Lane, LaunchFailed, RunnerOutage, UsageLimit
+from lib.qa_runners import Lane, Launched, LaunchFailed, RunnerOutage, UsageLimit
 from lib.qa_runners.claude_cloud import (
     BINARY_ENV,
     CONFIG_DIR_ENV,
@@ -1331,3 +1332,156 @@ def test_empty_reply_from_url_containing_response403_raises_runner_outage_and_fa
         listener.close()
         thread.join(timeout=2)
         assert not thread.is_alive()
+
+
+# --- Issue #1731 follow-ups from #1730 ---------------------------------------
+
+
+def test_sha_named_remote_branch_launches_at_branch_tip(tmp_path: Path) -> None:
+    """f-1: a configured remote branch whose name is a 40-char SHA launches at that branch's tip."""
+    source, commit1 = _source_repo(tmp_path, branch="main")
+    (source / "second.txt").write_text("second\n", encoding="utf-8")
+    _git("add", "second.txt", cwd=source)
+    _git("commit", "-m", "second", cwd=source)
+    commit2 = _git("rev-parse", "HEAD", cwd=source)
+    assert commit1 != commit2
+
+    # Name a branch after commit1's full lowercase SHA and point it at commit2.
+    _git("branch", commit1, commit2, cwd=source)
+    runner, state_dir = _runner(tmp_path, source=source)
+
+    runner.launch(_lane("lane-sha-branch", base_ref=commit1))
+    call = _calls(state_dir)[-1]
+    assert call["head"] == commit2
+    assert call["branch"] == commit1
+
+    # Once that branch is deleted, passing commit1 still falls back to detached HEAD at commit1.
+    _git("branch", "-D", commit1, cwd=source)
+    runner.launch(_lane("lane-raw-sha", base_ref=commit1))
+    detached_call = _calls(state_dir)[-1]
+    assert detached_call["head"] == commit1
+    assert detached_call["branch"] == "HEAD"
+
+
+def test_missing_session_marker_recovery_preserves_stop_acknowledged_before_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """f-2: stopping a session while missing-marker recovery is paused keeps `ended` and sends one stop."""
+    source, _ = _source_repo(tmp_path)
+    runner_a, state_dir = _runner(tmp_path, source=source)
+    lane = _lane("lane-recover-race-1")
+    launched = runner_a.launch(lane)
+
+    session_marker = runner_a._session_marker(launched.agent_id)
+    assert session_marker.exists()
+    session_marker.unlink()
+
+    runner_b = ClaudeCloudRunner(runner_a.config, home=tmp_path / "home", environ=runner_a._environ)
+    runner_c = ClaudeCloudRunner(runner_a.config, home=tmp_path / "home", environ=runner_a._environ)
+
+    entered = threading.Event()
+    proceed = threading.Event()
+    orig_session_lock = runner_b._session_lock
+
+    def paused_session_lock(agent_id: str) -> Path:
+        entered.set()
+        assert proceed.wait(timeout=5)
+        return orig_session_lock(agent_id)
+
+    monkeypatch.setattr(runner_b, "_session_lock", paused_session_lock)
+
+    recovered: list[Launched] = []
+    errors: list[BaseException] = []
+
+    def _recover() -> None:
+        try:
+            recovered.append(runner_b.launch(lane))
+        except BaseException as exc:  # pragma: no cover
+            errors.append(exc)
+
+    t = threading.Thread(target=_recover)
+    t.start()
+    assert entered.wait(timeout=5)
+
+    # Stop the session by ID while runner_b is paused right before acquiring the session lock.
+    runner_c.stop(launched.agent_id)
+    assert runner_c.status(launched.agent_id) == "ended"
+
+    proceed.set()
+    t.join(timeout=10)
+    assert not errors
+    assert recovered == [launched]
+    assert runner_b.status(launched.agent_id) == "ended"
+    assert runner_c.status(launched.agent_id) == "ended"
+
+    # Calling stop again on the recovered ID must be a no-op (still 1 stop CLI call total).
+    runner_b.stop(recovered[0].agent_id)
+    stop_calls = [c for c in _calls(state_dir) if "-p" in c["argv"]]
+    assert len(stop_calls) == 1
+
+
+def test_missing_session_marker_recovery_serializes_against_concurrent_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """f-2: holding the session lock during missing-marker write serializes concurrent stop."""
+    from lib.qa_runners import claude_cloud
+
+    source, _ = _source_repo(tmp_path)
+    runner_a, state_dir = _runner(tmp_path, source=source)
+    lane = _lane("lane-recover-race-2")
+    launched = runner_a.launch(lane)
+
+    session_marker = runner_a._session_marker(launched.agent_id)
+    session_marker.unlink()
+
+    runner_b = ClaudeCloudRunner(runner_a.config, home=tmp_path / "home", environ=runner_a._environ)
+    runner_c = ClaudeCloudRunner(runner_a.config, home=tmp_path / "home", environ=runner_a._environ)
+
+    entered = threading.Event()
+    proceed = threading.Event()
+    orig_write = claude_cloud._write_json_if_absent
+
+    def paused_write(path: Path, data: Mapping[str, object]) -> bool:
+        if path == session_marker:
+            entered.set()
+            assert proceed.wait(timeout=5)
+        return orig_write(path, data)
+
+    monkeypatch.setattr(claude_cloud, "_write_json_if_absent", paused_write)
+
+    errors: list[BaseException] = []
+    stop_done = threading.Event()
+
+    def _recover() -> None:
+        try:
+            runner_b.launch(lane)
+        except BaseException as exc:  # pragma: no cover
+            errors.append(exc)
+
+    def _stop() -> None:
+        try:
+            runner_c.stop(launched.agent_id)
+        except BaseException as exc:  # pragma: no cover
+            errors.append(exc)
+        finally:
+            stop_done.set()
+
+    t_rec = threading.Thread(target=_recover)
+    t_rec.start()
+    assert entered.wait(timeout=5)
+
+    t_stop = threading.Thread(target=_stop)
+    t_stop.start()
+    # stop() must wait for recovery's session lock rather than racing ahead of it.
+    assert not stop_done.wait(timeout=0.2)
+
+    proceed.set()
+    t_rec.join(timeout=10)
+    t_stop.join(timeout=10)
+    assert not errors
+    assert runner_b.status(launched.agent_id) == "ended"
+    assert runner_c.status(launched.agent_id) == "ended"
+
+    runner_b.stop(launched.agent_id)
+    stop_calls = [c for c in _calls(state_dir) if "-p" in c["argv"]]
+    assert len(stop_calls) == 1
