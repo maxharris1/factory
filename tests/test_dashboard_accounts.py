@@ -167,7 +167,6 @@ def recorded_cursor_snapshot(tmp_path: Path, **kwargs: object) -> dict:
 
 
 def stale_world(tmp_path: Path) -> tuple[Path, Path]:
-    """The world plus a claude-default reading on pc observed 90,000 seconds ago."""
     db, machines = world(tmp_path)
     with contextlib.closing(sqlite3.connect(db)) as connection, connection:
         usage_readings.store(

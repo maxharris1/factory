@@ -742,14 +742,11 @@ UNREAD = Freshness("no reading", None)
 
 
 def freshness_by_pair(rows: Iterable[StoredRow], now: float) -> dict[tuple[str, str], Freshness]:
-    """Each account and device's reading age: `ok` when any of its numbers is,
-    else `stale`. A pair with no valid number is absent (UNREAD)."""
     found: dict[tuple[str, str], list[Reading]] = {}
     for row in rows:
         reading = row.reading()
-        if reading is None or reading.used is None or not isinstance(row.account, str):
-            continue
-        if isinstance(row.device, str):
+        if reading is not None and reading.used is not None and isinstance(row.account, str) \
+                and isinstance(row.device, str):
             found.setdefault((row.account, row.device), []).append(reading)
     return {
         pair: Freshness(
