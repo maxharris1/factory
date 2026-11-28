@@ -34,6 +34,7 @@ from lib.handoff import HandoffError, parse_comment
 from lib.max_actions import wait_facts, wait_of
 from lib.queue import LOCAL_GATE_PASSED, Job, JobRequest, job_from_row, passed_head
 from lib.queue import plan_round as _plan_round
+from lib.role_router import sample_json
 from lib.ticket_type import ticket_type_of
 from lib.update_check import RebaseScope, UpdateScope
 
@@ -986,6 +987,8 @@ def _routing_payload(ticket: TrackedTicket) -> dict[str, object]:
                 payload[f"{side}_model"] = pick.model
             if pick.effort is not None:
                 payload[f"{side}_effort"] = pick.effort
+        if picks.sample is not None:
+            payload["sample"] = sample_json(picks.sample)
     return payload
 
 

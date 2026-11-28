@@ -34,7 +34,7 @@ from lib.dispatch.helpers import (
 )
 from lib.dispatch.transitions import write_workflow_state
 from lib.factory_md import family_findings
-from lib.role_router import Candidate, RoutingError
+from lib.role_router import Candidate, GuardFacts, RoutingError
 from lib.dispatch.types import (
     BaseCheck,
     BaseMismatch,
@@ -482,7 +482,10 @@ class DispatcherBase:
             built_by = None if row is None else str(row["recipient"])
             try:
                 picks = _router_picks(
-                    ticket, self.refused_harnesses, builder_only=built_by
+                    ticket,
+                    self.refused_harnesses,
+                    builder_only=built_by,
+                    guards=self._guard_facts if row is None else None,
                 )
             except RoutingError as error:
                 named = self._routed_by_pending_go(ticket)
@@ -503,7 +506,12 @@ class DispatcherBase:
                     builder, base.builder_model if builder == base.builder_harness else None
                 )
             )
-            fresh = _review_pick(ticket, self.refused_harnesses, built_by)
+            fresh = _review_pick(
+                ticket,
+                self.refused_harnesses,
+                built_by,
+                drawn=picks.sample.review if picks is not None and picks.sample is not None else None,
+            )
             if fresh is not None:
                 reviewer = fresh.harness
                 picks = (
@@ -524,6 +532,9 @@ class DispatcherBase:
                 str(row["source_comment_id"]),
             )
         return routed
+
+    def _guard_facts(self) -> GuardFacts:
+        return GuardFacts(refused="gemini" in self.refused_harnesses)
 
     def _routed_by_pending_go(self, ticket: TrackedTicket) -> TrackedTicket | None:
         for comment in sorted(ticket.comments, key=_comment_order, reverse=True):

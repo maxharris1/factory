@@ -12,7 +12,7 @@ from lib.factory_md import FactoryConfig, no_ci_base
 from lib.hold import LabelEvent, MergeUpdate
 from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES
 from lib.queue import Job
-from lib.role_router import Candidate
+from lib.role_router import Candidate, Sample
 from lib.update_check import HeadDiff, MovedHead, RebaseScope, RetargetDelta, UpdateClass
 
 if TYPE_CHECKING:
@@ -82,6 +82,7 @@ class RouterPicks:
     builder: Candidate
     reviewer: Candidate
     planner: Candidate | None = None
+    sample: Sample | None = None
 
 
 @dataclass(frozen=True)

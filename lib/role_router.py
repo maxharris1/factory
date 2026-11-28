@@ -549,7 +549,7 @@ REFERENCE_MEAN_WEIGHT = 1.25
 @dataclass(frozen=True)
 class TicketFacts:
     repo: str
-    ticket: int
+    ticket: int | str
     risk: str | None
     plan_first: bool
     touches: tuple[str, ...] = ()
