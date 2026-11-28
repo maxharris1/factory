@@ -1659,6 +1659,20 @@ by another owner: 8787 on pc-wsl-cursor-bot)` and exits 3. `orch health
 changes no component's state or reason, so self-heal still skips a held
 tunnel after its one alert.
 
+A job time that is not epoch seconds is a `bad-job-time` item (issue #1787).
+orch.db refuses such a value since #1786, but one stored before that is still
+there. `orch health` reads them from orch.db and lists them. It never prints
+the stored value. Its text ends with `  needs attention: 3 job times are not
+epoch seconds`, then one line per value, such as `  needs attention: job
+2b81e0489a1349e78012ee59ef76692c finished_at holds text`. The kind is `text`,
+`blob`, `infinity` or `null`. It lists the first 20 by job id and then column,
+and the count line adds ` (first 20 listed)` when there are more. `orch health
+--json` adds one entry per listed value to `needs_attention`, after the
+`tunnel-down` entries, as `{"kind": "bad-job-time", "job": <id>, "column":
+<column>, "stored": <kind>}`, and puts the full count in `bad_job_times`. Any
+such value makes `orch health` exit 3. Nothing is migrated. A person repairs
+the row.
+
 ## Self-heal
 
 ```sh
