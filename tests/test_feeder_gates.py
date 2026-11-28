@@ -693,8 +693,10 @@ def test_dashboard_page_renders_the_feeder_reason(tmp_path: Path) -> None:
     page = render_pages(
         collect_snapshot(tmp_path / "orch.db", tmp_path / "none.log", now=20_000.0)
     )["index.html"]
-    assert ('<span class="ticket">app#3</span><span class="ititle" title="Issue 3">Issue 3</span>'
-            '<span class="what">waiting on file lib/dashboard.py held by #1</span>') in page
+    assert ('<div class="iblock"><div class="ihead"><span class="ticket">app#1</span><span class="what">2 waiting</span>'
+            '</div><div class="ichips"><span class="chip muted" title="Issue 3 · waiting on file lib/dashboard.py held by #1">app#3</span>'
+            '<span class="chip muted" title="Issue 2 · waiting on #1">app#2</span>'
+            '</div></div>') in page
     assert "4 on a blocker or files" in page
     assert "x.reason || FEEDER_STATE[x.state]" in SCRIPT
 

@@ -111,6 +111,34 @@ def _six_and_nine(tmp_path: Path) -> dict:
     return snapshot
 
 
+def _blocked_item(issue: int, *refs: str, **extra) -> dict:
+    entries = [{"kind": "file", "ref": ref[5:], "path": "lib/x.py"} if ref.startswith("file:")
+               else {"kind": "ticket", "ref": ref, "path": None} for ref in refs]
+    return _intake_item(issue, "waiting-blocked", blocked_by=entries, **extra)
+
+
+BLOCKER_ITEMS = [
+    *(_blocked_item(issue, "o/factory#50", reason="waiting on #50") for issue in range(101, 109)),
+    _blocked_item(109, "o/factory#51", title="Blocker row", reason="waiting on #51"),
+    _blocked_item(110, "o/factory#52", "o/factory#51", title="Two blockers"),
+    _blocked_item(111, "file:o/factory#52", reason="waiting on file lib/x.py held by #52"),
+    _blocked_item(112),
+    _blocked_item(113, "o/factory#53"),
+    _blocked_item(114, "AUT-7"),
+    _blocked_item(115, "o/factory#51", "file:o/factory#51"),
+    _blocked_item(116, "o/factory#52", "o/factory#55"),
+    _blocked_item(117),
+    _blocked_item(118, "o/factory#54"),
+]
+
+
+def _blockers(tmp_path: Path, items: list[dict] = BLOCKER_ITEMS) -> dict:
+    snapshot = _tiles(tmp_path)
+    kept = [x for x in INTAKE_ITEMS if x["state"] != "waiting-blocked"]
+    snapshot["feeder"].update(waiting_blocked=len(items), items=copy.deepcopy(kept + items))
+    return snapshot
+
+
 COLUMNS = ["Next in line", "Waiting on a blocker or files", "Fed today"]
 EMPTY = ["no ticket is waiting for capacity", "no ticket is waiting on a blocker or files", "no ticket was fed today"]
 
@@ -127,9 +155,16 @@ def _assert_columns(intake: str, rows: list[list[str]], more: list[str | None]) 
     assert len(parts) == 3, cols
     for part, label, issues, last, empty in zip(parts, COLUMNS, rows, more, EMPTY):
         assert part.startswith(f'<div class="igroup">{label}</div>'), part
-        assert re.findall(r'<span class="ticket">factory#(\d+)</span>', part) == issues, (label, part)
+        ticket = r'<span class="chip muted"[^>]*>factory#(\d+)</span>' if label == COLUMNS[1] else (
+            r'<span class="ticket">factory#(\d+)</span>')
+        assert re.findall(ticket, part) == issues, (label, part)
         if not issues:
             assert f'<div class="igroup">{label}</div><p class="empty">{empty}</p></div>' in part, part
+            continue
+        if label == COLUMNS[1]:
+            assert "<li>" not in part and "feed" not in part, part
+            assert part.endswith(f'<p class="more">{last}</p></div>' if last else "</div></div></div>"), part
+            assert last or 'class="more"' not in part, part
             continue
         assert part.count("<li>") == len(issues) and part.count('<ul class="feed">') == 1, part
         tail = part[part.index("</ul>") + len("</ul>") :]
@@ -577,8 +612,10 @@ def _assert_intake_order(intake: str) -> None:
     head, body = intake.split("</h2>", 1)
     assert 'id="linear-webhook"' in head and "waiting" not in head
     t = _ticket_span
+    chips = [f'<span class="chip muted" title="{hover}">factory#{issue}</span>'
+             for issue, hover in ((2, "Header line · waiting on #1"), (5, "waiting on #2"), (8, "waiting on #5"))]
     marks = ['id="feeder"', t(3), t(6), '<div class="icols">', '<div class="igroup">Next in line</div>', t(4), t(9),
-             '<div class="igroup">Waiting on a blocker or files</div>', t(2), t(5), t(8),
+             '<div class="igroup">Waiting on a blocker or files</div>', *chips,
              '<div class="igroup">Fed today</div>', t(1), t(10)]
     at = [body.index(mark) for mark in marks]
     assert at == sorted(at), [marks[i] for i, _ in sorted(enumerate(at), key=lambda x: x[1])]
@@ -657,9 +694,10 @@ def _feeder_only(tmp_path: Path) -> dict:
 @needs_node
 @pytest.mark.parametrize(
     ("panel", "build"),
-    [("lanes", _tiles), ("just-happened", _tiles), ("intake", _tiles),
+    [("lanes", _tiles), ("just-happened", _tiles), ("intake", _blockers), ("intake", _tiles),
      ("intake", _webhook_only), ("intake", _feeder_only), ("intake", _six_and_nine)],
-    ids=["lanes", "just-happened", "intake", "intake-webhook-only", "intake-feeder-only", "intake-six-and-nine"],
+    ids=["lanes", "just-happened", "intake", "intake-tiles", "intake-webhook-only", "intake-feeder-only",
+         "intake-six-and-nine"],
 )
 def test_server_render_equals_script_render(tmp_path: Path, panel: str, build) -> None:
     snapshot = build(tmp_path)
@@ -980,7 +1018,7 @@ def test_long_intake_reasons_wrap_on_a_phone(tmp_path: Path, browser: Browser, r
     _open_rendered(browser, _long_intake_reasons(tmp_path), render, 375)
     shown = browser.eval("""[].filter.call(document.querySelectorAll('#intake .what'),
       function (e) { return e.textContent.indexOf('test_factory_dashboard') >= 0 && e.getClientRects().length; }).length""")
-    assert shown == 5, f"expected the long reason on five visible Intake rows, saw {shown}"
+    assert shown == 4, f"expected the long reason on four visible Intake rows, saw {shown}"
     lines = browser.eval("""[].map.call(document.querySelectorAll('#intake .icol .what'), function (e) {
       return Math.round(e.getBoundingClientRect().height / parseFloat(getComputedStyle(e).lineHeight)); })""")
     assert any(n > 1 for n in lines), f"no long reason in a column wraps at 375px: {lines}"
