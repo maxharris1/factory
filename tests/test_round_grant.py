@@ -33,7 +33,7 @@ def fix_keys(flow: AppFlow) -> list[tuple[str, str]]:
 def engine_granted(flow: AppFlow, site: str, stop: Comment, *ids: str) -> None:
     ruling = Ruling("first-cap-grant", Grant(str(go_header(4, 4))), ())
     with flow.queue.connect() as connection:
-        flow.dispatcher._log_ruling(
+        flow.dispatcher.review.log_ruling(
             connection, flow.snapshot(), site, stop.id, ruling, tuple(finding_id(item) for item in ids)
         )
 

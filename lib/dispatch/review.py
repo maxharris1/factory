@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterable
-from typing import Literal
+from collections.abc import Callable, Iterable
+from typing import Literal, Protocol, runtime_checkable
 
 from lib.dispatch.rebase import answers_rebase_review
-from lib.dispatch.types import Comment, RoundGrant, TrackedTicket
+from lib.dispatch.types import Comment, ReviewActions, RoundGrant, TrackedTicket
 from lib.dispatch.verdict.convergence import policy_name, stop_policy
 from lib.dispatch.verdict.repeat import StopRecord
 from lib.handoff import HandoffError, parse_comment
+from lib.queue import SQLiteJobQueue
 from lib.rule_engine import (
     Escalate,
     FindingId,
@@ -62,19 +63,47 @@ def prior_grants(history: Iterable[StopRecord], verdict_id: str) -> frozenset[Fi
     return frozenset(_valid_ids(found for record in released for found in record.finding_ids))
 
 
-class RuleEngineMixin:
-    def _rule_on_cap(self, ticket: TrackedTicket, verdict: Comment, stop: Literal["capped", "stalled"]) -> bool:
+@runtime_checkable
+class ReviewPort(Protocol):
+    def _stop_history(self, ticket: TrackedTicket) -> tuple[StopRecord, ...]: ...
+
+    def _effective_cap(
+        self,
+        ticket: TrackedTicket,
+        connection: sqlite3.Connection | None = None,
+    ) -> int: ...
+
+    def _apply_round_grant(
+        self,
+        ticket: TrackedTicket,
+        grant: RoundGrant,
+        *,
+        trusted_review: bool = False,
+    ) -> tuple[str, bool, bool] | None: ...
+
+    def _after_lift(self, ticket: TrackedTicket, queued: bool, reopened: bool) -> None: ...
+
+    def _review_actions(self, ticket: TrackedTicket) -> ReviewActions: ...
+
+
+class ReviewCoordinator:
+    def __init__(self, *, queue: SQLiteJobQueue, connect: Callable[[], sqlite3.Connection], port: ReviewPort) -> None:
+        self.queue = queue
+        self.connect = connect
+        self.port = port
+
+    def on_cap(self, ticket: TrackedTicket, verdict: Comment, stop: Literal["capped", "stalled"]) -> bool:
         try:
             subject = comment_id(verdict.id)
         except ValueError:
             return False
-        history = self._stop_history(ticket)
+        history = self.port._stop_history(ticket)
         named = next((record.finding_ids for record in history if record.verdict_id == verdict.id), frozenset())
         ids = _valid_ids(named)
         if len(ids) != len(named):
             ids = ()
         prior = prior_grants(history, verdict.id)
-        with self._connect() as connection:
+        with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             logged = connection.execute(
                 """
@@ -91,7 +120,7 @@ class RuleEngineMixin:
                 round_number = int(state["review_round"])
                 if answers_rebase_review(connection, ticket, round_number):
                     ruling = Ruling("first-cap-grant", Escalate("rebase-review"), ())
-                    self._log_ruling(connection, ticket, "cap", subject, ruling, ids)
+                    self.log_ruling(connection, ticket, "cap", subject, ruling, ids)
                     granted = False
                 else:
                     auto_prior = self._auto_extra_finding_ids(connection, ticket, verdict.id)
@@ -105,19 +134,19 @@ class RuleEngineMixin:
                             repeat_stops=0,
                             prior_grants=combined_prior,
                             round=round_number,
-                            cap=self._effective_cap(ticket, connection),
+                            cap=self.port._effective_cap(ticket, connection),
                             stuck=bool(state["stuck"]),
                             policy=policy_name(stop_policy(ticket.factory)),
                         )
                     )
-                    self._log_ruling(connection, ticket, "cap", subject, ruling, ids)
+                    self.log_ruling(connection, ticket, "cap", subject, ruling, ids)
                     granted = isinstance(ruling.outcome, Grant)
             else:
                 granted = logged["outcome"] == "granted" and logged["notice_status"] != "void"
             connection.commit()
         if not granted:
             return False
-        self._apply_engine_grants(ticket)
+        self.apply_engine_grants(ticket)
         return True
 
     def _auto_extra_finding_ids(
@@ -147,7 +176,7 @@ class RuleEngineMixin:
             found.extend(blocking_ids(parsed.body))
         return frozenset(_valid_ids(found))
 
-    def _rule_on_repeat(
+    def on_repeat(
         self,
         connection: sqlite3.Connection,
         ticket: TrackedTicket,
@@ -179,16 +208,16 @@ class RuleEngineMixin:
                 repeat_stops=stops,
                 prior_grants=combined_prior,
                 round=round_number,
-                cap=self._effective_cap(ticket, connection),
+                cap=self.port._effective_cap(ticket, connection),
                 stuck=bool(state["stuck"]),
                 policy=policy_name(stop_policy(ticket.factory)),
             )
         )
-        self._log_ruling(connection, ticket, "repeat", subject, ruling, ids)
+        self.log_ruling(connection, ticket, "repeat", subject, ruling, ids)
         return isinstance(ruling.outcome, Grant)
 
-    def _apply_engine_grants(self, ticket: TrackedTicket) -> None:
-        with self._connect() as connection:
+    def apply_engine_grants(self, ticket: TrackedTicket) -> None:
+        with self.connect() as connection:
             pending = connection.execute(
                 """
                 SELECT site, subject, finding_ids, header FROM engine_decisions
@@ -205,12 +234,12 @@ class RuleEngineMixin:
                 stop = next((item for item in ticket.comments if item.id == subject), None)
                 if stop is None:
                     continue
-                result = self._apply_round_grant(ticket, RoundGrant.engine(stop))
+                result = self.port._apply_round_grant(ticket, RoundGrant.engine(stop))
                 if result is None or result[0] != "queued-fix":
                     self._mark_notice(ticket, site, subject, "void")
                     continue
-            self._after_lift(ticket, queued=True, reopened=False)
-            self._review_actions(ticket).comment_once(
+            self.port._after_lift(ticket, queued=True, reopened=False)
+            self.port._review_actions(ticket).comment_once(
                 ticket,
                 _notice(site, json.loads(row["finding_ids"]), str(row["header"]), subject),
                 engine_marker(site, subject),
@@ -220,7 +249,7 @@ class RuleEngineMixin:
     def _mark_notice(
         self, ticket: TrackedTicket, site: Literal["cap", "repeat"], subject: str, status: Literal["void", "posted"]
     ) -> None:
-        with self._connect() as connection:
+        with self.connect() as connection:
             connection.execute(
                 """
                 UPDATE engine_decisions SET notice_status = ?
@@ -230,7 +259,7 @@ class RuleEngineMixin:
             )
             connection.commit()
 
-    def _log_ruling(
+    def log_ruling(
         self,
         connection: sqlite3.Connection,
         ticket: TrackedTicket,

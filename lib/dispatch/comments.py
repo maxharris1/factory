@@ -79,7 +79,7 @@ class CommentsMixin:
         if self._sync_base_mismatch(ticket) is not None:
             return
         try:
-            self._apply_engine_grants(ticket)
+            self.review.apply_engine_grants(ticket)
         except Exception as exc:
             self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
         comments = sorted(ticket.comments, key=_comment_order)

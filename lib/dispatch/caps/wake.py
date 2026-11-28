@@ -10,7 +10,7 @@ _CAPPED_DETAIL = {"capped": "review round cap reached", "stalled": "review not c
 class CappedWakeMixin:
     def _wake_capped(self, ticket: TrackedTicket, comment: Comment) -> bool:
         stop = self._capped_stop(ticket, comment)
-        if ticket.factory.rule_engine == "on" and self._rule_on_cap(ticket, comment, stop):
+        if ticket.factory.rule_engine == "on" and self.review.on_cap(ticket, comment, stop):
             return True
         self.wake_grok_once(
             ticket,
