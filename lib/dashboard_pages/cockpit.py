@@ -230,12 +230,32 @@ def _inbox_card(row: dict) -> str:
     )
 
 
+def _inbox_group_html(group: dict, rows: list[dict]) -> str:
+    if not rows:
+        return ""
+    shown, more = rows[:NEEDS_MAX["limit"]], rows[NEEDS_MAX["limit"]:]
+    fold = (
+        f'<details class="ck-more"><summary>show {len(more)} more</summary>'
+        f'<div class="ck-grid">{"".join(_inbox_card(row) for row in more)}</div></details>'
+        if more
+        else ""
+    )
+    return (
+        f'<div class="ck-group" data-ck-group="{_e(group["key"])}">'
+        f'<h3 class="ck-ghead"><span>{_e(group["label"])}</span><span class="count">{len(rows)}</span></h3>'
+        f'<div class="ck-grid">{"".join(_inbox_card(row) for row in shown)}</div>{fold}</div>'
+    )
+
+
 def _needs_max(snapshot: dict) -> str:
     """Needs Max / Product Inbox panel for `index.html`."""
     items = inbox_tickets(snapshot)
     count = f"{len(items)} waiting on you" if items else "all clear"
     inner = (
-        f'<div class="ck-grid">{"".join(_inbox_card(row) for row in items)}</div>'
+        "".join(
+            _inbox_group_html(group, [row for row in items if _inbox_group(row) == index])
+            for index, group in enumerate(NEEDS_MAX["groups"])
+        )
         if items
         else '<p class="empty">No open product questions or visual QA holds waiting on you.</p>'
     )
