@@ -21,7 +21,15 @@ from lib.role_router import (
 ROLES: tuple[DrawRole, ...] = get_args(DrawRole)
 DIFFICULTIES: tuple[Difficulty, ...] = get_args(Difficulty)
 Reason = Literal[
-    "bad-shape", "unknown-role", "unknown-difficulty", "bad-share", "unknown-harness", "build-total", "review-total"
+    "bad-shape",
+    "unknown-role",
+    "unknown-difficulty",
+    "bad-share",
+    "unknown-harness",
+    "empty-pool",
+    "build-total",
+    "review-total",
+    "no-cross-family-reviewer",
 ]
 REASONS: tuple[Reason, ...] = get_args(Reason)
 _TOTALS: dict[DrawRole, Reason] = {"build": "build-total", "review": "review-total"}
@@ -115,14 +123,24 @@ def _parse(value: object, config: RoutingConfig) -> Override:
     seats = {role: frozenset(row.harness for row in rows if getattr(row, role)) for role in ROLES}
     if any(h not in seats[r] for h, b in blocks.items() for r in ROLES if r in b):
         raise OverrideRefused("unknown-harness")
+    on = {role: frozenset(h for h, b in blocks.items() if role in b) for role in ROLES}
+    pools = [(role, central_pool(config, slot)) for role in ROLES for slot in _ROLE_POOLS[role]]
+    if any(pool and {c.harness for c in pool}.isdisjoint(on[role]) for role, pool in pools):
+        raise OverrideRefused("empty-pool")
     for role in ROLES:
         if seats[role] and sum(b[role] for b in blocks.values() if role in b) != 100:
             raise OverrideRefused(_TOTALS[role])
+    review_pool = central_pool(config, "review")
+    reviewers = {family_for(c.harness, c.model)[0] for c in review_pool if c.harness in on["review"]}
+    builders = {h for h, b in blocks.items() if b.get("build", 0) > 0}
+    built = {family_for(c.harness, c.model)[0] for r, p in pools if r == "build" for c in p if c.harness in builders}
+    if review_pool and any(not reviewers - {f} for f in built):
+        raise OverrideRefused("no-cross-family-reviewer")
     rank = {h: i for i, h in enumerate(KNOWN_HARNESSES)}
     ordered = sorted(blocks.items(), key=lambda item: rank.get(item[0], len(rank)))
     settings = {h: HarnessSetting(b["difficulty"], b.get("build"), b.get("review")) for h, b in ordered}
     return Override(
         MappingProxyType(settings),
-        build_off=seats["build"] - {h for h, b in blocks.items() if "build" in b},
-        review_off=seats["review"] - {h for h, b in blocks.items() if "review" in b},
+        build_off=seats["build"] - on["build"],
+        review_off=seats["review"] - on["review"],
     )
