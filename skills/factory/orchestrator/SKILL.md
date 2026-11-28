@@ -109,6 +109,7 @@ Every action in `lib.dispatch.constants.GROK_WAKE_REASONS`, `clarify`, and the s
 | `ci-rerun-refused` | A completed red run's rerun was refused and charged. | Tell Max once. |
 | `stack-parent-closed` | A stacked child's parent closed unmerged (`detail.detail`). The child is held. | Tell Max once: reopen the parent, or retarget or close the child. |
 | `ci-stale` | Two hours at one head in the CI state `detail.detail` names. | Run Stalled ticket. |
+| `account-signin` | A device dropped an account's sign-in (`detail.reading`). `ticket_id` is `<account>@<device>`, not a ticket. | Tell Max once for wakes that arrive together. Ask him to sign in from Settings. Never run a login or copy one from another device. |
 | `done` | The ticket finished. `detail.outcome` and `follow_up_owner` name what is left; `detail.followup_issue` names the parked follow-up issue. | Run Follow-up triage on `followup_issue`. Act by hand on a `detail.note`, such as an unmoved Linear issue. |
 
 ## Stalled ticket

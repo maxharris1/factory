@@ -444,6 +444,10 @@ def test_orchestrator_skill_pinned_and_matches_full_wake_table() -> None:
     assert "clarify" in table_actions
     assert "repeat-block" in table_actions
     assert "criterion-unsatisfiable" in table_actions
+    signin = next(line for line in text.splitlines() if line.startswith("| `account-signin` |"))
+    for phrase in ("`<account>@<device>`", "Tell Max once", "arrive together", "Settings",
+                   "Never run a login or copy one from another device"):
+        assert phrase in signin
 
     unit = ROOT / "deploy" / "orch-orchestrator.service"
     assert unit.is_file()

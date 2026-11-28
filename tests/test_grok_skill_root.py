@@ -12,8 +12,8 @@ from lib.pstack_pin import load_pin
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "grok" / "orchestrate-project" / "SKILL.md"
 PLAYBOOK = "skills/poteto-mode/playbooks/orchestrate.md"
-MAX_LINES = 180
-MAX_BYTES = 19042
+MAX_LINES = 181
+MAX_BYTES = 19305
 
 STALE = (
     r"second[^.|]*(unmet|acceptance-criterion)",
