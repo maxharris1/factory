@@ -2760,7 +2760,9 @@ placeholder the overlay fills is no longer reported.
 [`config/machines.local.example.yml`](config/machines.local.example.yml)
 show the keys the box sets: the Linear project id, `trusted_linear_users`,
 `linear_webhook` `path` and `public_url`, a project's `ready_starts_review`,
-and a device's `slot_max` and `enabled`.
+and a device's `slot_max`, `enabled` and `test_suite_max`. The tracked
+`machines.yml` refuses `test_suite_max`, since it is per host. It defaults
+to 1, and `orch job run` passes it to the job as `ORCH_TEST_SUITE_MAX`.
 
 Migration on the box (Factory, once, after merge):
 

@@ -33,7 +33,9 @@ REPLACE_WITH_ placeholder, and lists the harness. A device with
 `drain: true` takes no new placements and leaves its running jobs be. Unknown fields are
 refused so v1 stays closed. Nothing here checks that a device is reachable. A gitignored
 machines.local.yml beside the file is merged in before validation
-(lib/config_overlay.py).
+(lib/config_overlay.py). A device's test_suite_max (default 1, a
+positive integer) is the most whole local test suites that host runs at
+once; only machines.local.yml may set it, so the tracked file refuses it.
 
 The top-level orch_host names the device that runs orch. It must be a
 listed device, and a `local: true` device must be it. Without it, the one
@@ -73,7 +75,7 @@ from typing import Mapping, Sequence
 
 import yaml
 
-from lib.config_overlay import apply_overlay
+from lib.config_overlay import apply_overlay, overlay_path
 from lib.load import Finding, is_strict_int, load_yaml
 from lib.schema import HARNESSES
 
@@ -101,6 +103,7 @@ _DEVICE_KEYS = {
     "enabled",
     "drain",
     "slot_max",
+    "test_suite_max",
     "harnesses",
     "workdir_root",
     "ssh_alias",
@@ -108,6 +111,7 @@ _DEVICE_KEYS = {
     "ssh_user",
     "home",
 }
+_OVERLAY_ONLY_DEVICE_KEYS = ("test_suite_max",)
 # An ssh_alias once {bot} is resolved: a bare Host alias. No user@, no
 # leading '-' (it would be read as an option), no spaces or shell syntax.
 _SSH_ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
@@ -146,6 +150,7 @@ class Device:
     ssh_user: str | None = None
     accounts: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     home: str | None = None
+    test_suite_max: int = 1
 
     @property
     def placeholder(self) -> bool:
@@ -318,11 +323,29 @@ def load_machines_yml(
         return None, [Finding("error", f"invalid YAML: {text or 'invalid YAML'}")]
     if not isinstance(data, dict):
         return None, [Finding("error", "machines.yml must be a mapping")]
+    refusals = _overlay_only_refusals(path, data)
     if overlay:
         data, findings = apply_overlay(path, data)
         if data is None:
-            return None, findings
-    return _validate(data)
+            return None, refusals + findings
+    config, findings = _validate(data)
+    if refusals:
+        return None, refusals + findings
+    return config, findings
+
+
+def _overlay_only_refusals(path: Path, data: dict) -> list[Finding]:
+    devices = data.get("devices")
+    if not isinstance(devices, list):
+        return []
+    local = overlay_path(path).name
+    return [
+        Finding("error", f"devices[{i}].{key} is set per host: move it to {local}")
+        for i, item in enumerate(devices)
+        if isinstance(item, dict)
+        for key in _OVERLAY_ONLY_DEVICE_KEYS
+        if key in item
+    ]
 
 
 def _validate(data: dict) -> tuple[MachinesConfig | None, list[Finding]]:
@@ -841,6 +864,12 @@ def _device(
             Finding("error", f"{prefix}.slot_max must be a positive integer")
         )
 
+    test_suite_max = item.get("test_suite_max", 1)
+    if not (is_strict_int(test_suite_max) and test_suite_max >= 1):
+        findings.append(
+            Finding("error", f"{prefix}.test_suite_max must be a positive integer")
+        )
+
     harnesses: dict[str, str] = {}
     device_accounts: dict[str, str] = {}
     raw_harnesses = item.get("harnesses")
@@ -923,6 +952,7 @@ def _device(
         ssh_user=ssh_user,
         accounts=MappingProxyType(device_accounts),
         home=home,
+        test_suite_max=test_suite_max,
     )
 
 
