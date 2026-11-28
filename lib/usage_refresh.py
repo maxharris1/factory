@@ -18,7 +18,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, get_args
 
 from lib import account_doctor, harnesses, usage_probe, usage_readings
 from lib.machines_yml import MachinesConfig
@@ -163,3 +163,49 @@ def run(
         connection.execute("ROLLBACK")
         raise
     return [results[row.account, row.device] for row in rows]
+
+
+@dataclass(frozen=True)
+class PairUsage:
+    account: str
+    device: str
+    harness: str
+    status: account_doctor.Status
+    outcome: Outcome
+    detail: str
+    five_hour: float | None
+    seven_day: float | None
+    reading_age: int | None
+    source: str | None
+
+
+def report(results: list[Result], rows: list[usage_readings.StoredRow], now: float) -> list[PairUsage]:
+    by_pair: dict[tuple[str, str], list[usage_readings.StoredRow]] = {}
+    for row in rows:
+        by_pair.setdefault((str(row.account), str(row.device)), []).append(row)
+    pairs = []
+    for result in results:
+        own_or_recorded = by_pair.get((result.account, result.device)) or by_pair.get(
+            (result.account, usage_readings.EXTERNAL_DEVICE), []
+        )
+        found = [(row, reading) for row in own_or_recorded if (reading := row.reading()) is not None]
+        used = {
+            reading.window: reading.used
+            for _, reading in found
+            if usage_readings.window_state(reading, now, result.harness) == "ok"
+        }
+        newest = max(found, key=lambda pair: pair[1].observed_at, default=None)
+        status = result.outcome if result.outcome in get_args(account_doctor.Status) else "ok"
+        pairs.append(PairUsage(
+            result.account,
+            result.device,
+            result.harness,
+            status,
+            result.outcome,
+            result.detail,
+            used.get("five_hour"),
+            used.get("seven_day"),
+            None if newest is None else int(now - newest[1].observed_at),
+            None if newest is None else SOURCES.get(str(newest[0].harness)),
+        ))
+    return pairs

@@ -2095,6 +2095,22 @@ credential, cookie or token. A scheduled Grok Bot routine that calls
 `orch usage record` is a separate step that needs Max's approval. This
 ticket does not create it.
 
+To refresh every subscription at once, run:
+
+```sh
+bin/orch usage refresh [--db PATH] [--machines PATH] [--json]
+```
+
+It runs the account doctor, then reads usage for each signed-in Claude,
+Codex and Gemini pair with the scripts a job's start uses, and stores the
+readings. It creates no job row. It prints one line per account and device
+pair: the sign-in status, the 5-hour and 7-day percentages, and `read now`,
+the reading's age and source, or why the pair was not read. A count line
+follows, and `--json` prints the pairs as a list. Cursor is not read and
+stays on `orch usage record`. The command reads no credential file and
+signs nothing in. "Usage refresh" in [docs/ACCOUNTS.md](docs/ACCOUNTS.md)
+has the details.
+
 **Pages.** Every page shares one bar: links to the pages (Lanes, Jobs,
 Activity, Efficiency, in that order), the link state
 (`LIVE`, `STALE SNAPSHOT` after 3 minutes, `LINK LOST` when fetches fail)

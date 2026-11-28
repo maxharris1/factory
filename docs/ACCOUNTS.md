@@ -541,6 +541,39 @@ the new account's row on each listed device reads `ok`. The poller runs the
 same check on its first poll, every 30 minutes, and after it adopts a
 changed `machines.yml`.
 
+## Usage refresh
+
+To refresh every subscription's usage at once, run on the orch host:
+
+```sh
+orch usage refresh [--db PATH] [--machines PATH] [--json]
+```
+
+It runs the same doctor pass as `orch accounts doctor`, so it rewrites the
+sign-in rows and raises or clears `account-signin` flags. Then it reads
+usage for each pair the doctor judged `ok`, with the scripts a job's start
+uses: Claude's `get_usage`, the Codex rollout and Gemini's `agy /usage`.
+The reads run in parallel under one 30 second deadline. It stores each
+reading under its own account and device and creates no job row.
+
+It prints one line per pair:
+
+```text
+claude-b@far signed-out 5h 40% 7d 40% 2h old (get_usage); signed-out: not logged in
+```
+
+The line gives the account, the device, the doctor's status and the 5-hour
+and 7-day percentages. A `-` means no fresh reading. The line ends with
+`read now`, or the stored reading's age and source, or the reason the pair
+was not read. A count line per outcome follows. `--json` prints the pairs
+as a list instead.
+
+Cursor is not read. Its usage stays on `orch usage record`, and its line
+shows the reading recorded there. The command reads no credential file and
+signs nothing in. Run `orch usage migrate` first. It exits 0 after a pass,
+2 on a refused argument or a missing machines file, and 1 when the
+database cannot be written.
+
 ## Why the account folder, not `claude setup-token`
 
 `claude setup-token` makes a long-lived token that you export as

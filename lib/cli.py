@@ -24,7 +24,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from types import FrameType
-from typing import Any
+from typing import Any, get_args
 
 from lib import (
     account_doctor,
@@ -49,6 +49,7 @@ from lib import (
     usage_probe,
     usage_readings,
     usage_record,
+    usage_refresh,
     waiter,
     worktrees,
 )
@@ -227,7 +228,7 @@ commands:
   status           read-only snapshot of the queue, devices and paused tickets
   retry            ask the dispatcher to restart a stuck ticket (kind=retry)
   trace            read-only: every job attempt on a ticket and its handoff verdict
-  usage            per-account usage readings: migrate orch.db, record an external reading (#772)
+  usage            per-account usage readings: migrate orch.db, record an external reading, refresh every pair (#772)
   accounts         prepare account folders, check sign-ins, run the dashboard sign-in broker
 
 check-config [--orch PATH] [--machines PATH] [--factory [owner/name=]PATH ...]
@@ -634,6 +635,20 @@ usage record --account ID --window five_hour|seven_day|weekly --used FRACTION
   unknown account or one with an automatic source, a bad value, an
   unknown option, or a usage_readings table without the account column
   (run orch usage migrate first); 1 when the database cannot be written.
+
+usage refresh [--db PATH] [--machines PATH] [--json]
+  Run the account doctor once, as orch accounts doctor does: it replaces
+  the account_signins rows and raises or clears account-signin flags.
+  Then read usage for each signed-in pair with the scripts a job's start
+  uses, store the readings, and create no job row. Prints one line per
+  pair, <account>@<device> <status> 5h <percent or -> 7d <percent or ->,
+  then "read now", the reading's age and source, or why it was not read,
+  and a count line per outcome; --json prints the pairs as a JSON list.
+  Cursor is not read: its usage stays on orch usage record. It reads no
+  credential file and signs nothing in. Run orch usage migrate first.
+  --db defaults to $ORCH_DB, --machines to the checkout's machines.yml.
+  Exits 0 after a pass whatever the statuses, 2 on a refused argument or
+  a missing machines file, 1 when the database cannot be written.
 
 accounts prepare --device NAME [--account ID] [--machines PATH]
   Run as each bot on its device. Makes ~/.factory-accounts/<id> mode 700
@@ -3363,6 +3378,10 @@ def _usage(argv: list[str]) -> int:
     record.add_argument("--machines", type=Path)
     migrate = commands.add_parser("migrate", allow_abbrev=False)
     migrate.add_argument("--db", type=Path)
+    refresh = commands.add_parser("refresh", allow_abbrev=False)
+    refresh.add_argument("--db", type=Path)
+    refresh.add_argument("--machines", type=Path)
+    refresh.add_argument("--json", action="store_true")
     args, unknown = parser.parse_known_args(argv)
     prog = f"orch usage {args.command}"
     if unknown:
@@ -3370,6 +3389,8 @@ def _usage(argv: list[str]) -> int:
         return 2
     if args.command == "migrate":
         return _usage_migrate(args)
+    if args.command == "refresh":
+        return _usage_refresh(args, prog)
     try:
         machines = _machines_config(args.machines, required=True)
         assert machines is not None
@@ -3391,6 +3412,51 @@ def _usage(argv: list[str]) -> int:
         return 1
     print(f"recorded {reading.account} {reading.window}" if written else "kept newer reading")
     return 0
+
+
+def _usage_refresh(args: argparse.Namespace, prog: str) -> int:
+    from lib import self_deploy
+
+    now = time.time()
+    try:
+        path = _db_path(args.db)
+        machines = _machines_config(args.machines, required=True)
+        assert machines is not None
+        with contextlib.closing(sqlite3.connect(path, timeout=30, isolation_level=None)) as connection:
+            results = usage_refresh.run(connection, machines, SshTransport(), now, self_deploy.own_repo(ROOT))
+            pairs = usage_refresh.report(results, usage_readings.stored(connection) or [], now)
+    except (ValueError, WaitError) as exc:
+        print(f"{prog}: refused: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 2
+    except (sqlite3.Error, OSError) as exc:
+        print(f"{prog}: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps([asdict(pair) for pair in pairs]))
+        return 0
+    for pair in pairs:
+        print(_usage_line(pair))
+    counts = [(sum(pair.outcome == outcome for pair in pairs), outcome) for outcome in get_args(usage_refresh.Outcome)]
+    print(f"{len(pairs)} pairs: " + ", ".join(f"{count} {outcome}" for count, outcome in counts if count))
+    return 0
+
+
+def _usage_line(pair: usage_refresh.PairUsage) -> str:
+    def percent(used: float | None) -> str:
+        return "-" if used is None else f"{round(used * 100)}%"
+
+    if pair.outcome == "read" and pair.reading_age is not None and pair.reading_age < 60:
+        tail = "read now"
+    else:
+        parts = []
+        if pair.reading_age is not None:
+            parts.append(f"{health.age_text(pair.reading_age)} old ({pair.source})")
+        if pair.outcome != "read":
+            parts.append(f"{pair.outcome}: {pair.detail}")
+        tail = "; ".join(parts)
+    return (
+        f"{pair.account}@{pair.device} {pair.status} 5h {percent(pair.five_hour)} 7d {percent(pair.seven_day)} {tail}"
+    ).rstrip()
 
 
 def _accounts(argv: list[str]) -> int:
