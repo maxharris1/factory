@@ -629,7 +629,8 @@ def test_running_job_carries_its_flow(tmp_path: Path) -> None:
         "unknown")
 
     def ran(job: str, action: str, recipient: str, number: str = "unknown") -> list[dict]:
-        return [{"job": job, "action": action, "recipient": recipient, "exposure": {**unknown, "round": number}}]
+        return [{"job": job, "action": action, "recipient": recipient, "exposure": {**unknown, "round": number},
+                 "suite_wait_seconds": None}]
     assert job["flow"] == {
         "state": "review",
         "path": ["intake", "building", "review", "fixing", "review"],
