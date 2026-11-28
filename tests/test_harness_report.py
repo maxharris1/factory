@@ -79,16 +79,20 @@ class Db:
         action: str,
         recipient: str,
         *,
-        at: float = 100.0,
+        at: float | str = 100.0,
         repo: str = REPO,
         risk: str | None = None,
         routing: dict | None = None,
         handoff: str | None = None,
         model: str | None = None,
+        state: str = "done",
+        kind: str | None = None,
     ) -> None:
         detail: dict = {}
         if risk is not None:
             detail["risk"] = risk
+        if kind is not None:
+            detail["kind"] = kind
         if routing is not None:
             detail["routing"] = routing
         with sqlite3.connect(self.path) as connection:
@@ -98,9 +102,10 @@ class Db:
                     id, dedupe_key, repo, ticket_id, action, recipient, source_comment_id,
                     timeout_seconds, generation, attempt, detail, state, created_at,
                     last_activity_at, handoff_comment_id
-                ) VALUES (?, ?, ?, ?, ?, ?, 'c0', 7200, 1, 1, ?, 'done', ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, 'c0', 7200, 1, 1, ?, ?, ?, ?, ?)
                 """,
-                (job_id, job_id, repo, ticket, action, recipient, json.dumps(detail), at, at, handoff),
+                (job_id, job_id, repo, ticket, action, recipient, json.dumps(detail), state, at,
+                 at, handoff),
             )
             if model is not None:
                 connection.execute(
@@ -155,7 +160,7 @@ def _only(rows: list[Row], role: str) -> Row:
 def test_rows_group_claude_codex_and_gemini_jobs(db: Db) -> None:
     gemini_build = _draw("build", "gemini", True)
     db.job("t1-plan", "1", "plan", "claude", at=100, risk="low",
-           routing=_routing(plan_model="claude-opus"))
+           routing=_routing(planner="claude", plan_model="claude-opus"))
     db.job("t1-build", "1", "build", "codex", at=110, risk="low", model="gpt-5")
     db.job("t1-review1", "1", "review", "claude", at=120, risk="low", handoff="c1",
            routing=_routing(reviewer_model="claude-opus"))
@@ -341,7 +346,7 @@ def test_the_reported_model_beats_the_routed_one(db: Db) -> None:
 
 @pytest.mark.parametrize("reported", [None, exposure.UNKNOWN])
 def test_the_routed_model_stands_in_when_none_was_reported(db: Db, reported: str | None) -> None:
-    routing = _routing(plan_model="p", builder_model="b", reviewer_model="r")
+    routing = _routing(planner="claude", plan_model="p", builder_model="b", reviewer_model="r")
     db.job("plan", "1", "plan", "claude", model=reported, routing=routing)
     db.job("fix", "1", "fix", "claude", model=reported, routing=routing)
     db.job("review", "1", "review", "claude", model=reported, routing=routing)
@@ -349,6 +354,76 @@ def test_the_routed_model_stands_in_when_none_was_reported(db: Db, reported: str
     assert [(row.role, row.model) for row in harness_report.rows(db.path)] == [
         ("plan", "p"), ("build", "b"), ("review", "r"),
     ]
+
+
+@pytest.mark.parametrize("state", ["queued", "running", "cancelled"])
+def test_only_jobs_that_ran_count(db: Db, state: str) -> None:
+    db.job("plan", "1", "plan", "claude", state=state)
+    db.job("gemini", "1", "build", "gemini", state=state,
+           routing=_routing(build=_draw("build", "gemini", True)))
+    db.job("fix", "1", "fix", "claude", state=state)
+    db.job("build", "1", "build", "claude")
+
+    assert harness_report.rows(db.path) == [
+        Row("build", "claude", None, None, False, "default", 1, 1,
+            Measure(1.0, 1), Measure(None, 0), None, Measure(0.0, 1)),
+    ]
+
+
+def test_a_failed_job_ran(db: Db) -> None:
+    db.job("build", "1", "build", "claude", state="failed")
+
+    assert _only(harness_report.rows(db.path), "build").jobs == 1
+
+
+def test_a_merge_only_fix_is_not_a_build_job_or_a_fix_round(db: Db) -> None:
+    db.job("build", "1", "build", "claude", risk="low")
+    db.job("update", "1", "fix", "claude", risk="low", kind="merge-only")
+
+    assert [(row.role, row.jobs, row.fix_rounds) for row in harness_report.rows(db.path)] == [
+        ("build", 1, Measure(0.0, 1)),
+    ]
+
+
+def test_iso_created_at_is_read_as_epoch_seconds(db: Db) -> None:
+    db.job("old", "1", "build", "codex", at="2025-01-01T00:00:00Z")
+    db.job("new", "2", "build", "claude", at="2026-01-01T00:00:00Z")
+    db.job("newer", "3", "build", "gemini", at=1780000000.0)
+
+    rows = harness_report.rows(db.path, since=1760000000.0)
+
+    assert [row.harness for row in rows] == ["claude", "gemini"]
+
+
+def test_an_unreadable_created_at_is_outside_any_since_window(db: Db) -> None:
+    db.job("bad", "1", "build", "codex", at="yesterday")
+    db.job("good", "2", "build", "claude", at=200)
+
+    assert [row.harness for row in harness_report.rows(db.path, since=100)] == ["claude"]
+    assert [row.harness for row in harness_report.rows(db.path)] == ["claude", "codex"]
+
+
+def test_the_ticket_sample_follows_created_at_order_across_formats(db: Db) -> None:
+    db.job("old", "1", "plan", "gemini", at="2025-01-01T00:00:00Z",
+           routing=_routing(build=_draw("build", "gemini", False)))
+    db.job("new", "1", "build", "gemini", at=1780000000.0,
+           routing=_routing(build=_draw("build", "gemini", True)))
+
+    assert {row.mark for row in harness_report.rows(db.path)} == {"sampled"}
+
+
+def test_a_plan_without_a_planner_falls_back_to_the_builder_model(db: Db) -> None:
+    routing = {"builder": "gemini", "builder_model": "gemini-4-neon", "reviewer": "codex"}
+    db.job("plan", "1", "plan", "gemini", routing=routing)
+
+    assert harness_report.rows(db.path)[0].model == "gemini-4-neon"
+
+
+def test_no_routed_model_when_the_routed_side_is_another_harness(db: Db) -> None:
+    routing = {"builder": "claude", "builder_model": "claude-opus-5-5", "reviewer": "codex"}
+    db.job("build", "1", "build", "codex", routing=routing)
+
+    assert harness_report.rows(db.path)[0].model is None
 
 
 def test_the_database_is_opened_read_only(db: Db, monkeypatch: pytest.MonkeyPatch) -> None:

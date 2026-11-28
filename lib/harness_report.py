@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from lib import exposure, job_detail
-from lib.role_router import Sample, parse_sample
+from lib import epoch, exposure, job_detail
+from lib.role_router import Sample, parse_sample, routed_slot
 
 Role = Literal["plan", "build", "review"]
 Mark = Literal["sampled", "default"]
@@ -17,11 +17,6 @@ Ticket = tuple[str, str]
 
 ROLE_ORDER: tuple[Role, ...] = ("plan", "build", "review")
 _ROLES: dict[str, Role] = {"plan": "plan", "build": "build", "fix": "build", "review": "review"}
-_ROUTED_MODEL: dict[Role, str] = {
-    "plan": "plan_model",
-    "build": "builder_model",
-    "review": "reviewer_model",
-}
 APPROVE, REVISE, BLOCKED = "APPROVE", "REVISE", "BLOCKED"
 
 
@@ -61,7 +56,7 @@ class _Job:
     ticket: Ticket
     action: str
     recipient: str
-    created_at: float
+    created_at: float | None
     comment: str | None
     detail: dict
 
@@ -76,6 +71,7 @@ def rows(db: Path, *, since: float | None = None, repo: str | None = None) -> li
     uri = db.resolve().as_uri() + "?mode=ro"
     with closing(sqlite3.connect(uri, uri=True, timeout=5)) as connection:
         connection.execute("PRAGMA query_only = ON")
+        epoch.register(connection)
         tables = {
             name
             for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -83,6 +79,7 @@ def rows(db: Path, *, since: float | None = None, repo: str | None = None) -> li
         if "jobs" not in tables:
             return []
         on_repo, params = ("WHERE lower(repo) = lower(?)", (repo,)) if repo is not None else ("", ())
+        ran = f"{on_repo or 'WHERE 1'} AND state IN ('done', 'failed')"
         jobs = [
             _Job(
                 job_id,
@@ -95,8 +92,9 @@ def rows(db: Path, *, since: float | None = None, repo: str | None = None) -> li
             )
             for job_id, job_repo, ticket_id, action, recipient, detail, created_at, comment
             in connection.execute(
-                "SELECT id, repo, ticket_id, action, recipient, detail, created_at, "
-                f"handoff_comment_id FROM jobs {on_repo} ORDER BY created_at, rowid",
+                f"SELECT id, repo, ticket_id, action, recipient, detail, {epoch.sql('created_at')}, "
+                f"handoff_comment_id FROM jobs {ran} "
+                f"ORDER BY {epoch.sql('created_at')} IS NULL, {epoch.sql('created_at')}, rowid",
                 params,
             )
         ]
@@ -105,7 +103,7 @@ def rows(db: Path, *, since: float | None = None, repo: str | None = None) -> li
             models = dict(
                 connection.execute(
                     f"SELECT job_id, model FROM {exposure.TABLE} "
-                    f"WHERE job_id IN (SELECT id FROM jobs {on_repo})",
+                    f"WHERE job_id IN (SELECT id FROM jobs {ran})",
                     params,
                 )
             )
@@ -115,11 +113,12 @@ def rows(db: Path, *, since: float | None = None, repo: str | None = None) -> li
             verdict = "verdict" if "verdict" in columns else "NULL"
             for head_repo, ticket_id, comment, value in connection.execute(
                 f"SELECT repo, ticket_id, comment_id, {verdict} FROM verdict_heads {on_repo} "
-                "ORDER BY posted_at IS NULL, posted_at, rowid",
+                f"ORDER BY {epoch.sql('posted_at')} IS NULL, {epoch.sql('posted_at')}, rowid",
                 params,
             ):
                 verdicts[(head_repo.lower(), ticket_id)].append(_Verdict(str(comment), value))
 
+    jobs = [job for job in jobs if job.detail.get("kind") != "merge-only"]
     planned = {job.ticket for job in jobs if job.action == "plan"}
     fixes = Counter(job.ticket for job in jobs if job.action == "fix")
     samples: dict[Ticket, Sample] = {}
@@ -137,12 +136,14 @@ def rows(db: Path, *, since: float | None = None, repo: str | None = None) -> li
     role_tickets: dict[Role, set[Ticket]] = defaultdict(set)
     for job in jobs:
         role = _ROLES.get(job.action)
-        if role is None or (since is not None and job.created_at < since):
+        if role is None or (
+            since is not None and (job.created_at is None or job.created_at < since)
+        ):
             continue
         key = (
             role,
             job.recipient,
-            _model(job, role, models.get(job.id)),
+            _model(job, models.get(job.id)),
             _risk(job),
             job.ticket in planned,
             _mark(job, role, samples.get(job.ticket)),
@@ -190,10 +191,10 @@ def _routing(job: _Job) -> dict:
     return routing if isinstance(routing, dict) else {}
 
 
-def _model(job: _Job, role: Role, reported: str | None) -> str | None:
+def _model(job: _Job, reported: str | None) -> str | None:
     if reported is not None and reported != exposure.UNKNOWN:
         return reported
-    routed = _routing(job).get(_ROUTED_MODEL[role])
+    routed, _ = routed_slot(_routing(job), action=job.action, harness=job.recipient)
     return routed if isinstance(routed, str) else None
 
 
