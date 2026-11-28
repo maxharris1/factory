@@ -453,11 +453,23 @@ def _pool(
     return _legacy_fallback(factory, role), "factory-fallback", False
 
 
+def slot_pool(
+    role: str,
+    *,
+    routing: RoutingConfig | None = None,
+    factory: FactoryConfig | None = None,
+    budget: str | None = None,
+) -> tuple[tuple[Candidate, ...], SlotSource]:
+    """The candidates `resolve_slot` would pick `role` from, in list order, and which pool they are."""
+    pool, source, _ = _pool(role, routing, factory, _effective_budget(routing, factory, budget))
+    return pool, source
+
+
 def slot_source(
     role: str, *, routing: RoutingConfig | None = None, factory: FactoryConfig | None = None
 ) -> SlotSource:
     """Which pool `resolve_slot` would pick `role` from. Only a `routing.yml` pool takes a draw."""
-    return _pool(role, routing, factory, _effective_budget(routing, factory, None))[1]
+    return slot_pool(role, routing=routing, factory=factory)[1]
 
 
 def resolve_slot(

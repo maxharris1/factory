@@ -20,6 +20,7 @@ from lib.role_router import (
     REFERENCE_MEAN_WEIGHT,
     ROUTING_PATH,
     BuildShare,
+    Candidate,
     Draw,
     GuardFacts,
     HarnessShares,
@@ -44,6 +45,8 @@ from lib.role_router import (
     review_chances,
     routing_argv_for_detail,
     sample_json,
+    slot_pool,
+    slot_source,
 )
 from tests.test_dispatcher import factory
 
@@ -1248,6 +1251,26 @@ def test_the_legacy_fallback_ignores_a_won_draw() -> None:
     review = resolve_slot("review", routing=None, factory=legacy, drawn=replace(won, role="review"))
     assert (review.harness, review.source) == ("codex", "factory-fallback")
 
+
+def test_slot_pool_gives_the_candidates_and_source_resolve_slot_picks_from() -> None:
+    f_override, findings = parse_factory_md(
+        _factory_md("routing:\n  slots:\n    build:\n      - harness: codex\n        model: gpt-5.4\n")
+    )
+    assert f_override is not None and findings == []
+    legacy = replace(factory(ship="merge"), builder_harness="claude", builder_model="claude-opus-4-6")
+    cases = [
+        ({"routing": _DRAW_ROUTING}, ("claude", "codex", "gemini"), "routing.yml"),
+        ({"routing": _DRAW_ROUTING, "factory": f_override}, ("codex",), "factory-override"),
+        ({"factory": legacy}, ("claude",), "factory-fallback"),
+    ]
+    for kwargs, harnesses, source in cases:
+        pool, got = slot_pool("build", **kwargs)
+        assert (tuple(c.harness for c in pool), got) == (harnesses, source)
+        assert slot_source("build", **kwargs) == got
+        assert resolve_slot("build", **kwargs).harness == harnesses[0]
+    assert slot_pool("build", routing=_DRAW_ROUTING, factory=f_override)[0] == (Candidate("codex", "gpt-5.4"),)
+    pool, source = slot_pool("review", routing=_DRAW_ROUTING, budget="small")
+    assert ([c.harness for c in pool], source) == (["codex", "claude", "gemini"], "routing.yml")
 
 
 @pytest.mark.parametrize("picked", [True, False])
