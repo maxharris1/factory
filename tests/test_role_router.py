@@ -6,10 +6,11 @@ import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
-from lib import cli
+from lib import cli, job_detail
 from lib.factory_md import FactoryConfig, parse_factory_md, trust_front_matter_changed
 from lib.orchestrate import RouteError, RouteRequest, choose_route
 from lib.pstack_pin import ROOT
@@ -22,15 +23,19 @@ from lib.role_router import (
     HarnessShares,
     HeadroomReading,
     RoutingError,
+    Sample,
+    SkipReason,
     TicketFacts,
     apply_argv_flags,
     draw,
     family_for,
     load_routing_yml,
     parse_routing_yml,
+    parse_sample,
     resolve_pair,
     resolve_slot,
     routing_argv_for_detail,
+    sample_json,
 )
 from tests.test_dispatcher import factory
 
@@ -942,3 +947,248 @@ def test_builds_in_flight_do_not_hold_a_review_draw() -> None:
     assert review.skipped_reason is None
     assert review.picked
     assert draw("build", ticket, shares, GuardFacts(builds_in_flight=1)).skipped_reason is None
+
+
+_DRAW_ROUTING, _ = parse_routing_yml(
+    "budget: medium\n"
+    "roles:\n"
+    "  build:\n"
+    "    - harness: claude\n"
+    "    - harness: codex\n"
+    "    - harness: gemini\n"
+    "  review:\n"
+    "    - harness: codex\n"
+    "    - harness: claude\n"
+    "    - harness: gemini\n"
+    "    - harness: cursor\n"
+    "      model: gpt-5.4\n"
+    "budget_overrides:\n"
+    "  small:\n"
+    "    review:\n"
+    "      - harness: codex\n"
+    "      - harness: claude\n"
+    "      - harness: gemini\n"
+    "shares:\n"
+    "  gemini:\n"
+    "    build: 0.25\n"
+    "    review: 0.25\n"
+)
+
+
+def _gemini_draw(role: str, picked: bool, skipped_reason: str | None = None) -> Draw:
+    return Draw(
+        role=role,
+        harness="gemini",
+        seed=f"o/r#1:{role}",
+        draw=0.1 if picked or skipped_reason else 0.9,
+        share=0.25,
+        chance=0.3,
+        picked=picked,
+        skipped_reason=skipped_reason,
+    )
+
+
+_UNPICKED = [_gemini_draw("build", False), _gemini_draw("build", False, "low-headroom"), None]
+
+
+def test_a_won_build_draw_puts_gemini_first_in_the_routing_yml_pool() -> None:
+    won = _gemini_draw("build", True)
+    slot = resolve_slot("build", routing=_DRAW_ROUTING, drawn=won)
+    assert (slot.harness, slot.source, slot.draw) == ("gemini", "routing.yml", won)
+
+
+@pytest.mark.parametrize("drawn", _UNPICKED)
+def test_a_lost_skipped_or_absent_build_draw_keeps_the_pool_as_written(drawn: Draw | None) -> None:
+    slot = resolve_slot("build", routing=_DRAW_ROUTING, drawn=drawn)
+    assert (slot.harness, slot.draw) == ("claude", drawn)
+
+
+def test_a_won_review_draw_reorders_the_budget_override_pool() -> None:
+    won = _gemini_draw("review", True)
+    slot = resolve_slot("review", routing=_DRAW_ROUTING, budget="small", built_by=("claude", None), drawn=won)
+    assert (slot.harness, slot.source, slot.draw) == ("gemini", "routing.yml", won)
+
+
+@pytest.mark.parametrize("drawn", [replace(d, role="review") if d else None for d in _UNPICKED])
+def test_an_unpicked_review_draw_keeps_the_budget_override_pool(drawn: Draw | None) -> None:
+    slot = resolve_slot("review", routing=_DRAW_ROUTING, budget="small", built_by=("claude", None), drawn=drawn)
+    assert (slot.harness, slot.draw) == ("codex", drawn)
+
+
+@pytest.mark.parametrize("drawn", [_gemini_draw("build", True), *_UNPICKED])
+def test_a_factory_md_slots_pool_is_never_reordered(drawn: Draw | None) -> None:
+    f_override, findings = parse_factory_md(
+        _factory_md(
+            "routing:\n"
+            "  slots:\n"
+            "    build:\n"
+            "      - harness: claude\n"
+            "      - harness: gemini\n"
+        )
+    )
+    assert f_override is not None and findings == []
+    slot = resolve_slot("build", routing=_DRAW_ROUTING, factory=f_override, drawn=drawn)
+    assert (slot.harness, slot.source, slot.draw) == ("claude", "factory-override", drawn)
+
+
+def test_the_legacy_fallback_ignores_a_won_draw() -> None:
+    legacy = replace(factory(ship="merge"), builder_harness="claude", reviewer_harness="codex")
+    won = _gemini_draw("build", True)
+    slot = resolve_slot("build", routing=None, factory=legacy, drawn=won)
+    assert (slot.harness, slot.source, slot.draw) == ("claude", "factory-fallback", won)
+    review = resolve_slot("review", routing=None, factory=legacy, drawn=replace(won, role="review"))
+    assert (review.harness, review.source) == ("codex", "factory-fallback")
+
+
+@pytest.mark.parametrize("picked", [True, False])
+def test_a_gemini_built_ticket_records_its_review_draw_as_same_family(picked: bool) -> None:
+    drawn = _gemini_draw("review", picked)
+    slot = resolve_slot("review", routing=_DRAW_ROUTING, built_by=("gemini", "gemini-4-neon"), drawn=drawn)
+    assert slot.harness == "codex"
+    assert slot.draw == replace(drawn, picked=False, skipped_reason="same-family")
+
+
+def test_a_guard_reason_outranks_same_family() -> None:
+    drawn = _gemini_draw("review", False, "low-headroom")
+    slot = resolve_slot("review", routing=_DRAW_ROUTING, built_by=("gemini", "gemini-4-neon"), drawn=drawn)
+    assert slot.harness == "codex"
+    assert slot.draw == drawn
+
+
+@pytest.mark.parametrize("built_by", [("claude", "claude-opus-4-6"), ("codex", "gpt-5.4")])
+def test_a_won_review_draw_gives_a_claude_or_codex_build_a_gemini_reviewer(built_by: tuple[str, str]) -> None:
+    won = _gemini_draw("review", True)
+    slot = resolve_slot("review", routing=_DRAW_ROUTING, built_by=built_by, drawn=won)
+    assert (slot.harness, slot.family, slot.draw) == ("gemini", "google", won)
+
+
+def test_a_won_draw_never_lets_gemini_review_a_gemini_build() -> None:
+    with pytest.raises(RoutingError):
+        resolve_slot(
+            "review",
+            routing=_DRAW_ROUTING,
+            built_by=("gemini", "gemini-4-neon"),
+            refused_harnesses=("codex", "claude", "cursor"),
+            drawn=_gemini_draw("review", True),
+        )
+
+
+def _sample_ticket(**facts) -> TicketFacts:
+    return replace(_ticket(1852, plan_first=True, touches=("a", "b", "a"), ticket_type="feature"), **facts)
+
+
+def _sample(*roles: str) -> Sample:
+    ticket = _sample_ticket()
+    build = draw("build", ticket, _SHARES)
+    review = draw("review", ticket, _SHARES, build=build)
+    return Sample(**{role: {"build": build, "review": review}[role] for role in roles})
+
+
+@pytest.mark.parametrize("roles", [("build", "review"), ("build",), ("review",)])
+def test_a_sample_survives_serialize_and_parse(roles: tuple[str, ...]) -> None:
+    sample = _sample(*roles)
+    assert parse_sample(sample_json(sample)) == sample
+    assert parse_sample(json.loads(json.dumps(sample_json(sample)))) == sample
+
+
+def test_a_same_family_review_draw_survives_the_round_trip() -> None:
+    sample = _sample("build", "review")
+    sample = replace(sample, review=replace(sample.review, picked=False, skipped_reason="same-family"))
+    assert parse_sample(json.loads(json.dumps(sample_json(sample)))) == sample
+
+
+def test_sample_entries_carry_exactly_the_draw_fields_and_build_hardness() -> None:
+    raw = sample_json(_sample("build", "review"))
+    fields = {"role", "harness", "seed", "draw", "share", "chance", "picked", "skipped_reason"}
+    assert set(raw) == {"build", "review"}
+    assert set(raw["review"]) == fields
+    assert set(raw["build"]) == fields | {"hardness"}
+    assert raw["build"]["hardness"] == {
+        "risk": "high",
+        "plan_first": True,
+        "touches": 2,
+        "type": "feature",
+        "weight": _sample_ticket().weight,
+    }
+
+
+def test_only_a_build_draw_carries_hardness() -> None:
+    ticket = _sample_ticket()
+    assert draw("review", ticket, _SHARES).hardness is None
+    assert draw("build", ticket, _SHARES).hardness.touches == 2
+
+
+def _valid_raw() -> dict:
+    return json.loads(json.dumps(sample_json(_sample("build", "review"))))
+
+
+def _mutated(path: tuple[str, ...], value: object = ..., drop: bool = False) -> dict:
+    raw = _valid_raw()
+    node = raw
+    for key in path[:-1]:
+        node = node[key]
+    if drop:
+        del node[path[-1]]
+    else:
+        node[path[-1]] = value
+    return raw
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        None,
+        [],
+        "build",
+        {},
+        _mutated(("extra",), {}),
+        _mutated(("build",), []),
+        _mutated(("review", "seed"), drop=True),
+        _mutated(("build", "role"), "review"),
+        _mutated(("review", "harness"), 7),
+        _mutated(("review", "seed"), None),
+        _mutated(("review", "draw"), True),
+        _mutated(("review", "draw"), "0.5"),
+        _mutated(("review", "share"), 10**400),
+        _mutated(("review", "chance"), float("nan")),
+        _mutated(("review", "chance"), float("inf")),
+        _mutated(("review", "picked"), 1),
+        _mutated(("review", "skipped_reason"), "tired"),
+        _mutated(("review", "skipped_reason"), ["refused"]),
+        _mutated(("build", "hardness"), drop=True),
+        _mutated(("build", "hardness"), None),
+        _mutated(("build", "hardness", "touches"), -1),
+        _mutated(("build", "hardness", "touches"), True),
+        _mutated(("build", "hardness", "touches"), 2.0),
+        _mutated(("build", "hardness", "risk"), 3),
+        _mutated(("build", "hardness", "plan_first"), "yes"),
+        _mutated(("build", "hardness", "type"), drop=True),
+        _mutated(("build", "hardness", "weight"), False),
+        _mutated(("build", "hardness", "weight"), float("nan")),
+    ],
+)
+def test_a_malformed_sample_parses_to_none(raw: object) -> None:
+    assert parse_sample(raw) is None
+
+
+def test_extra_keys_inside_an_entry_are_ignored() -> None:
+    raw = _mutated(("review", "note"), "x")
+    assert parse_sample(raw) == _sample("build", "review")
+
+
+def test_the_worst_case_sample_fits_inline_in_job_detail() -> None:
+    longest: SkipReason = max(get_args(SkipReason), key=len)
+    ticket = TicketFacts(
+        repo="o" * 39 + "/" + "r" * 100,
+        ticket=9_999_999,
+        risk="medium",
+        plan_first=True,
+        touches=tuple(f"lib/file_{n}.py" for n in range(40)),
+        ticket_type="refactoring",
+    )
+    shares = HarnessShares(build=0.3333333333333333, review=0.2777777777777778)
+    build = replace(draw("build", ticket, shares), picked=False, skipped_reason=longest)
+    review = replace(draw("review", ticket, shares, build=build), picked=False, skipped_reason=longest)
+    raw = sample_json(Sample(build=build, review=review))
+    assert len(json.dumps(raw, separators=(",", ":"))) < job_detail.INLINE_LIMIT
+    assert len(json.dumps(raw)) < job_detail.INLINE_LIMIT
