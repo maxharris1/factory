@@ -1,12 +1,15 @@
 import gc
 import json
+import os
+import re
 import sqlite3
 import subprocess
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
 
-from lib import exposure, harness_report, telemetry
+from lib import cli, exposure, harness_report, telemetry
 from lib.harness_report import Measure, Row, VerdictMix
 from lib.pricing import estimate_cost_usd
 from lib.role_router import Draw, Hardness, Sample, sample_json
@@ -224,7 +227,7 @@ def _only(rows: list[Row], role: str) -> Row:
     return row
 
 
-def test_rows_group_claude_codex_and_gemini_jobs(db: Db) -> None:
+def _seed_claude_codex_and_gemini(db: Db) -> None:
     gemini_build = _draw("build", "gemini", True)
     db.job("t1-plan", "1", "plan", "claude", at=100, risk="low",
            routing=_routing(planner="claude", plan_model="claude-opus"))
@@ -250,6 +253,10 @@ def test_rows_group_claude_codex_and_gemini_jobs(db: Db) -> None:
     db.job("t3-review", "3", "review", "claude", at=320, risk="low", handoff="c4",
            model="claude-opus")
     db.verdict("3", "c4", "BLOCKED", 321)
+
+
+def test_rows_group_claude_codex_and_gemini_jobs(db: Db) -> None:
+    _seed_claude_codex_and_gemini(db)
 
     assert harness_report.rows(db.path) == [
         Row("plan", "claude", "claude-opus", "low", True, "default", 2, 2,
@@ -674,3 +681,153 @@ def test_a_telemetry_table_without_the_unknown_column_judges_tokens_by_their_cou
     db.telemetry("counted", "claude", tokens_in=10)
 
     assert _only(harness_report.rows(db.path), "build").tokens_in == Measure(10.0, 1)
+
+
+def _report(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str]:
+    code = cli.main(["harness-report", *argv])
+    return code, capsys.readouterr().out
+
+
+def _body(table: str) -> list[list[str]]:
+    lines = table.split("\n\n")[0].splitlines()
+    return [re.split(r" {2,}", line.strip()) for line in lines[1:]]
+
+
+def test_harness_report_prints_the_json_rows_as_a_table(
+    db: Db, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _seed_claude_codex_and_gemini(db)
+    db.telemetry("t2-build", "gemini", elapsed_seconds=120, tokens_in=1000, cost_usd=0.25)
+
+    code, out = _report(capsys, "--db", str(db.path), "--json")
+    assert code == 0
+    rows = json.loads(out)
+    assert rows == [asdict(row) for row in harness_report.rows(db.path)]
+
+    code, table = _report(capsys, "--db", str(db.path))
+    assert code == 0
+    header = table.splitlines()[0].split()
+    body = _body(table)
+    assert len(body) == len(rows)
+    for cells, row in zip(body, rows):
+        assert len(cells) == len(header)
+        cell = dict(zip(header, cells))
+        expected = (
+            row["role"], row["harness"], row["model"] or "-", row["risk"] or "-",
+            "yes" if row["plan_first"] else "no", row["mark"], str(row["tickets"]),
+            str(row["jobs"]),
+        )
+        shown = tuple(cell[name] for name in (
+            "role", "harness", "model", "risk", "plan-first", "mark", "tickets", "jobs"
+        ))
+        assert shown == expected
+    by_harness = {(c[0], c[1]): dict(zip(header, c)) for c in body}
+    assert by_harness[("build", "gemini")]["cost-usd"] == "0.25 (1)"
+    assert by_harness[("build", "gemini")]["minutes"] == "2.00 (1)"
+    assert by_harness[("plan", "claude")]["cost-usd"] == "-"
+    assert by_harness[("plan", "claude")]["verdicts"] == "A1 R1 B1"
+    assert "first-push CI is approximate" in table
+
+
+def test_harness_report_with_no_jobs_still_prints_the_header_and_footer(
+    db: Db, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, table = _report(capsys, "--db", str(db.path))
+
+    assert code == 0
+    assert table.splitlines()[0].split()[0] == "role"
+    assert _body(table) == [["no jobs ran in this window"]]
+    assert "first-push CI is approximate" in table
+
+
+def test_harness_report_filters_by_since_and_repo(
+    db: Db, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _seed_claude_codex_and_gemini(db)
+    db.job("elsewhere", "9", "build", "claude", at=400, repo="Owner/Other")
+
+    _, out = _report(capsys, "--db", str(db.path), "--json", "--since", "1970-01-01T00:03:20Z")
+    assert json.loads(out) == [
+        asdict(row) for row in harness_report.rows(db.path, since=200)
+    ]
+    assert {(r["role"], r["harness"]) for r in json.loads(out)} == {
+        ("plan", "claude"), ("build", "codex"), ("build", "gemini"),
+        ("review", "claude"), ("review", "codex"), ("build", "claude"),
+    }
+    assert all(r["jobs"] == 1 for r in json.loads(out))
+
+    _, out = _report(capsys, "--db", str(db.path), "--json", "--repo", "owner/other")
+    assert [(r["role"], r["harness"]) for r in json.loads(out)] == [("build", "claude")]
+
+
+@pytest.mark.parametrize(
+    "since",
+    ["2026-11-27", "2026-11-27T00:00:00", "2026-1-5T0:0:0Z", "2026-11-27T00:00:00+00:00",
+     "2026-13-01T00:00:00Z", "nonsense"],
+)
+def test_harness_report_rejects_a_bad_since(
+    db: Db, capsys: pytest.CaptureFixture[str], since: str
+) -> None:
+    assert cli.main(["harness-report", "--db", str(db.path), "--since", since]) == 2
+    assert "orch harness-report: --since" in capsys.readouterr().err
+
+
+def test_harness_report_without_a_database_is_a_usage_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    missing = tmp_path / "missing.db"
+    assert cli.main(["harness-report", "--db", str(missing)]) == 2
+    assert "orch harness-report: " in capsys.readouterr().err
+    assert not missing.exists()
+
+    monkeypatch.delenv("ORCH_DB", raising=False)
+    assert cli.main(["harness-report"]) == 2
+    assert "no dispatcher database" in capsys.readouterr().err
+
+    monkeypatch.setenv("ORCH_DB", "")
+    assert cli.main(["harness-report"]) == 2
+    assert "no dispatcher database" in capsys.readouterr().err
+
+
+def test_harness_report_reads_without_writing_or_starting_a_job(
+    db: Db, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _seed_claude_codex_and_gemini(db)
+    db.telemetry("t2-build", "gemini", cost_usd=0.25)
+    with sqlite3.connect(db.path) as connection:
+        jobs = connection.execute("SELECT count(*) FROM jobs").fetchone()
+    connection.close()
+    opened: list[str] = []
+    real = sqlite3.connect
+
+    def spy(database: str, *args: object, **kwargs: object) -> sqlite3.Connection:
+        opened.append(str(database))
+        return real(database, *args, **kwargs)
+
+    def started(*args: object, **kwargs: object) -> None:
+        pytest.fail("harness-report started a process")
+
+    monkeypatch.setattr(sqlite3, "connect", spy)
+    monkeypatch.setattr(subprocess, "run", started)
+    monkeypatch.setattr(subprocess, "Popen", started)
+    monkeypatch.setattr(os, "fork", started)
+    gc.collect()
+    before = db.path.read_bytes()
+
+    assert cli.main(["harness-report", "--db", str(db.path)]) == 0
+    assert cli.main(["harness-report", "--db", str(db.path), "--json"]) == 0
+
+    monkeypatch.setattr(sqlite3, "connect", real)
+    assert opened and all(name.endswith("?mode=ro") for name in opened)
+    assert db.path.read_bytes() == before
+    with sqlite3.connect(db.path) as connection:
+        assert connection.execute("SELECT count(*) FROM jobs").fetchone() == jobs
+    connection.close()
+    capsys.readouterr()
+
+
+def test_usage_documents_harness_report() -> None:
+    assert "\n  harness-report   " in cli.USAGE
+    section = cli.USAGE.split("\nharness-report [", 1)[1]
+    for text in ("--since", "YYYY-MM-DDTHH:MM:SSZ", "--json"):
+        assert text in section
