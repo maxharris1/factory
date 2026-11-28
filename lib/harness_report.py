@@ -260,8 +260,7 @@ def _risk(job: _Job) -> str | None:
 
 def _mark(job: _Job, role: Role, sample: Sample | None) -> Mark:
     draw = None if sample is None else sample.review if role == "review" else sample.build
-    picked = draw is not None and draw.picked and draw.harness == "gemini"
-    return "sampled" if picked and job.recipient == "gemini" else "default"
+    return "sampled" if draw is not None and draw.picked and job.recipient == draw.harness else "default"
 
 
 def _telemetry(

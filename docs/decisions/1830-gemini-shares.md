@@ -36,7 +36,7 @@ The dispatcher draws when it first routes a ticket in a repo whose `factory.md` 
 
 1. Each role draws once per ticket. The value is the first 8 bytes of `sha256("<repo>#<ticket>:<role>")` read as a fraction of 2^64, with the repo in lower case. It never uses the clock or a shared random generator, so the same ticket always gets the same value.
 2. The draw wins when the value is below the role's chance and no guard holds. A won draw moves Gemini to the front of that role's pool. The rest of the pool keeps its order, and the refused, unavailable and same-family filters still apply.
-3. The result is stored on the job's `detail.routing` as `sample`, one entry per role: `role`, `harness`, `seed`, `draw`, `share`, `chance`, `picked`, `skipped_reason`, and for the build its `hardness`. Plan, fix, re-build and re-review jobs reuse the stored route and never draw again.
+3. The result is stored on the job's `detail.routing` as `sample`, one entry per role: `role`, `harness`, `seed`, `draw`, `share`, `chance`, `picked`, `skipped_reason`, `model`, `shares_version`, `off`, and for the build its `hardness`. A record stored before `model`, `shares_version` and `off` existed reads as no model, `defaults` and nobody off. Plan, fix, re-build and re-review jobs reuse the stored route and never draw again.
 
 ### The tilt toward harder tickets
 

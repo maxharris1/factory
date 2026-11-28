@@ -616,13 +616,13 @@ trace <owner/repo>#<n> [--db PATH] [--json]
 
 harness-report [--db PATH] [--since TIME] [--repo OWNER/NAME] [--json]
   Print one row per role, harness and model, split by the ticket's risk and
-  whether a plan job ran first, marked sampled when a Gemini draw picked the
-  job and default otherwise. Each row counts tickets and jobs and shows the
-  share, rounds to approve, verdicts, fix rounds, first-push CI, changed
-  lines, minutes, tokens and cost; a measure shows its mean and (n), the
-  count measured, and - means unknown. --since YYYY-MM-DDTHH:MM:SSZ counts
-  jobs created at or after it. --repo matches case-insensitively. --json
-  prints the same rows as a JSON list.
+  whether a plan job ran first, marked sampled when a share draw picked the
+  harness the job ran on and default otherwise. Each row counts tickets and
+  jobs and shows the share, rounds to approve, verdicts, fix rounds,
+  first-push CI, changed lines, minutes, tokens and cost; a measure shows
+  its mean and (n), the count measured, and - means unknown. --since
+  YYYY-MM-DDTHH:MM:SSZ counts jobs created at or after it. --repo matches
+  case-insensitively. --json prints the same rows as a JSON list.
   Read-only: opens --db (default $ORCH_DB) with mode=ro, no GitHub call,
   starts no job. Exits 2 on a bad --since or a missing database, 1 when the
   database cannot be read.

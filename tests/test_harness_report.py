@@ -418,6 +418,18 @@ def test_the_review_role_uses_the_review_draw(db: Db) -> None:
     assert [(row.role, row.mark) for row in rows] == [("build", "default"), ("review", "sampled")]
 
 
+def test_mark_is_sampled_when_the_draw_picked_codex_and_the_job_ran_on_codex(db: Db) -> None:
+    db.job("review", "1", "review", "codex", routing=_routing(review=_draw("review", "codex", True)))
+
+    assert harness_report.rows(db.path)[0].mark == "sampled"
+
+
+def test_mark_is_default_when_the_draw_picked_codex_but_the_job_ran_on_gemini(db: Db) -> None:
+    db.job("review", "1", "review", "gemini", routing=_routing(review=_draw("review", "codex", True)))
+
+    assert harness_report.rows(db.path)[0].mark == "default"
+
+
 def test_plan_first_is_true_when_the_ticket_has_a_plan_job(db: Db) -> None:
     db.job("plan", "1", "plan", "claude")
     db.job("build", "1", "build", "claude")
