@@ -285,13 +285,20 @@ class SQLiteStatusReader:
             ).fetchone()
             if present is None:
                 return ()
-            rows = connection.execute(
+            finished = (
                 """
-                SELECT flag.repo, flag.ticket_id, flag.reason, flag.detail
-                FROM needs_attention AS flag
                 LEFT JOIN ticket_state AS state
                   ON state.repo = flag.repo AND state.ticket_id = flag.ticket_id
                 WHERE COALESCE(state.workflow_state, '') NOT IN ('merged', 'done')
+                """
+                if _has_table(connection, "ticket_state")
+                else ""
+            )
+            rows = connection.execute(
+                f"""
+                SELECT flag.repo, flag.ticket_id, flag.reason, flag.detail
+                FROM needs_attention AS flag
+                {finished}
                 ORDER BY flag.raised_at, flag.repo, flag.ticket_id, flag.reason
                 """
             ).fetchall()

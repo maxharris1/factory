@@ -2,7 +2,8 @@
 
 The dispatcher flags a ship that failed and will not be retried and a job
 dedupe dropped; the feeder flags blocker cycles and blockers that were closed
-without finishing or do not exist. orch status and the dashboard list them.
+without finishing or do not exist. Each bot's waiter flags its own cleanup
+passes failing (#1764). orch status and the dashboard list them.
 """
 
 from __future__ import annotations
@@ -13,6 +14,9 @@ from collections.abc import Collection, Mapping
 DETAIL_LIMIT = 500
 DEDUPE_DROPPED = "dedupe-dropped"
 DRIVER_WAKE_UNANSWERED = "driver-wake-unanswered"
+CLEANUP_FAILING = "cleanup-failing"
+
+Key = tuple[str, str, str]
 
 
 def ensure_table(connection: sqlite3.Connection) -> None:
@@ -34,7 +38,7 @@ def sync(
     connection: sqlite3.Connection,
     reasons: Collection[str],
     repos: Collection[str],
-    flags: Mapping[tuple[str, str, str], str],
+    flags: Mapping[Key, str],
     now: float,
 ) -> None:
     """Make one owner's flags in repos exactly `flags`.
@@ -69,3 +73,35 @@ def sync(
             """,
             (repo.lower(), ticket_id, reason, detail[:DETAIL_LIMIT], now),
         )
+
+
+def raise_flag(connection: sqlite3.Connection, key: Key, detail: str, now: float) -> bool:
+    """Raise one flag or update its detail, keeping its raised_at. True when
+    this call created the row."""
+    ensure_table(connection)
+    repo, ticket_id, reason = key
+    detail = detail[:DETAIL_LIMIT]
+    created = connection.execute(
+        """
+        INSERT INTO needs_attention (repo, ticket_id, reason, detail, raised_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(repo, ticket_id, reason) DO NOTHING
+        """,
+        (repo.lower(), ticket_id, reason, detail, now),
+    ).rowcount == 1
+    if not created:
+        connection.execute(
+            "UPDATE needs_attention SET detail = ? WHERE repo = ? AND ticket_id = ? AND reason = ?",
+            (detail, repo.lower(), ticket_id, reason),
+        )
+    return created
+
+
+def clear_flag(connection: sqlite3.Connection, key: Key) -> bool:
+    """Delete one flag. True when a row was deleted."""
+    ensure_table(connection)
+    repo, ticket_id, reason = key
+    return connection.execute(
+        "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason = ?",
+        (repo.lower(), ticket_id, reason),
+    ).rowcount == 1

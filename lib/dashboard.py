@@ -200,7 +200,7 @@ from urllib.parse import unquote
 
 import yaml
 
-from lib import account_doctor, epoch, exposure
+from lib import account_doctor, attention, epoch, exposure
 from lib import health as component_health
 from lib import live_settings
 from lib.config_overlay import apply_overlay
@@ -317,7 +317,7 @@ ATTENTION_REASONS = (
     "ship-failed", "dedupe-dropped", "edited-comment", "base-mismatch", "stack-retarget-failed",
     "stack-parent-closed", "deploy-conflict", "linear-reopen-failed", "linear-not-reopened",
     SLOW_CYCLE, LOCK_ERRORS, CI_INFRA_BLOCKED_REASON, CI_RERUN_REFUSED, CI_STALE_REASON, OK_WITHOUT_APPROVE,
-    *FEEDER_ATTENTION_REASONS, account_doctor.REASON,
+    *FEEDER_ATTENTION_REASONS, account_doctor.REASON, attention.CLEANUP_FAILING,
 )
 
 HANDOFF_SAVINGS_DEFINITION = (

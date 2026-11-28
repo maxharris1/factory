@@ -28,9 +28,11 @@ from pathlib import Path
 
 import pytest
 
-from lib import containers
+from lib import attention, containers
+from lib import queue as queue_module
 from lib import waiter as waiter_module
 from lib.device_pool import DevicePool
+from lib.dashboard import collect_snapshot
 from lib.dispatcher import Comment
 from lib.job_state import RUNNING, derive, read_placements
 from lib.machines_yml import load_machines_yml, orch_host
@@ -39,11 +41,13 @@ from lib.queue import JobRequest, SQLiteJobQueue
 from lib.remote import Called
 from lib.stacks import stack_name
 from lib.waiter import (
+    CleanupStreak,
     ContextResult,
     GhContextSource,
     HarnessCommand,
     Waiter,
     WaiterError,
+    cleanup_streak,
     job_run_argv,
     load_harness_command,
     local_only,
@@ -54,7 +58,7 @@ from tests.child_reaper import descendants
 from tests.pool_helpers import LOCAL_BOX_MACHINES, poller_adopts
 from tests.procs import alive
 from tests.test_brief import FACTORY_MD, detail
-from tests.test_wait import GO, dispatcher_for, tracked
+from tests.test_wait import GO, dispatcher_for, hold_write_lock, tracked
 
 ROOT = Path(__file__).resolve().parents[1]
 ORCH = ROOT / "bin" / "orch"
@@ -414,7 +418,9 @@ def test_a_failed_scratch_removal_is_retried_until_it_succeeds(tmp_path: Path) -
 
 def sweeping_waiter(tmp_path: Path, queue: SQLiteJobQueue, db: Path, log: list[str],
                     pool: DevicePool | None = None, *, spawn: FakeSpawn | None = None,
-                    cleanup: CleanupSpawn | None = None) -> tuple[Waiter, list[float]]:
+                    cleanup: CleanupSpawn | None = None,
+                    cleanup_alert_after: int = waiter_module.CLEANUP_ALERT_AFTER,
+                    ) -> tuple[Waiter, list[float]]:
     now = [0.0]
     waiter = Waiter(
         bot="claude-bot", queue=queue, pool=pool or local_pool(queue),
@@ -423,6 +429,7 @@ def sweeping_waiter(tmp_path: Path, queue: SQLiteJobQueue, db: Path, log: list[s
         orch=("python3", "/factory/bin/orch"), spawn=spawn or FakeSpawn(), log=log.append,
         environ={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}, clock=lambda: now[0],
         sweep_cleanup=cleanup is not None, cleanup_spawn=cleanup or CleanupSpawn(),
+        cleanup_alert_after=cleanup_alert_after,
     )
     return waiter, now
 
@@ -481,6 +488,39 @@ def test_a_ninth_cleanup_pass_drops_the_oldest_log(tmp_path: Path) -> None:
     assert names == ["cleanup.log", *(f"cleanup.log.{n}" for n in range(1, 8))]
     assert "pass 9\n" in (state_dir / "cleanup.log").read_text()
     assert "pass 2\n" in (state_dir / "cleanup.log.7").read_text()
+
+
+def finished_pass(code: int, *output: str) -> str:
+    return "".join(f"{line}\n" for line in (STARTED_LINE, *output, f"cleanup run exited {code}"))
+
+
+RUNNING_PASS = f"{STARTED_LINE}\npass 9\n"
+NOT_STARTED_PASS = f"{STARTED_LINE}\ncleanup run not started: cannot exec orch\n"
+
+
+@pytest.mark.parametrize("passes, expected", [
+    ([], None),
+    ([RUNNING_PASS, NOT_STARTED_PASS], None),
+    ([finished_pass(0, "removed 3")], CleanupStreak(0, "")),
+    ([finished_pass(1, "boom 4"), finished_pass(1, "boom 3"), finished_pass(0),
+      finished_pass(1, "boom 1")], CleanupStreak(2, "boom 4")),
+    ([finished_pass(1, "boom 5"), finished_pass(75, "already running"), RUNNING_PASS,
+      NOT_STARTED_PASS, finished_pass(1, "boom 1")], CleanupStreak(2, "boom 5")),
+    ([finished_pass(75, "already running"), finished_pass(0)], CleanupStreak(0, "")),
+    ([finished_pass(-9, "kept 12")], CleanupStreak(1, "kept 12")),
+    ([finished_pass(1)], CleanupStreak(1, "")),
+    ([finished_pass(1, "real failure", "   ")], CleanupStreak(1, "real failure")),
+    ([finished_pass(1, "cleanup run exited 0")], CleanupStreak(1, "cleanup run exited 0")),
+    ([f"{STARTED_LINE}\norch cleanup run: kept 2842cleanup run exited -9\n"],
+     CleanupStreak(1, "orch cleanup run: kept 2842")),
+], ids=[
+    "no-passes", "none-finished", "clean", "streak-stops-at-clean", "skips-unfinished-and-75",
+    "75-then-clean", "signal", "no-output", "blank-tail", "fake-exit-in-output", "glued-exit",
+])
+def test_cleanup_streak_reads_the_kept_passes_newest_first(
+    passes: list[str], expected: CleanupStreak | None
+) -> None:
+    assert cleanup_streak(passes) == expected
 
 
 def test_a_cleanup_pass_that_could_not_start_says_so_in_its_log(tmp_path: Path) -> None:
@@ -581,6 +621,244 @@ def test_the_cleanup_pass_does_not_block_the_claim_in_the_same_step(
     failed = [line for line in log if line.startswith("cleanup run not started")]
     assert failed == ([] if error is None else ["cleanup run not started: cannot exec orch"])
     spawn.end_runners()
+
+
+CLEANUP_ROW = ("orch", "cleanup-claude-bot", attention.CLEANUP_FAILING)
+ALERT_LINES = ("cleanup-failing raised:", "cleanup-failing cleared:")
+
+
+def attention_rows(db: Path) -> list[tuple]:
+    with sqlite3.connect(db) as connection:
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'needs_attention'"
+        ).fetchone() is None:
+            return []
+        return connection.execute(
+            "SELECT repo, ticket_id, reason, detail, raised_at FROM needs_attention ORDER BY ticket_id"
+        ).fetchall()
+
+
+class CleanupPasses:
+    def __init__(self, tmp_path: Path, log: list[str], **options) -> None:
+        self.db = tmp_path / "orch.db"
+        self.wall = [PASS_STARTED]
+        self.queue = SQLiteJobQueue(self.db, clock=lambda: self.wall[0])
+        self.cleanup = CleanupSpawn()
+        self.waiter, self.now = sweeping_waiter(
+            tmp_path, self.queue, self.db, log, cleanup=self.cleanup, **options)
+        self.waiter.step()
+
+    def finish(self, *codes: int) -> None:
+        for code in codes:
+            self.cleanup.children[-1].returncode = code
+            self.advance(waiter_module.CLEANUP_SWEEP_SECONDS)
+
+    def advance(self, seconds: float) -> None:
+        self.now[0] += seconds
+        self.wall[0] += seconds
+        self.waiter.step()
+
+
+def test_four_failed_cleanup_passes_raise_one_row_and_a_clean_pass_clears_it(
+    tmp_path: Path
+) -> None:
+    log: list[str] = []
+    passes = CleanupPasses(tmp_path, log)
+
+    passes.finish(1, 1, 1)
+    assert attention_rows(passes.db) == [], "three failed passes raise nothing"
+    passes.finish(1)
+    raised_at = passes.wall[0]
+    detail = "the last 4 cleanup passes failed: pass 4"
+    assert attention_rows(passes.db) == [(*CLEANUP_ROW, detail, raised_at)], "the fourth raises"
+    items = collect_snapshot(passes.db, tmp_path / "none.log", now=raised_at)["attention"]["items"]
+    assert [item["detail"] for item in items if item["kind"] == "needs-attention"] == [
+        f"cleanup-failing: {detail}"]
+    passes.finish(1, 1)
+    assert attention_rows(passes.db) == [
+        (*CLEANUP_ROW, "the last 6 cleanup passes failed: pass 6", raised_at)
+    ], "later failures update the detail and keep raised_at"
+    passes.finish(0)
+    assert attention_rows(passes.db) == [], "a clean pass deletes the row"
+    assert [line for line in log if line.startswith(ALERT_LINES)] == [
+        f"cleanup-failing raised: {detail}",
+        "cleanup-failing cleared: a cleanup pass exited 0",
+    ]
+
+
+def test_one_bots_clean_pass_leaves_another_bots_cleanup_row(tmp_path: Path) -> None:
+    passes = CleanupPasses(tmp_path, [])
+    other = ("orch", "cleanup-codex-bot", attention.CLEANUP_FAILING)
+    other_detail = "the last 5 cleanup passes failed: boom"
+    with passes.queue.connect() as connection:
+        attention.raise_flag(connection, other, other_detail, 7.0)
+
+    passes.finish(1, 1, 1, 1)
+    assert [row[:3] for row in attention_rows(passes.db)] == [CLEANUP_ROW, other]
+    passes.finish(0)
+
+    assert attention_rows(passes.db) == [(*other, other_detail, 7.0)]
+
+
+def test_a_restarted_waiter_raises_and_keeps_the_cleanup_row_from_the_pass_files(
+    tmp_path: Path
+) -> None:
+    passes = CleanupPasses(tmp_path, [], cleanup_alert_after=99)
+    passes.finish(1, 1, 1, 1)
+    assert attention_rows(passes.db) == [], "a threshold of 99 raises nothing"
+    restarted: list[str] = []
+
+    sweeping_waiter(tmp_path, passes.queue, passes.db, restarted, cleanup=CleanupSpawn())[0].step()
+    raised_at = passes.wall[0]
+    passes.wall[0] += 60
+    sweeping_waiter(tmp_path, passes.queue, passes.db, restarted, cleanup=CleanupSpawn())[0].step()
+
+    assert attention_rows(passes.db) == [
+        (*CLEANUP_ROW, "the last 4 cleanup passes failed: pass 4", raised_at)]
+    assert [line for line in restarted if line.startswith(ALERT_LINES)] == [
+        "cleanup-failing raised: the last 4 cleanup passes failed: pass 4"
+    ], "the third waiter neither raises again nor logs it"
+
+
+def test_a_cleanup_row_write_on_a_locked_database_is_logged_and_made_good(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(queue_module, "BUSY_TIMEOUT_SECONDS", 0.05)
+    log: list[str] = []
+    passes = CleanupPasses(tmp_path, log)
+    passes.finish(1, 1, 1)
+    holder = hold_write_lock(passes.db)
+    try:
+        passes.finish(1)
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    assert attention_rows(passes.db) == [], "a locked write leaves no row"
+    assert sum("not written" in line for line in log) == 1
+
+    passes.advance(59)
+    assert attention_rows(passes.db) == [], "no retry before 60 seconds"
+    passes.advance(1)
+
+    assert [row[:4] for row in attention_rows(passes.db)] == [
+        (*CLEANUP_ROW, "the last 4 cleanup passes failed: pass 4")]
+    assert sum("not written" in line for line in log) == 1
+
+
+def test_a_planted_symlink_and_undecodable_bytes_do_not_break_the_cleanup_row(
+    tmp_path: Path
+) -> None:
+    passes = CleanupPasses(tmp_path, [])
+    passes.finish(1, 1, 1, 1, 1)
+    assert [row[3] for row in attention_rows(passes.db)] == [
+        "the last 5 cleanup passes failed: pass 5"]
+    state_dir = tmp_path / "state"
+    clean = tmp_path / "clean.log"
+    clean.write_text(finished_pass(0))
+    (state_dir / "cleanup.log.1").unlink()
+    (state_dir / "cleanup.log.1").symlink_to(clean)
+    (state_dir / "cleanup.log").write_bytes(f"{STARTED_LINE}\n".encode() + b"\xff\xfe broke\n")
+
+    passes.finish(1)
+
+    assert [row[3] for row in attention_rows(passes.db)] == [
+        "the last 5 cleanup passes failed: \ufffd\ufffd broke"
+    ], "the symlinked clean pass is skipped and the undecodable pass counts"
+
+
+def seed_passes(tmp_path: Path, *passes: str) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(exist_ok=True)
+    names = ["cleanup.log", *(f"cleanup.log.{n}" for n in range(1, waiter_module.CLEANUP_LOGS))]
+    for name, text in zip(names, passes):
+        (state_dir / name).write_text(text)
+
+
+def raise_row(db: Path, detail: str) -> None:
+    with SQLiteJobQueue(db, clock=lambda: 7.0).connect() as connection:
+        attention.raise_flag(connection, CLEANUP_ROW, detail, 7.0)
+
+
+def test_a_fresh_waiter_reads_all_eight_kept_passes_before_rotating(tmp_path: Path) -> None:
+    seed_passes(tmp_path, *[finished_pass(75)] * 4,
+                *(finished_pass(1, f"failed {n}") for n in (4, 5, 6, 7)))
+
+    passes = CleanupPasses(tmp_path, [])
+
+    assert [row[3] for row in attention_rows(passes.db)] == [
+        "the last 4 cleanup passes failed: failed 4"]
+
+
+def test_a_restart_over_eight_failed_passes_keeps_the_count_of_eight(tmp_path: Path) -> None:
+    seed_passes(tmp_path, *(finished_pass(1, f"failed {n}") for n in range(8)))
+    raise_row(tmp_path / "orch.db", "the last 8 cleanup passes failed: failed 0")
+
+    passes = CleanupPasses(tmp_path, [])
+
+    assert attention_rows(passes.db) == [
+        (*CLEANUP_ROW, "the last 8 cleanup passes failed: failed 0", 7.0)]
+
+
+def test_a_restart_clears_the_row_when_the_oldest_kept_pass_was_clean(tmp_path: Path) -> None:
+    seed_passes(tmp_path, *[finished_pass(75)] * 7, finished_pass(0))
+    raise_row(tmp_path / "orch.db", "the last 4 cleanup passes failed: boom")
+
+    passes = CleanupPasses(tmp_path, [])
+
+    assert attention_rows(passes.db) == []
+
+
+def test_a_slow_failing_pass_is_counted_before_the_next_pass_rotates_the_logs(
+    tmp_path: Path
+) -> None:
+    seed_passes(tmp_path, *[finished_pass(75)] * 4,
+                *(finished_pass(1, f"failed {n}") for n in (4, 5, 6)))
+    passes = CleanupPasses(tmp_path, [])
+    assert attention_rows(passes.db) == [], "three failed passes raise nothing"
+
+    passes.finish(1)
+
+    assert [row[3] for row in attention_rows(passes.db)] == [
+        "the last 4 cleanup passes failed: pass 1"]
+
+
+def test_no_cleanup_pass_rotates_the_logs_while_a_row_write_waits_for_its_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(queue_module, "BUSY_TIMEOUT_SECONDS", 0.05)
+    seed_passes(tmp_path, *[finished_pass(75)] * 4,
+                *(finished_pass(1, f"failed {n}") for n in (4, 5, 6)))
+    passes = CleanupPasses(tmp_path, [])
+    holder = hold_write_lock(passes.db)
+    try:
+        passes.finish(1)
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    assert len(passes.cleanup.children) == 1, "the next pass waits for the row write"
+
+    passes.advance(waiter_module.CLEANUP_ALERT_RETRY_SECONDS)
+
+    assert [row[3] for row in attention_rows(passes.db)] == [
+        "the last 4 cleanup passes failed: pass 1"]
+    assert len(passes.cleanup.children) == 2
+
+
+@pytest.mark.parametrize("codes", [(0,), (1, 1, 1, 1)], ids=["cleared", "raised"])
+def test_orch_status_reads_a_cleanup_row_on_a_fresh_queue_database(
+    tmp_path: Path, codes: tuple[int, ...]
+) -> None:
+    passes = CleanupPasses(tmp_path, [])
+    passes.finish(*codes)
+
+    status = subprocess.run(
+        [sys.executable, str(ORCH), "status", "--db", str(passes.db),
+         "--machines", str(ROOT / "machines.yml")],
+        capture_output=True, text=True, env={**os.environ, "ORCH_DB": ""}, check=False,
+    )
+
+    assert status.returncode == 0, status.stderr
+    assert ("cleanup-failing" in status.stdout) == bool(attention_rows(passes.db))
 
 
 def set_state(db: Path, job_id: str, job_state: str) -> None:
