@@ -453,11 +453,23 @@ def _pool(
     return _legacy_fallback(factory, role), "factory-fallback", False
 
 
+def slot_pool(
+    role: str,
+    *,
+    routing: RoutingConfig | None = None,
+    factory: FactoryConfig | None = None,
+    budget: str | None = None,
+) -> tuple[tuple[Candidate, ...], SlotSource]:
+    """The candidates `resolve_slot` would pick `role` from, in list order, and which pool they are."""
+    pool, source, _ = _pool(role, routing, factory, _effective_budget(routing, factory, budget))
+    return pool, source
+
+
 def slot_source(
     role: str, *, routing: RoutingConfig | None = None, factory: FactoryConfig | None = None
 ) -> SlotSource:
     """Which pool `resolve_slot` would pick `role` from. Only a `routing.yml` pool takes a draw."""
-    return _pool(role, routing, factory, _effective_budget(routing, factory, None))[1]
+    return slot_pool(role, routing=routing, factory=factory)[1]
 
 
 def resolve_slot(
@@ -618,6 +630,9 @@ class Draw:
     picked: bool
     skipped_reason: SkipReason | None
     hardness: Hardness | None = None
+    model: str | None = None
+    shares_version: Literal["defaults"] | int = "defaults"
+    off: frozenset[str] = frozenset()
 
 
 def _low_headroom(guards: GuardFacts, shares: HarnessShares) -> bool:
@@ -782,6 +797,9 @@ def _draw_json(d: Draw) -> dict:
         "chance": d.chance,
         "picked": d.picked,
         "skipped_reason": d.skipped_reason,
+        "model": d.model,
+        "shares_version": d.shares_version,
+        "off": sorted(d.off),
     }
     if d.hardness is not None:
         h = d.hardness
@@ -823,6 +841,11 @@ _DRAW_FIELDS: Mapping[str, Callable[[object], bool]] = MappingProxyType({
     "picked": lambda v: isinstance(v, bool),
     "skipped_reason": lambda v: v is None or (isinstance(v, str) and v in _SKIP_REASONS),
 })
+_ADDED_DRAW_FIELDS: Mapping[str, Callable[[object], bool]] = MappingProxyType({
+    "model": _optional_str,
+    "shares_version": lambda v: v == "defaults" or (isinstance(v, int) and not isinstance(v, bool) and v >= 1),
+    "off": lambda v: isinstance(v, list) and all(isinstance(h, str) and h for h in v),
+})
 _HARDNESS_FIELDS: Mapping[str, Callable[[object], bool]] = MappingProxyType({
     "risk": _optional_str,
     "plan_first": lambda v: isinstance(v, bool),
@@ -845,6 +868,11 @@ def _parse_draw(role: DrawRole, raw: object) -> Draw | None:
         if not _fields_ok(h, _HARDNESS_FIELDS):
             return None
         hardness = Hardness(h["risk"], h["plan_first"], h["touches"], h["type"], float(h["weight"]))
+    added = {key: raw[key] for key in _ADDED_DRAW_FIELDS if key in raw}
+    if not all(_ADDED_DRAW_FIELDS[key](value) for key, value in added.items()):
+        return None
+    if "off" in added:
+        added["off"] = frozenset(added["off"])
     return Draw(
         role=role,
         harness=raw["harness"],
@@ -855,6 +883,7 @@ def _parse_draw(role: DrawRole, raw: object) -> Draw | None:
         picked=raw["picked"],
         skipped_reason=raw["skipped_reason"],
         hardness=hardness,
+        **added,
     )
 
 

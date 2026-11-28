@@ -16,9 +16,11 @@ from lib.orchestrate import RouteError, RouteRequest, choose_route
 from lib.pstack_pin import ROOT
 from lib.role_router import (
     BUDGETS,
+    KNOWN_HARNESSES,
     REFERENCE_MEAN_WEIGHT,
     ROUTING_PATH,
     BuildShare,
+    Candidate,
     Draw,
     GuardFacts,
     HarnessShares,
@@ -31,6 +33,7 @@ from lib.role_router import (
     TicketFacts,
     apply_argv_flags,
     build_chances,
+    central_routing,
     defaults_table,
     draw,
     family_for,
@@ -42,6 +45,8 @@ from lib.role_router import (
     review_chances,
     routing_argv_for_detail,
     sample_json,
+    slot_pool,
+    slot_source,
 )
 from tests.test_dispatcher import factory
 
@@ -1247,6 +1252,27 @@ def test_the_legacy_fallback_ignores_a_won_draw() -> None:
     assert (review.harness, review.source) == ("codex", "factory-fallback")
 
 
+def test_slot_pool_gives_the_candidates_and_source_resolve_slot_picks_from() -> None:
+    f_override, findings = parse_factory_md(
+        _factory_md("routing:\n  slots:\n    build:\n      - harness: codex\n        model: gpt-5.4\n")
+    )
+    assert f_override is not None and findings == []
+    legacy = replace(factory(ship="merge"), builder_harness="claude", builder_model="claude-opus-4-6")
+    cases = [
+        ({"routing": _DRAW_ROUTING}, ("claude", "codex", "gemini"), "routing.yml"),
+        ({"routing": _DRAW_ROUTING, "factory": f_override}, ("codex",), "factory-override"),
+        ({"factory": legacy}, ("claude",), "factory-fallback"),
+    ]
+    for kwargs, harnesses, source in cases:
+        pool, got = slot_pool("build", **kwargs)
+        assert (tuple(c.harness for c in pool), got) == (harnesses, source)
+        assert slot_source("build", **kwargs) == got
+        assert resolve_slot("build", **kwargs).harness == harnesses[0]
+    assert slot_pool("build", routing=_DRAW_ROUTING, factory=f_override)[0] == (Candidate("codex", "gpt-5.4"),)
+    pool, source = slot_pool("review", routing=_DRAW_ROUTING, budget="small")
+    assert ([c.harness for c in pool], source) == (["codex", "claude", "gemini"], "routing.yml")
+
+
 @pytest.mark.parametrize("picked", [True, False])
 def test_a_gemini_built_ticket_records_its_review_draw_as_same_family(picked: bool) -> None:
     drawn = _gemini_draw("review", picked)
@@ -1304,9 +1330,53 @@ def test_a_same_family_review_draw_survives_the_round_trip() -> None:
     assert parse_sample(json.loads(json.dumps(sample_json(sample)))) == sample
 
 
+@pytest.mark.parametrize(
+    "added",
+    [
+        {},
+        {"model": "gemini-4-neon"},
+        {"model": "gpt-6.2-sol", "shares_version": 7, "off": frozenset({"cursor", "claude"})},
+    ],
+)
+def test_model_shares_version_and_off_survive_the_round_trip(added: dict) -> None:
+    sample = _sample("build", "review")
+    sample = Sample(build=replace(sample.build, **added), review=replace(sample.review, **added))
+    assert parse_sample(json.loads(json.dumps(sample_json(sample)))) == sample
+
+
+def test_a_draw_serializes_its_defaults_and_a_sorted_off_list() -> None:
+    sample = _sample("build", "review")
+    raw = sample_json(replace(sample, review=replace(sample.review, off=frozenset({"cursor", "claude"}))))
+    assert (raw["build"]["model"], raw["build"]["shares_version"], raw["build"]["off"]) == (None, "defaults", [])
+    assert raw["review"]["off"] == ["claude", "cursor"]
+
+
+def test_a_stored_entry_without_the_new_keys_parses_as_the_defaults_with_nobody_off() -> None:
+    stored = {
+        "build": {
+            "chance": 0.25, "draw": 0.8345010838285246,
+            "hardness": {"plan_first": False, "risk": "high", "touches": 0, "type": None, "weight": 1.25},
+            "harness": "gemini", "picked": False, "role": "build", "seed": "maxharris1/factory#1955:build",
+            "share": 0.25, "skipped_reason": None,
+        },
+        "review": {
+            "chance": 0.3333333333333333, "draw": 0.6380682478124085, "harness": "gemini", "picked": False,
+            "role": "review", "seed": "maxharris1/factory#1955:review", "share": 0.25, "skipped_reason": None,
+        },
+    }
+    sample = parse_sample(stored)
+    assert sample is not None
+    for d in (sample.build, sample.review):
+        assert (d.model, d.shares_version, d.off) == (None, "defaults", frozenset())
+    assert parse_sample(json.loads(json.dumps(sample_json(sample)))) == sample
+
+
 def test_sample_entries_carry_exactly_the_draw_fields_and_build_hardness() -> None:
     raw = sample_json(_sample("build", "review"))
-    fields = {"role", "harness", "seed", "draw", "share", "chance", "picked", "skipped_reason"}
+    fields = {
+        "role", "harness", "seed", "draw", "share", "chance", "picked", "skipped_reason",
+        "model", "shares_version", "off",
+    }
     assert set(raw) == {"build", "review"}
     assert set(raw["review"]) == fields
     assert set(raw["build"]) == fields | {"hardness"}
@@ -1372,6 +1442,20 @@ def _mutated(path: tuple[str, ...], value: object = ..., drop: bool = False) -> 
         _mutated(("build", "hardness", "type"), drop=True),
         _mutated(("build", "hardness", "weight"), False),
         _mutated(("build", "hardness", "weight"), float("nan")),
+        _mutated(("review", "model"), 7),
+        _mutated(("review", "model"), ["gpt-6.2-sol"]),
+        _mutated(("review", "shares_version"), None),
+        _mutated(("review", "shares_version"), "v2"),
+        _mutated(("review", "shares_version"), 0),
+        _mutated(("review", "shares_version"), -1),
+        _mutated(("review", "shares_version"), True),
+        _mutated(("review", "shares_version"), 2.0),
+        _mutated(("build", "off"), None),
+        _mutated(("build", "off"), "claude"),
+        _mutated(("build", "off"), {"claude": True}),
+        _mutated(("build", "off"), [""]),
+        _mutated(("build", "off"), ["claude", ""]),
+        _mutated(("build", "off"), ["claude", 7]),
     ],
 )
 def test_a_malformed_sample_parses_to_none(raw: object) -> None:
@@ -1394,8 +1478,12 @@ def test_the_worst_case_sample_fits_inline_in_job_detail() -> None:
         ticket_type="refactoring",
     )
     shares = HarnessShares(build=0.3333333333333333, review=0.2777777777777778)
-    build = replace(draw("build", ticket, shares), picked=False, skipped_reason=longest)
-    review = replace(draw("review", ticket, shares, build=build), picked=False, skipped_reason=longest)
+    routing = central_routing()
+    pools = [*routing.roles.values(), *(p for o in routing.budget_overrides.values() for p in o.values())]
+    model = max((c.model or "" for pool in pools if pool != "inherit" for c in pool), key=len)
+    added = {"model": model, "shares_version": 9_999_999, "off": frozenset(KNOWN_HARNESSES)}
+    build = replace(draw("build", ticket, shares), picked=False, skipped_reason=longest, **added)
+    review = replace(draw("review", ticket, shares, build=build), picked=False, skipped_reason=longest, **added)
     raw = sample_json(Sample(build=build, review=review))
     assert len(json.dumps(raw, separators=(",", ":"))) < job_detail.INLINE_LIMIT
     assert len(json.dumps(raw)) < job_detail.INLINE_LIMIT
