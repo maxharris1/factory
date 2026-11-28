@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import ast
 import dataclasses
+import inspect
 import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
 
+from lib.dispatch import review
+from lib.dispatch.review import ReviewCoordinator, ReviewPort
+from lib.dispatcher import Dispatcher
 from tests.test_dispatcher import VERDICT
 from tests.test_first_cap_grant import rows
 from tests.test_round_grant import fix_keys
@@ -158,3 +163,41 @@ def test_auto_extra_rounds_does_not_change_a_convergence_stop(tmp_path: Path) ->
             path.mkdir()
             runs.append(observed(*scenario(path, auto_extra_rounds)))
         assert runs[0] == runs[1], name
+
+
+def self_attributes(node: ast.AST, owner: str = "self") -> set[str]:
+    return {
+        found.attr
+        for found in ast.walk(node)
+        if isinstance(found, ast.Attribute) and ast.unparse(found.value) == owner
+    }
+
+
+def test_the_review_coordinator_is_a_collaborator_that_reaches_the_dispatcher_only_through_its_port(
+    tmp_path: Path,
+) -> None:
+    dispatcher = EngineFlow(tmp_path, 0).dispatcher
+    assert type(dispatcher.review) is ReviewCoordinator
+    assert dispatcher.review.port is dispatcher
+    assert ReviewCoordinator not in Dispatcher.__mro__
+    assert [base for base in Dispatcher.__mro__ if base.__module__ == review.__name__] == []
+    assert len(Dispatcher.__bases__) == 22
+    assert isinstance(dispatcher, ReviewPort)
+
+    signature = inspect.signature(ReviewCoordinator.__init__, eval_str=True)
+    fields = list(signature.parameters.values())[1:]
+    assert [field.name for field in fields] == ["queue", "connect", "port"]
+    assert [field.kind for field in fields] == [inspect.Parameter.KEYWORD_ONLY] * 3
+    assert all(field.annotation is not inspect.Parameter.empty for field in fields)
+    assert signature.parameters["port"].annotation is ReviewPort
+
+    tree = ast.parse(Path(review.__file__).read_text())
+    classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
+    assert set(classes) == {"ReviewPort", "ReviewCoordinator"}
+    coordinator = classes["ReviewCoordinator"]
+    methods = {node.name for node in coordinator.body if isinstance(node, ast.FunctionDef)}
+    declared = {node.name for node in classes["ReviewPort"].body if isinstance(node, ast.FunctionDef)}
+    assert self_attributes(coordinator) - {field.name for field in fields} - methods == set()
+    assert self_attributes(coordinator, "self.port") == declared
+    outside = [node for node in tree.body if node not in classes.values()]
+    assert [name for node in outside for name in ast.walk(node) if isinstance(name, ast.Name) and name.id == "self"] == []
