@@ -308,8 +308,9 @@ the job's worker. On Linux the script refuses (exit 125, nothing run) a device
 without `/proc` and a `grep -z`, makes `<workdir_root>/jobs/<job-id>`, records
 the worker's process group and boot id (sshd starts the command in its own
 session) in `.orch-worker.pid` there, and execs the command with `ORCH_JOB_ID`,
-`ORCH_JOB_BOT`, `ORCH_JOB_DEVICE` and `ORCH_JOB_WORKDIR` (not `ORCH_DB`: the
-database stays on the box, and the bot runs `orch job done` there); ssh exits
+`ORCH_JOB_BOT`, `ORCH_TEST_SUITE_MAX`, `ORCH_JOB_DEVICE` and `ORCH_JOB_WORKDIR`
+(not `ORCH_DB`: the database stays on the box, and the bot runs `orch job done`
+there); ssh exits
 with the command's status. The record is never removed. The heartbeat stays
 local and beats while ssh runs; SIGTERM and SIGHUP go to ssh.
 The command runs under the bot's login shell (`bash -lc 'exec "$@"'`), so the
@@ -2760,7 +2761,9 @@ placeholder the overlay fills is no longer reported.
 [`config/machines.local.example.yml`](config/machines.local.example.yml)
 show the keys the box sets: the Linear project id, `trusted_linear_users`,
 `linear_webhook` `path` and `public_url`, a project's `ready_starts_review`,
-and a device's `slot_max` and `enabled`.
+and a device's `slot_max`, `enabled` and `test_suite_max`. The tracked
+`machines.yml` refuses `test_suite_max`, since it is per host. It defaults
+to 1, and `orch job run` passes it to the job as `ORCH_TEST_SUITE_MAX`.
 
 Migration on the box (Factory, once, after merge):
 

@@ -43,6 +43,7 @@ from lib import (
     placed_run,
     skill_preflight,
     skill_probe,
+    suite_slot,
     telemetry,
     trace,
     usage_probe,
@@ -421,7 +422,8 @@ job run <bot> <job-id> [--db PATH] [--machines PATH] [--interval SECONDS]
   is no longer running, or when this process dies. SIGTERM and SIGHUP are
   forwarded to COMMAND; a Ctrl-C reaches COMMAND through the process group.
   A signal before COMMAND starts means it never runs. Exits with COMMAND's
-  status; never finishes the job. COMMAND gets ORCH_JOB_ID, ORCH_JOB_BOT and ORCH_DB.
+  status; never finishes the job. COMMAND gets ORCH_JOB_ID, ORCH_JOB_BOT,
+  ORCH_TEST_SUITE_MAX (the placed device's test_suite_max) and ORCH_DB.
   Telemetry (issue #93): `claude -p` gets --output-format stream-json
   --verbose and `codex exec` gets --json; COMMAND's stdout is logged to
   events.jsonl in $ORCH_JOB_STATE_DIR (else telemetry-<bot>/<job-id>
@@ -434,8 +436,9 @@ job run <bot> <job-id> [--db PATH] [--machines PATH] [--interval SECONDS]
   remote device COMMAND runs there as the bot's user over the device's
   ssh_alias (ssh -l <bot> -- <alias>), under its login shell (bash -lc),
   in <workdir_root>/jobs/<job-id>, with ORCH_JOB_ID, ORCH_JOB_BOT,
-  ORCH_JOB_DEVICE and ORCH_JOB_WORKDIR. There it is launched detached
-  (setsid) with its own files in <workdir_root>/jobs/<job-id>.run/<tag>/
+  ORCH_TEST_SUITE_MAX, ORCH_JOB_DEVICE and ORCH_JOB_WORKDIR. There it is
+  launched detached (setsid) with its own files in
+  <workdir_root>/jobs/<job-id>.run/<tag>/
   (stdin, pid, log, handoff, exit), and its stdin is the brief: the file
   $ORCH_JOB_BRIEF, else this process's stdin when that is a regular file.
   orch job run follows it with short ssh calls, relays its log to stdout,
@@ -2785,11 +2788,14 @@ def _job_run_command(argv: list[str]) -> int:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
 
+    job_env = {
+        "ORCH_JOB_ID": args.job_id,
+        "ORCH_JOB_BOT": args.bot,
+        suite_slot.LIMIT_ENV: str(placed.device.test_suite_max),
+    }
     # Never pass on a token this process inherited (another job's run).
     inherited = {name: value for name, value in os.environ.items() if name != job_token.PROOF_ENV}
-    inherited.update(
-        {"ORCH_JOB_ID": args.job_id, "ORCH_JOB_BOT": args.bot, DB_ENV: str(database), **harness_env(owner)}
-    )
+    inherited.update({**job_env, DB_ENV: str(database), **harness_env(owner)})
     environment = account_environ(inherited, owner, placed.account_home)
     if proof is not None and not placed.remote:
         # Not sent to a remote device: it would be on the ssh command line.
@@ -2860,8 +2866,7 @@ def _job_run_command(argv: list[str]) -> int:
     if args.follow_grace is not None:
         placed.grace = args.follow_grace
     remote_env = {
-        "ORCH_JOB_ID": args.job_id,
-        "ORCH_JOB_BOT": args.bot,
+        **job_env,
         "ORCH_JOB_DEVICE": placed.device.name,
         # #94: with --worktree, the checkout's and the brief's remote paths
         **placed.remote_env(worktree=args.worktree, brief=box_brief is not None),

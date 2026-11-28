@@ -5,10 +5,12 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
 
+from lib import live_settings, settings_apply
 from lib.config_overlay import merge, overlay_keys, overlay_path
 from lib.machines_yml import load_machines_yml
 from lib.orch_yml import load_orch_yml
@@ -145,6 +147,30 @@ def test_machines_overlay_enables_a_device(overlay_on: None, shipped: tuple[Path
     pc = config.device("pc")
     assert pc is not None and pc.enabled and pc.slot_max == 1
     assert config.device("box").slot_max == 3
+
+
+def test_test_suite_max_is_set_per_host_and_the_tracked_file_refuses_it(
+    overlay_on: None, shipped: tuple[Path, Path]
+) -> None:
+    orch, machines = shipped
+    overlay_path(machines).write_text(
+        "devices:\n  - name: pc\n    test_suite_max: 2\n", encoding="utf-8")
+    config, findings = load_machines_yml(machines)
+    assert config is not None, findings
+    assert config.device("pc").test_suite_max == 2
+    assert config.device("box").test_suite_max == 1
+
+    base = machines.read_text(encoding="utf-8")
+    machines.write_text(
+        base.replace("    slot_max: 6\n", "    slot_max: 6\n    test_suite_max: 3\n", 1),
+        encoding="utf-8",
+    )
+    result = check_config(orch, machines)
+    assert result.returncode == 1
+    assert any("machines.local.yml" in line for line in result.stderr.splitlines()), result.stderr
+
+    assert "test_suite_max" not in settings_apply.FIELDS
+    assert "test_suite_max" not in {item.name for item in fields(live_settings.Switch)}
 
 
 @pytest.mark.parametrize("text, expected", [

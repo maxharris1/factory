@@ -9,3 +9,4 @@ devices:
   - name: pc
     enabled: true
     slot_max: 2
+    test_suite_max: 2

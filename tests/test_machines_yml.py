@@ -308,6 +308,15 @@ def test_drain_defaults_false_and_the_device_takes_new_jobs(tmp_path: Path) -> N
     assert not pc.takes_new("claude")
 
 
+def test_test_suite_max_defaults_to_one(tmp_path: Path) -> None:
+    config, findings = load_machines_yml(write(tmp_path, "orch_host: pc\ndevices:\n" + remote()))
+
+    assert findings == []
+    assert config is not None
+    (pc,) = config.devices
+    assert pc.test_suite_max == 1
+
+
 def test_draining_device_stays_enabled_and_eligible_but_takes_no_new_jobs(
     tmp_path: Path,
 ) -> None:
@@ -370,6 +379,10 @@ def test_placeholder_device_loads_with_a_warning_and_is_never_eligible(
         ("devices:\n" + remote(slot_max="0"), "devices[0].slot_max must be a positive"),
         ("devices:\n" + remote(slot_max="true"), "devices[0].slot_max must be a positive"),
         ("devices:\n" + remote(slot_max="-"), "missing required field 'devices[0].slot_max'"),
+        ("devices:\n" + remote(test_suite_max="0"), "devices[0].test_suite_max must be a positive"),
+        ("devices:\n" + remote(test_suite_max="-1"), "devices[0].test_suite_max must be a positive"),
+        ("devices:\n" + remote(test_suite_max="true"), "devices[0].test_suite_max must be a positive"),
+        ("devices:\n" + remote(test_suite_max="many"), "devices[0].test_suite_max must be a positive"),
         ("devices:\n" + remote(enabled="yes please"), "devices[0].enabled must be true or false"),
         ("devices:\n" + remote(drain='"yes"'), "devices[0].drain must be true or false"),
         (

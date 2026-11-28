@@ -30,6 +30,7 @@ from lib.dispatcher import Dispatcher
 from lib.harness_env import CPU_CAP, account_tokens, cpu_cap_env, cpu_window, harness_env
 from lib.machines_yml import MachinesConfig, load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
+from lib.suite_slot import LIMIT_ENV
 from lib.wait import WaitError, deliver, wait_for_job
 from lib.worktrees import pid_alive, process_start
 from tests.pool_helpers import TARGET_MACHINES_YML, poller_adopts, write_target_machines
@@ -474,6 +475,26 @@ def test_remote_job_starts_over_the_bots_own_alias_as_that_bot(tmp_path: Path, b
     assert {call["words"] for call in calls} == {1}  # one remote command string each
     assert pool.placement(job_id) is None  # released: the worker is gone
     assert state(queue, job_id) == "running"  # job run never finishes the job
+
+
+def test_remote_job_gets_the_placed_devices_test_suite_max(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("ORCH_NO_LOCAL_OVERLAY", raising=False)
+    machines, _, _, job_id, ssh = remote_setup(tmp_path, "codex")
+    (tmp_path / "machines.local.yml").write_text(
+        "devices:\n  - name: pc\n    test_suite_max: 2\n", encoding="utf-8")
+    report = tmp_path / "report.json"
+    script = f"import json, os; json.dump(os.environ.get({LIMIT_ENV!r}), open({str(report)!r}, 'w'))"
+    proc = orch(
+        "job", "run", "codex-bot", job_id, "--db", str(tmp_path / "orch.db"), "--machines", str(machines),
+        "--", sys.executable, "-c", script,
+        env=ssh.env(),
+    )
+    _, err = proc.communicate(timeout=30)
+
+    assert proc.returncode == 0, err
+    assert json.loads(report.read_text(encoding="utf-8")) == "2"
 
 
 @pytest.mark.parametrize("account", ["placed", "default"])
