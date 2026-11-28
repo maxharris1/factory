@@ -1315,7 +1315,10 @@ _CHECKOUT = (
     'cd -- "$d" || fail "cannot enter $d"; '
     'if [ -n "$b" ]; then (umask 077 && cat > "$b") || fail "cannot write the brief $b"; fi; '
     "exclude() { mkdir -p .git/info && for p in "
-    + " ".join(shlex.quote(f"/{name}") for name in (PID_FILE, start_record("*"), scope_record("*")))
+    + " ".join(
+        shlex.quote(f"/{name}")
+        for name in (PID_FILE, start_record("*"), f"{tree_record('*')}.lock", scope_record("*"))
+    )
     + '; do grep -qxF -- "$p" .git/info/exclude 2>/dev/null '
     '|| printf \'%s\\n\' "$p" >> .git/info/exclude || return 1; done; }; '
     "if [ -d .git ] && t=$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null); then "
