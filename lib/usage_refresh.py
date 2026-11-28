@@ -1,18 +1,13 @@
 """One usage refresh pass over every account and device pair (issue #1837).
 
 `run` runs the account doctor (lib/account_doctor.py), then reads usage for
-each pair it judged `ok`, with no job row and no model turn. READERS maps a
-harness to the script lib/usage_probe.py already sends at a job's start, its
-stdin and its parser. Each read goes over `account_doctor.ssh_argv` as the
-pair's bot login, all of them in parallel under one DEADLINE_SECONDS
-deadline, and nothing here reads a credential file: the CLI or the rollout
-reader runs as the account and only its stdout comes back.
-
-Every reading is stored through `usage_readings.store` in one transaction,
-under its own account and device, with JOB_ID and the harness's bot user,
-the `bot` a job-time probe stores. `store` keeps whichever reading is newer,
-so a second pass or a job's own probe never loses a fresher one, and it
-lifts a usage limit the fresh reading clears (`lane_limit.reevaluate`).
+each pair it judged `ok`, with no job row and no model turn, using the
+scripts lib/usage_probe.py sends at a job's start. The reads run in parallel
+under one DEADLINE_SECONDS deadline, and nothing here reads a credential
+file: the CLI or the rollout reader runs as the account and only its stdout
+comes back. Every reading is stored through `usage_readings.store` in one
+transaction, under its own account and device, with JOB_ID and the
+harness's bot user.
 """
 
 from __future__ import annotations
@@ -28,10 +23,12 @@ from typing import Literal
 from lib import account_doctor, harnesses, usage_probe, usage_readings
 from lib.machines_yml import MachinesConfig
 from lib.remote import ByteTransport
+from lib.usage_probe import ProbeFailed
 from lib.usage_readings import NOT_TRACKED, SOURCES, Reading
 
 JOB_ID = "orch-usage-refresh"
 DEADLINE_SECONDS = 30.0
+NO_READING = "no reading in the reply"
 
 Outcome = Literal["read", "signed-out", "mismatch", "unreachable", "not tracked", "probe failed"]
 
@@ -61,13 +58,12 @@ READERS: dict[str, Reader] = {
 
 @dataclass(frozen=True)
 class Result:
-    """One pair's outcome. `detail` is the source for a read, else why not."""
-
     account: str
     device: str
     harness: str
     outcome: Outcome
-    detail: str
+    source: str | None = None
+    detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -79,8 +75,8 @@ class _Pair:
     own_login: bool
 
 
-class _ProbeFailed(Exception):
-    pass
+def _timed_out() -> str:
+    return f"timed out after {DEADLINE_SECONDS:g}s"
 
 
 def _read(transport: ByteTransport, config: MachinesConfig, pair: _Pair, deadline: float) -> bytes:
@@ -89,17 +85,17 @@ def _read(transport: ByteTransport, config: MachinesConfig, pair: _Pair, deadlin
     timeout = max(0.0, deadline - time.monotonic())
     exchanged = transport.exchange(argv, timeout=timeout, input=reader.stdin)
     if exchanged.timed_out:
-        raise _ProbeFailed(f"timed out after {DEADLINE_SECONDS:g}s")
+        raise ProbeFailed(_timed_out())
     if exchanged.code != 0:
-        raise _ProbeFailed(f"ssh exit {exchanged.code}")
+        raise ProbeFailed(f"ssh exit {exchanged.code}")
     return exchanged.stdout[: usage_readings.MAX_REPLY_BYTES]
 
 
 def _not_read(row: account_doctor.SignIn, harness: str) -> Result | None:
     if row.status != "ok":
-        return Result(row.account, row.device, harness, row.status, row.detail)
+        return Result(row.account, row.device, harness, row.status, detail=row.detail)
     if harness in NOT_TRACKED:
-        return Result(row.account, row.device, harness, "not tracked", NOT_TRACKED[harness])
+        return Result(row.account, row.device, harness, "not tracked", detail=NOT_TRACKED[harness])
     return None
 
 
@@ -132,21 +128,21 @@ def run(
     stored: list[tuple[_Pair, list[Reading]]] = []
     for future, pair in futures.items():
         key = (pair.account, pair.device)
-        if not future.done():
-            results[key] = Result(*key, pair.harness, "probe failed", f"timed out after {DEADLINE_SECONDS:g}s")
-            continue
         try:
-            readings = READERS[pair.harness].parse(future.result(), now)
-        except _ProbeFailed as failed:
-            results[key] = Result(*key, pair.harness, "probe failed", str(failed))
+            if not future.done():
+                raise ProbeFailed(_timed_out())
+            stdout = future.result()
+        except ProbeFailed as failed:
+            results[key] = Result(*key, pair.harness, "probe failed", detail=str(failed))
             continue
         except Exception as exc:
-            results[key] = Result(*key, pair.harness, "probe failed", type(exc).__name__)
+            results[key] = Result(*key, pair.harness, "probe failed", detail=type(exc).__name__)
             continue
+        readings = READERS[pair.harness].parse(stdout, now)
         if not readings:
-            results[key] = Result(*key, pair.harness, "probe failed", "no reading in the reply")
+            results[key] = Result(*key, pair.harness, "probe failed", detail=NO_READING)
             continue
-        results[key] = Result(*key, pair.harness, "read", SOURCES[pair.harness])
+        results[key] = Result(*key, pair.harness, "read", source=SOURCES[pair.harness])
         stored.append((pair, readings))
 
     connection.execute("BEGIN IMMEDIATE")

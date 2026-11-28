@@ -4,6 +4,7 @@ import contextlib
 import json
 import re
 import sqlite3
+import threading
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -68,8 +69,6 @@ def agy_usage(remaining: float) -> bytes:
 
 
 class Transport:
-    """Doctor status scripts by alias; usage reads by alias and account home."""
-
     def __init__(self) -> None:
         self.status: dict[str, bytes | Exchanged] = {
             "far-claude-bot": framed((0, 0, claude_reply()), (1, 0, claude_reply(org=ORG_B, email=EMAIL_B))),
@@ -130,7 +129,7 @@ def test_one_pass_reads_claude_codex_and_gemini_for_the_signed_in_pairs(world) -
     transport = Transport()
     results = refresh(world, transport)
 
-    assert {key: (r.outcome, r.detail) for key, r in results.items() if r.outcome == "read"} == {
+    assert {key: (r.outcome, r.source) for key, r in results.items() if r.outcome == "read"} == {
         ("claude-default", "far"): ("read", "get_usage"),
         ("claude-b", "far"): ("read", "get_usage"),
         ("codex-default", "far"): ("read", "rollout"),
@@ -215,12 +214,12 @@ def test_a_failed_probe_fails_only_its_own_pair(world) -> None:
     transport.usage["far-gemini-bot", None] = b"not json"
     results = refresh(world, transport)
 
-    assert {key: (r.outcome, r.detail) for key, r in results.items() if r.device == "far"} == {
+    assert {key: (r.outcome, r.source or r.detail) for key, r in results.items() if r.device == "far"} == {
         ("claude-default", "far"): ("read", "get_usage"),
         ("claude-b", "far"): ("probe failed", "ssh exit 1"),
         ("codex-default", "far"): ("probe failed", "timed out after 30s"),
         ("cursor-default", "far"): ("not tracked", usage_readings.NOT_TRACKED["cursor"]),
-        ("gemini-default", "far"): ("probe failed", "no reading in the reply"),
+        ("gemini-default", "far"): ("probe failed", usage_refresh.NO_READING),
     }
     _, connection, _ = world
     assert {account for account, _, _ in stored(connection)} == {"claude-default"}
@@ -259,3 +258,26 @@ def test_a_usage_held_account_takes_work_after_a_refresh(world) -> None:
     assert "claude-default" not in lane_limit.account_limits(connection, NOW)
     claimed = pool.claim("claude")
     assert claimed is not None
+    assert claimed[1].account == "claude-default"
+
+
+def test_a_read_still_running_at_the_deadline_fails_only_its_own_pair(world, monkeypatch) -> None:
+    monkeypatch.setattr(usage_refresh, "DEADLINE_SECONDS", 0.2)
+    release = threading.Event()
+
+    class Stuck(Transport):
+        def exchange(self, argv: Sequence[str], *, timeout: float, input: bytes = b"") -> Exchanged:
+            if argv[-2] == "far-codex-bot" and "ORCH-ACCOUNTS-BEGIN" not in argv[-1]:
+                release.wait(5)
+            return super().exchange(argv, timeout=timeout, input=input)
+
+    try:
+        results = refresh(world, Stuck())
+    finally:
+        release.set()
+
+    assert (results["codex-default", "far"].outcome, results["codex-default", "far"].detail) == (
+        "probe failed", "timed out after 0.2s")
+    assert results["claude-default", "far"].outcome == "read"
+    _, connection, _ = world
+    assert "codex-default" not in {account for account, _, _ in stored(connection)}
