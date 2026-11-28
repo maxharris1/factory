@@ -34,7 +34,7 @@ from lib.dispatch.helpers import (
 )
 from lib.dispatch.transitions import write_workflow_state
 from lib.factory_md import family_findings
-from lib.role_router import Candidate, GuardFacts, RoutingError
+from lib.role_router import Candidate, RoutingError
 from lib.dispatch.types import (
     BaseCheck,
     BaseMismatch,
@@ -542,7 +542,7 @@ class DispatcherBase:
                 ticket,
                 self.refused_harnesses,
                 builder_only=built_by,
-                guards=self._guard_facts if built_by is None else None,
+                guards=self._gemini_guards(ticket) if built_by is None else None,
                 built_outside=built_outside,
             )
         except RoutingError as error:
@@ -562,9 +562,6 @@ class DispatcherBase:
             return ticket
         unrouted = replace(ticket, factory=ticket.factory_md, factory_md=None, router_picks=None)
         return self._fresh_route(unrouted, None, built_outside=True)
-
-    def _guard_facts(self) -> GuardFacts:
-        return GuardFacts(refused="gemini" in self.refused_harnesses)
 
     def _routed_by_pending_go(self, ticket: TrackedTicket) -> TrackedTicket | None:
         for comment in sorted(ticket.comments, key=_comment_order, reverse=True):

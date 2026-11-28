@@ -8,10 +8,11 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from lib import device_sync, job_detail, lane_limit, skill_preflight
+from lib import device_sync, job_detail, lane_limit, skill_preflight, usage_readings
 from lib.device_memory import MEMORY_WAIT
 from lib.device_pool import (
     UNREACHABLE_BACKOFF_SECONDS,
+    UNREAD_HEADROOM,
     account_loads,
     back_off,
     backed_off_through,
@@ -109,6 +110,7 @@ from lib.queue import (
     restored_claim,
     retire_requeued,
 )
+from lib.role_router import GuardFacts, HeadroomReading
 from lib.schema import HARNESSES
 
 
@@ -333,6 +335,56 @@ class JobsMixin:
             for repo, project in self.wake_routes.items()
             if project.devices is not None
         }
+
+    def _gemini_guards(self, ticket: TrackedTicket) -> Callable[[], GuardFacts] | None:
+        config = getattr(self.devices, "config", None)
+        if config is None:
+            return None
+        allowed = self._pins().get(ticket.repo.lower())
+
+        def read() -> GuardFacts:
+            now = self.queue.now()
+            with self.queue.connect() as connection:
+                loads = account_loads(connection, config, now)
+                lane_held = lane_limit.active(connection, "gemini", now) is not None
+                newest = usage_readings.newest_by_account(usage_readings.stored(connection) or [])
+                (builds,) = connection.execute(
+                    """
+                    SELECT COUNT(DISTINCT lower(repo) || '#' || ticket_id) FROM jobs
+                    WHERE recipient = 'gemini' AND action IN ('plan', 'build', 'fix')
+                      AND state IN ('queued', 'running')
+                      AND NOT (lower(repo) = ? AND ticket_id = ?)
+                    """,
+                    (ticket.repo.lower(), ticket.ticket_id),
+                ).fetchone()
+            signed_in = {
+                account
+                for device in config.devices
+                if device.takes_new("gemini") and (allowed is None or device.name in allowed)
+                for account in loads.signed_in_on(config, device.name, "gemini")
+            }
+            paused = {item.id for item in config.accounts if item.paused}
+            unheld = signed_in - (loads.held | paused)
+            fresh = {
+                account: usage_readings.headroom(list(newest.get(account, {}).values()), now)
+                for account in unheld
+            }
+            room = {account: UNREAD_HEADROOM if left is None else left for account, left in fresh.items()}
+            roomiest = min(room, key=lambda account: (-room[account], account), default=None)
+            windows = newest.get(roomiest, {}) if roomiest is not None else {}
+            return GuardFacts(
+                refused="gemini" in self.refused_harnesses,
+                signed_out=not signed_in,
+                usage_held=bool(signed_in) and (lane_held or not unheld),
+                readings=tuple(
+                    HeadroomReading(window, round(1.0 - reading.used, 6), reading.observed_at)
+                    for window, reading in sorted(windows.items())
+                    if reading.used is not None and usage_readings.window_state(reading, now) == "ok"
+                ),
+                builds_in_flight=int(builds),
+            )
+
+        return read
 
     def _head(self) -> str | None:
         pool = getattr(self.devices, "pool", None)
