@@ -9,21 +9,27 @@ from pathlib import Path
 
 import pytest
 
-from lib import account_doctor, queue
+from lib import account_doctor, cli, queue, self_deploy
+from lib.grok_delivery import PullDriverDelivery
 from lib.machines_yml import MachinesConfig
 from lib.queue import Job, SQLiteJobQueue
 from lib.signin_wake import announce
 from tests.test_account_doctor import (
     CLAUDE_B_HOME,
+    KEY,
     NOW,
     SIGNED_OUT_CLAUDE,
     DoctorTransport,
     claude_reply,
     drops,
     framed,
+    poller,
     poller_config,
     sign_out_claude_b,
 )
+from tests.test_account_doctor import World as SshWorld
+from tests.test_account_pair_requests import Box, Logout
+from tests.test_dispatcher import FakeGrokDelivery, RaisingGrokDelivery
 
 REPO = "Owner/Factory"
 DAY = 24 * 60 * 60
@@ -174,3 +180,128 @@ def test_announce_takes_no_transport_and_imports_no_sign_in_module() -> None:
         for alias in node.names]
     banned = ("account_signin", "signin_attempt", "signin_broker", "remote")
     assert [name for name in names if any(word in name for word in banned)] == []
+
+
+def wakes(job_queue: SQLiteJobQueue) -> list[tuple[object, ...]]:
+    with contextlib.closing(job_queue.connect()) as connection:
+        return [tuple(row) for row in connection.execute(
+            "SELECT action, ticket_id, dedupe_key, state, failure_handled FROM jobs ORDER BY created_at, ticket_id")]
+
+
+def wake(account: str, since: float, state: str = "done", handled: int = 0) -> tuple[object, ...]:
+    return ("account-signin", f"{account}@pc", key(account, since), state, handled)
+
+
+def test_a_new_signed_out_pair_raises_the_flag_and_one_wake_naming_account_and_device(tmp_path: Path) -> None:
+    delivery = FakeGrokDelivery()
+    world = poller(tmp_path, grok_delivery=delivery)
+    sign_out_claude_b(world.transport)
+    world.poll(0.0)
+    assert [flag[:3] for flag in world.flags()] == [KEY]
+    assert wakes(world.queue) == [wake("claude-b", 0.0)]
+    [job] = delivery.jobs
+    detail = json.loads(job.request.detail or "")
+    assert (detail["account"], detail["device"], detail["link"]) == ("claude-b", "pc", LINK)
+
+
+def test_the_wake_reaches_driver_inbox_through_deliver_grok_jobs(tmp_path: Path) -> None:
+    world = poller(tmp_path, grok_delivery=PullDriverDelivery())
+    sign_out_claude_b(world.transport)
+    world.poll(0.0)
+    with contextlib.closing(world.queue.connect()) as connection:
+        [(receipt, pull_state, logical_key, payload)] = connection.execute(
+            "SELECT jobs.handoff_comment_id, inbox.pull_state, inbox.logical_key, inbox.payload "
+            "FROM driver_inbox AS inbox JOIN jobs ON jobs.id = inbox.job_id").fetchall()
+    assert (receipt, pull_state) == (f"pull:{logical_key}", "queued")
+    body = json.loads(payload)
+    assert (body["action"], body["ticket_id"]) == ("account-signin", "claude-b@pc")
+
+
+def test_a_flagged_pair_is_not_woken_again_until_it_recovers_and_drops_again(tmp_path: Path) -> None:
+    world = poller(tmp_path)
+    sign_out_claude_b(world.transport)
+    for at in (0.0, 120.0, 240.0):
+        world.poll(at)
+    assert len(world.transport.exchanges) == 6
+    assert wakes(world.queue) == [wake("claude-b", 0.0)]
+    world.transport.replies = DoctorTransport().replies
+    world.poll(360.0)
+    assert world.flags() == []
+    sign_out_claude_b(world.transport)
+    world.poll(2160.0)
+    assert wakes(world.queue) == [wake("claude-b", 0.0), wake("claude-b", 2160.0)]
+
+
+def test_unreachable_then_signed_out_wakes_once(tmp_path: Path) -> None:
+    world = poller(tmp_path)
+    world.transport.replies["pc-claude-bot"] = b""
+    world.poll(0.0)
+    assert KEY in [flag[:3] for flag in world.flags()]
+    assert wakes(world.queue) == []
+    sign_out_claude_b(world.transport)
+    world.poll(1800.0)
+    world.poll(1920.0)
+    assert wakes(world.queue) == [wake("claude-b", 1800.0)]
+
+
+ORCH_YML = (
+    "poll_seconds: 60\n"
+    "driver: pull\n"
+    "trusted_logins:\n  grok-login: [grok-bot]\n"
+    "projects:\n  - repo: owner/factory\n"
+)
+
+
+def orch_db(ssh: SshWorld, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setattr(self_deploy, "own_repo", lambda *_: "owner/factory")
+    orch = ssh.tmp / "orch.yml"
+    orch.write_text(ORCH_YML, encoding="utf-8")
+    cli._runtime(ssh.db, orch, create=True)
+    return orch
+
+
+def orch_poll(ssh: SshWorld, orch: Path) -> list[tuple[object, ...]]:
+    dispatcher, _ = cli._runtime(ssh.db, orch, create=False, machines_path=ssh.machines)
+    dispatcher.reconcile_jobs()
+    return [(action, ticket, state) for action, ticket, _, state, _ in wakes(dispatcher.queue)]
+
+
+def test_a_settings_sign_out_does_not_wake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ssh = SshWorld(tmp_path, monkeypatch)
+    orch = orch_db(ssh, monkeypatch)
+    box = Box(ssh, tmp_path)
+    Logout(box, "claude")
+    box.request("signout", account="claude-b")
+    (entry,) = box.run()
+    assert entry.result == "signed-out"
+    assert orch_poll(ssh, orch) == [("account-signin", "claude-c@pc", "done")]
+    assert ssh.statuses()[("claude-b", "pc")] == "signed-out"
+
+
+def test_orch_accounts_doctor_records_a_drop_and_creates_no_job_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ssh = SshWorld(tmp_path, monkeypatch)
+    orch = orch_db(ssh, monkeypatch)
+    assert ssh.doctor() == 0
+    job_queue = SQLiteJobQueue(ssh.db, clock=lambda: NOW)
+    with contextlib.closing(job_queue.connect()) as connection:
+        assert [(account, device, announced) for account, device, _, announced in drops(connection)] == [
+            ("claude-c", "pc", 0), ("codex-b", "pc", 0)]
+    assert wakes(job_queue) == []
+    assert orch_poll(ssh, orch) == [("account-signin", "claude-c@pc", "done"),
+                                    ("account-signin", "codex-b@pc", "done")]
+
+
+def test_an_undelivered_wake_that_times_out_leaves_no_stuck_ticket(tmp_path: Path) -> None:
+    world = poller(tmp_path, grok_delivery=RaisingGrokDelivery(OSError("webhook down")))
+    sign_out_claude_b(world.transport)
+    world.poll(0.0)
+    world.poll(DAY - 1)
+    assert wakes(world.queue) == [wake("claude-b", 0.0, "queued")]
+    for at in (DAY, 2 * DAY, 3 * DAY):
+        world.poll(at)
+        assert wakes(world.queue) == [wake("claude-b", 0.0, "failed", 1)]
+        with contextlib.closing(world.queue.connect()) as connection:
+            assert connection.execute("SELECT * FROM ticket_state").fetchall() == []
+        assert [flag[:3] for flag in world.flags()] == [KEY]

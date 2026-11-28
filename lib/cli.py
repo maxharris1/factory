@@ -41,6 +41,7 @@ from lib import (
     linear_webhook,
     oom,
     placed_run,
+    signin_wake,
     skill_preflight,
     skill_probe,
     suite_slot,
@@ -147,7 +148,7 @@ from lib.queue import (
     require_latest_claim,
     require_proof,
 )
-from lib.remote import SshTransport
+from lib.remote import ByteTransport, SshTransport
 from lib.role_router import RoutingError, load_routing_yml, routing_argv_for_detail
 from lib.state_backup import (
     BackupError,
@@ -1736,6 +1737,13 @@ def _file_bytes(database: Path) -> int:
     return database.stat().st_size + (wal.stat().st_size if wal.exists() else 0)
 
 
+def _sign_in_pass(
+    queue: SQLiteJobQueue, transport: ByteTransport, repo: str | None, config: MachinesConfig, now: float
+) -> None:
+    account_doctor.check(queue, transport, repo, config, now)
+    signin_wake.announce(queue, config, repo)
+
+
 def _runtime(
     db_path: Path | None,
     orch_path: Path | None,
@@ -1794,7 +1802,7 @@ def _runtime(
                 machines_path=_machines_path(machines_path),
                 memory=functools.partial(read_memory, transport),
                 sign_ins=functools.partial(
-                    account_doctor.check, queue, SshTransport(), self_deploy.own_repo(ROOT)
+                    _sign_in_pass, queue, SshTransport(), self_deploy.own_repo(ROOT)
                 ),
             )
     feeder = None

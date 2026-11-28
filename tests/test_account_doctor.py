@@ -18,6 +18,7 @@ from lib import account_doctor
 from lib.account_doctor import Probe, SignIn
 from lib.device_monitor import DeviceMonitor
 from lib.device_pool import DevicePool
+from lib.dispatch.types import GrokDelivery
 from lib.dispatcher import Dispatcher
 from lib.machines_yml import MachinesConfig
 from lib.queue import JobRequest, SQLiteJobQueue
@@ -826,7 +827,9 @@ class Poller(NamedTuple):
             return attention_rows(connection)
 
 
-def poller(tmp_path: Path, *, sign_ins: bool = True) -> Poller:
+def poller(tmp_path: Path, *, sign_ins: bool = True, grok_delivery: GrokDelivery | None = None) -> Poller:
+    from lib import cli
+
     now = [0.0]
     path = tmp_path / "d.db"
     queue = SQLiteJobQueue(path, clock=lambda: now[0])
@@ -835,13 +838,13 @@ def poller(tmp_path: Path, *, sign_ins: bool = True) -> Poller:
     config = config_of(machines)
     pool = DevicePool(queue, config)
     transport = DoctorTransport()
-    check = functools.partial(account_doctor.check, queue, transport, "Owner/Factory") if sign_ins else None
+    check = functools.partial(cli._sign_in_pass, queue, transport, "Owner/Factory") if sign_ins else None
     dispatcher = Dispatcher(
         path,
         queue,
         trusted_logins=TRUSTED_LOGINS,
         review_actions=FakeReviewActions(),
-        grok_delivery=FakeGrokDelivery(),
+        grok_delivery=grok_delivery or FakeGrokDelivery(),
         devices=DeviceMonitor(pool, config, transport, alive=lambda *_: False,
                               machines_path=machines, sign_ins=check),
     )
