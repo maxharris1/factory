@@ -372,6 +372,11 @@ def _central_entry(
     return _slot_lookup(routing.roles, role), "roles"
 
 
+def central_pool(config: RoutingConfig, slot: str) -> tuple[Candidate, ...]:
+    entry, _ = _central_entry(config, slot, config.budget)
+    return () if entry is None or entry == "inherit" else entry
+
+
 def role_matrix(path: Path = ROOT / ROUTING_PATH) -> dict:
     if not path.is_file():
         return {"state": "missing", "roles": []}
