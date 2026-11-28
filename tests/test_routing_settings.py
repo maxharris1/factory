@@ -218,10 +218,13 @@ NEIGHBOURS = [
 
 @pytest.mark.parametrize(("early", "late", "reason"), NEIGHBOURS)
 def test_the_earlier_rule_wins_in_either_key_order(early, late, reason):
+    rest = {h: b for h, b in SPLIT.items() if h != "claude"}
     pairs = [("claude", early), ("grok", late)]
-    for order in (pairs, pairs[::-1]):
+    values = [{**dict(order), **rest} for order in (pairs, pairs[::-1])]
+    assert [list(value)[:2] for value in values] == [["claude", "grok"], ["grok", "claude"]]
+    for value in values:
         with pytest.raises(OverrideRefused) as refused:
-            parse_override({**SPLIT, **dict(order)}, SHIPPED)
+            parse_override(value, SHIPPED)
         assert refused.value.reason == reason
 
 
