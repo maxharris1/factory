@@ -15,10 +15,11 @@ Codex, Gemini, and Cursor, with:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -527,6 +528,111 @@ _BUILD_ROLE_BY_TICKET_TYPE: dict[str, str] = {
 
 def build_role_for_ticket_type(ticket_type: str | None) -> str:
     return _BUILD_ROLE_BY_TICKET_TYPE.get(ticket_type or "", "build")
+
+
+REFERENCE_MEAN_WEIGHT = 1.25
+
+
+@dataclass(frozen=True)
+class TicketFacts:
+    repo: str
+    ticket: int
+    risk: str | None
+    plan_first: bool
+    touches: tuple[str, ...] = ()
+    ticket_type: str | None = None
+
+    @property
+    def weight(self) -> float:
+        score = (
+            2 * (self.risk == "high")
+            + 2 * self.plan_first
+            + (len(set(self.touches)) >= 4)
+            + (build_role_for_ticket_type(self.ticket_type) != "build:bug")
+        )
+        return 0.5 + 0.25 * score
+
+
+@dataclass(frozen=True)
+class HeadroomReading:
+    window: str
+    headroom: float
+    observed_at: float
+
+
+@dataclass(frozen=True)
+class GuardFacts:
+    refused: bool = False
+    signed_out: bool = False
+    usage_held: bool = False
+    readings: tuple[HeadroomReading, ...] = ()
+    builds_in_flight: int = 0
+
+
+SkipReason = Literal["refused", "signed-out", "usage-held", "low-headroom", "builds-in-flight"]
+DrawRole = Literal["build", "review"]
+
+
+@dataclass(frozen=True)
+class Draw:
+    role: DrawRole
+    harness: str
+    seed: str
+    draw: float
+    share: float
+    chance: float
+    picked: bool
+    skipped_reason: SkipReason | None
+
+
+def _low_headroom(guards: GuardFacts, shares: HarnessShares) -> bool:
+    latest = {r.window: r for r in sorted(guards.readings, key=lambda r: (r.observed_at, -r.headroom))}
+    return any(r.headroom < shares.min_headroom for r in latest.values())
+
+
+_GUARDS: tuple[tuple[SkipReason, Callable[[DrawRole, GuardFacts, HarnessShares], bool]], ...] = (
+    ("refused", lambda role, guards, shares: guards.refused),
+    ("signed-out", lambda role, guards, shares: guards.signed_out),
+    ("usage-held", lambda role, guards, shares: guards.usage_held),
+    ("low-headroom", lambda role, guards, shares: _low_headroom(guards, shares)),
+    (
+        "builds-in-flight",
+        lambda role, guards, shares: role == "build" and guards.builds_in_flight >= shares.max_builds_in_flight,
+    ),
+)
+
+
+def _chance(role: DrawRole, ticket: TicketFacts, shares: HarnessShares, build: Draw | None) -> float:
+    if role == "build":
+        return min(1.0, shares.build * ticket.weight / REFERENCE_MEAN_WEIGHT)
+    taken = build.chance if build is not None and build.skipped_reason is None else 0.0
+    if taken >= 1.0:
+        return 1.0 if shares.review > 0 else 0.0
+    return min(1.0, shares.review / (1 - taken))
+
+
+def draw(
+    role: DrawRole,
+    ticket: TicketFacts,
+    shares: HarnessShares,
+    guards: GuardFacts = GuardFacts(),
+    *,
+    build: Draw | None = None,
+) -> Draw:
+    seed = f"{ticket.repo.lower()}#{ticket.ticket}:{role}"
+    value = int.from_bytes(hashlib.sha256(seed.encode()).digest()[:8], "big") / 2**64
+    chance = _chance(role, ticket, shares, build)
+    skipped = next((reason for reason, held in _GUARDS if held(role, guards, shares)), None)
+    return Draw(
+        role=role,
+        harness="gemini",
+        seed=seed,
+        draw=value,
+        share=shares.build if role == "build" else shares.review,
+        chance=chance,
+        picked=skipped is None and value < chance,
+        skipped_reason=skipped,
+    )
 
 
 def resolve_pair(
