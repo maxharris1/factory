@@ -6,11 +6,25 @@ from pathlib import Path
 
 import pytest
 
-from lib import exposure, harness_report
+from lib import exposure, harness_report, telemetry
 from lib.harness_report import Measure, Row, VerdictMix
+from lib.pricing import estimate_cost_usd
 from lib.role_router import Draw, Hardness, Sample, sample_json
 
 REPO = "Owner/Repo"
+UNKNOWN = Measure(None, 0)
+UNMEASURED = (UNKNOWN,) * 7
+
+CI_EVENTS_DDL = """
+CREATE TABLE ci_events (
+    repo TEXT NOT NULL,
+    ticket_id TEXT NOT NULL,
+    head TEXT NOT NULL,
+    status TEXT NOT NULL,
+    gate_count_after INTEGER NOT NULL,
+    PRIMARY KEY (repo, ticket_id, head)
+)
+"""
 
 JOBS_DDL = """
 CREATE TABLE jobs (
@@ -61,15 +75,26 @@ class Db:
         exposure_table: bool = True,
         verdict_table: bool = True,
         verdict_column: bool = True,
+        ci_table: bool = True,
+        telemetry_table: bool = True,
+        tokens_unknown_column: bool = True,
     ):
         self.path = path
         self.verdict_column = verdict_column
+        self.tokens_unknown_column = tokens_unknown_column
         with sqlite3.connect(path) as connection:
             connection.execute(JOBS_DDL)
             if exposure_table:
                 connection.execute(exposure.DDL)
             if verdict_table:
                 connection.execute(_verdict_heads_ddl(verdict_column))
+            if ci_table:
+                connection.execute(CI_EVENTS_DDL)
+            if telemetry_table:
+                ddl = telemetry.DDL
+                if not tokens_unknown_column:
+                    ddl = ddl.replace("tokens_unknown INTEGER,", "")
+                connection.execute(ddl)
         connection.close()
 
     def job(
@@ -120,16 +145,58 @@ class Db:
         connection.close()
 
     def verdict(
-        self, ticket: str, comment: str, verdict: str | None, at: float | None, repo: str = REPO
+        self,
+        ticket: str,
+        comment: str,
+        verdict: str | None,
+        at: float | None,
+        repo: str = REPO,
+        changed_lines: int | None = None,
     ) -> None:
-        columns = "repo, ticket_id, comment_id, head, posted_at"
-        values: tuple = (repo.lower(), ticket, comment, "abc", at)
+        columns = "repo, ticket_id, comment_id, head, posted_at, changed_lines"
+        values: tuple = (repo.lower(), ticket, comment, "abc", at, changed_lines)
         if self.verdict_column:
             columns += ", verdict"
             values += (verdict,)
         marks = ", ".join("?" for _ in values)
         with sqlite3.connect(self.path) as connection:
             connection.execute(f"INSERT INTO verdict_heads ({columns}) VALUES ({marks})", values)
+        connection.close()
+
+    def ci(self, ticket: str, head: str, status: str, repo: str = REPO) -> None:
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "INSERT INTO ci_events (repo, ticket_id, head, status, gate_count_after) "
+                "VALUES (?, ?, ?, ?, 0)",
+                (repo.lower(), ticket, head, status),
+            )
+        connection.close()
+
+    def telemetry(
+        self,
+        job_id: str,
+        harness: str,
+        *,
+        elapsed_seconds: float = 60.0,
+        tokens_in: int = 0,
+        tokens_cached: int = 0,
+        tokens_out: int = 0,
+        cost_usd: float | None = None,
+        tokens_unknown: int | None = 0,
+    ) -> None:
+        columns = (
+            "job_id, bot, harness, repo, started_at, updated_at, elapsed_seconds, events, "
+            "turns, tool_calls, files_touched, commands, test_runs, tokens_in, tokens_cached, "
+            "tokens_out, cost_usd, steps"
+        )
+        values: tuple = (job_id, "bot", harness, REPO, 0, 0, elapsed_seconds, 0, 0, "{}", 0, 0,
+                         0, tokens_in, tokens_cached, tokens_out, cost_usd, "[]")
+        if self.tokens_unknown_column:
+            columns += ", tokens_unknown"
+            values += (tokens_unknown,)
+        marks = ", ".join("?" for _ in values)
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(f"INSERT INTO job_telemetry ({columns}) VALUES ({marks})", values)
         connection.close()
 
 
@@ -186,15 +253,20 @@ def test_rows_group_claude_codex_and_gemini_jobs(db: Db) -> None:
 
     assert harness_report.rows(db.path) == [
         Row("plan", "claude", "claude-opus", "low", True, "default", 2, 2,
-            Measure(1.0, 2), Measure(2.0, 1), VerdictMix(1, 1, 1, 3), Measure(0.5, 2)),
+            Measure(1.0, 2), Measure(2.0, 1), VerdictMix(1, 1, 1, 3), Measure(0.5, 2),
+            *UNMEASURED),
         Row("build", "codex", "gpt-5", "low", True, "default", 2, 3,
-            Measure(2 / 3, 3), Measure(2.0, 1), VerdictMix(1, 1, 1, 3), Measure(0.5, 2)),
+            Measure(2 / 3, 3), Measure(2.0, 1), VerdictMix(1, 1, 1, 3), Measure(0.5, 2),
+            *UNMEASURED),
         Row("build", "gemini", "gemini-3", "high", False, "sampled", 1, 1,
-            Measure(1 / 3, 3), Measure(1.0, 1), VerdictMix(1, 0, 0, 1), Measure(0.0, 1)),
+            Measure(1 / 3, 3), Measure(1.0, 1), VerdictMix(1, 0, 0, 1), Measure(0.0, 1),
+            *UNMEASURED),
         Row("review", "claude", "claude-opus", "low", True, "default", 2, 3,
-            Measure(2 / 3, 3), Measure(2.0, 1), VerdictMix(1, 1, 1, 3), Measure(0.5, 2)),
+            Measure(2 / 3, 3), Measure(2.0, 1), VerdictMix(1, 1, 1, 3), Measure(0.5, 2),
+            *UNMEASURED),
         Row("review", "codex", "gpt-5", "high", False, "default", 1, 1,
-            Measure(1 / 3, 3), Measure(1.0, 1), VerdictMix(1, 0, 0, 1), Measure(0.0, 1)),
+            Measure(1 / 3, 3), Measure(1.0, 1), VerdictMix(1, 0, 0, 1), Measure(0.0, 1),
+            *UNMEASURED),
     ]
 
 
@@ -227,7 +299,7 @@ def test_unknown_values_are_none_not_zero(db: Db) -> None:
 
     assert harness_report.rows(db.path) == [
         Row("build", "claude", None, None, False, "default", 1, 1,
-            Measure(1.0, 1), Measure(None, 0), None, Measure(0.0, 1)),
+            Measure(1.0, 1), Measure(None, 0), None, Measure(0.0, 1), *UNMEASURED),
     ]
 
 
@@ -256,8 +328,22 @@ def test_since_counts_later_jobs_but_keeps_ticket_facts(db: Db) -> None:
 
     assert harness_report.rows(db.path, since=150) == [
         Row("build", "claude", None, None, True, "default", 1, 1,
-            Measure(1.0, 1), Measure(None, 0), None, Measure(1.0, 1)),
+            Measure(1.0, 1), Measure(None, 0), None, Measure(1.0, 1), *UNMEASURED),
     ]
+
+
+def test_since_measures_job_costs_on_the_window_and_ci_on_the_ticket(db: Db) -> None:
+    db.job("old", "1", "build", "claude", at=100)
+    db.job("new", "1", "build", "claude", at=200)
+    db.telemetry("old", "claude", elapsed_seconds=6000, cost_usd=9.0)
+    db.telemetry("new", "claude", elapsed_seconds=600, cost_usd=1.0)
+    db.ci("1", "h1", "success")
+
+    row = _only(harness_report.rows(db.path, since=150), "build")
+
+    assert (row.jobs, row.elapsed_minutes, row.cost_usd, row.first_push_ci) == (
+        1, Measure(10.0, 1), Measure(1.0, 1), Measure(1.0, 1),
+    )
 
 
 def test_repo_filter_ignores_case(db: Db) -> None:
@@ -366,7 +452,7 @@ def test_only_jobs_that_ran_count(db: Db, state: str) -> None:
 
     assert harness_report.rows(db.path) == [
         Row("build", "claude", None, None, False, "default", 1, 1,
-            Measure(1.0, 1), Measure(None, 0), None, Measure(0.0, 1)),
+            Measure(1.0, 1), Measure(None, 0), None, Measure(0.0, 1), *UNMEASURED),
     ]
 
 
@@ -429,7 +515,9 @@ def test_no_routed_model_when_the_routed_side_is_another_harness(db: Db) -> None
 def test_the_database_is_opened_read_only(db: Db, monkeypatch: pytest.MonkeyPatch) -> None:
     db.job("build", "1", "build", "claude", model="opus")
     db.job("review", "1", "review", "codex", handoff="c1")
-    db.verdict("1", "c1", "APPROVE", 1)
+    db.verdict("1", "c1", "APPROVE", 1, changed_lines=12)
+    db.ci("1", "h1", "success")
+    db.telemetry("build", "claude", tokens_in=100, cost_usd=0.5)
     opened: list[str] = []
     query_only: list[int] = []
     real = sqlite3.connect
@@ -458,12 +546,13 @@ def test_the_database_is_opened_read_only(db: Db, monkeypatch: pytest.MonkeyPatc
 
 
 def test_a_db_with_only_jobs_still_reports(tmp_path: Path) -> None:
-    db = Db(tmp_path / "orch.db", exposure_table=False, verdict_table=False)
+    db = Db(tmp_path / "orch.db", exposure_table=False, verdict_table=False, ci_table=False,
+            telemetry_table=False)
     db.job("build", "1", "build", "claude", routing=_routing(builder_model="opus"))
 
     assert harness_report.rows(db.path) == [
         Row("build", "claude", "opus", None, False, "default", 1, 1,
-            Measure(1.0, 1), Measure(None, 0), None, Measure(0.0, 1)),
+            Measure(1.0, 1), Measure(None, 0), None, Measure(0.0, 1), *UNMEASURED),
     ]
 
 
@@ -479,3 +568,109 @@ def test_the_module_does_not_use_the_queue() -> None:
 
     assert "open_queue" not in source
     assert "SQLiteJobQueue" not in source
+
+
+def test_every_row_carries_ci_size_time_tokens_and_cost_with_their_counts(db: Db) -> None:
+    db.job("b1", "1", "build", "claude")
+    db.job("b2", "2", "build", "claude")
+    db.job("b3", "3", "build", "codex")
+    db.ci("1", "h1", "success")
+    db.ci("2", "h2", "failure")
+    db.verdict("1", "c1", "APPROVE", 10, changed_lines=40)
+    db.verdict("2", "c2", "REVISE", 20, changed_lines=100)
+    db.telemetry("b1", "claude", elapsed_seconds=600, tokens_in=1000, tokens_cached=400,
+                 tokens_out=200, cost_usd=1.5)
+    db.telemetry("b2", "claude", elapsed_seconds=1200, tokens_in=3000, tokens_cached=600,
+                 tokens_out=400, cost_usd=0.5)
+
+    assert harness_report.rows(db.path) == [
+        Row("build", "claude", None, None, False, "default", 2, 2,
+            Measure(2 / 3, 3), Measure(1.0, 1), VerdictMix(1, 1, 0, 2), Measure(0.0, 2),
+            first_push_ci=Measure(0.5, 2), changed_lines=Measure(70.0, 2),
+            elapsed_minutes=Measure(15.0, 2), tokens_in=Measure(2000.0, 2),
+            tokens_cached=Measure(500.0, 2), tokens_out=Measure(300.0, 2),
+            cost_usd=Measure(1.0, 2)),
+        Row("build", "codex", None, None, False, "default", 1, 1,
+            Measure(1 / 3, 3), UNKNOWN, None, Measure(0.0, 1), *UNMEASURED),
+    ]
+
+
+def test_first_push_ci_reads_the_first_recorded_status_and_skips_tickets_without_one(
+    db: Db,
+) -> None:
+    db.job("b1", "1", "build", "claude")
+    db.job("b2", "2", "build", "claude")
+    db.ci("1", "h-first", "failure")
+    db.ci("1", "h-later", "success")
+
+    assert _only(harness_report.rows(db.path), "build").first_push_ci == Measure(0.0, 1)
+
+
+def test_changed_lines_takes_the_first_head_by_post_time_that_has_a_count(db: Db) -> None:
+    db.job("build", "1", "build", "claude")
+    db.verdict("1", "c-unposted", "APPROVE", None, changed_lines=999)
+    db.verdict("1", "c-second", "REVISE", 20, changed_lines=30)
+    db.verdict("1", "c-first", "REVISE", 10)
+
+    assert _only(harness_report.rows(db.path), "build").changed_lines == Measure(30.0, 1)
+
+
+def test_a_reported_cost_beats_the_token_estimate(db: Db) -> None:
+    db.job("build", "1", "build", "claude")
+    db.telemetry("build", "claude", tokens_in=1_000_000, cost_usd=0.25)
+
+    assert _only(harness_report.rows(db.path), "build").cost_usd == Measure(0.25, 1)
+
+
+def test_the_token_estimate_stands_in_when_no_cost_was_reported(db: Db) -> None:
+    db.job("build", "1", "build", "claude")
+    db.telemetry("build", "claude", tokens_in=1_000_000)
+    estimate = estimate_cost_usd("claude", tokens_in=1_000_000, tokens_cached=0, tokens_out=0)
+
+    assert estimate == 3.0
+    assert _only(harness_report.rows(db.path), "build").cost_usd == Measure(estimate, 1)
+
+
+def test_the_estimate_prices_by_the_job_recipient_when_telemetry_names_no_harness(
+    db: Db,
+) -> None:
+    db.job("build", "1", "build", "codex")
+    db.telemetry("build", "", tokens_in=1_000_000)
+    estimate = estimate_cost_usd("codex", tokens_in=1_000_000, tokens_cached=0, tokens_out=0)
+
+    assert _only(harness_report.rows(db.path), "build").cost_usd == Measure(estimate, 1)
+
+
+def test_unknown_tokens_are_not_counted_and_cost_only_when_reported(db: Db) -> None:
+    db.job("silent", "1", "build", "claude")
+    db.job("billed", "2", "build", "claude")
+    db.telemetry("silent", "claude", tokens_in=1_000_000, tokens_unknown=1)
+    db.telemetry("billed", "claude", tokens_in=1_000_000, cost_usd=2.0, tokens_unknown=1)
+
+    row = _only(harness_report.rows(db.path), "build")
+
+    assert (row.tokens_in, row.tokens_cached, row.tokens_out) == (UNKNOWN, UNKNOWN, UNKNOWN)
+    assert row.cost_usd == Measure(2.0, 1)
+
+
+def test_a_null_unknown_flag_means_unknown_only_when_every_token_count_is_zero(db: Db) -> None:
+    db.job("empty", "1", "build", "claude")
+    db.job("counted", "2", "build", "claude")
+    db.telemetry("empty", "claude", tokens_unknown=None)
+    db.telemetry("counted", "claude", tokens_in=10, tokens_out=4, tokens_unknown=None)
+
+    row = _only(harness_report.rows(db.path), "build")
+
+    assert (row.tokens_in, row.tokens_out) == (Measure(10.0, 1), Measure(4.0, 1))
+
+
+def test_a_telemetry_table_without_the_unknown_column_judges_tokens_by_their_counts(
+    tmp_path: Path,
+) -> None:
+    db = Db(tmp_path / "orch.db", tokens_unknown_column=False)
+    db.job("empty", "1", "build", "claude")
+    db.job("counted", "2", "build", "claude")
+    db.telemetry("empty", "claude")
+    db.telemetry("counted", "claude", tokens_in=10)
+
+    assert _only(harness_report.rows(db.path), "build").tokens_in == Measure(10.0, 1)

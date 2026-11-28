@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from lib import epoch, exposure, job_detail
+from lib import epoch, exposure, job_detail, pricing
 from lib.role_router import Sample, parse_sample, routed_slot
 
 Role = Literal["plan", "build", "review"]
@@ -48,6 +48,13 @@ class Row:
     rounds_to_approve: Measure
     verdicts: VerdictMix | None
     fix_rounds: Measure
+    first_push_ci: Measure
+    changed_lines: Measure
+    elapsed_minutes: Measure
+    tokens_in: Measure
+    tokens_cached: Measure
+    tokens_out: Measure
+    cost_usd: Measure
 
 
 @dataclass(frozen=True)
@@ -65,6 +72,14 @@ class _Job:
 class _Verdict:
     comment: str
     verdict: str | None
+    changed_lines: int | None
+
+
+@dataclass(frozen=True)
+class _Telemetry:
+    elapsed_minutes: float | None
+    tokens: tuple[int, int, int] | None
+    cost_usd: float | None
 
 
 def rows(db: Path, *, since: float | None = None, repo: str | None = None) -> list[Row]:
@@ -111,12 +126,35 @@ def rows(db: Path, *, since: float | None = None, repo: str | None = None) -> li
         if "verdict_heads" in tables:
             columns = {row[1] for row in connection.execute("PRAGMA table_info(verdict_heads)")}
             verdict = "verdict" if "verdict" in columns else "NULL"
-            for head_repo, ticket_id, comment, value in connection.execute(
-                f"SELECT repo, ticket_id, comment_id, {verdict} FROM verdict_heads {on_repo} "
+            lines = "changed_lines" if "changed_lines" in columns else "NULL"
+            for head_repo, ticket_id, comment, value, changed in connection.execute(
+                f"SELECT repo, ticket_id, comment_id, {verdict}, {lines} "
+                f"FROM verdict_heads {on_repo} "
                 f"ORDER BY {epoch.sql('posted_at')} IS NULL, {epoch.sql('posted_at')}, rowid",
                 params,
             ):
-                verdicts[(head_repo.lower(), ticket_id)].append(_Verdict(str(comment), value))
+                verdicts[(head_repo.lower(), ticket_id)].append(
+                    _Verdict(str(comment), value, changed)
+                )
+        first_ci: dict[Ticket, bool] = {}
+        if "ci_events" in tables:
+            for ci_repo, ticket_id, status in connection.execute(
+                f"SELECT repo, ticket_id, status FROM ci_events {on_repo} ORDER BY rowid", params
+            ):
+                first_ci.setdefault((ci_repo.lower(), ticket_id), status == "success")
+        telemetry: dict[str, _Telemetry] = {}
+        if "job_telemetry" in tables:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(job_telemetry)")}
+            flag = "tokens_unknown" if "tokens_unknown" in columns else "NULL"
+            recipients = {job.id: job.recipient for job in jobs}
+            for job_id, harness, elapsed, *tokens, cost, unknown in connection.execute(
+                "SELECT job_id, harness, elapsed_seconds, tokens_in, tokens_cached, tokens_out, "
+                f"cost_usd, {flag} FROM job_telemetry WHERE job_id IN (SELECT id FROM jobs {ran})",
+                params,
+            ):
+                telemetry[job_id] = _telemetry(
+                    harness or recipients[job_id], elapsed, tokens, cost, unknown
+                )
 
     jobs = [job for job in jobs if job.detail.get("kind") != "merge-only"]
     planned = {job.ticket for job in jobs if job.action == "plan"}
@@ -130,6 +168,11 @@ def rows(db: Path, *, since: float | None = None, repo: str | None = None) -> li
         ticket: next(n for n, v in enumerate(heads, 1) if v.verdict == APPROVE)
         for ticket, heads in verdicts.items()
         if any(v.verdict == APPROVE for v in heads)
+    }
+    sizes = {
+        ticket: next(v.changed_lines for v in heads if v.changed_lines is not None)
+        for ticket, heads in verdicts.items()
+        if any(v.changed_lines is not None for v in heads)
     }
 
     groups: dict[tuple, list[_Job]] = defaultdict(list)
@@ -163,6 +206,8 @@ def rows(db: Path, *, since: float | None = None, repo: str | None = None) -> li
         else:
             counted = [v.verdict for t in tickets for v in verdicts.get(t, ())]
         everyone = len(role_tickets[role])
+        runs = [telemetry[job.id] for job in members if job.id in telemetry]
+        measured = [run.tokens for run in runs if run.tokens is not None]
         report.append(
             Row(
                 *key,
@@ -172,6 +217,15 @@ def rows(db: Path, *, since: float | None = None, repo: str | None = None) -> li
                 rounds_to_approve=_mean([rounds[t] for t in tickets if t in rounds]),
                 verdicts=_mix(counted),
                 fix_rounds=_mean([fixes[t] for t in tickets]),
+                first_push_ci=_mean([first_ci[t] for t in tickets if t in first_ci]),
+                changed_lines=_mean([sizes[t] for t in tickets if t in sizes]),
+                elapsed_minutes=_mean(
+                    [run.elapsed_minutes for run in runs if run.elapsed_minutes is not None]
+                ),
+                tokens_in=_mean([tokens[0] for tokens in measured]),
+                tokens_cached=_mean([tokens[1] for tokens in measured]),
+                tokens_out=_mean([tokens[2] for tokens in measured]),
+                cost_usd=_mean([run.cost_usd for run in runs if run.cost_usd is not None]),
             )
         )
     return sorted(report, key=_order)
@@ -209,7 +263,28 @@ def _mark(job: _Job, role: Role, sample: Sample | None) -> Mark:
     return "sampled" if picked and job.recipient == "gemini" else "default"
 
 
-def _mean(values: list[int]) -> Measure:
+def _telemetry(
+    harness: str,
+    elapsed_seconds: float | None,
+    tokens: list[int | None],
+    cost_usd: float | None,
+    unknown: int | None,
+) -> _Telemetry:
+    tokens_in, tokens_cached, tokens_out = (count or 0 for count in tokens)
+    known = any((tokens_in, tokens_cached, tokens_out)) if unknown is None else unknown == 0
+    if not known:
+        tokens_in = tokens_cached = tokens_out = 0
+    return _Telemetry(
+        None if elapsed_seconds is None else elapsed_seconds / 60,
+        (tokens_in, tokens_cached, tokens_out) if known else None,
+        pricing.effective_cost_usd(
+            harness, cost_usd, tokens_in=tokens_in, tokens_cached=tokens_cached,
+            tokens_out=tokens_out,
+        ),
+    )
+
+
+def _mean(values: list[float]) -> Measure:
     return Measure(sum(values) / len(values) if values else None, len(values))
 
 
