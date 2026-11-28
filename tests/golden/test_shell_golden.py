@@ -29,8 +29,8 @@ CSS_ORDER = (
 SCRIPT_ORDER = (
     (common, "SCRIPT_HEAD"), (shell, "SCRIPT"), (lanes, "SCRIPT"), (ci, "SCRIPT"), (activity, "SCRIPT"),
     (tickets, "SCRIPT_TICKETS"), (counts, "SCRIPT"), (system, "SCRIPT_LOG"), (system, "SCRIPT_HEALTH"),
-    (efficiency, "SCRIPT"), (evals, "SCRIPT"), (routing, "SCRIPT"), (common, "SCRIPT_GITHUB"), (cockpit, "SCRIPT"),
-    (ticket_detail, "SCRIPT"), (settings, "SCRIPT"), (common, "SCRIPT_TELEMETRY"),
+    (efficiency, "SCRIPT"), (usage_chip, "SCRIPT"), (evals, "SCRIPT"), (routing, "SCRIPT"), (common, "SCRIPT_GITHUB"),
+    (cockpit, "SCRIPT"), (ticket_detail, "SCRIPT"), (settings, "SCRIPT"), (common, "SCRIPT_TELEMETRY"),
     (system, "SCRIPT_COMPONENTS"), (common, "SCRIPT_TAIL"),
 )
 SHELL_SUBSTITUTIONS = ("__PIXELSTRIP__", "__SHELL__", "__POLL_MS__", "__FONTS__")
@@ -44,12 +44,13 @@ GOLDEN = {
     "common.CSS_MISC": "3ef1afa5b09c2e89dcdd3faca4dd5a2fdbe9a5de738f40e9b3966bff640849d5",
     "shell.CSS_PX": "66e50adc3d7ac0f6d3d17fe47305b9b533ebb810d1b8e535fd8c89ff9cd095e0",
     "common.CSS_TAIL": "2294685d9fc46b3e2f656db366bfe1d3e26684e291ceb97d6d04e31a58c42609",
-    "usage_chip.CSS": "5f484b515fb73d09efa162c60a88d3b4f268dee142074113e68bb1a4350d9c49",
+    "usage_chip.CSS": "a2f6910d7943d3e793ed472eb224b59e51237e9a5dc5eb0370fe04557cabf7c9",
     "common.SCRIPT_HEAD": "c04cf950b671b57d6e6af76acd291acd0252cc60c99869eec8ccfec692e90a87",
     "shell.SCRIPT": "efb4170fdde2f3d4fe762ed57ea6465c6539ceee9beefba62aff48d455943407",
+    "usage_chip.SCRIPT": "23bbfeffb019bfa15813238164f8295455e994b48f860f507d0997ad34e52099",
     "common.SCRIPT_GITHUB": "0eb01bf0faff4f8dbcd44a4ff9dcb1d1b89284e89d16edf3a3ae85603b1726ae",
     "common.SCRIPT_TELEMETRY": "7d2a9166e208474d94a535dbbd9fbe8f2d78ad33591f287685a38bb0814bd34f",
-    "common.SCRIPT_TAIL": "1676ab68854b87183e3c8b160e92c915f187ce240bd9609c73809b684b201b46",
+    "common.SCRIPT_TAIL": "f0071140f954bd8dfb92d95a4faf1c5fee71d33d16d16749612e923fdef95de6",
     "PX_SCRIPT": "777ae1a8b65aa0d735a696c3e6ba885f3e5e086f61c26784d9e5efcb5bc5bef5",
     "__PIXELSTRIP__": "5eec0f40428daccb97fb1763e5316bd900c435f1f6535d3f7cf0b814847cd065",
     "__SHELL__": "c7afcd2bb9b13281221e4788582e90bc3447a057669a44fc7ae27b64d1289e84",

@@ -29,6 +29,7 @@ from lib.dashboard_pages.system import (
 )
 from lib.dashboard_pages.ticket_detail import _ticketview
 from lib.dashboard_pages.tickets import _board, _tickets
+from lib.dashboard_pages.usage_chip import _usage_chip
 from lib.dashboard_static import read_asset
 
 
@@ -300,6 +301,7 @@ def _topbar(snapshot: dict, page: str) -> str:
         f'<span class="caret" id="caret" aria-hidden="true">{px_strip("caret", state="link-boot", height=12)}'
         "</span></div>"
         f'<nav class="nav" id="nav" aria-label="Pages">{links}</nav>'
+        f"{_usage_chip(snapshot)}"
         '<div class="link boot" id="link" role="status" aria-live="polite">'
         '<span class="dot" aria-hidden="true"></span>'
         '<span id="link-text">STATIC SNAPSHOT</span></div>'
