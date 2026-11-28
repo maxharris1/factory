@@ -112,6 +112,52 @@ def test_an_inbox_card_draws_its_parts_in_order(tmp_path: Path) -> None:
         '<ul class="ck-qlist">', '<ul class="ck-qopts">'])
 
 
+TODAYS_ORDER = ["maxharris1/cleffy#41", "maxharris1/tracy-harris-coaching#7", "maxharris1/aut0#11", NULL_TITLE,
+                NULL_AGE, "maxharris1/cleffy#20", "maxharris1/site#21", "maxharris1/billing#30"]
+
+
+def test_cards_sit_under_group_headings_in_todays_order(tmp_path: Path) -> None:
+    snapshot = _inbox(tmp_path)
+    snapshot["tickets"].reverse()
+    assert [ticket_address(row) for row in cockpit.inbox_tickets(snapshot)] == TODAYS_ORDER
+    markup = cockpit._needs_max(snapshot)
+    assert list(_cards(markup)) == TODAYS_ORDER
+    assert _headings(markup) == [("Visual QA", "2"), ("Questions", "3"), ("Merge OK", "2"), ("Other", "1")]
+    without_merge_ok = dict(snapshot, tickets=[row for row in snapshot["tickets"] if row.get("state") != "awaiting-ok"
+                                               or (row.get("wait") or {}).get("why") == "visual-qa-review"])
+    assert _headings(cockpit._needs_max(without_merge_ok)) == [("Visual QA", "2"), ("Questions", "3"), ("Other", "1")]
+    assert "__NEEDS_MAX__" not in cockpit.SCRIPT and "NEEDS_MAX" in cockpit.SCRIPT
+
+
+def _headings(markup: str) -> list[tuple[str, str]]:
+    return re.findall(r'<h3 class="ck-ghead"><span>([^<]*)</span><span class="count">(\d+)</span></h3>', markup)
+
+
+def _with_questions(snapshot: dict, total: int) -> dict:
+    template = next(row for row in snapshot["tickets"] if ticket_address(row) == NULL_TITLE)
+    asked = sum(1 for row in cockpit.inbox_tickets(snapshot) if (row.get("wait") or {}).get("why") == "question")
+    for n in range(total - asked):
+        snapshot["tickets"].append(dict(copy.deepcopy(template), repo="maxharris1/zeta", ticket_id=str(100 + n),
+                                        record=f"maxharris1/zeta#{100 + n}", pr=str(100 + n)))
+    return snapshot
+
+
+def _group(markup: str, key: str) -> str:
+    start = markup.index(f'<div class="ck-group" data-ck-group="{key}">')
+    end = markup.find('<div class="ck-group"', start + 1)
+    return markup[start:end if end >= 0 else len(markup)]
+
+
+def test_a_group_past_nine_shows_nine_and_a_toggle(tmp_path: Path) -> None:
+    base = _inbox(tmp_path)
+    for total, more in ((11, 2), (10, 1), (9, 0)):
+        group = _group(cockpit._needs_max(_with_questions(copy.deepcopy(base), total)), "question")
+        shown, _, folded = group.partition("<details")
+        assert len(_cards(shown)) == 9, total
+        assert len(_cards(folded)) == more, total
+        assert ('<details class="ck-more"><summary>show %d more</summary>' % more in group) == bool(more), total
+
+
 def _script_needs_max(tmp_path: Path, snapshot: dict, actions: list | None = None) -> str:
     return _run_page(tmp_path, snapshot, "main", ["link", "needs-max"], actions=actions)["html"]["needs-max"]
 
@@ -167,17 +213,40 @@ def _tree(markup: str) -> list[tuple]:
     return parser.events
 
 
+SWAPPED = {
+    "limit": 2,
+    "groups": (
+        {"key": "asked", "label": "Asked of you", "why": "question", "state": None},
+        {"key": "screens", "label": "Screens", "why": "visual-qa-review", "state": None},
+        {"key": "ship", "label": "Ship it?", "why": None, "state": "awaiting-ok"},
+        {"key": "rest", "label": "Everything else", "why": None, "state": None},
+    ),
+}
+
+
 @needs_node
-def test_the_script_draws_the_same_needs_max_as_the_server(tmp_path: Path) -> None:
-    snapshot = _inbox(tmp_path, TWIN)
+@pytest.mark.parametrize("table", ["shipped", "swapped"])
+def test_the_script_draws_the_same_needs_max_as_the_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                           table: str) -> None:
+    snapshot = _with_questions(_inbox(tmp_path, TWIN + ("maxharris1/cleffy#41", "maxharris1/site#21")), 11)
+    script_js = render_static_assets(snapshot)["app.js"]
+    if table == "swapped":
+        shipped = json.dumps(cockpit.NEEDS_MAX, separators=(",", ":"))
+        assert shipped in script_js
+        script_js = script_js.replace(shipped, json.dumps(SWAPPED, separators=(",", ":")))
+        monkeypatch.setattr(cockpit, "NEEDS_MAX", SWAPPED)
     section = _section(cockpit._needs_max(snapshot), "needs-max")
     server = section[section.index(">") + 1:section.rindex("</section>")]
     harness = HARNESS.replace("let nowMs = 1800000003000;", "let nowMs = 1800000000000;")
     assert harness != HARNESS
-    out = run_harness(tmp_path, harness, render_static_assets(snapshot)["app.js"], snapshot, "main",
-                      ["link", "needs-max"], [])
+    out = run_harness(tmp_path, harness, script_js, snapshot, "main", ["link", "needs-max"], [])
     script = out["html"]["needs-max"]
-    assert len(_cards(server)) == len(TWIN)
+    assert len(_cards(server)) == len(TWIN) + 2 + 8
+    assert server.count('<div class="ck-group"') == 4
+    if table == "shipped":
+        assert "show 2 more" in server
+    else:
+        assert _headings(server)[0] == ("Asked of you", "11") and "show 9 more" in server
     assert _tree(script) == _tree(server)
 
 
@@ -190,8 +259,8 @@ def _stubbed(snapshot: dict, signed_in: bool) -> str:
     shim = (
         "<script>window.fetch = function (url) {"
         f" if (url === '/api/session') return Promise.resolve({SESSION_IN if signed_in else SESSION_OUT});"
-        " return Promise.resolve({ok: true, status: 200,"
-        f" json: function () {{ return Promise.resolve({json.dumps(snapshot)}); }}}}); }};</script>"
+        f" window.snapshot = window.snapshot || {json.dumps(snapshot)}; return Promise.resolve({{ok: true, status: 200,"
+        " json: function () { return Promise.resolve(JSON.parse(JSON.stringify(window.snapshot))); }}); };</script>"
     )
     return (
         render_pages(snapshot)["index.html"]
@@ -284,3 +353,79 @@ def test_each_card_keeps_its_buttons_and_a_rows_button_bars_line_up(tmp_path: Pa
       cards: document.querySelectorAll('#needs-max .ck-grid > .ck-card').length,
       buttons: document.querySelectorAll('#needs-max [data-ck-act], #needs-max .ck-actions').length}); }, 300); })""")
     assert signed_out == {"cards": len(INBOX), "buttons": 0}
+
+
+def _poll(browser: Browser, change: str = "") -> None:
+    replaced = browser.eval("""new Promise(function (done) {
+      var before = document.querySelector('#needs-max .ck-card'), tries = 0;
+      %s
+      window.snapshot.generated_at_epoch += 1;
+      (function wait() { if (!before.isConnected || ++tries > 200) done(tries <= 200); else setTimeout(wait, 20); })();
+    })""" % change)
+    assert replaced, "no poll redrew the panel"
+
+
+@needs_chrome
+def test_show_more_reveals_the_rest_and_stays_open_across_polls(tmp_path: Path, browser: Browser) -> None:
+    browser.open(_stubbed(_with_questions(_inbox(tmp_path), 11), signed_in=False), 1440)
+    shown = """[].filter.call(document.querySelectorAll('#needs-max [data-ck-group="question"] .ck-card'),
+      function (c) { return c.checkVisibility(); }).length"""
+    assert browser.eval(shown) == 9
+    browser.eval("""document.querySelector('#needs-max [data-ck-group="question"] summary').focus(),
+      document.querySelector('#needs-max [data-ck-group="question"] summary').click()""")
+    assert browser.eval(shown) == 11
+    _poll(browser)
+    assert browser.eval(shown) == 11
+    assert browser.eval("""document.activeElement.tagName + ' ' + document.activeElement.textContent""") == \
+        "SUMMARY show 2 more"
+
+
+OPEN = """(function () {
+  var card = document.querySelector('#needs-max [data-cockpit-ticket="%s"]');
+  var main = card.querySelector('.ck-main').getBoundingClientRect(), text = card.querySelector('.ck-qtext');
+  var area = card.querySelector('.ck-form textarea'), box = area.getBoundingClientRect();
+  return {width: card.getBoundingClientRect().width, grid: card.parentElement.getBoundingClientRect().width,
+          index: [].indexOf.call(document.querySelectorAll('#needs-max .ck-card'), card),
+          scroll: text ? text.scrollHeight : 0, client: text ? text.clientHeight : 0,
+          beside: box.left >= main.right, below: box.top >= main.bottom, shown: card.checkVisibility(),
+          open: !!card.closest('details') && card.closest('details').open,
+          value: area.value, focused: document.activeElement === area};
+})()"""
+
+
+def _answer(browser: Browser, ticket: str) -> None:
+    browser.eval(f"""document.querySelector('#needs-max [data-cockpit-ticket="{ticket}"] [data-ck-act="answer"]').click()""")
+
+
+@needs_chrome
+@pytest.mark.parametrize("width", [1440, 760, 759])
+def test_an_open_composer_takes_the_full_row_beside_the_whole_question(tmp_path: Path, browser: Browser,
+                                                                       width: int) -> None:
+    ticket = "maxharris1/aut0#11"
+    browser.open(_stubbed(_with_questions(_inbox(tmp_path), 9), signed_in=True), width)
+    _wait_for_buttons(browser)
+    _answer(browser, ticket)
+    opened = browser.eval(OPEN % ticket)
+    assert abs(opened["width"] - opened["grid"]) <= 1, opened
+    assert opened["scroll"] <= opened["client"], opened
+    assert opened["below" if width < 760 else "beside"], opened
+    browser.call("Input.insertText", text="Ship OAuth first.")
+    _poll(browser)
+    polled = browser.eval(OPEN % ticket)
+    assert (polled["index"], polled["width"], polled["value"], polled["focused"]) == \
+        (opened["index"], opened["width"], "Ship OAuth first.", True), polled
+    _answer(browser, ticket)
+    closed = browser.eval(OPEN % ticket)
+    assert closed["scroll"] > closed["client"], closed
+    if width >= 760:
+        assert closed["width"] < closed["grid"] / 1.5, closed
+    if width != 1440:
+        return
+    ninth = "maxharris1/zeta#105"
+    _answer(browser, ninth)
+    browser.call("Input.insertText", text="Keep it.")
+    _poll(browser, """var rows = window.snapshot.tickets, row = JSON.parse(JSON.stringify(rows.filter(function (t) {
+        return t.repo === 'maxharris1/zeta' && t.ticket_id === '105'; })[0]));
+      row.repo = 'maxharris1/alpha'; row.ticket_id = '1'; row.record = 'maxharris1/alpha#1'; rows.push(row);""")
+    moved = browser.eval(OPEN % ninth)
+    assert (moved["open"], moved["shown"], moved["value"]) == (True, True, "Keep it."), moved

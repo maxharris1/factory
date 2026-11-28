@@ -2,6 +2,11 @@
 .ck-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:12px;align-items:stretch}
 @media (min-width:760px){.ck-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (min-width:1200px){.ck-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+.ck-group+.ck-group{margin-top:16px}
+.ck-ghead{display:flex;align-items:baseline;gap:8px;margin:0 0 8px;font:600 13px/1.4 var(--mono);color:var(--text)}
+.ck-ghead .count{font-weight:400;font-size:12px;color:var(--muted)}
+.ck-more{margin-top:10px}
+.ck-more>.ck-grid{margin-top:8px}
 .ck-card{border:1px solid var(--line);background:var(--panel-hi);padding:12px 14px;display:flex;flex-direction:column;gap:10px}
 .ck-card.ck-visual{border-color:rgba(122,162,247,.45)}
 .ck-card.ck-question{border-color:rgba(255,158,100,.45)}
@@ -43,3 +48,9 @@
 .ck-status.ck-conflict{color:#ff9e64}
 .ck-status.ck-ok{color:#9ece6a}
 .ck-ticket{margin-top:14px}
+.ck-inbox:has(>.ck-form>textarea:not([hidden])){grid-column:1/-1}
+.ck-inbox:has(>.ck-form>textarea:not([hidden])) .ck-qtext{display:block;overflow:visible}
+@media (min-width:760px){.ck-inbox:has(>.ck-form>textarea:not([hidden])){display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);grid-template-rows:auto 1fr;gap:10px 16px;align-content:start}}
+@media (min-width:760px){.ck-inbox:has(>.ck-form>textarea:not([hidden]))>.ck-main{grid-column:1;grid-row:1/span 2}}
+@media (min-width:760px){.ck-inbox:has(>.ck-form>textarea:not([hidden]))>.ck-actions,.ck-inbox:has(>.ck-form>textarea:not([hidden]))>.ck-form{grid-column:2;align-self:start}}
+@media (min-width:760px){.ck-inbox:has(>.ck-form>textarea:not([hidden])) .ck-media img,.ck-inbox:has(>.ck-form>textarea:not([hidden])) .ck-media video{height:220px}}
