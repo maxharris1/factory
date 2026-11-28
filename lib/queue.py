@@ -74,6 +74,7 @@ ACTIONS = (
     "ci-rerun-refused",
     "ci-stale",
     "stack-parent-closed",
+    "account-signin",
 )
 FINISHING_ACTIONS = ("review", "fix", "update-from-main", "qa")
 QA_RECIPIENT = "qa"
