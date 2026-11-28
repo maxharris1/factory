@@ -1789,6 +1789,7 @@ def test_an_old_table_gains_the_live_run_columns(tmp_path: Path) -> None:
     assert row["current_task"] == "Parsing the stream" and json.loads(row["subagents"]) == []
     old = _row(db, "old")
     assert all(old[name] is None for name in LIVE_RUN)  # NULL: an older runner recorded nothing
+    assert old["suite_wait_seconds"] is None
 
 
 def test_two_runners_migrating_at_once_both_write(tmp_path: Path) -> None:
@@ -2131,3 +2132,47 @@ def test_skill_reads_are_null_without_a_tree_and_empty_when_nothing_was_read(tmp
     assert [line for line in messages if "skill" in line] == [
         "telemetry: skill reads not recorded (skills.lock: FileNotFoundError)"
     ]
+
+
+SLOT_RUN = "bin/suite-slot python -m pytest -q"
+
+
+def _slot_output(seconds: int) -> str:
+    return f"ORCH-SUITE-SLOT: waited {seconds}s, running\n...\n12 passed in 3.0s\n"
+
+
+@pytest.mark.parametrize(
+    "harness, events, expected",
+    [
+        ("claude", [_use("t1", "Bash", {"command": SLOT_RUN}), _result("t1", _slot_output(12))], 12),
+        ("codex", [_exec(SLOT_RUN), _exec_done(0, _slot_output(12))], 12),
+        (
+            "claude",
+            [
+                _use("t1", "Bash", {"command": SLOT_RUN}), _result("t1", _slot_output(12)),
+                _use("t2", "Bash", {"command": SLOT_RUN}), _result("t2", _slot_output(30)),
+            ],
+            42,
+        ),
+        ("claude", [_use("t1", "Bash", {"command": "python -m pytest -q"}), _result("t1", _slot_output(12))], None),
+        ("claude", [_use("t1", "Bash", {"command": SLOT_RUN})], None),
+        ("claude", [_use("t1", "Bash", {"command": "ls"}), _result("t1", "a\nb\n")], None),
+    ],
+    ids=["claude", "codex", "two-calls-sum", "no-helper", "unfinished", "no-shell-output"],
+)
+def test_suite_wait_seconds_sums_the_helper_s_reported_waits(harness: str, events: list[dict], expected) -> None:
+    assert _feed(Summary(harness, Scrubber({})), *events).row()["suite_wait_seconds"] == expected
+
+
+def test_suite_wait_seconds_reaches_the_table_and_stays_null_without_the_helper(tmp_path: Path) -> None:
+    for job, events in (
+        ("waited", [_use("t1", "Bash", {"command": SLOT_RUN}), _result("t1", _slot_output(37))]),
+        ("plain", [_use("t1", "Bash", {"command": "ls"}), _result("t1", "a\n")]),
+    ):
+        session, db, _, messages = _session(tmp_path)
+        session.job_id = job
+        session.consume(io.BytesIO("".join(json.dumps(event) + "\n" for event in events).encode()))
+        session.finish(0)
+        assert messages == []
+    assert _row(db, "waited")["suite_wait_seconds"] == 37
+    assert _row(db, "plain")["suite_wait_seconds"] is None

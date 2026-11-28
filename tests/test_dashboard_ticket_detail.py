@@ -2524,9 +2524,40 @@ def _run_log_models(markup: str) -> dict[str, list[tuple[str, str, str]]]:
             (html.unescape(job), html.unescape(action), html.unescape(" · ".join(filter(None, (number, model)))))
             for job, action, number, model in re.findall(
                 r'<span class="exp-job"><span class="job">([^<]*)</span><span class="act">([^<]*)</span>'
-                r'(?:<span class="rnd">([^<]*)</span>)?<span class="model">([^<]*)</span></span>', jobs.group(1))
+                r'(?:<span class="rnd">([^<]*)</span>)?<span class="model">([^<]*)</span>'
+                r'(?:<span class="wait">[^<]*</span>)?</span>', jobs.group(1))
         )
     return found
+
+
+def _run_log_waits(markup: str) -> dict[str, str | None]:
+    log = re.search(r'<ol class="runlog">(.*?)</ol>', markup, re.S)
+    assert log, "no run log"
+    found = {}
+    for item in re.findall(r'<span class="exp-job">(.*?)</span></span>', log.group(1)):
+        job = re.search(r'<span class="job">([^<]*)</span>', item).group(1)
+        wait = re.search(r'<span class="wait">([^<]*)$', item)
+        found[job] = None if wait is None else wait.group(1)
+    return found
+
+
+def _write_suite_waits(db: Path, waits: dict[str, object], *, column: bool = True) -> None:
+    from lib import telemetry
+
+    names = ["job_id", "bot", "harness", "repo", "started_at", "updated_at", "elapsed_seconds", "events", "turns",
+             "tool_calls", "files_touched", "commands", "test_runs", "tokens_in", "tokens_cached", "tokens_out", "steps"]
+    with closing(sqlite3.connect(db)) as connection, connection:
+        telemetry.ensure_table(connection)
+        if not column:
+            connection.execute(f"ALTER TABLE {telemetry.TABLE} DROP COLUMN suite_wait_seconds")
+        for job_id, seconds in waits.items():
+            values = [job_id, "claude-bot", "claude", "maxharris1/factory", NOW, NOW, 0, 0, 0, "{}", 0, 0, 0, 0, 0, 0, "[]"]
+            extra = ["suite_wait_seconds"] if column else []
+            connection.execute(
+                f"INSERT INTO {telemetry.TABLE} ({', '.join(names + extra)}) "
+                f"VALUES ({', '.join('?' for _ in names + extra)})",
+                values + ([seconds] if column else []),
+            )
 
 
 def _record_jobs(snapshot: dict) -> dict[str, dict]:
@@ -2534,7 +2565,10 @@ def _record_jobs(snapshot: dict) -> dict[str, dict]:
     return {job["job"]: job for visit in record["visits"] for job in visit["jobs"]}
 
 
-def _ticket_jobs(tmp_path: Path, written: dict[str, Exposure | None], *, table: bool = True) -> tuple[dict, dict]:
+def _ticket_jobs(
+    tmp_path: Path, written: dict[str, Exposure | None], *, table: bool = True,
+    waits: dict[str, object] | None = None, wait_column: bool = True,
+) -> tuple[dict, dict]:
     from lib import exposure
     from lib.dashboard import collect_snapshot
     from lib.queue import JobRequest
@@ -2560,6 +2594,8 @@ def _ticket_jobs(tmp_path: Path, written: dict[str, Exposure | None], *, table: 
     if not table:
         with closing(sqlite3.connect(db)) as connection, connection:
             connection.execute(f"DROP TABLE IF EXISTS {exposure.TABLE}")
+    if waits is not None:
+        _write_suite_waits(db, {ids[action]: seconds for action, seconds in waits.items()}, column=wait_column)
     return collect_snapshot(db, tmp_path / "missing.log", now=1_800_000_002.0, alive=None), ids
 
 
@@ -2643,6 +2679,56 @@ def test_the_script_draws_the_server_s_run_log_exposure(tmp_path: Path, written:
     assert models["building"] == [
         (ids["build"][:8], "build", "independent-model · high" if written["build"] else "unknown")
     ]
+
+
+def test_the_run_log_shows_how_long_a_job_waited_for_a_suite_slot(tmp_path: Path) -> None:
+    snapshot, ids = _ticket_jobs(tmp_path, {"plan": REAL, "build": INDEPENDENT}, waits={"plan": None, "build": 37})
+    plan, build = ids["plan"][:8], ids["build"][:8]
+    markup = _ticket_server(snapshot, EXPOSURE_ADDRESS)
+    assert _run_log_waits(markup) == {plan: None, build: "suite wait 37s"}
+    assert _run_log_models(markup)["building"] == [(build, "build", "independent-model · high")]
+    jobs = _record_jobs(snapshot)
+    assert (jobs[plan]["suite_wait_seconds"], jobs[build]["suite_wait_seconds"]) == (None, 37)
+
+
+def test_the_suite_wait_stays_on_the_run_log_after_the_job_finishes(tmp_path: Path) -> None:
+    from lib.dashboard import collect_snapshot
+    from lib.queue import SQLiteJobQueue
+
+    snapshot, ids = _ticket_jobs(tmp_path, {"plan": REAL, "build": INDEPENDENT}, waits={"plan": None, "build": 37})
+    build = ids["build"][:8]
+    assert _run_log_waits(_ticket_server(snapshot, EXPOSURE_ADDRESS))[build] == "suite wait 37s"
+
+    SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: NOW + 1).finish(
+        ids["build"], owner="claude", handoff_comment_id="h-build")
+    after = collect_snapshot(tmp_path / "orch.db", tmp_path / "missing.log", now=1_800_000_003.0, alive=None)
+
+    assert after["running"] == []
+    assert _run_log_waits(_ticket_server(after, EXPOSURE_ADDRESS))[build] == "suite wait 37s"
+    assert _record_jobs(after)[build]["suite_wait_seconds"] == 37
+
+
+@pytest.mark.parametrize(
+    "waits, column",
+    [({"plan": 5, "build": 37}, False), ({"plan": "soon", "build": None}, True)],
+    ids=["column-missing", "not-a-number"],
+)
+def test_no_suite_wait_is_shown_without_a_usable_value(tmp_path: Path, waits: dict, column: bool) -> None:
+    snapshot, ids = _ticket_jobs(tmp_path, {"plan": REAL, "build": INDEPENDENT}, waits=waits, wait_column=column)
+    markup = _ticket_server(snapshot, EXPOSURE_ADDRESS)
+    assert "suite wait" not in markup
+    assert _run_log_models(markup)["building"] == [(ids["build"][:8], "build", "independent-model · high")]
+    assert all(job["suite_wait_seconds"] is None for job in _record_jobs(snapshot).values())
+
+
+@needs_node
+def test_the_script_draws_the_server_s_suite_wait(tmp_path: Path) -> None:
+    (tmp_path / "db").mkdir()
+    snapshot, ids = _ticket_jobs(tmp_path / "db", {"plan": REAL, "build": INDEPENDENT},
+                                 waits={"plan": None, "build": 37})
+    views = _both(tmp_path, snapshot, EXPOSURE_ADDRESS)
+    assert views["script"] == views["server"]
+    assert _run_log_waits(views["script"]) == {ids["plan"][:8]: None, ids["build"][:8]: "suite wait 37s"}
 
 
 def _flow_jobs(result: dict) -> dict[str, str]:

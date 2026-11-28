@@ -217,7 +217,7 @@ from lib.dashboard_flow import (
     stop_facts,
 )
 from lib.dashboard_telemetry import attach as attach_telemetry
-from lib.dashboard_telemetry import read_telemetry, ticket_totals
+from lib.dashboard_telemetry import _maybe_count, read_telemetry, ticket_totals
 from lib.dashboard_usage import read_usage
 from lib.dispatch.constants import (
     CI_BASE_RED,
@@ -2683,7 +2683,7 @@ def _ticket_flows(
         joined = "job_id" in columns
         times = ", ".join(
             f"t.{name} AS {name}" if joined and name in columns else f"NULL AS {name}"
-            for name in ("started_at", "finished_at")
+            for name in ("started_at", "finished_at", "suite_wait_seconds")
         )
         kept = []
         for row in connection.execute(
@@ -2713,6 +2713,7 @@ def _ticket_flows(
                     exposures.get(str(row["id"])),
                     _review_round(_round(rounds.get(row["id"])), qa_rounds.get(str(row["id"]))),
                 ),
+                _maybe_count(row["suite_wait_seconds"]),
             ))
     recorded: dict[tuple[str, str], list[Transition]] = {key: [] for key in keys}
     if "ticket_transitions" in tables:

@@ -44,7 +44,8 @@ stdout on a pipe and hands the pipe to a `Session` here:
   placed device's skills tree and kept only when skills/skills.lock lists
   it, so the column holds names from that closed set alone, in counters
   mode too. NULL when the run has no known skills tree or skills.lock
-  cannot be read.
+  cannot be read. `suite_wait_seconds` sums the waits bin/suite-slot
+  reported in the run's finished shell calls, NULL when it reported none.
 * The one exception (#147, Max, 2026-11-13): the live run (`LiveRun`), so
   the agent's task-list text, its current and last finished task, and its
   sub-agents' description and type. Never a prompt, a result, a summary or
@@ -145,7 +146,7 @@ from lib.remote import TAG_ENV, WORKER_ENV_END, WORKER_ENV_MARK
 from lib.codex_rollout import THREAD_ID
 from lib.codex_rollout import latest as rollout_latest
 from lib.codex_rollout import default_home as codex_home
-from lib import account_doctor, exposure, harnesses, lane_limit
+from lib import account_doctor, exposure, harnesses, lane_limit, suite_slot
 from lib.harnesses import StreamFlags
 from lib.harnesses.codex import CODEX_EVENTS as _CODEX_EVENTS
 from lib.job_state import SIGNED_OUT, USAGE_LIMIT, record_job_event
@@ -215,6 +216,7 @@ COLUMNS = (
     "tokens_unknown",
     "slot_hours_lost",
     "skill_reads",
+    "suite_wait_seconds",
 )
 LIVE_RUN_COLUMNS = ("plan", "current_task", "last_finished", "subagents")
 ADDED_COLUMNS = {
@@ -222,6 +224,7 @@ ADDED_COLUMNS = {
     "tokens_unknown": "INTEGER",
     "slot_hours_lost": "REAL",
     "skill_reads": "TEXT",
+    "suite_wait_seconds": "INTEGER",
 }
 
 DDL = f"""
@@ -256,7 +259,8 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     subagents TEXT,
     tokens_unknown INTEGER,
     slot_hours_lost REAL,
-    skill_reads TEXT
+    skill_reads TEXT,
+    suite_wait_seconds INTEGER
 )
 """
 INDEX = f"CREATE INDEX IF NOT EXISTS {TABLE}_updated ON {TABLE} (updated_at)"
@@ -1223,6 +1227,7 @@ class Summary:
         self.test_runs = 0
         self.tests_passed: int | None = None
         self.tests_failed: int | None = None
+        self.suite_wait_seconds: int | None = None
         self.tokens_in = 0
         self.tokens_cached = 0
         self.tokens_cache_write = 0
@@ -1284,6 +1289,9 @@ class Summary:
         step["status"] = "error" if error else "ok"
         if command is not None:
             self._tests(command, output)
+            waited = suite_slot.waited(command, output)
+            if waited is not None:
+                self.suite_wait_seconds = (self.suite_wait_seconds or 0) + waited
 
     def _tests(self, command: str, output: str) -> None:
         if not _TEST_COMMAND.search(command):
@@ -1629,6 +1637,7 @@ class Summary:
             "test_runs": _int(self.test_runs),
             "tests_passed": _maybe_int(self.tests_passed),
             "tests_failed": _maybe_int(self.tests_failed),
+            "suite_wait_seconds": _maybe_int(self.suite_wait_seconds),
             "tokens_in": _int(self.tokens_in),
             "tokens_cached": _int(self.tokens_cached),
             "tokens_out": _int(self.tokens_out),
