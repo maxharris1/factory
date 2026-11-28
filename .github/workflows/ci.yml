@@ -153,8 +153,8 @@ jobs:
           set -euo pipefail
           while true; do
             if job=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
-              --jq '.jobs[] | select(.name == "macos") | "\(.status) \(.conclusion) \(.created_at)"') && [[ -n "$job" ]]; then
-              read -r status conclusion created_at <<<"$job"
+              --jq '([.jobs[] | select(.name != "macos" and .name != "macos-pickup" and .status != "completed")] | length) as $running | .jobs[] | select(.name == "macos") | "\(.status) \(.conclusion) \(.created_at) \($running)"') && [[ -n "$job" ]]; then
+              read -r status conclusion created_at running <<<"$job"
               case "$status" in
                 completed)
                   [[ "$conclusion" == success ]] && exit 0
@@ -163,7 +163,7 @@ jobs:
                   ;;
                 in_progress) ;;
                 *)
-                  if (( $(date +%s) - $(date -d "$created_at" +%s) >= PICKUP_SECONDS )); then
+                  if (( running == 0 && $(date +%s) - $(date -d "$created_at" +%s) >= PICKUP_SECONDS )); then
                     echo "::error title=macos runner pickup::No factory-mac runner picked up the macos job within $((PICKUP_SECONDS / 60)) minutes (queued since $created_at). The Mac runner is offline, asleep or busy, not a test failure. Cancelling this run. Rerun failed jobs to retry. See docs/decisions/628-macos-runner-pickup.md and docs/decisions/711-self-hosted-runners.md."
                     gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
                     exit 1

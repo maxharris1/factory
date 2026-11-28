@@ -223,10 +223,14 @@ def _pickup_step() -> dict:
     return steps[0]
 
 
-def _jobs(macos: tuple[str, datetime] | None, conclusion: str | None = None) -> str:
+def _jobs(
+    macos: tuple[str, datetime] | None, conclusion: str | None = None, *, others: dict[str, str] | None = None
+) -> str:
     jobs = [
         {"name": "macos-pickup", "status": "in_progress", "conclusion": None, "created_at": "2020-01-01T00:00:00Z"}
     ]
+    for name, status in (others or {}).items():
+        jobs.append({"name": name, "status": status, "conclusion": None, "created_at": "2020-01-01T00:00:00Z"})
     if macos is not None:
         status, created = macos
         jobs.append(
@@ -305,6 +309,21 @@ def test_the_pickup_watchdog_cancels_the_run_when_macos_stays_queued(tmp_path: P
     assert len(error) == 1, result.stdout
     assert "within 10 minutes" in error[0]
     assert created.strftime("%Y-%m-%dT%H:%M:%SZ") in error[0]
+    assert calls[-1] == "run cancel 4242 --repo acme/factory"
+
+
+def test_the_pickup_watchdog_lets_the_other_jobs_finish_before_it_cancels_the_run(tmp_path: Path) -> None:
+    created = datetime.now(timezone.utc) - timedelta(seconds=601)
+    result, calls = _run_pickup(
+        tmp_path,
+        [
+            _jobs(("queued", created), others={"changes": "completed", "test (1/3)": "in_progress"}),
+            _jobs(("queued", created), others={"changes": "completed", "test (1/3)": "queued"}),
+            _jobs(("queued", created), others={"changes": "completed", "test (1/3)": "completed"}),
+        ],
+    )
+    assert result.returncode == 1
+    assert len(calls) == 4
     assert calls[-1] == "run cancel 4242 --repo acme/factory"
 
 
