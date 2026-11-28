@@ -11,8 +11,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from lib import cli, job_detail
-from lib.dashboard import _detail_round
+from lib import cli, dashboard, job_detail
 from lib.dispatcher import Dispatcher
 from lib import queue as queue_module
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
@@ -647,34 +646,37 @@ def _every_reader(path: Path) -> dict[str, dict[str, object]]:
     queue = make_queue(path, [10.0])
     with queue.connect() as connection:
         rows = connection.execute("SELECT id, detail FROM jobs").fetchall()
+        rounds = connection.execute(f"SELECT id, {dashboard._DETAIL_ROUND} AS round FROM jobs").fetchall()
         return {
             "job": {job.id: job.request.detail for job in queue.outstanding()},
             "verdict": {
                 str(row["id"]): job_detail.load_row(connection, row["id"], row["detail"]) for row in rows
             },
-            "dashboard round": {str(row["id"]): _detail_round(row["detail"]) for row in rows},
+            "dashboard round": {str(row["id"]): dashboard._round(row["round"]) for row in rounds},
         }
 
 
 def test_db_spill_detail_moves_inline_detail_out_and_vacuums(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    path = tmp_path / "orch.db"
+    path = tmp_path / "state" / "orch.db"
+    path.parent.mkdir()
+    backups = ["--dir", str(tmp_path / "backups")]
     details = _inline_jobs(path, 300, 80_000)
     before_size = path.stat().st_size
     assert before_size > 20_000_000
     before = _every_reader(path)
     assert before["job"] == details
 
-    assert cli.main(["db-spill-detail", "--db", str(path), "--vacuum"]) == 0
+    assert cli.main(["db-spill-detail", "--db", str(path), *backups, "--vacuum"]) == 0
     out = capsys.readouterr().out
-    assert "moved the detail of 300 jobs" in out
+    assert "moved 300 jobs by key, 0 cold jobs" in out
     assert "vacuumed" in out
     assert path.stat().st_size < before_size * 0.10
     assert _every_reader(path) == before
 
-    assert cli.main(["db-spill-detail", "--db", str(path)]) == 0
-    assert "moved the detail of 0 jobs" in capsys.readouterr().out
+    assert cli.main(["db-spill-detail", "--db", str(path), *backups]) == 0
+    assert "moved 0 jobs by key, 0 cold jobs" in capsys.readouterr().out
 
 
 def test_db_spill_detail_refuses_while_a_poller_holds_the_lock(

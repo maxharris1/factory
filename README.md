@@ -584,6 +584,37 @@ the newest 5 labelled backups plus any under 48 hours old and deletes the rest,
 with their `-wal` and `-shm` files. It prunes on each `db-backup`, and `orch
 poll` prunes once a day.
 
+*Spilling job detail.* `orch db-spill-detail` moves bulky job detail out of
+`orch.db` into `job-detail/<id>.json` beside it (#653, #1777). Run it in this
+order:
+
+1. `orch db-spill-detail --dry-run` against the live database. It opens the
+   database read-only, takes no lock, writes nothing, and prints the rows and
+   inline bytes of live, replayable and cold jobs, the bytes the cold spill
+   would move, the rows whose detail is not a JSON object, and the ten largest
+   inline keys.
+2. Stop the poller and the waiters (`deploy/poller-service.sh stop`,
+   `deploy/waiter-service.sh <bot> stop`).
+3. `orch db-spill-detail --vacuum`. It holds the poller's lock and exits 1
+   while any `waiter-<bot>.lock` beside the database is held. It writes
+   `manual/orch-<UTC stamp>-pre-spill.db` with the `db-backup` labelled backup
+   (`--dir` moves it) and exits 1, changing no row, unless that copy passes
+   `PRAGMA integrity_check`. It then moves the fixed keys of every job and
+   each key over 1 KB of every cold job (finished, with its ticket merged,
+   done or abandoned), runs `VACUUM` and `wal_checkpoint(TRUNCATE)`, and
+   prints the rows and bytes moved, the backup path and the database size
+   before and after. Without `--vacuum` it spills and leaves the file size
+   alone. `orch poll` and `orch wait` never vacuum.
+4. Start the poller and the waiters again.
+
+To undo it, stop them, move `orch.db` and its `-wal` and `-shm` aside (`orch
+restore-db` refuses an existing database), and run `orch restore-db --db
+<path> --backup <printed backup path>`. Leave `job-detail/` in place.
+
+Afterwards merged readers (the dispatcher, the dashboard, briefs, `move-db`)
+see each job's full detail as before. A raw SQL read of `jobs.detail` sees the
+slim row: its `spilled` key names the keys now in `job-detail/<id>.json`.
+
 *Poll interval.* `poll_seconds` in `orch.yml` may be 30 or 60 (anything else is refused); the shipped value is 30. It is how long `orch poll` sleeps after a cycle finishes, so a cycle's elapsed time includes the work it does: cycle start to cycle start is that work plus `poll_seconds`. The sleep ends when either the wall clock or the monotonic clock reaches `poll_seconds`, so a box VM pause in the sleep does not add the pause on top (issue #470). When the time from one `cycle end` to the next `cycle start` runs more than 10 seconds past `poll_seconds`, poller.log gets an `orch poll: between cycles` line before `cycle start` that gives the sleep's wall and monotonic seconds and any clock jump. The `cycle end` line breaks `after-poll` into `backup`, `dashboard-push` and `self-deploy`. 30 seconds is the poll interval, not a promise that a comment is picked up and acted on within 30 seconds. GitHub is read
 every cycle. Linear keeps its own 60-second cadence and budget: the
 discovery search, dirty-row reads (with `linear_webhook`) and tracked Linear

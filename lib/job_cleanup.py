@@ -54,6 +54,13 @@ alone. It holds a flock on `cleanup-<bot>.lock` beside orch.db for the whole
 pass, and exits 75 at once when another pass for that bot holds it. A pass
 that exits non-zero ends its output with one `orch cleanup run: failed:` line
 naming the first failing target, or the exception after its traceback.
+
+`orch cleanup run --backlog --root [LOGIN@]DEVICE:PATH` (issue #1766) sweeps a
+work root DEVICE no longer lists in machines.yml with the same backlog plan,
+once per ssh login the device lists (or once as LOGIN). Its device steps get
+`--owner-guard`: a job with any entry under `jobs/` another user owns is kept
+`not-owner`, and old `jobs-kept/` archives are pruned only when this user owns
+that folder. A root without `jobs/` fails that target.
 """
 
 from __future__ import annotations
@@ -63,6 +70,7 @@ import fcntl
 import json
 import math
 import os
+import posixpath
 import re
 import shutil
 import sqlite3
@@ -74,15 +82,24 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import TextIO
 
 from lib import health, job_leftovers, remote, worktrees
-from lib.device_deploy import PICK_PYTHON, Target, targets
+from lib.device_deploy import PICK_PYTHON, PROBE_JOB, Target, targets
 from lib.job_leftovers import GONE, WORKER_RECORD
-from lib.remote import SSH_UNREACHABLE, CaptureTransport, SshTransport, _login, _marked, ssh_argv
+from lib.remote import (
+    SSH_UNREACHABLE,
+    CaptureTransport,
+    RemoteError,
+    RemoteTarget,
+    SshTransport,
+    _login,
+    _marked,
+    ssh_argv,
+)
 from lib.wait import OWNING_BOTS
 
 DEFAULT_GRACE_HOURS = 6.0
@@ -106,6 +123,7 @@ WORKTREE_RECORD = "worktree-record"
 WORKTREE_OWNER_LIVE = "worktree-owner-live"
 WORKER_LIVE = "worker-live"
 WORKER_UNSURE = "worker-unsure"
+NOT_OWNER = "not-owner"
 HOLD = "hold"
 FINISH = "finish"
 SET_ASIDE = ".cleanup"
@@ -569,7 +587,8 @@ def _orphan_records(root: Path, plan: Plan,
     kept: dict[str, str] = {}
     for record in sorted(jobs.glob("*.json")):
         job_id = record.stem
-        if (job_id not in plan.finished or _checked_out_again(jobs, job_id)
+        if (job_id not in plan.finished or not plan.owns(job_id)
+                or _checked_out_again(jobs, job_id)
                 or os.path.lexists(jobs / f"{job_id}{GONE}")):
             continue
         if not locks:
@@ -598,7 +617,7 @@ def _unlink_stranded_locks(jobs: Path, plan: Plan) -> dict[str, str]:
         return kept
     for lock in sorted(jobs.glob(f"*{LOCK}")):
         job_id = lock.name.removesuffix(LOCK)
-        if job_id not in plan.finished:
+        if job_id not in plan.finished or not plan.owns(job_id):
             continue
         try:
             with _claim_lock(jobs, job_id, wait=False, create=False) as locked:
@@ -608,7 +627,8 @@ def _unlink_stranded_locks(jobs: Path, plan: Plan) -> dict[str, str]:
     return kept
 
 
-def _hold(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None]) -> Report:
+def _hold(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None],
+          prune: bool) -> Report:
     jobs = root / "jobs"
     locks = runner_locks()
     removed, kept = _finish_crashed(root, plan, locks)
@@ -644,7 +664,7 @@ def _hold(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None]) -> Re
                     held.append(job_id)
         except OSError as exc:
             kept[job_id] = f"error: could not set aside {folder}: {exc}".splitlines()[0]
-    if not plan.dry_run:
+    if prune and not plan.dry_run:
         job_leftovers.prune_kept(root, now=time.time())
     return Report(removed, kept, plan.dry_run, tuple(sorted(held)))
 
@@ -697,8 +717,45 @@ def _finish(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None]) -> 
     return Report(removed, kept, False)
 
 
-def device_step(root: Path, plan: Plan, *, scan: Callable[[Path], set[str] | None] = jobs_held_open) -> Report:
-    return (_finish if plan.step == FINISH else _hold)(root, plan, scan)
+def _owner(path: Path) -> int:
+    return path.lstat().st_uid
+
+
+def _guarded(root: Path, plan: Plan) -> tuple[Plan, dict[str, str]]:
+    me = os.getuid()
+    jobs = root / "jobs"
+    seen = [(entry.name.split(".", 1)[0], entry) for entry in jobs.iterdir()]
+    seen += [(job_id, root / job_leftovers.KEPT_ROOT / job_id)
+             for job_id in job_leftovers.pending(root)]
+    owners: dict[str, set[int]] = {}
+    for job_id, path in seen:
+        try:
+            uid = _owner(path)
+        except FileNotFoundError:
+            continue
+        owners.setdefault(job_id, set()).add(uid)
+    foreign = {job_id for job_id, uids in owners.items() if uids != {me}}
+    kept = {job_id: NOT_OWNER for job_id in sorted(foreign) if plan.owns(job_id) and (
+        job_id in plan.finished or any(
+            (jobs / f"{job_id}{mark}").is_dir() for mark in ("", SET_ASIDE, GONE)))}
+    owned = frozenset(filter(plan.owns, owners)) - foreign
+    return replace(plan, owned=owned), kept
+
+
+def _may_prune(root: Path) -> bool:
+    archive = root / job_leftovers.KEPT_ROOT
+    return archive.is_dir() and _owner(archive) == os.getuid()
+
+
+def device_step(root: Path, plan: Plan, *, scan: Callable[[Path], set[str] | None] = jobs_held_open,
+                owner_guard: bool = False) -> Report:
+    foreign: dict[str, str] = {}
+    prune = True
+    if owner_guard:
+        plan, foreign = _guarded(root, plan)
+        prune = _may_prune(root)
+    report = _finish(root, plan, scan) if plan.step == FINISH else _hold(root, plan, scan, prune)
+    return replace(report, kept={**report.kept, **foreign})
 
 
 def label_unnamed(report: Report, reasons: Mapping[str, str | None]) -> Report:
@@ -743,15 +800,19 @@ def report_lines(target: Target, outcome: Report | str) -> list[str]:
               for job_id, reason in sorted(outcome.kept.items()))]
 
 
-def device_script(checkout: str, workdir_root: str) -> str:
+def device_script(checkout: str, workdir_root: str, *, owner_guard: bool = False) -> str:
     body = PICK_PYTHON + 'cd -- "$1" || exit 3; exec "$py" ./bin/orch cleanup device --root "$2"'
+    if owner_guard:
+        body += " --owner-guard"
     return _login(body, "orch-cleanup", (checkout, workdir_root))
 
 
-def _device_call(transport: CaptureTransport, target: Target, plan: Plan) -> Report | str:
+def _device_call(transport: CaptureTransport, target: Target, plan: Plan,
+                 owner_guard: bool) -> Report | str:
     try:
         result = transport.call(
-            ssh_argv(target.remote, device_script(target.checkout, target.remote.workdir_root)),
+            ssh_argv(target.remote, device_script(target.checkout, target.remote.workdir_root,
+                                                  owner_guard=owner_guard)),
             timeout=TIMEOUT_SECONDS,
             input=plan.to_json().encode(),
         )
@@ -770,8 +831,8 @@ def _device_call(transport: CaptureTransport, target: Target, plan: Plan) -> Rep
 
 
 def clean_target(transport: CaptureTransport, target: Target, db: Path, plan: Plan,
-                 reasons: Mapping[str, str | None]) -> Report | str:
-    hold = _device_call(transport, target, plan)
+                 reasons: Mapping[str, str | None], owner_guard: bool = False) -> Report | str:
+    hold = _device_call(transport, target, plan, owner_guard)
     if isinstance(hold, str):
         return hold
     held = label_unnamed(hold, reasons)
@@ -782,7 +843,7 @@ def clean_target(transport: CaptureTransport, target: Target, db: Path, plan: Pl
     finish = _device_call(transport, target, Plan(
         confirmed, plan.cutoff, False, FINISH,
         {i: at for i, at in plan.finished_at.items() if i in confirmed}, plan.unlink_lock,
-        plan.owned))
+        plan.owned), owner_guard)
     if isinstance(finish, str):
         return f"set aside {len(hold.held)} checkouts, then {finish}"
     taken_back = {i: reread.get(i) or RECENT for i in hold.held if i not in finish.removed}
@@ -792,8 +853,51 @@ def clean_target(transport: CaptureTransport, target: Target, db: Path, plan: Pl
                   {**held.kept, **taken_back, **label_unnamed(finish, reread).kept}, False)
 
 
+class BadRoot(ValueError):
+    pass
+
+
+def root_targets(machines, spec: str) -> list[Target]:
+    head, colon, path = spec.partition(":")
+    login, at, name = head.rpartition("@")
+    if not colon or not name or (at and not login):
+        raise BadRoot(f"{spec!r} is not [LOGIN@]DEVICE:PATH")
+    devices = machines.devices if machines is not None else ()
+    device = next((d for d in devices if d.name == name), None)
+    if device is None:
+        raise BadRoot(f"no device {name!r} in machines.yml")
+    if device.local:
+        raise BadRoot(f"{name} is the local device")
+    if not path.startswith("/"):
+        raise BadRoot(f"{path!r} is not an absolute path")
+    path = posixpath.normpath(path)
+    if any(posixpath.normpath(root) == path
+           for root in map(device.workdir_for, device.harnesses) if root):
+        raise BadRoot(f"{path} is a work root {name} lists today")
+    harness_of: dict[str, str] = {}
+    for harness in device.harnesses:
+        harness_of.setdefault(device.login_for(harness), harness)
+    if not harness_of:
+        raise BadRoot(f"{name} lists no harness")
+    if login:
+        harness_of = {login: harness_of.get(login, next(iter(harness_of.values())))}
+    found = []
+    for user, harness in harness_of.items():
+        alias, checkout = device.ssh_alias_for(harness), device.factory_root_for(harness)
+        if not alias or not checkout:
+            raise BadRoot(f"{name} has no ssh alias or checkout for {harness}")
+        try:
+            remote_target = RemoteTarget(device=name, alias=alias, user=user,
+                                         workdir_root=path, job_id=PROBE_JOB)
+        except RemoteError as exc:
+            raise BadRoot(str(exc)) from exc
+        found.append(Target(name, harness, user, checkout, remote_target))
+    return found
+
+
 def run(db: Path, machines, transport: CaptureTransport, *, now: float, grace_hours: float,
-        dry_run: bool, bot: str | None = None) -> list[tuple[Target, Report | str]]:
+        dry_run: bool, bot: str | None = None,
+        sweep: list[Target] | None = None) -> list[tuple[Target, Report | str]]:
     cutoff = now - grace_hours * 3600
     rows = read_jobs(db)
     reasons = keep_reasons(rows, cutoff)
@@ -808,20 +912,25 @@ def run(db: Path, machines, transport: CaptureTransport, *, now: float, grace_ho
                 owned=owned)
     found = {(t.device, t.remote.workdir_root): t for t in targets(machines)
              if bot is None or t.bot == bot}
-    work = list(found.values())
+    work = list(found.values()) if sweep is None else sweep
     if not work:
         return []
-    with ThreadPoolExecutor(max_workers=len(work)) as pool:
-        return list(zip(work, pool.map(
-            lambda t: clean_target(transport, t, db, plan, reasons), work)))
+    by_root: dict[tuple[str, str], list[Target]] = {}
+    for target in work:
+        by_root.setdefault((target.device, target.remote.workdir_root), []).append(target)
+    with ThreadPoolExecutor(max_workers=len(by_root)) as pool:
+        done = pool.map(lambda group: [
+            (t, clean_target(transport, t, db, plan, reasons, sweep is not None)) for t in group],
+            by_root.values())
+        return [pair for group in done for pair in group]
 
 
 ALREADY_RUNNING = 75
 
 USAGE = """\
-orch cleanup run (--backlog | --bot BOT) [--dry-run] [--grace-hours H] [--db PATH]
-                  [--machines PATH]
-orch cleanup device --root DIR      (reads the host's plan as JSON on stdin)
+orch cleanup run (--backlog [--root [LOGIN@]DEVICE:PATH] | --bot BOT) [--dry-run]
+                  [--grace-hours H] [--db PATH] [--machines PATH]
+orch cleanup device --root DIR [--owner-guard]  (reads the host's plan as JSON on stdin)
 """
 
 
@@ -837,8 +946,10 @@ def main(argv: list[str], *, clock: Callable[[], float] = time.time,
     host.add_argument("--grace-hours", type=float)
     host.add_argument("--db", type=Path)
     host.add_argument("--machines", type=Path)
+    host.add_argument("--root", metavar="[LOGIN@]DEVICE:PATH")
     device = commands.add_parser("device")
     device.add_argument("--root", type=Path, required=True)
+    device.add_argument("--owner-guard", action="store_true")
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
@@ -849,13 +960,28 @@ def main(argv: list[str], *, clock: Callable[[], float] = time.time,
         except (ValueError, KeyError, TypeError) as exc:
             print(f"orch cleanup device: bad plan: {exc}", file=sys.stderr)
             return 2
-        print(MARK, device_step(args.root, plan).to_json(), flush=True)
+        if args.owner_guard and not (args.root / "jobs").is_dir():
+            print(f"orch cleanup device: no jobs folder under {args.root}", file=sys.stderr)
+            return 3
+        print(MARK, device_step(args.root, plan, owner_guard=args.owner_guard).to_json(),
+              flush=True)
         return 0
+    if args.root is not None and not args.backlog:
+        print("orch cleanup run: --root needs --backlog", file=sys.stderr)
+        return 2
     if args.grace_hours is None:
         args.grace_hours = BOT_GRACE_MINUTES / 60 if args.bot else DEFAULT_GRACE_HOURS
     if args.grace_hours < 0:
         print("orch cleanup run: --grace-hours must not be negative", file=sys.stderr)
         return 2
+    machines = sweep = None
+    if args.root is not None:
+        machines = health.load_machines(args.machines)
+        try:
+            sweep = root_targets(machines, args.root)
+        except BadRoot as exc:
+            print(f"orch cleanup run: --root: {exc}", file=sys.stderr)
+            return 2
     db = args.db or Path(os.environ.get("ORCH_DB")
                          or Path.home() / ".local/state/factory/orch.db")
     if not db.is_file():
@@ -870,10 +996,12 @@ def main(argv: list[str], *, clock: Callable[[], float] = time.time,
                 except BlockingIOError:
                     print(f"orch cleanup run: cleanup for {args.bot} already running")
                     return ALREADY_RUNNING
-            outcomes = run(db, health.load_machines(args.machines),
+            if args.root is None:
+                machines = health.load_machines(args.machines)
+            outcomes = run(db, machines,
                            transport if transport is not None else SshTransport(),
                            now=clock(), grace_hours=args.grace_hours, dry_run=args.dry_run,
-                           bot=args.bot)
+                           bot=args.bot, sweep=sweep)
         for target, outcome in outcomes:
             for line in report_lines(target, outcome):
                 print(line, flush=True)
