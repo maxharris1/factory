@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+from lib.dispatch.bookkeeping import bookkeeping_write
 from lib.dispatch.constants import (
     CI_BASE_RED,
     CI_INFRA_BLOCKED_REASON,
@@ -524,43 +526,55 @@ class ReadyMixin:
         )
         now = self.queue.now()
         with self._connect() as connection:
-            if not silent:
-                connection.execute("DELETE FROM ci_silence WHERE repo = ? AND ticket_id = ?", key)
-                connection.execute(
-                    "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason = ?",
-                    (*key, CI_SILENT_REASON),
-                )
-                return
-            since = connection.execute(
-                """
-                INSERT INTO ci_silence (repo, ticket_id, head, since) VALUES (?, ?, ?, ?)
-                ON CONFLICT (repo, ticket_id) DO UPDATE SET
-                    head = excluded.head,
-                    since = CASE WHEN ci_silence.head = excluded.head
-                                 THEN ci_silence.since ELSE excluded.since END
-                RETURNING since
-                """,
-                (*key, head, now),
-            ).fetchone()["since"]
-            if now - since < CI_SILENT_SECONDS:
-                connection.execute(
-                    "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason = ?",
-                    (*key, CI_SILENT_REASON),
-                )
-                return
+            row = connection.execute(
+                "SELECT head, since FROM ci_silence WHERE repo = ? AND ticket_id = ?", key
+            ).fetchone()
+            flagged = connection.execute(
+                "SELECT 1 FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason = ?",
+                (*key, CI_SILENT_REASON),
+            ).fetchone() is not None
+        have_row = (row["head"], row["since"]) if row is not None else None
+        want_row = None
+        if silent:
+            since = row["since"] if row is not None and row["head"] == head else now
+            want_row = (head, since)
+        want_flag = None
+        if want_row is not None and now - want_row[1] >= CI_SILENT_SECONDS:
             where = (
                 f"on CI base {ticket.pr_base}"
                 if ticket.factory.ci_branches is not None
                 else f"on base {ticket.pr_base} (factory.md sets no ci.branches)"
             )
-            self._flag_attention_once(
-                connection,
-                ticket.repo,
-                ticket.ticket_id,
-                CI_SILENT_REASON,
+            want_flag = (
                 f"no check run or status on {head[:12]} after "
-                f"{CI_SILENT_SECONDS / 60:.0f} minutes {where}",
+                f"{CI_SILENT_SECONDS / 60:.0f} minutes {where}"
             )
+        if have_row == want_row and flagged == (want_flag is not None):
+            return
+
+        def work(connection: sqlite3.Connection) -> None:
+            if want_row is None:
+                connection.execute("DELETE FROM ci_silence WHERE repo = ? AND ticket_id = ?", key)
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO ci_silence (repo, ticket_id, head, since) VALUES (?, ?, ?, ?)
+                    ON CONFLICT (repo, ticket_id) DO UPDATE SET
+                        head = excluded.head, since = excluded.since
+                    """,
+                    (*key, *want_row),
+                )
+            if want_flag is None:
+                connection.execute(
+                    "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason = ?",
+                    (*key, CI_SILENT_REASON),
+                )
+            else:
+                self._flag_attention_once(
+                    connection, ticket.repo, ticket.ticket_id, CI_SILENT_REASON, want_flag
+                )
+
+        bookkeeping_write(self._connect, work, site="_watch_ci_silence", ledger=self.lock_ledger)
 
     def _ci_stale_state(self, ticket: TrackedTicket) -> str | None:
         if self._review_context(ticket)[0] in TERMINAL_STATES:
