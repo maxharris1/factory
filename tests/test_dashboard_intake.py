@@ -7,9 +7,14 @@ import pytest
 
 from lib.dashboard import render_pages
 from lib.dashboard_pages import lanes
-from lib.dashboard_pages.lanes import FUNNEL, lanes_table
-from tests.test_dashboard_lanes import Browser, FOLD, _page_with_status_stub, _tiles, needs_chrome
+from lib.dashboard_page import intake_groups
+from lib.dashboard_pages.lanes import FUNNEL, INTAKE, IntakeGroups, lanes_table
+from tests.test_dashboard_lanes import (
+    COLUMNS, EMPTY, Browser, FOLD, _assert_columns, _intake_item, _page_with_status_stub, _six_and_nine, _tiles,
+    needs_chrome,
+)
 from tests.test_dashboard_layout import BAR, NODE, _no_script, _run_page, _section
+from tests.test_dashboard_shell import AT_SNAPSHOT
 
 LABELS = ["Labelled ready", "Waiting", "Next in line", "Fed today", "Into the factory"]
 RENDERS = ["server", "script"]
@@ -22,12 +27,12 @@ def browser():
     chrome.close()
 
 
-def _render(render: str, tmp_path: Path, snapshot: dict) -> str:
+def _render(render: str, tmp_path: Path, snapshot: dict, actions: list | None = None) -> str:
     if render == "server":
         return _section(_no_script(render_pages(snapshot)["index.html"]), "intake")
     if NODE is None:
         pytest.skip("node is not installed")
-    return _run_page(tmp_path, snapshot, "main", BAR + ["hud", "intake"])["html"]["intake"]
+    return _run_page(tmp_path, snapshot, "main", BAR + ["hud", "intake"], actions=actions)["html"]["intake"]
 
 
 def _assert_funnel(intake: str, counts: tuple[int, ...], split: tuple[int, int]) -> None:
@@ -240,7 +245,8 @@ def test_a_feeder_with_no_webhook_has_no_count_and_no_webhook_id(tmp_path: Path,
     inner = _inner(render, _render(render, tmp_path, snapshot))
     assert inner.startswith(BARE_HEADING + '<div class="intake"><ol class="funnel" id="feeder">'), inner
     assert 'class="count"' not in inner and "linear-webhook" not in inner and "Linear webhook" not in inner
-    marks = ["</ol>" + TROUBLE + "</div>", '<div class="igroup">5 waiting</div>', "2 fed today"]
+    marks = ["</ol>" + TROUBLE + "</div>", '<div class="icols">', '<div class="igroup">Next in line</div>',
+             '<div class="igroup">Waiting on a blocker or files</div>', '<div class="igroup">Fed today</div>']
     at = [inner.index(mark) for mark in marks]
     assert at == sorted(at), inner
 
@@ -306,7 +312,6 @@ def test_trouble_is_one_wrapping_red_line_under_the_funnel(tmp_path: Path, brows
 
 
 TITLES = """(function () {
-  [].forEach.call(document.querySelectorAll('#intake details'), function (d) { d.open = true; });
   var titles = [].map.call(document.querySelectorAll('#intake .ititle'), function (t) {
     var css = getComputedStyle(t);
     return {lines: Math.round(t.getBoundingClientRect().height / parseFloat(css.lineHeight)),
@@ -345,3 +350,117 @@ def test_a_long_title_and_a_long_reason_do_not_scroll_a_phone_sideways(
     assert all(t["lines"] > 1 and not t["cut"] for t in box["titles"]), box
     assert len(box["trouble"]) == 2 and box["trouble"][1] > box["trouble"][0], box
     assert box["scroll"] <= 375, f"phone page scrolls sideways: {box}"
+
+
+GROUP_ITEMS = [
+    _intake_item(1, "done", fed_age_seconds=900),
+    _intake_item(2, "done", fed_age_seconds=300),
+    _intake_item(3, "fed", fed_age_seconds=900),
+    _intake_item(4, "done", fed_age_seconds=86400),
+    _intake_item(5, "done"),
+    _intake_item(6, "error", fed_age_seconds=60),
+    _intake_item(7, "waiting-capacity"),
+    _intake_item(8, "waiting-blocked", reason="waiting on #7"),
+    _intake_item(9, "waiting-capacity"),
+    _intake_item(10, "refused-intake", reason="no acceptance criteria"),
+    _intake_item(11, "fed", fed_age_seconds=86399),
+    _intake_item(12, "eligible"),
+]
+GROUPS = [["6", "10"], ["7", "9"], ["8"], ["2", "1", "3", "11"]]
+
+
+def test_intake_groups_returns_four_lists() -> None:
+    groups = intake_groups(GROUP_ITEMS)
+    assert [[x["issue"] for x in group] for group in groups] == GROUPS
+    trouble, next_, blocked, fed = groups
+    assert [len(trouble), len(next_), len(blocked), len(fed)] == [2, 2, 1, 4]
+    assert groups.fed is fed and groups.next is next_
+
+
+@pytest.mark.parametrize("render", RENDERS)
+def test_the_columns_hold_the_same_tickets(tmp_path: Path, render: str) -> None:
+    snapshot = _tiles(tmp_path)
+    snapshot["feeder"]["items"] = [dict(x) for x in GROUP_ITEMS]
+    intake = _render(render, tmp_path, snapshot)
+    trouble = re.search(r'<ul class="itrouble">(.*?)</ul>', intake, re.S).group(1)
+    assert re.findall(r"factory#(\d+)<", trouble) == GROUPS[0]
+    _assert_columns(intake, GROUPS[1:], [None, None, None])
+
+
+@pytest.mark.parametrize("render", RENDERS)
+def test_each_column_shows_four_rows_and_then_a_more_line(tmp_path: Path, render: str) -> None:
+    snapshot = _six_and_nine(tmp_path)
+    intake = _render(render, tmp_path, snapshot, AT_SNAPSHOT)
+    _assert_columns(intake, [["21", "22", "23", "24"], ["2", "5", "8"], ["35", "32", "34", "31"]],
+                    ["+2 more", None, "+5 more today"])
+    assert ('<li><span class="ticket">factory#21</span><span class="ititle" title="Next row">Next row</span>'
+            '<span class="chip accent">tier 2</span><span class="what">waiting for capacity</span></li>') in intake
+    assert ('<li><span class="ticket">factory#2</span><span class="ititle" title="Header line">Header line</span>'
+            '<span class="what">waiting on #1</span></li>') in intake
+    assert ('<li><span class="ticket">factory#35</span><span class="ititle" title="Fed row">Fed row</span>'
+            '<span class="chip accent">tier 1</span><span class="what">fed, job queued</span>'
+            '<span>→ PR #135</span><span class="when">fed 1m 00s ago</span></li>') in intake
+    assert '<li><span class="ticket">factory#32</span><span class="what">fed</span><span class="when">fed 5m 00s ago</span></li>' in intake
+    snapshot["feeder"]["items"] += [_intake_item(issue, "waiting-blocked", reason="waiting on #21") for issue in (41, 42, 43)]
+    _assert_columns(_render(render, tmp_path, snapshot), [["21", "22", "23", "24"], ["2", "5", "8", "41"],
+                    ["35", "32", "34", "31"]], ["+2 more", "+2 more", "+5 more today"])
+
+
+@pytest.mark.parametrize("render", RENDERS)
+def test_a_column_with_no_rows_says_so(tmp_path: Path, render: str) -> None:
+    snapshot = _tiles(tmp_path)
+    snapshot["feeder"]["items"] = []
+    _assert_columns(_render(render, tmp_path, snapshot), [[], [], []], [None, None, None])
+    snapshot["feeder"]["items"] = [_intake_item(issue, "waiting-capacity") for issue in (1, 2, 3, 4)]
+    intake = _render(render, tmp_path, snapshot)
+    _assert_columns(intake, [["1", "2", "3", "4"], [], []], [None, None, None])
+    assert 'class="more"' not in intake
+
+
+def test_the_limit_comes_from_the_table(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(INTAKE, "rows", 2)
+    snapshot = _six_and_nine(tmp_path)
+    for render in RENDERS:
+        _assert_columns(_render(render, tmp_path, snapshot), [["21", "22"], ["2", "5"], ["35", "32"]],
+                        ["+4 more", "+1 more", "+7 more today"])
+
+
+def test_the_script_keeps_no_copy_of_the_column_table() -> None:
+    assert lanes_table()["intake"] == INTAKE
+    assert [col["label"] for col in INTAKE["columns"]] == COLUMNS
+    assert [col["empty"] for col in INTAKE["columns"]] == EMPTY
+    for words in (*COLUMNS[1:], *EMPTY, "more today", "' more", " fed today", "intake-fed", "intake-waiting"):
+        assert words not in lanes.SCRIPT, words
+    for gone in ("fed-more", "#intake details"):
+        assert gone not in lanes.CSS and gone not in lanes.SCRIPT, gone
+    keys = [col["key"] for col in INTAKE["columns"]]
+    assert keys == list(lanes._INTAKE_BODY) == list(IntakeGroups._fields[1:])
+
+
+def test_the_fed_age_ticks_in_the_script(tmp_path: Path) -> None:
+    snapshot = _six_and_nine(tmp_path)
+    fed_row = r'factory#35<.*?<span class="when">([^<]*)</span>'
+    assert re.search(fed_row, _render("server", tmp_path, snapshot)).group(1) == "fed 1m 00s ago"
+    ticked = _render("script", tmp_path, snapshot, AT_SNAPSHOT + [["advance", 60]])
+    assert re.search(fed_row, ticked).group(1) == "fed 2m 00s ago"
+
+
+COLUMN_LAYOUT = """(function () {
+  var cols = [].map.call(document.querySelectorAll('#intake .icols > .icol'), function (c) {
+    var b = c.getBoundingClientRect(); return {left: Math.round(b.left), top: Math.round(b.top)}; });
+  return {cols: cols, scroll: document.documentElement.scrollWidth};
+})()"""
+
+
+@needs_chrome
+@pytest.mark.parametrize("render", RENDERS)
+@pytest.mark.parametrize(("width", "lefts", "tops"), [(760, 3, 1), (759, 1, 3)])
+def test_the_columns_are_a_row_from_760_px_and_a_stack_below(
+    tmp_path: Path, browser: Browser, render: str, width: int, lefts: int, tops: int
+) -> None:
+    _open(browser, _six_and_nine(tmp_path), width, render)
+    box = browser.eval(COLUMN_LAYOUT)
+    assert len(box["cols"]) == 3, box
+    assert len({c["left"] for c in box["cols"]}) == lefts, box
+    assert len({c["top"] for c in box["cols"]}) == tops, box
+    assert box["scroll"] <= width, box

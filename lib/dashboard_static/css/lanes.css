@@ -88,8 +88,6 @@ font:500 11px/1 var(--mono);letter-spacing:.12em;color:var(--warn)}
 @media (width<760px){.funnel{grid-template-columns:minmax(0,1fr)}.fstage,.fstage a{flex-flow:row wrap;align-items:baseline}.fnum{margin-left:auto}.fbar,.fsplit{flex-basis:100%}}
 #intake .what{min-width:0;overflow-wrap:anywhere}
 .igroup{margin:14px 0 2px;font:11px/1.3 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
-#intake details{margin-top:4px}
-.fed-more{margin:4px 0 0;padding:0;list-style:none;font:12px/1.5 var(--mono);color:var(--text-2)}
-.fed-more li{display:flex;flex-wrap:wrap;gap:8px;padding:4px 6px;border-bottom:1px solid var(--line)}
-.fed-more li:last-child{border-bottom:0}
-.fed-more .ticket{color:var(--text)}.fed-more .when{margin-left:auto;color:var(--muted)}
+.icols{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0 20px}
+.icol>.more,.icol>.empty{padding:0 6px}
+@media (width<760px){.icols{grid-template-columns:minmax(0,1fr)}}
