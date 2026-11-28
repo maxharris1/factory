@@ -622,8 +622,8 @@ def test_run_records_survive_git_clean_in_new_and_reused_checkouts(tmp_path: Pat
         assert "reused" in _checkout(tmp_path, origin, job_dir)
     tag = "0" * 32
     records = [
-        remote.PID_FILE, remote.start_record(tag), remote.tree_record(tag), remote.scope_record(tag),
-        f".orch-worker-{tag}.keeper.pid", f".orch-worker-{tag}.members.pid",
+        remote.PID_FILE, remote.start_record(tag), remote.tree_record(tag), f"{remote.tree_record(tag)}.lock",
+        remote.scope_record(tag), f".orch-worker-{tag}.keeper.pid", f".orch-worker-{tag}.members.pid",
     ]
     for name in records:
         (job_dir / name).write_text("x\n", encoding="utf-8")
