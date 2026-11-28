@@ -976,7 +976,7 @@ def test_dashboard_snapshot_shows_feeder_state(tmp_path: Path) -> None:
         ("1", "fed"), ("2", "waiting-capacity"),
     }
     pages = render_pages(snapshot)
-    assert "Feeder" in pages["index.html"]
+    assert pages["index.html"].count('id="feeder"') == 1
 
 
 # --- the poller: fed issues become queued jobs within one poll --------------
