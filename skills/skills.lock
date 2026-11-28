@@ -583,7 +583,7 @@ factory:
   harness/codex.md: 7990a6deb21566e3036d8c2e2c12486cd78f1760bdd0fc450c354fe3c786be26
   harness/cursor.md: a6000aaafb0cd92f192e8a57f89b3e96a54718af5d51f65741f8ed020f63f7b9
   harness/gemini.md: 92edac44fbe41cf3b71679c0b14b001e46f9b0c65284dc154e8dde47700da320
-  orchestrator/SKILL.md: e40ea3012e5b6fd0021d917054a0ffcff61b6b9fad4c0d9891102c4ec1fbc3b4
+  orchestrator/SKILL.md: 27917d5d6e5f1269c5b5251d0e8df2bffe67f210be2cab047d630c1cc2a2431a
 kit:
   LICENSE: 702f5f331b56aff0e33d8c7826df5202559f894145eb70355c6477b55b5bb8a0
   deslop/SKILL.md: 2f7b7def74af7ed11f5b44b4d32f0f91fca8c5d1f92bf2171e8d12fd33a0f810
