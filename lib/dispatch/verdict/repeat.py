@@ -218,6 +218,32 @@ def _released_by(
     return None
 
 
+def _held_row(connection: sqlite3.Connection, ticket: TrackedTicket) -> sqlite3.Row | None:
+    return connection.execute(
+        """
+        SELECT review_events.outcome, review_events.comment_id, review_events.stop FROM ticket_state
+        JOIN review_events
+          ON review_events.repo = ticket_state.repo
+         AND review_events.ticket_id = ticket_state.ticket_id
+        WHERE ticket_state.repo = ? AND ticket_state.ticket_id = ?
+          AND (
+            (ticket_state.workflow_state = 'waiting-max'
+             AND review_events.comment_id = ticket_state.paused_question_id
+             AND review_events.outcome IN ('waiting-max-repeat', 'waiting-max-unsat'))
+            OR (ticket_state.workflow_state = 'capped'
+                AND review_events.outcome = 'capped-review')
+          )
+        ORDER BY review_events.rowid DESC LIMIT 1
+        """,
+        (ticket.repo.lower(), ticket.ticket_id),
+    ).fetchone()
+
+
+def _held_kind(row: sqlite3.Row) -> Stop:
+    held: dict[str, Stop] = {"waiting-max-repeat": "repeat", "waiting-max-unsat": "unsat"}
+    return held.get(str(row["outcome"])) or ("stalled" if row["stop"] == "stalled" else "capped")
+
+
 class RepeatBlockMixin:
     def _convergence(
         self,
@@ -352,31 +378,13 @@ class RepeatBlockMixin:
 
     def _held_stop(self, ticket: TrackedTicket) -> tuple[Stop, Comment] | None:
         with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT review_events.outcome, review_events.comment_id FROM ticket_state
-                JOIN review_events
-                  ON review_events.repo = ticket_state.repo
-                 AND review_events.ticket_id = ticket_state.ticket_id
-                WHERE ticket_state.repo = ? AND ticket_state.ticket_id = ?
-                  AND (
-                    (ticket_state.workflow_state = 'waiting-max'
-                     AND review_events.comment_id = ticket_state.paused_question_id
-                     AND review_events.outcome IN ('waiting-max-repeat', 'waiting-max-unsat'))
-                    OR (ticket_state.workflow_state = 'capped'
-                        AND review_events.outcome = 'capped-review')
-                  )
-                ORDER BY review_events.rowid DESC LIMIT 1
-                """,
-                (ticket.repo.lower(), ticket.ticket_id),
-            ).fetchone()
+            row = _held_row(connection, ticket)
         if row is None:
             return None
         verdict = next((item for item in ticket.comments if item.id == row["comment_id"]), None)
         if verdict is None:
             return None
-        held: dict[str, Stop] = {"waiting-max-repeat": "repeat", "waiting-max-unsat": "unsat"}
-        return held.get(str(row["outcome"])) or self._capped_stop(ticket, verdict), verdict
+        return _held_kind(row), verdict
 
     def _stop_history(self, ticket: TrackedTicket) -> tuple[StopRecord, ...]:
         from lib.evidence.findings import blocking_ids

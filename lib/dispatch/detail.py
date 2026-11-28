@@ -734,7 +734,7 @@ class DetailMixin:
         connection: sqlite3.Connection | None = None,
     ) -> str:
         if round_number is not None and cap is None:
-            cap = self._effective_cap(ticket)
+            cap = self._effective_cap(ticket, connection)
         context: dict[str, object] = {
             "linear_url": ticket.ticket_url,
             "gitBranchName": ticket.git_branch_name,

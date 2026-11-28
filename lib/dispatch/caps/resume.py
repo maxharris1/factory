@@ -4,12 +4,13 @@ from __future__ import annotations
 import sqlite3
 from typing import Literal
 
+from lib.dispatch.bookkeeping import locked_write
 from lib.dispatch.constants import UNANNOUNCED_AFTER_CAP
 from lib.dispatch.decisions import record_decisions
 from lib.dispatch.helpers import _comment_link, _scope, grant_open, red_checks
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, RoundGrant, TrackedTicket
-from lib.dispatch.verdict.repeat import OVERRULE
+from lib.dispatch.verdict.repeat import OVERRULE, _held_kind, _held_row
 from lib.dispatch.verdict.shipped import _approved_round
 from lib.queue import JobRequest
 
@@ -23,30 +24,25 @@ class ResumeMixin:
         key = (ticket.repo.lower(), ticket.ticket_id)
         ticket = self._fresh_issue(ticket)
         with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            replayed = connection.execute(
-                """
-                SELECT 1 FROM review_events
-                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
-                  AND outcome = 'overruled-finding'
-                """,
-                (*key, comment.id),
-            ).fetchone()
-            row = connection.execute(
-                "SELECT review_round, generation FROM ticket_state WHERE repo = ? AND ticket_id = ?",
-                key,
-            ).fetchone()
-            if replayed is not None:
-                stopped = int(row["review_round"]) + 1
-            else:
-                held = self._held_stop(ticket)
-                if held is None or held[0] == "unsat" or not self._may_lift_cap(comment.author):
-                    connection.commit()
-                    return None
-                stop, verdict = held
-                decision = self._stop_decision(ticket, verdict, stop, comment, "Another round")
-                if not decision.choice.lower().startswith(OVERRULE.name.lower()):
-                    connection.commit()
+            replayed, state = _overrule_state(connection, key, comment)
+        if replayed:
+            stopped = int(state["review_round"]) + 1
+        else:
+            held = self._held_stop(ticket)
+            if held is None or held[0] == "unsat" or not self._may_lift_cap(comment.author):
+                return None
+            stop, verdict = held
+            decision = self._stop_decision(ticket, verdict, stop, comment, "Another round")
+            if not decision.choice.lower().startswith(OVERRULE.name.lower()):
+                return None
+
+            def overrule(connection: sqlite3.Connection) -> int | None:
+                replayed, state = _overrule_state(connection, key, comment)
+                if replayed:
+                    return int(state["review_round"]) + 1
+                round_number = int(state["review_round"])
+                row = _held_row(connection, ticket)
+                if row is None or (row["comment_id"], _held_kind(row)) != (verdict.id, stop):
                     return None
                 record_decisions(connection, ticket, verdict.id, [decision])
                 connection.execute(
@@ -56,7 +52,6 @@ class ResumeMixin:
                     """,
                     (*key, comment.id),
                 )
-                stopped = int(row["review_round"])
                 self._enqueue_step(
                     connection,
                     ticket,
@@ -68,13 +63,13 @@ class ResumeMixin:
                         recipient=ticket.factory.reviewer_harness,
                         source_comment_id=comment.id,
                         timeout_seconds=ticket.job_timeout_minutes * 60,
-                        generation=int(row["generation"]),
+                        generation=int(state["generation"]),
                         head=ticket.current_head,
                         detail=self._job_detail(
                             ticket,
                             action="review",
                             head=ticket.current_head,
-                            round_number=stopped,
+                            round_number=round_number,
                             instruction="\n".join([_comment_link(verdict), _comment_link(comment)]),
                             connection=connection,
                         ),
@@ -89,7 +84,7 @@ class ResumeMixin:
                     source="overrule-review",
                     at=self.queue.now(),
                     also={
-                        "review_round": stopped - 1,
+                        "review_round": round_number - 1,
                         "paused_action": None,
                         "paused_recipient": None,
                         "paused_head": None,
@@ -97,7 +92,11 @@ class ResumeMixin:
                         "paused_question_id": None,
                     },
                 )
-            connection.commit()
+                return round_number
+
+            stopped = locked_write(self._connect, overrule, site="_overrule_stop", ledger=self.lock_ledger)
+            if stopped is None:
+                return None
         self._write_state_label(ticket, "review")
         self._queue_qa(ticket, comment, head=ticket.current_head, review_round=stopped)
         return True, "overruled-finding"
@@ -648,6 +647,24 @@ class ResumeMixin:
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchone()
         return None if parked is None else "unsat" if parked["outcome"] == "waiting-max-unsat" else "repeat"
+
+
+def _overrule_state(
+    connection: sqlite3.Connection, key: tuple[str, str], comment: Comment
+) -> tuple[bool, sqlite3.Row | None]:
+    replayed = connection.execute(
+        """
+        SELECT 1 FROM review_events
+        WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+          AND outcome = 'overruled-finding'
+        """,
+        (*key, comment.id),
+    ).fetchone()
+    state = connection.execute(
+        "SELECT review_round, generation FROM ticket_state WHERE repo = ? AND ticket_id = ?",
+        key,
+    ).fetchone()
+    return replayed is not None, state
 
 
 def _reopen_hold(connection: sqlite3.Connection, ticket: TrackedTicket) -> str:
