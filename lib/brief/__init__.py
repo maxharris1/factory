@@ -172,7 +172,11 @@ def render_brief(
         *middle,
         finish_section(job, bot, remote_device, handoff_via_marker=handoff_via_marker),
         *([review_rules(facts)] if kind == "review" else []),
-        rules(remote_device, follow_ups=kind != "review" and review.filing_active(facts)),
+        rules(
+            remote_device,
+            follow_ups=kind != "review" and review.filing_active(facts),
+            factory_root=factory_root,
+        ),
         data_section(
             job, detail, facts, findings_quoted=(
                 kind == "fix" and not isinstance(router, str) and bool(fix.quoted_findings(detail, facts))
