@@ -577,6 +577,7 @@ The Mac's row appears once the Mac lists `claude` in `machines.yml`.
 | `signed-out` | `not logged in` | The status command reports no sign-in. | Run step 2. |
 | `signed-out` | `status reply not understood` | Claude's reply has no `loggedIn`, Codex's first line is unknown, or Cursor's `status` is unknown. | Run the status command as the bot and read its reply. |
 | `signed-out` | `status command exited nonzero` | The reply says signed in, but the command failed, or Cursor's reply is `error`. | Run the status command as the bot and read its error. |
+| `signed-out` | `harness CLI not found` | The status command exited 127, so the CLI is not on the bot's login `PATH`. The doctor records it as a drop. | Install the harness CLI for the bot's login on the device. |
 | `signed-out` | `partly signed in` | Cursor reports `partially-authenticated`. | Run the Cursor login again. |
 | `signed-out` | `sign-in names no org and email` | Claude's `claude.ai` sign-in names no org and email. | Run the Claude login again. |
 | `signed-out` | `auth from a token variable, not the account folder` | Claude's auth method is `oauth_token`, `api_key`, `auth_token` or `apiKeyHelper`. | Follow [Move the Mac's profile token off the default account](#move-the-macs-profile-token-off-the-default-account). |
@@ -603,6 +604,7 @@ its reason is `account-signin`. Its detail is `<status>; run: <step>;
 - `sign in as <login> on <device>: <sign-in command>, then orch accounts doctor`
 - `sign <account> in to its own account as <login> on <device>: <sign-in command>, then orch accounts doctor`
 - `remove the token export from <login>'s login profile on <device>, then orch accounts doctor`
+- `install the <harness> CLI for <login> on <device>, then orch accounts doctor`
 - `fix ssh to <device> for <harness>, then orch accounts doctor`
 
 `<sign-in command>` is the step 2 command for the account's folder, with

@@ -100,6 +100,8 @@ NOT_LOGGED_IN = "not logged in"
 NOT_UNDERSTOOD = "status reply not understood"
 EXIT_NONZERO = "status command exited nonzero"
 PARTIAL_LOGIN = "partly signed in"
+CLI_NOT_FOUND = "harness CLI not found"
+COMMAND_NOT_FOUND = 127
 _INCONCLUSIVE = frozenset({NOT_UNDERSTOOD, EXIT_NONZERO})
 NO_IDENTITY = "sign-in names no org and email"
 TOKEN_AUTH = "auth from a token variable, not the account folder"
@@ -447,7 +449,7 @@ def _probe_accounts(
         return [_unreached(account, device.name, harness, SSH_DOWN) for account in accounts]
     replies = _replies(exchanged.stdout, len(accounts), split=_STATUS[harness].stderr == "split")
     return [
-        _STATUS[harness].parse(account, device.name, *replies[index]) if index in replies
+        _read(harness, account, device.name, *replies[index]) if index in replies
         else _unreached(account, device.name, harness, NO_REPLY)
         for index, account in enumerate(accounts)
     ]
@@ -460,6 +462,12 @@ class SignedOut(Exception):
         self.device = device
         self.harness = harness
         self.detail = detail
+
+
+def _read(harness: Harness, account: str, device: str, code: int, stdout: bytes, stderr: bytes) -> Probe:
+    if code == COMMAND_NOT_FOUND:
+        return Probe(account, device, harness, True, False, None, None, None, CLI_NOT_FOUND)
+    return _STATUS[harness].parse(account, device, code, stdout, stderr)
 
 
 def _probe_local(
@@ -477,9 +485,11 @@ def _probe_local(
             timeout=PROBE_TIMEOUT_SECONDS,
             check=False,
         )
+    except FileNotFoundError:
+        return _read(harness, account, device.name, COMMAND_NOT_FOUND, b"", b"")
     except (OSError, subprocess.TimeoutExpired):
         return _unreached(account, device.name, harness, NO_REPLY)
-    return status.parse(account, device.name, done.returncode, done.stdout, done.stderr or b"")
+    return _read(harness, account, device.name, done.returncode, done.stdout, done.stderr or b"")
 
 
 def check_login(
@@ -566,7 +576,10 @@ _STEP: dict[Status, str] = {
     "mismatch": "sign {account} in to its own account as {login} on {device}: {command}" + _THEN,
     "unreachable": "fix ssh to {device} for {harness}" + _THEN,
 }
-_TOKEN_STEP = "remove the token export from {login}'s login profile on {device}" + _THEN
+_DETAIL_STEP = {
+    TOKEN_AUTH: "remove the token export from {login}'s login profile on {device}" + _THEN,
+    CLI_NOT_FOUND: "install the {harness} CLI for {login} on {device}" + _THEN,
+}
 
 
 def login_command(harness: Harness, home: str | None) -> str:
@@ -584,7 +597,7 @@ def login_command(harness: Harness, home: str | None) -> str:
 def _step(row: SignIn, config: MachinesConfig) -> str:
     harness = config.account(row.account).harness
     path = None if row.status == "unreachable" else config.account_home(row.device, harness, row.account)
-    template = _TOKEN_STEP if row.detail == TOKEN_AUTH else _STEP[row.status]
+    template = _DETAIL_STEP.get(row.detail, _STEP[row.status])
     return template.format(
         account=row.account,
         device=row.device,
