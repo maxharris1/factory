@@ -883,6 +883,18 @@ _LOW = (HeadroomReading("five_hour", 0.1, 100.0),)
             GuardFacts(readings=(HeadroomReading("five_hour", 0.9, 50.0), HeadroomReading("seven_day", 0.1, 100.0))),
             "low-headroom",
         ),
+        (
+            GuardFacts(readings=(HeadroomReading("five_hour", 0.8, 100.0), HeadroomReading("seven_day", 0.04, 100.0))),
+            "low-headroom",
+        ),
+        (
+            GuardFacts(readings=(HeadroomReading("seven_day", 0.05, 40.0), HeadroomReading("five_hour", 0.85, 100.0))),
+            "low-headroom",
+        ),
+        (
+            GuardFacts(readings=(HeadroomReading("five_hour", 0.9, 100.0), HeadroomReading("five_hour", 0.1, 100.0))),
+            "low-headroom",
+        ),
         (GuardFacts(builds_in_flight=2), "builds-in-flight"),
         (GuardFacts(builds_in_flight=3), "builds-in-flight"),
     ],
@@ -901,7 +913,12 @@ def test_a_guard_skips_the_draw_in_order_and_still_records_it(guards: GuardFacts
     [
         (),
         (HeadroomReading("five_hour", 0.15, 100.0),),
-        (HeadroomReading("five_hour", 0.1, 50.0), HeadroomReading("seven_day", 0.9, 100.0)),
+        (HeadroomReading("five_hour", 0.1, 50.0), HeadroomReading("five_hour", 0.9, 100.0)),
+        (
+            HeadroomReading("seven_day", 0.05, 50.0),
+            HeadroomReading("seven_day", 0.6, 100.0),
+            HeadroomReading("five_hour", 0.8, 70.0),
+        ),
     ],
 )
 def test_no_reading_or_a_fresh_reading_at_the_floor_proceeds(readings: tuple[HeadroomReading, ...]) -> None:
@@ -909,6 +926,13 @@ def test_no_reading_or_a_fresh_reading_at_the_floor_proceeds(readings: tuple[Hea
     result = draw("build", ticket, HarnessShares(build=0.625), GuardFacts(readings=readings))
     assert result.skipped_reason is None
     assert result.picked
+
+
+def test_a_low_seven_day_reading_holds_a_review_draw_beside_a_healthy_five_hour_one() -> None:
+    readings = (HeadroomReading("five_hour", 0.8, 100.0), HeadroomReading("seven_day", 0.04, 100.0))
+    review = draw("review", _ticket(3), HarnessShares(review=1.0), GuardFacts(readings=readings))
+    assert review.skipped_reason == "low-headroom"
+    assert not review.picked
 
 
 def test_builds_in_flight_do_not_hold_a_review_draw() -> None:

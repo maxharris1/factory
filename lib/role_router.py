@@ -586,9 +586,8 @@ class Draw:
 
 
 def _low_headroom(guards: GuardFacts, shares: HarnessShares) -> bool:
-    if not guards.readings:
-        return False
-    return max(guards.readings, key=lambda r: r.observed_at).headroom < shares.min_headroom
+    latest = {r.window: r for r in sorted(guards.readings, key=lambda r: (r.observed_at, -r.headroom))}
+    return any(r.headroom < shares.min_headroom for r in latest.values())
 
 
 _GUARDS: tuple[tuple[SkipReason, Callable[[DrawRole, GuardFacts, HarnessShares], bool]], ...] = (
