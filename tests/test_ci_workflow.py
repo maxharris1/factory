@@ -25,6 +25,9 @@ ROUTED = re.compile(
     r"(?:'(?P<slot>[\w-]+)'|(?P<shard>format\('test-\{0\}', matrix\.shard\)))\) "
     r"&& 'ubuntu-latest' \|\| fromJSON\('(?P<fallback>\[[^']*\])'\) \}\}$"
 )
+WORKERS = re.compile(
+    r"^pytest -n \$\{\{ runner\.environment == 'self-hosted' && (?P<local>\d+) \|\| (?P<hosted>\d+) \}\} "
+)
 ROUTE_ENV = {"GITHUB_TOKEN": "${{ github.token }}", "FACTORY_LINUX_POOL": "${{ vars.FACTORY_LINUX_POOL }}"}
 
 
@@ -600,3 +603,28 @@ def test_the_test_shards_start_a_lingering_user_manager_before_pytest() -> None:
     assert linger < pytest_step
     assert "XDG_RUNTIME_DIR" in runs[linger]
     assert "systemd-run --user --scope" in runs[linger]
+
+
+def _test_workers() -> tuple[int, int]:
+    steps = _workflow()["jobs"]["test"]["steps"]
+    run = next(step["run"] for step in steps if step.get("run", "").startswith("pytest"))
+    workers = WORKERS.match(run)
+    assert workers, run
+    return int(workers["local"]), int(workers["hosted"])
+
+
+def test_the_local_test_shards_start_at_most_6_pytest_workers_and_hosted_shards_keep_4() -> None:
+    job = _workflow()["jobs"]["test"]
+    local, hosted = _test_workers()
+    assert local == 2
+    assert local * len(job["strategy"]["matrix"]["shard"]) <= 6
+    assert hosted == 4
+    assert job["timeout-minutes"] == 25
+
+
+def test_the_runner_decision_states_the_local_worker_count_and_the_load_behind_it() -> None:
+    text = " ".join((ROOT / "docs/decisions/711-self-hosted-runners.md").read_text(encoding="utf-8").split())
+    local, _ = _test_workers()
+    assert f"`pytest -n {local}`" in text
+    assert "12 workers" in text
+    assert "load of about 14" in text
