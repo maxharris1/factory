@@ -65,8 +65,8 @@ def _intake_item(issue: int, state: str, **extra) -> dict:
 
 DAY = 86400
 INTAKE_ITEMS = [
-    _intake_item(1, "done", pr="101", fed_age_seconds=600, tier=1),
-    _intake_item(2, "waiting-blocked", reason="waiting on #1"),
+    _intake_item(1, "done", pr="101", fed_age_seconds=600, tier=1, title="Funnel row"),
+    _intake_item(2, "waiting-blocked", reason="waiting on #1", title="Header line"),
     _intake_item(3, "error"),
     _intake_item(4, "waiting-capacity"),
     _intake_item(5, "waiting-blocked", reason="waiting on #2"),
@@ -497,8 +497,8 @@ def _quiet_webhook(tmp_path: Path) -> dict:
 
 
 def _assert_quiet_once(intake: str) -> None:
-    hook = re.search(r'<div class="irow" id="linear-webhook">.*?</div>', intake, re.S).group(0)
-    assert hook.count(QUIET) == 1 and "note:" not in hook and f'<p class="muted">{QUIET}</p>' in hook
+    assert intake.count(QUIET) == 1 and "note:" not in intake
+    assert f'<div class="intake"><p class="muted">{QUIET}</p>' in intake
 
 
 def test_the_webhook_quiet_line_has_no_note_prefix(tmp_path: Path) -> None:
@@ -535,16 +535,15 @@ def _ticket_span(issue: int) -> str:
 
 def _assert_intake_order(intake: str) -> None:
     head, body = intake.split("</h2>", 1)
-    assert '<span class="count">5 waiting · 2 fed today</span>' in head
+    assert 'id="linear-webhook"' in head and "waiting" not in head
     t = _ticket_span
-    marks = ['id="linear-webhook"', 'id="feeder"', t(3), t(6), "5 waiting", t(2), t(4), t(5),
+    marks = ['id="feeder"', t(3), t(6), "5 waiting", t(2), t(4), t(5),
              "<details><summary>2 more</summary>", t(8), t(9), "<details><summary>2 fed today</summary>", t(1), t(10)]
     at = [body.index(mark) for mark in marks]
     assert at == sorted(at), [marks[i] for i, _ in sorted(enumerate(at), key=lambda x: x[1])]
     assert t(7) not in intake and t(11) not in intake
     assert intake.count("<details>") == 2 and "<details open" not in intake
-    assert '<span class="what bad">feed error, retrying</span>' in intake
-    assert '<span class="what bad">no acceptance criteria</span>' in intake
+    assert "what bad" not in intake
     fed = intake[intake.index("2 fed today") :]
     assert "<span>→ PR #101</span>" in fed and "PR #107" not in intake
     assert fed.count('<span class="when">fed ') == 2
@@ -601,10 +600,28 @@ def _shape(markup: str) -> list[str]:
     ]
 
 
-@needs_node
-@pytest.mark.parametrize("panel", ["lanes", "just-happened", "intake"])
-def test_server_render_equals_script_render(tmp_path: Path, panel: str) -> None:
+def _webhook_only(tmp_path: Path) -> dict:
     snapshot = _tiles(tmp_path)
+    snapshot["feeder"] = None
+    snapshot["poller"]["linear_webhook"].update(warning="no webhook for 2h", note=QUIET)
+    return snapshot
+
+
+def _feeder_only(tmp_path: Path) -> dict:
+    snapshot = _tiles(tmp_path)
+    del snapshot["poller"]["linear_webhook"]
+    return snapshot
+
+
+@needs_node
+@pytest.mark.parametrize(
+    ("panel", "build"),
+    [("lanes", _tiles), ("just-happened", _tiles), ("intake", _tiles),
+     ("intake", _webhook_only), ("intake", _feeder_only)],
+    ids=["lanes", "just-happened", "intake", "intake-webhook-only", "intake-feeder-only"],
+)
+def test_server_render_equals_script_render(tmp_path: Path, panel: str, build) -> None:
+    snapshot = build(tmp_path)
     server = _section(_no_script(render_pages(snapshot)["index.html"]), panel)
     inner = server[server.index(">") + 1 : server.rindex("<")]
     out = _run_page(tmp_path, snapshot, "main", BAR + ["hud", panel])
