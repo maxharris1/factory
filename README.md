@@ -308,8 +308,9 @@ the job's worker. On Linux the script refuses (exit 125, nothing run) a device
 without `/proc` and a `grep -z`, makes `<workdir_root>/jobs/<job-id>`, records
 the worker's process group and boot id (sshd starts the command in its own
 session) in `.orch-worker.pid` there, and execs the command with `ORCH_JOB_ID`,
-`ORCH_JOB_BOT`, `ORCH_JOB_DEVICE` and `ORCH_JOB_WORKDIR` (not `ORCH_DB`: the
-database stays on the box, and the bot runs `orch job done` there); ssh exits
+`ORCH_JOB_BOT`, `ORCH_TEST_SUITE_MAX`, `ORCH_JOB_DEVICE` and `ORCH_JOB_WORKDIR`
+(not `ORCH_DB`: the database stays on the box, and the bot runs `orch job done`
+there); ssh exits
 with the command's status. The record is never removed. The heartbeat stays
 local and beats while ssh runs; SIGTERM and SIGHUP go to ssh.
 The command runs under the bot's login shell (`bash -lc 'exec "$@"'`), so the

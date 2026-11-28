@@ -716,7 +716,7 @@ def test_cli_job_run_heartbeats_and_passes_the_job_to_the_command(tmp_path: Path
     out = tmp_path / "env.json"
     script = (
         "import json, os, sys, time; "
-        f"json.dump({{k: os.environ.get(k) for k in ('ORCH_JOB_ID', 'ORCH_JOB_BOT', 'ORCH_DB', 'ORCH_CPU_CAP', 'PYTEST_XDIST_AUTO_NUM_WORKERS')}}, open({str(out)!r}, 'w')); "
+        f"json.dump({{k: os.environ.get(k) for k in ('ORCH_JOB_ID', 'ORCH_JOB_BOT', 'ORCH_DB', 'ORCH_CPU_CAP', 'PYTEST_XDIST_AUTO_NUM_WORKERS', 'ORCH_TEST_SUITE_MAX')}}, open({str(out)!r}, 'w')); "
         "time.sleep(1.0)"
     )
     proc = _orch(
@@ -733,6 +733,7 @@ def test_cli_job_run_heartbeats_and_passes_the_job_to_the_command(tmp_path: Path
         "ORCH_DB": str(tmp_path / "orch.db"),
         "ORCH_CPU_CAP": "4",
         "PYTEST_XDIST_AUTO_NUM_WORKERS": "3",
+        "ORCH_TEST_SUITE_MAX": "1",
     }
     after = _last_activity(queue, job.id)
     time.sleep(0.6)
