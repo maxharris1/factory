@@ -66,7 +66,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from lib import epoch, lane_limit, state_backup
 from lib.machines_yml import default_account
@@ -731,3 +731,30 @@ def newest_by_account(rows: Iterable[StoredRow]) -> dict[str, dict[str, Reading]
     ):
         newest.setdefault(account, {})[reading.window] = reading
     return newest
+
+
+class Freshness(NamedTuple):
+    state: Literal["ok", "stale", "no reading"]
+    age: int | None
+
+
+UNREAD = Freshness("no reading", None)
+
+
+def freshness_by_pair(rows: Iterable[StoredRow], now: float) -> dict[tuple[str, str], Freshness]:
+    """Each account and device's reading age: `ok` when any of its numbers is,
+    else `stale`. A pair with no valid number is absent (UNREAD)."""
+    found: dict[tuple[str, str], list[Reading]] = {}
+    for row in rows:
+        reading = row.reading()
+        if reading is None or reading.used is None or not isinstance(row.account, str):
+            continue
+        if isinstance(row.device, str):
+            found.setdefault((row.account, row.device), []).append(reading)
+    return {
+        pair: Freshness(
+            "ok" if any(window_state(r, now) == "ok" for r in readings) else "stale",
+            int(max(0.0, now - max(r.observed_at for r in readings))),
+        )
+        for pair, readings in found.items()
+    }

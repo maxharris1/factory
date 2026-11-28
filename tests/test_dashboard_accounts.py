@@ -12,7 +12,7 @@ from lib.account_doctor import SignIn
 from lib.dashboard import collect_snapshot
 from lib.dashboard_accounts import read_accounts
 from lib.device_pool import FLOOR
-from lib.usage_readings import Reading
+from lib.usage_readings import UNREAD, Freshness, Reading, StoredRow, freshness_by_pair
 from tests.test_dashboard import add_job, make_db
 from tests.test_remote_start import config_of
 
@@ -432,3 +432,42 @@ def test_without_a_reading_the_cursor_reason_points_at_orch_usage_record() -> No
     reason = usage_readings.NOT_TRACKED["cursor"]
     assert "orch usage record" in reason
     assert "shared" not in reason and "pool" not in reason and "external account" not in reason
+
+
+def stored_row(window: str, used: float | None, resets_at: int | None, observed_at: float,
+               account: object = "claude-default", device: object = "box") -> StoredRow:
+    return StoredRow(account, device, "claude", "claude-bot", window, used, resets_at, observed_at, 0, None)
+
+
+DAY = 86_400
+
+
+@pytest.mark.parametrize(("rows", "expected"), [
+    ([], {}),
+    ([stored_row("five_hour", 0.2, FIVE_HOUR_RESET, NOW - 252)], {("claude-default", "box"): Freshness("ok", 252)}),
+    ([stored_row("five_hour", 0.2, int(NOW) - 60, NOW - 21_600),
+      stored_row("seven_day", 0.4, SEVEN_DAY_RESET, NOW - 21_600)],
+     {("claude-default", "box"): Freshness("ok", 21_600)}),
+    ([stored_row("five_hour", 0.2, FIVE_HOUR_RESET, NOW - DAY - 3600),
+      stored_row("seven_day", 0.4, SEVEN_DAY_RESET, NOW - DAY - 7200)],
+     {("claude-default", "box"): Freshness("stale", DAY + 3600)}),
+    ([stored_row("five_hour", 0.2, int(NOW) - 60, NOW - 72_000),
+      stored_row("seven_day", 0.4, int(NOW) - 60, NOW - 72_000)],
+     {("claude-default", "box"): Freshness("stale", 72_000)}),
+    ([stored_row("seven_day", 0.4, SEVEN_DAY_RESET, NOW - DAY)], {("claude-default", "box"): Freshness("ok", DAY)}),
+    ([stored_row("five_hour", None, None, NOW - 60), stored_row("seven_day", None, None, NOW - 60)], {}),
+    ([stored_row("five_hour", 0.2, FIVE_HOUR_RESET, NOW + 30)], {("claude-default", "box"): Freshness("ok", 0)}),
+    ([stored_row("hourly", 0.2, FIVE_HOUR_RESET, NOW - 60), stored_row("five_hour", 0.2, FIVE_HOUR_RESET, "soon"),
+      stored_row("five_hour", 0.2, FIVE_HOUR_RESET, NOW - 60, account=7),
+      stored_row("five_hour", 0.2, FIVE_HOUR_RESET, NOW - 60, device=None)], {}),
+    ([stored_row("five_hour", 0.2, FIVE_HOUR_RESET, NOW - 60),
+      stored_row("five_hour", 0.3, FIVE_HOUR_RESET, NOW - 90, device="pc"),
+      stored_row("five_hour", 0.3, FIVE_HOUR_RESET, NOW - DAY - 60, account="claude-b", device="pc")],
+     {("claude-default", "box"): Freshness("ok", 60), ("claude-default", "pc"): Freshness("ok", 90),
+      ("claude-b", "pc"): Freshness("stale", DAY + 60)}),
+], ids=["no-row", "fresh", "five-hour-reset", "older-than-a-day", "all-windows-reset", "exactly-a-day",
+        "only-no-reading-rows", "clock-skew", "ignored-cells", "per-pair"])
+def test_freshness_by_pair_reads_each_pair_from_its_numbers(rows: list[StoredRow], expected: dict) -> None:
+    found = freshness_by_pair(rows, NOW)
+    assert found == expected
+    assert found.get(("claude-default", "mac"), UNREAD) == Freshness("no reading", None)
