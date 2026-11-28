@@ -303,3 +303,95 @@ def test_a_legacy_pair_repo_queues_the_same_detail_with_shares_on(
     assert shared == today
     assert "routing" not in shared
     assert reads == []
+
+
+def _outcome(queue: SQLiteJobQueue, comment_id: str) -> str:
+    with queue.connect() as connection:
+        row = connection.execute(
+            "SELECT outcome FROM handled_comments WHERE comment_id = ?", (comment_id,)
+        ).fetchone()
+    return str(row["outcome"])
+
+
+def _ready_comment() -> object:
+    return comment(
+        "ready-1",
+        f"<!-- orch:v1 kind=ready from=claude-bot role=builder head={HEAD} -->\nReady.\n",
+        author="claude-login",
+        created_at=2,
+    )
+
+
+def _outside(*comments: object) -> object:
+    return replace(
+        ticket(*comments, head=HEAD, ci={HEAD: CIResult("success")}, factory_config=ROUTED),
+        ready_starts_review=True,
+    )
+
+
+@pytest.mark.parametrize("build_share", [0.0, 0.25, 1.0])
+def test_a_ticket_built_outside_the_queue_starts_review_on_its_builders_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, guard_reads: list[int], build_share: float
+) -> None:
+    _shares(monkeypatch, build=build_share, review=0.0)
+    dispatcher, queue = setup(tmp_path)
+
+    dispatcher.process(_outside(_ready_comment()))
+
+    assert _outcome(queue, "ready-1") == "queued-review"
+    routing = _routing(queue, "review")
+    assert (routing["builder"], routing["reviewer"]) == ("claude", "codex")
+    assert "build" not in routing.get("sample", {})
+
+
+def test_a_route_stored_on_a_review_is_replayed_by_the_fix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guard_reads: list[int] = []
+    real = Dispatcher._guard_facts
+    monkeypatch.setattr(Dispatcher, "_guard_facts", lambda self: guard_reads.append(1) or real(self))
+    _shares(monkeypatch, build=0.0, review=1.0)
+    dispatcher, queue = setup(tmp_path)
+    ready = _ready_comment()
+    dispatcher.refused_harnesses = frozenset({"gemini"})
+    dispatcher.process(_outside(ready))
+    review = _routing(queue, "review")
+    assert review["reviewer"] == "codex"
+    assert review["sample"]["review"]["skipped_reason"] == "refused"
+    job = queue.claim("codex")
+    assert job is not None
+    queue.finish(job.id, owner="codex", handoff_comment_id="verdict-1")
+    reads = len(guard_reads)
+
+    dispatcher.refused_harnesses = frozenset()
+    verdict = comment(
+        "verdict-1",
+        "<!-- orch:v1 kind=verdict from=codex-bot role=reviewer "
+        f"round=1/3 head={HEAD} verdict=REVISE risk=high -->\nRevise.\n",
+        author="codex-login",
+        created_at=3,
+    )
+    dispatcher.process(_outside(ready, verdict))
+
+    fix = _routing(queue, "fix")
+    assert (fix["builder"], fix["reviewer"]) == ("claude", "codex")
+    assert fix["sample"] == review["sample"]
+    assert len(guard_reads) == reads
+
+
+def test_a_factory_md_slots_pool_takes_no_draw_and_leaves_the_review_chance_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, guard_reads: list[int]
+) -> None:
+    _shares(monkeypatch, build=0.5, review=0.25)
+    pinned = replace(
+        factory(),
+        routing=FactoryRouting(budget="medium", slots={"build": (("claude", "claude-opus-5-5", "medium"),)}),
+    )
+    dispatcher, queue = setup(tmp_path)
+
+    dispatcher.process(ticket(comment("go-1", _go(), author="grok-login"), factory_config=pinned))
+
+    routing = _routing(queue, "build")
+    assert routing["builder"] == "claude"
+    assert "build" not in routing["sample"]
+    assert routing["sample"]["review"]["chance"] == 0.25

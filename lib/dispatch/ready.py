@@ -151,6 +151,9 @@ class ReadyMixin:
         comment: Comment,
         fields: Mapping[str, str],
     ) -> tuple[bool, str]:
+        if ticket.ready_starts_review and self._job_builder_harness(ticket) is None:
+            ticket = self._routed_outside_queue(ticket)
+            self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
         builder_harness = (
             ticket.factory.builder_harness
             if ticket.factory_md is not None

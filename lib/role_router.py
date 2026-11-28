@@ -421,6 +421,40 @@ def _legacy_fallback(factory: FactoryConfig | None, role: str) -> tuple[Candidat
     return (Candidate(harness=factory.builder_harness, model=factory.builder_model),)
 
 
+def _effective_budget(routing: RoutingConfig | None, factory: FactoryConfig | None, budget: str | None) -> str:
+    effective = (
+        budget
+        or (factory.routing.budget if factory is not None and factory.routing is not None else None)
+        or (routing.budget if routing is not None else None)
+        or "medium"
+    )
+    if effective not in BUDGETS:
+        raise RoutingError(f"unknown budget tier {effective!r}")
+    return effective
+
+
+SlotSource = Literal["factory-override", "routing.yml", "factory-fallback"]
+
+
+def _pool(
+    role: str, routing: RoutingConfig | None, factory: FactoryConfig | None, budget: str
+) -> tuple[tuple[Candidate, ...], SlotSource, bool]:
+    override = _factory_override_entry(factory, role)
+    if override is not None and override != "inherit":
+        return override, "factory-override", False
+    central, central_source = _central_entry(routing, role, budget) if routing is not None else (None, "roles")
+    if central is not None and central != "inherit":
+        return central, "routing.yml", central_source == "roles"
+    return _legacy_fallback(factory, role), "factory-fallback", False
+
+
+def slot_source(
+    role: str, *, routing: RoutingConfig | None = None, factory: FactoryConfig | None = None
+) -> SlotSource:
+    """Which pool `resolve_slot` would pick `role` from. Only a `routing.yml` pool takes a draw."""
+    return _pool(role, routing, factory, _effective_budget(routing, factory, None))[1]
+
+
 def resolve_slot(
     role: str,
     *,
@@ -449,14 +483,7 @@ def resolve_slot(
     """
     if role not in _ROLE_SET:
         raise RoutingError(f"unknown routing role {role!r}")
-    effective_budget = (
-        budget
-        or (factory.routing.budget if factory is not None and factory.routing is not None else None)
-        or (routing.budget if routing is not None else None)
-        or "medium"
-    )
-    if effective_budget not in BUDGETS:
-        raise RoutingError(f"unknown budget tier {effective_budget!r}")
+    effective_budget = _effective_budget(routing, factory, budget)
 
     excluded_family: str | None = None
     if role == "review" and built_by is not None:
@@ -469,27 +496,7 @@ def resolve_slot(
 
     blocked = frozenset(refused_harnesses) | frozenset(unavailable_harnesses)
 
-    pool: tuple[Candidate, ...] = ()
-    source = "factory-fallback"
-    clamp_budget = True
-
-    override = _factory_override_entry(factory, role)
-    if override is not None and override != "inherit":
-        pool = override
-        source = "factory-override"
-        clamp_budget = False
-    else:
-        central, central_source = (
-            _central_entry(routing, role, effective_budget) if routing is not None else (None, "roles")
-        )
-        clamp_budget = central_source == "roles"
-        if central is not None and central != "inherit":
-            pool = central
-            source = "routing.yml"
-        else:
-            pool = _legacy_fallback(factory, role)
-            source = "factory-fallback"
-            clamp_budget = False
+    pool, source, clamp_budget = _pool(role, routing, factory, effective_budget)
 
     applied = drawn
     if drawn is not None and excluded_family is not None and family_for(drawn.harness, None)[0] == excluded_family:

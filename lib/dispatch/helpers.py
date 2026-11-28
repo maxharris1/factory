@@ -43,6 +43,7 @@ from lib.role_router import (
     draw,
     parse_sample,
     resolve_slot,
+    slot_source,
 )
 from lib.schema import HARNESSES
 from lib.ticket_type import ticket_type_of
@@ -418,6 +419,7 @@ def _router_picks(
     *,
     sample: Sample | None = None,
     guards: Callable[[], GuardFacts] | None = None,
+    built_outside: bool = False,
 ) -> RouterPicks | None:
     base = ticket.factory_md or ticket.factory
     if base.routing is None:
@@ -430,7 +432,14 @@ def _router_picks(
     if sample is not None:
         draws = {role: getattr(sample, role) for role in roles}
     elif guards is not None and central is not None:
-        drawing = [role for role in roles if central.share("gemini", role) > 0]
+        slots = {"build": build_role, "review": "review"}
+        drawing = [
+            role
+            for role in roles
+            if central.share("gemini", role) > 0
+            and not (role == "build" and built_outside)
+            and slot_source(slots[role], routing=central, factory=base) == "routing.yml"
+        ]
         if drawing:
             facts, guard_facts = _ticket_facts(ticket), guards()
             for role in drawing:
