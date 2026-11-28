@@ -228,7 +228,7 @@ commands:
   status           read-only snapshot of the queue, devices and paused tickets
   retry            ask the dispatcher to restart a stuck ticket (kind=retry)
   trace            read-only: every job attempt on a ticket and its handoff verdict
-  usage            per-account usage readings: migrate orch.db, record an external reading (#772)
+  usage            per-account usage readings: migrate orch.db, record an external reading, refresh every pair (#772)
   accounts         prepare account folders, check sign-ins, run the dashboard sign-in broker
 
 check-config [--orch PATH] [--machines PATH] [--factory [owner/name=]PATH ...]
@@ -635,6 +635,20 @@ usage record --account ID --window five_hour|seven_day|weekly --used FRACTION
   unknown account or one with an automatic source, a bad value, an
   unknown option, or a usage_readings table without the account column
   (run orch usage migrate first); 1 when the database cannot be written.
+
+usage refresh [--db PATH] [--machines PATH] [--json]
+  Run the account doctor once, as orch accounts doctor does: it replaces
+  the account_signins rows and raises or clears account-signin flags.
+  Then read usage for each signed-in pair with the scripts a job's start
+  uses, store the readings, and create no job row. Prints one line per
+  pair, <account>@<device> <status> 5h <percent or -> 7d <percent or ->,
+  then "read now", the reading's age and source, or why it was not read,
+  and a count line per outcome; --json prints the pairs as a JSON list.
+  Cursor is not read: its usage stays on orch usage record. It reads no
+  credential file and signs nothing in. Run orch usage migrate first.
+  --db defaults to $ORCH_DB, --machines to the checkout's machines.yml.
+  Exits 0 after a pass whatever the statuses, 2 on a refused argument or
+  a missing machines file, 1 when the database cannot be written.
 
 accounts prepare --device NAME [--account ID] [--machines PATH]
   Run as each bot on its device. Makes ~/.factory-accounts/<id> mode 700

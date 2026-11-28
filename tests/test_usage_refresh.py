@@ -333,3 +333,15 @@ def test_orch_usage_refresh_exit_codes(world, tmp_path: Path, monkeypatch) -> No
     assert cli.main(["usage", "refresh", *db, "--machines", str(tmp_path / "absent.yml")]) == 2
     assert cli.main(["usage", "refresh", "--db", str(tmp_path / "missing-dir" / "d.db"), *machines]) == 1
     assert cli.main(["usage", "refresh", "--db", str(tmp_path), *machines]) == 1
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize("doc", ["USAGE", "README.md", "docs/ACCOUNTS.md"])
+def test_usage_refresh_is_in_the_help_text(doc: str) -> None:
+    text = " ".join((cli.USAGE if doc == "USAGE" else (ROOT / doc).read_text(encoding="utf-8")).split())
+
+    for phrase in ("usage refresh [--db PATH] [--machines PATH] [--json]", "orch usage record",
+                   "reads no credential file"):
+        assert phrase in text, phrase
