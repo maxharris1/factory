@@ -14,10 +14,7 @@ from lib.rule_engine import (
     Escalate,
     FindingId,
     Grant,
-    HeadProbe,
     Land,
-    MovedHeadFacts,
-    Outcome,
     Ruling,
     Site,
     StopFacts,
@@ -25,11 +22,8 @@ from lib.rule_engine import (
     comment_id,
     decide,
     finding_id,
-    git_path,
-    sha,
 )
 
-ALWAYS_HELD = ("supabase/migrations/**", ".github/**", "factory.md")
 OUTCOME_COLUMN = {Grant: "granted", Land: "landed", Wait: "waiting", Escalate: "escalated"}
 
 
@@ -192,34 +186,6 @@ class RuleEngineMixin:
         )
         self._log_ruling(connection, ticket, "repeat", subject, ruling, ids)
         return isinstance(ruling.outcome, Grant)
-
-    def _rule_on_moved_head(self, ticket: TrackedTicket, ok: str, head: str) -> Outcome:
-        try:
-            ok_head, new_head = sha(ok), sha(head)
-        except ValueError:
-            return Escalate("bad-sha")
-        hold = ticket.factory.effective_hold
-        assert hold is not None
-        result = ticket.ci.get(head)
-        ci = "unknown" if result is None else result.status
-        moved = self._moved_head(ticket, ok, head)
-        try:
-            held = tuple(git_path(pattern) for pattern in (*hold.paths, *ALWAYS_HELD))
-            probe = None if moved is None else HeadProbe(
-                parents=tuple(sha(parent) for parent in moved.parents),
-                second_parent_on_base=moved.second_parent_on_base,
-                remerge_empty=moved.remerge_empty,
-                changed_paths=tuple(git_path(path) for path in sorted(moved.paths)),
-                scan=moved.scan.status,
-            )
-        except ValueError:
-            held, probe = (), None
-        ruling = decide(MovedHeadFacts(ok_head, new_head, probe, held, ci))
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            self._log_ruling(connection, ticket, "moved-head", f"{ok}..{head}", ruling, ())
-            connection.commit()
-        return ruling.outcome
 
     def _apply_engine_grants(self, ticket: TrackedTicket) -> None:
         with self._connect() as connection:

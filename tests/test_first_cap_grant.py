@@ -110,7 +110,7 @@ def test_a_first_cap_on_fresh_findings_gets_the_round_in_code(tmp_path: Path) ->
 def test_a_stalled_stop_wakes_grok(tmp_path: Path) -> None:
     flow = engine_flow(tmp_path, stop_on="convergence", cap=4)
     assert to_cap(flow, cap=4) == "capped-review"
-    assert_woke_grok(flow, "stop")
+    assert_woke_grok(flow, "convergence-owns-cap")
 
 
 def test_a_cap_with_no_blocking_finding_ids_wakes_grok(tmp_path: Path) -> None:

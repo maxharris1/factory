@@ -18,11 +18,11 @@ GOLDEN = {
     "counts.SCRIPT": "c65d30a7f29d994eb2324ccc339defe2ad8edc7da28db9f6d21b854f4af30c0a",
     "__LANES__": "0a070c5626c19ae07dc2fd8adfb927643b397d9899d61f93f67b20ee6f76e617",
     "seeded/main": "e954b4f0f05eff3936a0da7c551f1f28089a670eee046b95b37cd15478aabd2a",
-    "seeded/chrome": "f3e4dc388b191dc3315c5172f7e009449cf3ef04b1aed58408cb411801b84b1e",
+    "seeded/chrome": "93ad3ca0eb36a1d294ab167bcb6b1242ae900fe0db81c0cefcdd119288ef6308",
     "hostile/main": "e954b4f0f05eff3936a0da7c551f1f28089a670eee046b95b37cd15478aabd2a",
-    "hostile/chrome": "1ed276e76b962443e7187ef5dbb2d2a7d2c56f4555bc769e360c388ce9137cdb",
+    "hostile/chrome": "794be4754f2624a81b9d295c9aaedfe234da12e1633e2a44a8fed77560b1a3fa",
     "empty/main": "0a5da8f27f8d251de6e625ad1456e7aef3bb7f4f9b329da22b6a56c17d158dc8",
-    "empty/chrome": "65af8a67750e034be56641d0d9d31e25e3bf7abb9964e2dc800885179beee081",
+    "empty/chrome": "2daa26c130e43cf3716873a27dc86223f95e191cb27a350787dc68a93607f00e",
 }
 
 

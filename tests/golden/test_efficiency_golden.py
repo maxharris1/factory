@@ -16,11 +16,11 @@ GOLDEN = {
     "TELEMETRY_CSS": "649dcbbee7a9591b4dac5c5d49a14247192fb5baffe024921698d935b8437071",
     "__TELEMETRY__": "a36660b73d6a3ff62efe3db3e1e644deb2aa93f51ddf1021c50b9c150f96e114",
     "seeded/main": "59a2d241ad6053216102cff2cdef0ab661a86b9f2512c6646cb3d5d3c70430ef",
-    "seeded/chrome": "b190f2c6e6f863942520a896dc431239c9359b4ba346ba2d723eebb25d6741b3",
+    "seeded/chrome": "10f3eba33bd6e48faaf9cd6007540862a5cc39283bb4f887e738f1b24357d409",
     "hostile/main": "ffd9414b919f6d38f9df39638c8c83f18893b6f58fcdb87ac1697f17d224655c",
-    "hostile/chrome": "7aceffd2548b12b99a7e9b3d81da64e3380be6165d8169bd511842a067ae750e",
+    "hostile/chrome": "f8a73af2ba38f375b0394697f87b38278f6c34a415aeba51f0fe46319b1fcd2e",
     "empty/main": "353e678fbabae434a83fedf67a4792980990eb91105ef23049201e35a1629d52",
-    "empty/chrome": "c98452a1fb240ec7c4dfea4d769e9dec40374c8f88e64343847f5f0d8179e068",
+    "empty/chrome": "d1dedf9c992411bd264ee2e77e996080c5bb8c4edea90caa5ce00d47fa906fed",
 }
 
 

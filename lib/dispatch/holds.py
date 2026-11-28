@@ -31,9 +31,20 @@ from lib.factory_md import DEFAULT_HOLD_APPROVER, DEFAULT_HOLD_LABEL, HoldConfig
 from lib.handoff import parse_comment
 from lib.hold import VISUAL_QA_REASON, HoldDecision, decide, ok_carries
 from lib.queue import JobRequest, cancel_queued
-from lib.rule_engine import Escalate, Land, Wait
+from lib.rule_engine import (
+    Escalate,
+    HeadProbe,
+    Land,
+    MovedHeadFacts,
+    Outcome,
+    Wait,
+    git_path,
+    sha,
+)
+from lib.rule_engine import decide as engine_decide
 
 _HELD_BASE_UPDATE = "held-base-update"
+ALWAYS_HELD = ("supabase/migrations/**", ".github/**", "factory.md")
 
 
 def _ok_head(comment: Comment) -> str | None:
@@ -352,6 +363,34 @@ class HoldsMixin:
             connection.commit()
         self._write_state_label(ticket, "building")
         return True, "queued-hold-changes"
+
+    def _rule_on_moved_head(self, ticket: TrackedTicket, ok: str, head: str) -> Outcome:
+        try:
+            ok_head, new_head = sha(ok), sha(head)
+        except ValueError:
+            return Escalate("bad-sha")
+        hold = ticket.factory.effective_hold
+        assert hold is not None
+        result = ticket.ci.get(head)
+        ci = "unknown" if result is None else result.status
+        moved = self._moved_head(ticket, ok, head)
+        try:
+            held = tuple(git_path(pattern) for pattern in (*hold.paths, *ALWAYS_HELD))
+            probe = None if moved is None else HeadProbe(
+                parents=tuple(sha(parent) for parent in moved.parents),
+                second_parent_on_base=moved.second_parent_on_base,
+                remerge_empty=moved.remerge_empty,
+                changed_paths=tuple(git_path(path) for path in sorted(moved.paths)),
+                scan=moved.scan.status,
+            )
+        except ValueError:
+            held, probe = (), None
+        ruling = engine_decide(MovedHeadFacts(ok_head, new_head, probe, held, ci))
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._log_ruling(connection, ticket, "moved-head", f"{ok}..{head}", ruling, ())
+            connection.commit()
+        return ruling.outcome
 
     def _hold_decision(self, ticket: TrackedTicket, head: str) -> HoldDecision:
         return self._read_hold(ticket, head)[0]
