@@ -5,6 +5,7 @@ from __future__ import annotations
 from lib.brief.common import GH
 from lib.brief.review import filing_active
 from lib.followups import followups_active
+from lib.harness_env import TEST_WORKERS
 from lib.queue import Job
 
 
@@ -95,7 +96,7 @@ def review_rules(facts: dict) -> str:
 
 
 CONTAINER_RULE = "Label each container or compose stack `factory.job=$ORCH_JOB_ID` and remove it in an EXIT trap."
-LOAD_RULE = "Run JS tests with `--maxWorkers=2` and one typecheck at a time."
+LOAD_RULE = f"Run JS tests with `--maxWorkers={TEST_WORKERS}` and one typecheck at a time."
 SECRET_RULE = "Never read credentials, runner tokens, `.env`, `auth.json`, `.runner`, `.credentials*` or `FACTORY_WEBHOOK_*` values."
 
 

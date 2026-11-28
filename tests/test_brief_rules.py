@@ -6,6 +6,7 @@ import pytest
 
 from lib.brief.common import NO_EDIT_RULE
 from lib.brief.rules import CONTAINER_RULE, LOAD_RULE, rules
+from lib.harness_env import TEST_WORKERS
 from tests.regenerate_brief_snapshots import CASES, render_snapshot
 
 AUTHORITY = (
@@ -56,4 +57,4 @@ def test_every_brief_caps_js_test_workers_and_typechecks(kind: str) -> None:
     for brief in render_snapshot(kind).split("=====")[2::2]:
         section = brief.split("## Rules\n", 1)[1].split("\n## ", 1)[0] + "\n"
         assert f"- {LOAD_RULE}\n" in section
-    assert "`--maxWorkers=2`" in LOAD_RULE and "one typecheck at a time" in LOAD_RULE
+    assert f"`--maxWorkers={TEST_WORKERS}`" in LOAD_RULE and "one typecheck at a time" in LOAD_RULE

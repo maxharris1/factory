@@ -5,14 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from lib.harness_env import CPU_CAP, account_environ, cpu_cap_env, cpu_window, harness_env
+from lib.harness_env import CPU_CAP, TEST_WORKERS, account_environ, cpu_cap_env, cpu_window, harness_env
 
 ROOT = Path(__file__).resolve().parents[1]
 CAPPED = {
     "ORCH_CPU_CAP": "4",
-    "PYTEST_XDIST_AUTO_NUM_WORKERS": "3",
-    "VITEST_MAX_THREADS": "3",
-    "VITEST_MAX_FORKS": "3",
+    "PYTEST_XDIST_AUTO_NUM_WORKERS": str(TEST_WORKERS),
+    "VITEST_MAX_THREADS": str(TEST_WORKERS),
+    "VITEST_MAX_FORKS": str(TEST_WORKERS),
     "VITEST_MIN_THREADS": "1",
     "VITEST_MIN_FORKS": "1",
 }
@@ -46,7 +46,7 @@ def test_an_account_environ_drops_its_tokens_and_names_its_home(
     assert login == base and login is not base
 
 
-def test_the_cap_is_four_cpus_in_code_and_runners_get_one_less() -> None:
+def test_the_cap_is_four_cpus_in_code_and_runners_get_the_worker_count() -> None:
     assert CPU_CAP == 4
     assert cpu_cap_env() == CAPPED
     assert cpu_cap_env(2) == {
@@ -57,6 +57,21 @@ def test_the_cap_is_four_cpus_in_code_and_runners_get_one_less() -> None:
         "VITEST_MIN_THREADS": "1",
         "VITEST_MIN_FORKS": "1",
     }
+
+
+def test_the_three_runner_maxima_are_the_one_worker_count() -> None:
+    assert TEST_WORKERS == 2
+    assert 1 <= TEST_WORKERS < CPU_CAP
+    env = cpu_cap_env()
+    for name in ("PYTEST_XDIST_AUTO_NUM_WORKERS", "VITEST_MAX_THREADS", "VITEST_MAX_FORKS"):
+        assert env[name] == str(TEST_WORKERS), name
+
+
+@pytest.mark.parametrize(("cap", "workers"), [(1, 1), (2, 1), (3, 2), (4, TEST_WORKERS), (64, TEST_WORKERS)])
+def test_the_worker_count_never_passes_the_cap_less_one(cap: int, workers: int) -> None:
+    env = cpu_cap_env(cap)
+    for name in ("PYTEST_XDIST_AUTO_NUM_WORKERS", "VITEST_MAX_THREADS", "VITEST_MAX_FORKS"):
+        assert env[name] == str(workers), name
 
 
 def test_the_cap_is_not_a_machines_yml_key() -> None:
