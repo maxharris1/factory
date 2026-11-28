@@ -538,8 +538,7 @@ Cursor it runs `cursor-agent status --format json` with `CURSOR_API_KEY` and
 file. It keeps a hash of the Cursor user id, never the email. It prints one line per
 pair, `<account>@<device> <status> <auth method or -> <detail>`. Confirm
 the new account's row on each listed device reads `ok`. The poller runs the
-same check on its first poll, every 30 minutes, and after it adopts a
-changed `machines.yml`.
+same check on its own clocks. "Usage refresh" below gives them.
 
 ## Usage refresh
 
@@ -573,6 +572,25 @@ shows the reading recorded there. The command reads no credential file and
 signs nothing in. Run `orch usage migrate` first. It exits 0 after a pass,
 2 on a refused argument or a missing machines file, and 1 when the
 database cannot be written.
+
+The poller runs the same pass every 30 minutes, on its first poll at or
+after each hour and half hour, so every subscription is read at the same
+time. The pass reads each sign-in's status, then the usage of each pair
+that reads `ok`, and nothing else. It runs no sign-in command and copies
+nothing between devices.
+
+Each pass writes its start time to the one-row table `usage_refresh`
+before its first ssh call, and the table keeps the latest start. A pass is
+due when none has started, or when the clock is in a later 30-minute slot
+than the stored start. So a poller restart does not run the pass again in
+the same slot. A run of `orch usage refresh` by hand counts as its slot's
+pass and does not cancel the next one. A pass that fails is recorded as a
+poll error and runs again in the next slot.
+
+Between passes the poller runs the doctor alone: on its first poll, on the
+poll after a new sign-in hold appears, every 2 minutes while a hold is
+open, after it adopts a changed `machines.yml`, and 30 minutes after its
+last run.
 
 ## Why the account folder, not `claude setup-token`
 
@@ -670,8 +688,9 @@ dashboard Settings page. A pair that stays down is not woken again. Once it
 reads `ok` and then drops again, that is a new drop, and it wakes once more.
 
 Neither the doctor nor the wake runs a login or copies one between devices.
-Max signs in. The wake goes to the factory's own repo, the `origin` of the
-orch checkout. When that `origin` is not a GitHub repo, no wake goes out.
+A dropped sign-in is repaired only by a person signing in, by hand or
+through the dashboard sign-in. The wake goes to the factory's own repo, the
+`origin` of the orch checkout. When that `origin` is not a GitHub repo, no wake goes out.
 
 A sign-out from Settings does not wake. Its doctor pass records the drop as
 already announced. The pair's `account-signin` flag still goes up.

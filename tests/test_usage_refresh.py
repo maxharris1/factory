@@ -17,7 +17,7 @@ from lib.queue import JobRequest, SQLiteJobQueue
 from lib.remote import SSH_UNREACHABLE, Exchanged
 from lib.usage_probe import REQUEST
 from tests.pool_helpers import poller_adopts
-from tests.test_account_doctor import EMAIL_B, ORG_B, SIGNED_OUT_CLAUDE, claude_reply, framed
+from tests.test_account_doctor import EMAIL_B, ORG_B, SIGNED_OUT_CLAUDE, claude_reply, framed, poller
 from tests.test_remote_start import config_of
 
 NOW = 1_800_000_000.0
@@ -333,6 +333,71 @@ def test_orch_usage_refresh_exit_codes(world, tmp_path: Path, monkeypatch) -> No
     assert cli.main(["usage", "refresh", *db, "--machines", str(tmp_path / "absent.yml")]) == 2
     assert cli.main(["usage", "refresh", "--db", str(tmp_path / "missing-dir" / "d.db"), *machines]) == 1
     assert cli.main(["usage", "refresh", "--db", str(tmp_path), *machines]) == 1
+
+
+SLOT = usage_refresh.SLOT_SECONDS
+
+
+def started_at(queue: SQLiteJobQueue) -> list[tuple[object, ...]]:
+    with contextlib.closing(queue.connect()) as connection:
+        return [tuple(row) for row in connection.execute(f"SELECT started_at FROM {usage_refresh.TABLE}")]
+
+
+class SeesTheStamp(Transport):
+    def __init__(self, queue: SQLiteJobQueue) -> None:
+        super().__init__()
+        self.queue = queue
+        self.seen: list[list[tuple[object, ...]]] = []
+
+    def exchange(self, argv: Sequence[str], *, timeout: float, input: bytes = b"") -> Exchanged:
+        self.seen.append(started_at(self.queue))
+        return super().exchange(argv, timeout=timeout, input=input)
+
+
+def test_a_pass_is_due_once_per_half_hour_slot(world) -> None:
+    queue, connection, _ = world
+    assert NOW % SLOT == 0
+    assert usage_refresh.due(connection, NOW)
+
+    transport = SeesTheStamp(queue)
+    refresh(world, transport, NOW + 60)
+    assert len(transport.seen) == 8 and all(rows == [(NOW + 60,)] for rows in transport.seen), \
+        "the stamp is committed before the first ssh call"
+    assert not usage_refresh.due(connection, NOW + SLOT - 1)
+    assert usage_refresh.due(connection, NOW + SLOT)
+
+    refresh(world, Transport(), NOW + SLOT + 45)
+    assert not usage_refresh.due(connection, NOW + 2 * SLOT - 1)
+    assert usage_refresh.due(connection, NOW + 2 * SLOT), "due by the clock slot, 1755 seconds after the last start"
+
+
+def test_a_restart_does_not_rerun_the_pass(tmp_path: Path) -> None:
+    first = poller(tmp_path)
+    first.poll(0.0)
+    assert len(first.transport.reads) == 3
+
+    restarted = poller(tmp_path)
+    restarted.poll(600.0)
+    assert sorted(restarted.transport.exchanges) == ["pc-claude-bot", "pc-codex-bot"]
+    assert restarted.transport.reads == []
+    restarted.poll(float(SLOT))
+    assert len(restarted.transport.reads) == 3
+
+
+def test_an_on_demand_run_keeps_the_next_slot(world, monkeypatch) -> None:
+    queue, connection, path = world
+    refresh(world, Transport(), NOW + 10)
+    monkeypatch.setattr(cli, "SshTransport", Transport)
+    monkeypatch.setattr(time, "time", lambda: NOW + 1500)
+    monkeypatch.setattr(self_deploy, "own_repo", lambda _root: "owner/factory")
+
+    assert cli.main(["usage", "refresh", "--db", str(queue.path), "--machines", str(path)]) == 0
+    assert started_at(queue) == [(NOW + 1500,)]
+    assert not usage_refresh.due(connection, NOW + SLOT - 1)
+    assert usage_refresh.due(connection, NOW + SLOT)
+
+    refresh(world, Transport(), NOW + 100)
+    assert started_at(queue) == [(NOW + 1500,)], "an older start never moves the stamp back"
 
 
 ROOT = Path(__file__).resolve().parents[1]

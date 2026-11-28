@@ -14,7 +14,7 @@ from typing import NamedTuple, get_args
 
 import pytest
 
-from lib import account_doctor
+from lib import account_doctor, usage_refresh
 from lib.account_doctor import Probe, SignIn
 from lib.device_monitor import DeviceMonitor
 from lib.device_pool import DevicePool
@@ -798,12 +798,16 @@ class DoctorTransport:
             "pc-codex-bot": framed((0, 0, b"Logged in using ChatGPT\n")),
         }
         self.exchanges: list[str] = []
+        self.reads: list[str] = []
         self.error: Exception | None = None
 
     def run(self, argv: Sequence[str], *, timeout: float) -> int:
         return 0
 
     def exchange(self, argv: Sequence[str], *, timeout: float, input: bytes = b"") -> Exchanged:
+        if "ORCH-ACCOUNTS-BEGIN" not in argv[-1]:
+            self.reads.append(argv[-2])
+            return Exchanged(0, b"", "")
         self.exchanges.append(argv[-2])
         if self.error is not None:
             raise self.error
@@ -838,7 +842,7 @@ def poller(tmp_path: Path, *, sign_ins: bool = True, grok_delivery: GrokDelivery
     config = config_of(machines)
     pool = DevicePool(queue, config)
     transport = DoctorTransport()
-    check = functools.partial(cli._sign_in_pass, queue, transport, "Owner/Factory") if sign_ins else None
+    check = functools.partial(usage_refresh.poll_pass, queue, transport, "Owner/Factory") if sign_ins else None
     dispatcher = Dispatcher(
         path,
         queue,
@@ -889,6 +893,52 @@ def test_doctor_error_is_recorded_and_the_poll_goes_on(tmp_path: Path) -> None:
     probed = len(world.transport.exchanges)
     world.poll(500.0)
     assert len(world.transport.exchanges) == probed
+
+
+def test_the_monitor_runs_the_doctor_alone_between_usage_passes(tmp_path: Path) -> None:
+    world = poller(tmp_path)
+
+    def polled(at: float) -> tuple[int, int]:
+        world.poll(at)
+        return len(world.transport.exchanges), len(world.transport.reads)
+
+    assert polled(0.0) == (2, 3), "the first poll runs the whole pass"
+    assert polled(60.0) == (2, 3), "a quiet poll runs nothing"
+    preflight_hold(world.queue, 70.0)
+    assert polled(80.0) == (4, 3), "a newer hold runs the doctor alone"
+    preflight_hold(world.queue, 70.0)
+    assert polled(80.0 + account_doctor.HELD_INTERVAL_SECONDS) == (6, 3), "so does 120 seconds under a hold"
+    world.machines.write_text(world.machines.read_text(encoding="utf-8") + "# edited\n", encoding="utf-8")
+    stamp(world.machines, 10**18)
+    assert polled(300.0) == (8, 3), "and a machines config change"
+    assert polled(float(usage_refresh.SLOT_SECONDS)) == (10, 6), "the next slot runs the whole pass"
+
+
+def test_a_pass_error_is_recorded_and_the_poll_goes_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def unreadable(_stdout: bytes, _now: float) -> list[object]:
+        raise RuntimeError("usage reply blew up")
+
+    world = poller(tmp_path)
+    sign_out_claude_b(world.transport)
+    monkeypatch.setitem(usage_refresh.READERS, "claude", replace(usage_refresh.READERS["claude"], parse=unreadable))
+    job_id = enqueue(world.queue, "claude", "1", timeout=86_400)
+    world.pool.claim("claude")
+
+    world.poll(400.0)
+    errors = poll_errors(world.queue)
+    assert [repo for repo, _ in errors] == ["devices"]
+    assert "RuntimeError" in errors[0][1]
+    assert state(world.queue, job_id) == "queued"
+    assert (len(world.transport.exchanges), len(world.transport.reads)) == (2, 2)
+    with contextlib.closing(world.queue.connect()) as connection:
+        assert [tuple(row) for row in connection.execute(
+            "SELECT ticket_id FROM jobs WHERE action = 'account-signin'")] == [("claude-b@pc",)]
+
+    world.poll(460.0)
+    assert (len(world.transport.exchanges), len(world.transport.reads)) == (2, 2)
+    world.poll(float(usage_refresh.SLOT_SECONDS))
+    assert (len(world.transport.exchanges), len(world.transport.reads)) == (4, 4)
+    assert len(poll_errors(world.queue)) == 2
 
 
 def test_a_signed_out_pair_raises_one_flag_naming_the_operator_step(tmp_path: Path) -> None:
