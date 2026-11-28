@@ -182,3 +182,166 @@ def test_into_the_factory_links_to_the_count_strip(tmp_path: Path, browser: Brow
     assert browser.eval("document.querySelectorAll('[id=counts]').length") == 1
     hash_ = browser.eval("document.querySelector('#feeder a').click(), location.hash")
     assert hash_ == "#counts"
+
+
+HEADING = ('<h2><span>Intake</span><span class="count" id="linear-webhook">'
+           "Linear webhook · last received 30s ago (Issue) · dirty queue 0</span></h2>")
+BARE_HEADING = "<h2><span>Intake</span></h2>"
+OPEN = '<section class="panel" id="intake" aria-label="Intake">'
+TROUBLE = ('<ul class="itrouble">'
+           '<li><span class="ticket">factory#3</span><span class="what">feed error, retrying</span></li>'
+           '<li><span class="ticket">factory#6</span><span class="what">no acceptance criteria</span></li></ul>')
+WARNING = "no webhook for 2h"
+QUIET = "quiet: no Linear webhook for 2h 10m (nothing missed by the last reconcile)"
+
+
+def _inner(render: str, intake: str) -> str:
+    if render == "server":
+        assert intake.startswith(OPEN) and intake.endswith("</section>"), intake
+        return intake[len(OPEN) : -len("</section>")]
+    return intake
+
+
+def _assert_header_trouble_and_titles(intake: str) -> None:
+    assert intake.count(HEADING) == 1, intake
+    assert intake.index(HEADING) < intake.index('<div class="intake">')
+    for gone in ("irow", "ilabel", "itext", "what bad", "waiting · "):
+        assert gone not in intake, gone
+    assert intake.count('class="itrouble"') == 1
+    assert intake.index("</ol>") < intake.index(TROUBLE) < intake.index('<div class="igroup">'), intake
+    assert intake.index(TROUBLE) < intake.index("</div>", intake.index('<div class="intake">'))
+    assert intake.count('class="ititle"') == 2, intake
+    for issue, title in ((2, "Header line"), (1, "Funnel row")):
+        assert (f'<span class="ticket">factory#{issue}</span>'
+                f'<span class="ititle" title="{title}">{title}</span>') in intake
+    assert '<span class="ticket">factory#4</span><span class="what">waiting for capacity</span>' in intake
+
+
+@pytest.mark.parametrize("render", RENDERS)
+def test_the_header_holds_the_webhook_line_and_trouble_is_one_list(tmp_path: Path, render: str) -> None:
+    _assert_header_trouble_and_titles(_render(render, tmp_path, _tiles(tmp_path)))
+
+
+@pytest.mark.parametrize("render", RENDERS)
+def test_a_webhook_with_no_feeder_says_no_feeder_has_run(tmp_path: Path, render: str) -> None:
+    snapshot = _tiles(tmp_path)
+    snapshot["feeder"] = None
+    snapshot["poller"]["linear_webhook"].update(warning=WARNING, note=QUIET)
+    assert _inner(render, _render(render, tmp_path, snapshot)) == (
+        HEADING + f'<div class="intake"><p class="bad">warning: {WARNING}</p><p class="muted">{QUIET}</p>'
+        '<p class="empty">no feeder has run</p></div>'
+    )
+
+
+@pytest.mark.parametrize("render", RENDERS)
+def test_a_feeder_with_no_webhook_has_no_count_and_no_webhook_id(tmp_path: Path, render: str) -> None:
+    snapshot = _tiles(tmp_path)
+    del snapshot["poller"]["linear_webhook"]
+    inner = _inner(render, _render(render, tmp_path, snapshot))
+    assert inner.startswith(BARE_HEADING + '<div class="intake"><ol class="funnel" id="feeder">'), inner
+    assert 'class="count"' not in inner and "linear-webhook" not in inner and "Linear webhook" not in inner
+    marks = ["</ol>" + TROUBLE + "</div>", '<div class="igroup">5 waiting</div>', "2 fed today"]
+    at = [inner.index(mark) for mark in marks]
+    assert at == sorted(at), inner
+
+
+@pytest.mark.parametrize("render", RENDERS)
+def test_neither_half_keeps_the_empty_panel_byte_for_byte(tmp_path: Path, render: str) -> None:
+    snapshot = _tiles(tmp_path)
+    snapshot["feeder"] = None
+    del snapshot["poller"]["linear_webhook"]
+    empty = BARE_HEADING + '<div class="intake"><p class="empty">no listener or feeder has run</p></div>'
+    if render == "server":
+        assert _render(render, tmp_path, snapshot) == OPEN + empty + "</section>"
+    else:
+        assert _render(render, tmp_path, snapshot) == empty
+
+
+@pytest.mark.parametrize("render", RENDERS)
+def test_no_trouble_draws_no_trouble_line(tmp_path: Path, render: str) -> None:
+    snapshot = _tiles(tmp_path)
+    items = snapshot["feeder"]["items"]
+    snapshot["feeder"]["items"] = [x for x in items if x["state"] not in ("error", "refused-intake")]
+    intake = _render(render, tmp_path, snapshot)
+    assert 'id="feeder"' in intake and "itrouble" not in intake
+
+
+LONG_TITLE = ("Move the Linear webhook line into the Intake heading and draw trouble as one red line "
+              "under the funnel, with titles")[:120]
+LONG_REASON = ("refused at intake: the ticket names lib/dashboard_pages/lanes.py, lib/dashboard_static/js/lanes.js "
+               "and lib/dashboard_static/css/lanes.css but has no acceptance criteria, no risk line and no estimate, "
+               "so the feeder will not feed it until a person edits it")
+
+
+def _long(tmp_path: Path) -> dict:
+    snapshot = _tiles(tmp_path)
+    for item in snapshot["feeder"]["items"]:
+        item["title"] = LONG_TITLE
+        if item["state"] == "refused-intake":
+            item["reason"] = LONG_REASON
+    return snapshot
+
+
+TROUBLE_LAYOUT = """(function () {
+  var ul = document.querySelector('#intake .itrouble');
+  var probe = document.createElement('span'); probe.style.color = 'var(--bad)'; ul.parentNode.appendChild(probe);
+  var bad = getComputedStyle(probe).color; probe.remove();
+  var css = getComputedStyle(ul);
+  return {display: css.display, wrap: css.flexWrap, before: ul.previousElementSibling.id,
+          inBox: ul.parentNode.className, bad: bad,
+          colors: [].map.call(ul.querySelectorAll('li, li span'), function (n) { return getComputedStyle(n).color; }),
+          tops: [].map.call(ul.children, function (li) { return Math.round(li.getBoundingClientRect().top); })};
+})()"""
+
+
+@needs_chrome
+@pytest.mark.parametrize("render", RENDERS)
+def test_trouble_is_one_wrapping_red_line_under_the_funnel(tmp_path: Path, browser: Browser, render: str) -> None:
+    _open(browser, _tiles(tmp_path), 1440, render)
+    box = browser.eval(TROUBLE_LAYOUT)
+    assert box["display"] == "flex" and box["wrap"] == "wrap", box
+    assert box["before"] == "feeder" and box["inBox"] == "intake", box
+    assert len(box["tops"]) == 2 and len(set(box["tops"])) == 1, box
+    assert box["colors"] and set(box["colors"]) == {box["bad"]}, box
+
+
+TITLES = """(function () {
+  [].forEach.call(document.querySelectorAll('#intake details'), function (d) { d.open = true; });
+  var titles = [].map.call(document.querySelectorAll('#intake .ititle'), function (t) {
+    var css = getComputedStyle(t);
+    return {lines: Math.round(t.getBoundingClientRect().height / parseFloat(css.lineHeight)),
+            cut: t.scrollWidth > t.clientWidth, space: css.whiteSpace, overflow: css.textOverflow,
+            title: t.getAttribute('title'), text: t.textContent};
+  });
+  var trouble = [].map.call(document.querySelectorAll('#intake .itrouble li'), function (li) {
+    return li.getClientRects().length && Math.round(li.getBoundingClientRect().height); });
+  return {titles: titles, trouble: trouble, scroll: document.documentElement.scrollWidth};
+})()"""
+
+
+@needs_chrome
+@pytest.mark.parametrize(("width", "space", "cut"), [(760, "nowrap", True), (759, "normal", False)])
+def test_a_long_title_is_one_cut_line_from_760_px_and_wraps_below(
+    tmp_path: Path, browser: Browser, width: int, space: str, cut: bool
+) -> None:
+    _open(browser, _long(tmp_path), width)
+    box = browser.eval(TITLES)
+    assert len(box["titles"]) == 7, box
+    for title in box["titles"]:
+        assert title["space"] == space and title["cut"] is cut, title
+        assert title["overflow"] == "ellipsis" and title["title"] == title["text"] == LONG_TITLE, title
+        assert title["lines"] == 1 or not cut, title
+    assert box["scroll"] <= width, box
+
+
+@needs_chrome
+@pytest.mark.parametrize("render", RENDERS)
+def test_a_long_title_and_a_long_reason_do_not_scroll_a_phone_sideways(
+    tmp_path: Path, browser: Browser, render: str
+) -> None:
+    _open(browser, _long(tmp_path), 375, render)
+    box = browser.eval(TITLES)
+    assert len(box["titles"]) == 7, box
+    assert all(t["lines"] > 1 and not t["cut"] for t in box["titles"]), box
+    assert len(box["trouble"]) == 2 and box["trouble"][1] > box["trouble"][0], box
+    assert box["scroll"] <= 375, f"phone page scrolls sideways: {box}"

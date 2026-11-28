@@ -31,8 +31,8 @@ def test_status_json_carries_webhook_health_and_the_panel_sits_in_factory_status
     assert status["poller"]["linear_webhook"]["note"].startswith("quiet: no Linear webhook")
 
     kpis = _section(_no_script((out / "index.html").read_text(encoding="utf-8")), "intake")
-    assert '<div class="irow" id="linear-webhook"><span class="ilabel">Linear webhook</span>' in kpis
-    assert "last received 1h 06m ago (Issue.update) · dirty queue 3" in kpis
+    assert ('<h2><span>Intake</span><span class="count" id="linear-webhook">'
+            "Linear webhook · last received 1h 06m ago (Issue.update) · dirty queue 3</span></h2>") in kpis
     assert '<p class="muted">quiet: no Linear webhook for 1h' in kpis
     assert "note: quiet" not in kpis
     for name in ("activity.html", "efficiency.html", "job.html"):

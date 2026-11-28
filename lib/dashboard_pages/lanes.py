@@ -413,12 +413,10 @@ _FEEDER_STATE = {
 }
 
 
-def _linear_webhook(snapshot: dict) -> str:
-    """Linear webhook health (#56), Intake's first line; only when a listener or
-    webhook-mode poller has run on this database."""
+def _linear_webhook(snapshot: dict) -> tuple[str | None, str]:
     webhook = snapshot["poller"].get("linear_webhook")
     if webhook is None:
-        return ""
+        return None, ""
     if webhook["last_received_age_seconds"] is not None:
         received = f'{duration(webhook["last_received_age_seconds"])} ago' + (
             f' ({webhook["last_event"]})' if webhook["last_event"] else ""
@@ -427,14 +425,10 @@ def _linear_webhook(snapshot: dict) -> str:
         received = "never (listener has not started)"
     else:
         received = "never"
-    extra = f'<p class="bad">warning: {_e(webhook["warning"])}</p>' if webhook["warning"] is not None else ""
+    notes = f'<p class="bad">warning: {_e(webhook["warning"])}</p>' if webhook["warning"] is not None else ""
     if webhook.get("note") is not None:
-        extra += f'<p class="muted">{_e(webhook["note"])}</p>'
-    return (
-        '<div class="irow" id="linear-webhook"><span class="ilabel">Linear webhook</span>'
-        f'<span class="itext">last received {_e(received)} · dirty queue {_e(webhook["dirty"])}</span>'
-        f"{extra}</div>"
-    )
+        notes += f'<p class="muted">{_e(webhook["note"])}</p>'
+    return f"Linear webhook · last received {received} · dirty queue {webhook['dirty']}", notes
 
 
 def intake_groups(items: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
@@ -478,10 +472,18 @@ def _tier_chip(item: dict) -> str:
     return _chip(f"tier {tier}" + ("" if own == tier else f" (own {'none' if own is None else own})"), "accent")
 
 
-def _intake_row(item: dict, cls: str = "what", tail: str = "") -> str:
-    state = item.get("reason") or _FEEDER_STATE.get(item["state"], item["state"])
-    ticket = f"{_short(item['repo'])}#{item['issue']}"
-    return f'<li>{_span("ticket", ticket)}{_tier_chip(item)}{_span(cls, state)}{tail}</li>'
+def _intake_ticket(item: dict) -> str:
+    return _span("ticket", f"{_short(item['repo'])}#{item['issue']}")
+
+
+def _intake_what(item: dict) -> str:
+    return _span("what", item.get("reason") or _FEEDER_STATE.get(item["state"], item["state"]))
+
+
+def _intake_row(item: dict, tail: str = "") -> str:
+    title = item.get("title")
+    title_html = f'<span class="ititle" title="{_e(title)}">{_e(title)}</span>' if title else ""
+    return f"<li>{_intake_ticket(item)}{title_html}{_tier_chip(item)}{_intake_what(item)}{tail}</li>"
 
 
 def _fed_row(item: dict) -> str:
@@ -491,15 +493,18 @@ def _fed_row(item: dict) -> str:
 
 def _intake(snapshot: dict) -> str:
     feeder = snapshot.get("feeder")
-    lines = _linear_webhook(snapshot) + _feeder(snapshot)
-    if not lines:
-        return _panel("intake", "Intake", '<div class="intake"><p class="empty">no listener or feeder has run</p></div>')
-    inner = f'<div class="intake">{lines}</div>'
+    line, notes = _linear_webhook(snapshot)
+
+    def panel(inner: str) -> str:
+        return _panel("intake", "Intake", inner, count=line, count_id="linear-webhook")
+
     if not feeder:
-        return _panel("intake", "Intake", inner)
+        empty = "no feeder has run" if line else "no listener or feeder has run"
+        return panel(f'<div class="intake">{notes}<p class="empty">{empty}</p></div>')
     trouble, waiting, fed = intake_groups(feeder["items"])
-    if trouble:
-        inner += f'<ul class="feed">{"".join(_intake_row(x, "what bad") for x in trouble)}</ul>'
+    entries = "".join(f"<li>{_intake_ticket(x)}{_intake_what(x)}</li>" for x in trouble)
+    trouble_html = f'<ul class="itrouble">{entries}</ul>' if trouble else ""
+    inner = f'<div class="intake">{notes}{_feeder(snapshot)}{trouble_html}</div>'
     if waiting:
         inner += (
             f'<div class="igroup">{len(waiting)} waiting</div>'
@@ -515,7 +520,7 @@ def _intake(snapshot: dict) -> str:
             f"<details><summary>{len(fed)} fed today</summary>"
             f'<ul class="fed-more">{"".join(_fed_row(x) for x in fed)}</ul></details>'
         )
-    return _panel("intake", "Intake", inner, count=f"{len(waiting)} waiting · {len(fed)} fed today")
+    return panel(inner)
 
 
 def lanes_script(script: str) -> str:
