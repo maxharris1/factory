@@ -34,6 +34,7 @@ DETAILS = (
     account_doctor.NOT_UNDERSTOOD,
     account_doctor.EXIT_NONZERO,
     account_doctor.PARTIAL_LOGIN,
+    account_doctor.CLI_NOT_FOUND,
     account_doctor.NO_IDENTITY,
     account_doctor.TOKEN_AUTH,
     account_doctor.CODEX_API_KEY,

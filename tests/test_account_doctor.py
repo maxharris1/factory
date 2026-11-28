@@ -1601,3 +1601,87 @@ def test_take_unannounced_skips_a_pair_the_config_does_not_declare(tmp_path: Pat
     assert account_doctor.take_unannounced(connection, config) == [
         account_doctor.Drop("claude-b", "pc", "claude", NOW, TOKEN_READING)]
     assert drops(connection) == [("claude-b", "pc", NOW, 1), ("claude-gone", "pc", NOW - 5, 0)]
+
+
+MISSING_CLI_MACHINES = """\
+devices:
+  - name: box
+    local: true
+    slot_max: 1
+    harnesses: {claude: claude-bot, codex: codex-bot, cursor: cursor-bot, gemini: gemini-bot}
+    home: HOME
+  - name: pc
+    tailscale_name: pc.example.ts.net
+    slot_max: 1
+    harnesses: {claude: claude-bot, codex: codex-bot, cursor: cursor-bot, gemini: gemini-bot}
+    workdir_root: HOME/work
+    ssh_alias: pc-{bot}
+    factory_root: /srv/factory
+    home: HOME
+"""
+NO_HARNESS_PATH = "/usr/bin:/bin"
+INSTALL_READING = ("signed-out; run: install the claude CLI for claude-bot on pc, then orch accounts doctor; "
+                   "harness CLI not found")
+
+
+class ShellTransport:
+    def __init__(self, home: Path) -> None:
+        self.env = {"HOME": str(home), "PATH": NO_HARNESS_PATH}
+
+    def run(self, argv: Sequence[str], *, timeout: float) -> int:
+        return 0
+
+    def exchange(self, argv: Sequence[str], *, timeout: float, input: bytes = b"") -> Exchanged:
+        done = subprocess.run(["/bin/sh", "-c", argv[-1]], env=self.env, capture_output=True, timeout=timeout,
+                              check=False)
+        return Exchanged(done.returncode, done.stdout, done.stderr.decode())
+
+
+def missing_cli_world(tmp_path: Path) -> tuple[MachinesConfig, ShellTransport, dict[str, str]]:
+    home = tmp_path / "home"
+    home.mkdir()
+    path = tmp_path / "missing-cli.yml"
+    path.write_text(MISSING_CLI_MACHINES.replace("HOME", str(home)), encoding="utf-8")
+    return config_of(path), ShellTransport(home), {"HOME": str(home), "PATH": NO_HARNESS_PATH}
+
+
+@pytest.mark.parametrize("where", ["box", "pc"])
+@pytest.mark.parametrize("harness", sorted(get_args(account_doctor.Harness)))
+def test_exit_127_reads_harness_cli_not_found_for_every_harness(tmp_path: Path, harness: str, where: str) -> None:
+    config, transport, environ = missing_cli_world(tmp_path)
+    device = config.device(where)
+    account = device.account_for(harness)
+    if device.local:
+        reading = account_doctor._probe_local(
+            device, harness, account, config.account_home(where, harness, account), environ)
+    else:
+        [reading] = account_doctor.probe(transport, config, device, harness)
+    [row] = account_doctor.judge([reading], NOW)
+    assert (row.account, row.status, row.detail) == (account, "signed-out", "harness CLI not found")
+    assert account_doctor.CLI_NOT_FOUND not in account_doctor._INCONCLUSIVE
+
+
+@pytest.mark.parametrize("where", ["box", "pc"])
+@pytest.mark.parametrize("harness", sorted(get_args(account_doctor.Harness)))
+def test_the_job_preflight_does_not_raise_for_a_missing_cli(tmp_path: Path, harness: str, where: str) -> None:
+    config, transport, environ = missing_cli_world(tmp_path)
+    device = config.device(where)
+    account_doctor.check_login(transport, config, device, harness, device.account_for(harness), environ)
+
+
+def test_a_missing_cli_is_a_drop(tmp_path: Path) -> None:
+    connection = connect(tmp_path / "orch.db")
+    config = poller_config(tmp_path)
+    transport = DoctorTransport()
+    transport.replies["pc-claude-bot"] = framed((0, 0, claude_reply()), (1, 127, b""))
+    rows = account_doctor.run(connection, config, transport, NOW, "Owner/Factory")
+    assert [(row.account, row.status, row.detail) for row in rows if row.status != "ok"] == [
+        ("claude-b", "signed-out", "harness CLI not found")]
+    assert drops(connection) == [("claude-b", "pc", NOW, 0)]
+    assert account_doctor.take_unannounced(connection, config) == [
+        account_doctor.Drop("claude-b", "pc", "claude", NOW, INSTALL_READING)]
+
+
+def test_the_flag_for_a_missing_cli_says_install(tmp_path: Path) -> None:
+    row = sign_in("claude-b", "signed-out", "harness CLI not found")
+    assert account_doctor.flags([row], {}, flag_config(tmp_path), "Owner/Factory") == {KEY: INSTALL_READING}
