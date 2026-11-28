@@ -14,7 +14,9 @@ import sqlite3
 
 import pytest
 
-from lib import account_doctor, account_requests, account_signin, device_monitor, signin_attempt, signin_broker
+from lib import (
+    account_doctor, account_requests, account_signin, device_monitor, signin_attempt, signin_broker, usage_refresh,
+)
 from lib.dashboard_accounts import read_accounts
 from lib.dashboard_pages.settings import ADD_HARNESSES
 from lib.machines_yml import Account, Device, MachinesConfig
@@ -421,3 +423,32 @@ def test_the_doc_says_what_happens_when_a_sign_in_drops(tmp_path: Path) -> None:
     assert headings == ["## When a sign-in drops"]
     assert [claim for claim in DROP_CLAIMS if claim not in section] == []
     assert "lib/signin_wake.py" in (device_monitor.__doc__ or "")
+
+
+CADENCE_CLAIMS = (
+    "The poller runs the same pass every {slot} minutes, on its first poll at or after each hour and half hour",
+    "The pass reads each sign-in's status, then the usage of each pair that reads `ok`, and nothing else.",
+    "It runs no sign-in command and copies nothing between devices.",
+    "A pass is due when none has started, or when the clock is in a later {slot}-minute slot than the stored start.",
+    "So a poller restart does not run the pass again in the same slot.",
+    "A run of `orch usage refresh` by hand counts as its slot's pass and does not cancel the next one.",
+    "every {held} minutes while a hold is open",
+    "and {doctor} minutes after its last run.",
+)
+
+
+def test_the_doc_states_the_usage_refresh_cadence() -> None:
+    minutes = {"slot": usage_refresh.SLOT_SECONDS // 60, "held": account_doctor.HELD_INTERVAL_SECONDS // 60,
+               "doctor": account_doctor.INTERVAL_SECONDS // 60}
+    section = " ".join(doc().partition("\n## Usage refresh\n")[2].split("\n## ", 1)[0].split())
+    drops = " ".join(doc().partition("\n## When a sign-in drops\n")[2].split("\n## ", 1)[0].split())
+    paragraph = " ".join((device_monitor.__doc__ or "").partition("Sign-ins.")[2].partition("\n\n")[0].split())
+
+    assert 60 * 60 % usage_refresh.SLOT_SECONDS == 0, "slots fall on the hour"
+    assert [claim for claim in CADENCE_CLAIMS if claim.format(**minutes) not in section] == []
+    assert f"`{usage_refresh.TABLE}`" in section
+    assert ("A dropped sign-in is repaired only by a person signing in, by hand or through the dashboard sign-in."
+            in drops)
+    assert "Max signs in." not in drops
+    assert [name for name in ("usage_refresh.py `due`", "`SLOT_SECONDS`", "`account_doctor.due`",
+                              "`HELD_INTERVAL_SECONDS`", "`INTERVAL_SECONDS`") if name not in paragraph] == []
