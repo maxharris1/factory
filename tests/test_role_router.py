@@ -18,15 +18,20 @@ from lib.role_router import (
     BUDGETS,
     REFERENCE_MEAN_WEIGHT,
     ROUTING_PATH,
+    BuildShare,
     Draw,
     GuardFacts,
     HarnessShares,
     HeadroomReading,
+    ReviewShare,
     RoutingError,
     Sample,
+    ShareTable,
     SkipReason,
     TicketFacts,
     apply_argv_flags,
+    build_chances,
+    defaults_table,
     draw,
     family_for,
     load_routing_yml,
@@ -34,6 +39,7 @@ from lib.role_router import (
     parse_sample,
     resolve_pair,
     resolve_slot,
+    review_chances,
     routing_argv_for_detail,
     sample_json,
 )
@@ -951,6 +957,175 @@ def test_builds_in_flight_do_not_hold_a_review_draw() -> None:
     assert review.skipped_reason is None
     assert review.picked
     assert draw("build", ticket, shares, GuardFacts(builds_in_flight=1)).skipped_reason is None
+
+
+def test_the_defaults_table_carries_one_hard_gemini_build_entry_and_one_review_entry() -> None:
+    cfg, _ = load_routing_yml(ROOT / ROUTING_PATH)
+    assert defaults_table(cfg) == ShareTable(
+        build=(BuildShare("gemini", 0.25, "hard"),), review=(ReviewShare("gemini", 0.25),)
+    )
+    assert defaults_table(cfg).version is None
+    assert defaults_table(cfg).build_off == frozenset() == defaults_table(cfg).review_off
+
+
+def test_a_zero_share_gives_the_defaults_table_no_entry_for_that_role() -> None:
+    review_only, _ = parse_routing_yml(_ROLES_BLOCK + "shares:\n  gemini:\n    build: 0\n    review: 0.25\n")
+    assert defaults_table(review_only) == ShareTable(review=(ReviewShare("gemini", 0.25),))
+    both_off, _ = parse_routing_yml(_ROLES_BLOCK + "shares:\n  gemini:\n    build: 0\n    review: 0\n")
+    assert defaults_table(both_off) == ShareTable()
+    absent, _ = parse_routing_yml(_ROLES_BLOCK)
+    assert defaults_table(absent) == ShareTable()
+
+
+_THREE = ("claude", "codex", "gemini")
+
+
+def test_an_all_any_table_totalling_one_gives_each_harness_its_share() -> None:
+    table = ShareTable(
+        build=(BuildShare("claude", 0.5), BuildShare("codex", 0.25), BuildShare("gemini", 0.25)), version=1
+    )
+    for ticket in _synthetic_tickets():
+        assert build_chances(table, ticket, _THREE) == pytest.approx({"claude": 0.5, "codex": 0.25, "gemini": 0.25})
+
+
+def test_a_mixed_difficulty_table_totalling_one_gives_chances_totalling_one() -> None:
+    table = ShareTable(
+        build=(BuildShare("claude", 0.3), BuildShare("codex", 0.3, "easy"), BuildShare("gemini", 0.4, "hard")),
+        version=1,
+    )
+    for ticket in _synthetic_tickets():
+        assert sum(build_chances(table, ticket, _THREE).values()) == pytest.approx(1.0)
+
+
+def test_leaning_chances_over_one_are_scaled_to_one_and_leave_any_entries_nothing() -> None:
+    ticket = _ticket(1, "high", True, ("a", "b", "c", "d"), "feature")
+    assert ticket.weight == 2.0
+    table = ShareTable(
+        build=(BuildShare("gemini", 0.7, "hard"), BuildShare("codex", 0.2, "easy"), BuildShare("claude", 0.1)),
+        version=1,
+    )
+    chances = build_chances(table, ticket, _THREE)
+    assert list(chances) == ["gemini", "codex", "claude"]
+    assert chances["claude"] == 0.0
+    assert chances["gemini"] + chances["codex"] == pytest.approx(1.0)
+    assert chances["gemini"] / chances["codex"] == pytest.approx(1.12 / 0.08)
+
+
+def test_the_defaults_table_gives_gemini_exactly_todays_build_chance() -> None:
+    cfg, _ = load_routing_yml(ROOT / ROUTING_PATH)
+    table = defaults_table(cfg)
+    for ticket in _synthetic_tickets():
+        assert build_chances(table, ticket, _THREE)["gemini"] == draw("build", ticket, cfg.shares["gemini"]).chance
+
+
+def test_a_versioned_table_drops_harnesses_outside_the_pool_and_rescales_the_rest() -> None:
+    cfg, _ = load_routing_yml(ROOT / ROUTING_PATH)
+    pool = [c.harness for c in cfg.roles["build:feature"]]
+    assert pool == ["claude", "codex", "gemini"]
+    table = ShareTable(
+        build=(BuildShare("cursor", 0.25), BuildShare("claude", 0.5), BuildShare("codex", 0.25)), version=1
+    )
+    assert build_chances(table, _ticket(1), pool) == pytest.approx({"claude": 2 / 3, "codex": 1 / 3})
+
+
+def test_the_defaults_table_is_never_filtered_or_rescaled_by_the_pool() -> None:
+    cfg, _ = load_routing_yml(ROOT / ROUTING_PATH)
+    table = defaults_table(cfg)
+    pool = [c.harness for c in cfg.roles["build:feature"]]
+    for ticket in _synthetic_tickets(200):
+        today = draw("build", ticket, cfg.shares["gemini"]).chance
+        assert build_chances(table, ticket, pool) == {"gemini": today}
+        assert build_chances(table, ticket, {"claude", "codex"}) == {"gemini": today}
+
+
+def _pick(chances: dict[str, float], value: float, fallback: str) -> str:
+    edge = 0.0
+    for harness, chance in chances.items():
+        edge += chance
+        if value < edge:
+            return harness
+    return fallback
+
+
+def _build_picks(table: ShareTable) -> list[tuple[TicketFacts, str]]:
+    return [
+        (t, _pick(build_chances(table, t, _THREE), draw("build", t, HarnessShares()).draw, _THREE[0]))
+        for t in _synthetic_tickets()
+    ]
+
+
+def _hard_rate(picks: list[tuple[TicketFacts, str]], harness: str) -> float:
+    group = [h for t, h in picks if t.risk == "high" and t.plan_first]
+    return sum(h == harness for h in group) / len(group)
+
+
+def _easy_rate(picks: list[tuple[TicketFacts, str]], harness: str) -> float:
+    group = [h for t, h in picks if t.risk == "low" and not t.plan_first]
+    return sum(h == harness for h in group) / len(group)
+
+
+@pytest.mark.parametrize("codex_difficulty", ["any", "easy"])
+def test_picks_from_build_chances_meet_each_share_and_lean_by_difficulty(codex_difficulty: str) -> None:
+    table = ShareTable(
+        build=(
+            BuildShare("claude", 0.5),
+            BuildShare("codex", 0.25, codex_difficulty),
+            BuildShare("gemini", 0.25, "hard"),
+        ),
+        version=1,
+    )
+    picks = _build_picks(table)
+    for harness, target in {"claude": 0.5, "codex": 0.25, "gemini": 0.25}.items():
+        assert abs(sum(h == harness for _, h in picks) / len(picks) - target) <= 0.05
+    assert _hard_rate(picks, "gemini") >= 1.5 * _easy_rate(picks, "gemini")
+    if codex_difficulty == "easy":
+        assert _easy_rate(picks, "codex") >= 1.5 * _hard_rate(picks, "codex")
+
+
+def test_the_defaults_table_gives_gemini_exactly_todays_review_chance() -> None:
+    cfg, _ = load_routing_yml(ROOT / ROUTING_PATH)
+    table = defaults_table(cfg)
+    shares = cfg.shares["gemini"]
+    for ticket in _synthetic_tickets():
+        build = draw("build", ticket, shares)
+        today = draw("review", ticket, shares, build=build).chance
+        assert review_chances(table, build_chances(table, ticket, _THREE), "anthropic")["gemini"] == today
+        assert review_chances(table, {}, "anthropic")["gemini"] == draw("review", ticket, shares).chance == 0.25
+
+
+def test_a_reviewer_in_the_builders_family_gets_no_review_chance() -> None:
+    table = ShareTable(review=(ReviewShare("gemini", 0.25),))
+    assert review_chances(table, {}, "google") == {"gemini": 0.0}
+
+
+def test_review_chances_over_one_are_scaled_to_total_one() -> None:
+    table = ShareTable(
+        review=(ReviewShare("codex", 0.5), ReviewShare("claude", 0.25), ReviewShare("gemini", 0.25)), version=1
+    )
+    chances = review_chances(table, {"claude": 0.5, "codex": 0.25, "gemini": 0.25}, "google")
+    assert chances["gemini"] == 0.0
+    assert sum(chances.values()) == pytest.approx(1.0)
+    assert chances["codex"] / chances["claude"] == pytest.approx((0.5 / 0.75) / (0.25 / 0.5))
+
+
+def test_picks_from_review_chances_meet_each_reviewer_share_of_all_reviews() -> None:
+    build_table = ShareTable(
+        build=(BuildShare("claude", 0.5), BuildShare("codex", 0.25), BuildShare("gemini", 0.25)), version=1
+    )
+    review_table = ShareTable(
+        review=(ReviewShare("codex", 0.5), ReviewShare("claude", 0.25), ReviewShare("gemini", 0.25)), version=1
+    )
+    review_pool = ("codex", "claude", "gemini")
+    reviewers = []
+    for ticket in _synthetic_tickets():
+        built = build_chances(build_table, ticket, _THREE)
+        builder = _pick(built, draw("build", ticket, HarnessShares()).draw, _THREE[0])
+        family = family_for(builder, None)[0]
+        fallback = next(h for h in review_pool if family_for(h, None)[0] != family)
+        chances = review_chances(review_table, built, family)
+        reviewers.append(_pick(chances, draw("review", ticket, HarnessShares()).draw, fallback))
+    for harness, target in {"codex": 0.5, "claude": 0.25, "gemini": 0.25}.items():
+        assert abs(reviewers.count(harness) / len(reviewers) - target) <= 0.06
 
 
 _DRAW_ROUTING, _ = parse_routing_yml(

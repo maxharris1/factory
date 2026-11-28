@@ -670,6 +670,82 @@ def draw(
     )
 
 
+Difficulty = Literal["hard", "any", "easy"]
+
+
+@dataclass(frozen=True)
+class BuildShare:
+    harness: str
+    share: float
+    difficulty: Difficulty = "any"
+
+
+@dataclass(frozen=True)
+class ReviewShare:
+    harness: str
+    share: float
+
+
+@dataclass(frozen=True)
+class ShareTable:
+    build: tuple[BuildShare, ...] = ()
+    review: tuple[ReviewShare, ...] = ()
+    build_off: frozenset[str] = frozenset()
+    review_off: frozenset[str] = frozenset()
+    version: int | None = None
+
+
+def defaults_table(config: RoutingConfig) -> ShareTable:
+    return ShareTable(
+        build=tuple(BuildShare(h, s.build, "hard") for h, s in config.shares.items() if s.build > 0),
+        review=tuple(ReviewShare(h, s.review) for h, s in config.shares.items() if s.review > 0),
+    )
+
+
+def build_chances(table: ShareTable, ticket: TicketFacts, pool: Collection[str]) -> dict[str, float]:
+    entries = table.build
+    if table.version is not None:
+        entries = tuple(e for e in entries if e.harness in pool)
+        total = sum(e.share for e in entries)
+        if total > 0:
+            entries = tuple(replace(e, share=e.share / total) for e in entries)
+    leaning = {
+        e.harness: (
+            e.share * ticket.weight / REFERENCE_MEAN_WEIGHT
+            if e.difficulty == "hard"
+            else e.share * (2.5 - ticket.weight) / REFERENCE_MEAN_WEIGHT
+        )
+        for e in entries
+        if e.difficulty != "any"
+    }
+    leaning_total = sum(leaning.values())
+    spread = [e for e in entries if e.difficulty == "any"]
+    if leaning_total > 1:
+        leaning = {h: c / leaning_total for h, c in leaning.items()}
+        rest = {e.harness: 0.0 for e in spread}
+    else:
+        list_order_share = max(0.0, 1 - sum(e.share for e in entries)) if table.version is None else 0.0
+        denominator = sum(e.share for e in spread) + list_order_share
+        rest = {e.harness: (1 - leaning_total) * e.share / denominator if denominator > 0 else 0.0 for e in spread}
+    return {e.harness: leaning[e.harness] if e.difficulty != "any" else rest[e.harness] for e in entries}
+
+
+def review_chances(table: ShareTable, build_chances: Mapping[str, float], builder_family: str) -> dict[str, float]:
+    chances = {}
+    for entry in table.review:
+        family = family_for(entry.harness, None)[0]
+        if family == builder_family:
+            chances[entry.harness] = 0.0
+            continue
+        taken = sum(c for h, c in build_chances.items() if family_for(h, None)[0] == family)
+        if taken >= 1:
+            chances[entry.harness] = 1.0 if entry.share > 0 else 0.0
+        else:
+            chances[entry.harness] = min(1.0, entry.share / (1 - taken))
+    total = sum(chances.values())
+    return {h: c / total for h, c in chances.items()} if total > 1 else chances
+
+
 @dataclass(frozen=True)
 class Sample:
     build: Draw | None = None
