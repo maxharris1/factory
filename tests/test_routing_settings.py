@@ -153,8 +153,10 @@ def test_reasons_and_difficulties_are_exposed_in_order():
         "unknown-difficulty",
         "bad-share",
         "unknown-harness",
+        "empty-pool",
         "build-total",
         "review-total",
+        "no-cross-family-reviewer",
     )
     assert DIFFICULTIES == ("hard", "any", "easy")
 
@@ -299,3 +301,77 @@ def test_a_refusal_carries_no_part_of_the_value(value):
     error = refused.value
     assert MARK not in str(error) and MARK not in repr(error) and MARK not in repr(error.args)
     assert error.__cause__ is None and error.__context__ is None
+
+
+def _block(difficulty="any", **shares):
+    return {"difficulty": difficulty, **shares}
+
+
+STRANDING = [
+    ("cursor-only-builder", {"cursor": _block(build=100), "claude": _block(review=100)}),
+    ("no-review-key", {h: _block(b["difficulty"], build=b["build"]) for h, b in SPLIT.items()}),
+    ("empty-mapping", {}),
+]
+
+
+@pytest.mark.parametrize("value", [v for _, v in STRANDING], ids=[i for i, _ in STRANDING])
+def test_a_value_that_leaves_a_pool_with_nobody_on_is_refused(value):
+    with pytest.raises(OverrideRefused) as refused:
+        parse_override(value, SHIPPED)
+    assert refused.value.reason == "empty-pool"
+
+
+def test_empty_pool_comes_after_unknown_harness_and_before_the_totals():
+    with pytest.raises(OverrideRefused) as refused:
+        parse_override({"grok": _block(build=100)}, SHIPPED)
+    assert refused.value.reason == "unknown-harness"
+    with pytest.raises(OverrideRefused) as refused:
+        parse_override({"claude": _block(build=10)}, SHIPPED)
+    assert refused.value.reason == "empty-pool"
+
+
+def test_a_pool_the_table_does_not_fill_is_not_checked():
+    config = RoutingConfig(
+        budget="medium",
+        roles=MappingProxyType({
+            "build": (Candidate("cursor", "claude-opus-4-6"),),
+            "build:feature": "inherit",
+            "review": (Candidate("codex", "gpt-6.2-sol"),),
+        }),
+    )
+    parse_override({"cursor": _block(build=100), "codex": _block(review=100)}, config)
+
+
+CROSS_FAMILY_REFUSED = [
+    ("claude-reviews-claude", {"claude": _block(build=100, review=100)}),
+    ("claude-reviews-cursor", {"cursor": _block(build=100), "claude": _block(build=0, review=100)}),
+]
+
+
+@pytest.mark.parametrize("value", [v for _, v in CROSS_FAMILY_REFUSED], ids=[i for i, _ in CROSS_FAMILY_REFUSED])
+def test_a_builder_with_no_reviewer_outside_its_family_is_refused(value):
+    with pytest.raises(OverrideRefused) as refused:
+        parse_override(value, SHIPPED)
+    assert refused.value.reason == "no-cross-family-reviewer"
+
+
+CROSS_FAMILY_ACCEPTED = [
+    ("cursor-reviews-cursor", {"cursor": _block(build=100, review=100), "claude": _block(build=0)}),
+    ("gemini-on-at-zero", {"claude": _block(build=100), "gemini": _block(build=0, review=100)}),
+]
+
+
+@pytest.mark.parametrize("value", [v for _, v in CROSS_FAMILY_ACCEPTED], ids=[i for i, _ in CROSS_FAMILY_ACCEPTED])
+def test_a_builder_with_a_reviewer_outside_its_family_is_accepted(value):
+    parse_override(value, SHIPPED)
+
+
+def test_cross_family_is_checked_last():
+    with pytest.raises(OverrideRefused) as refused:
+        parse_override({"claude": _block(build=100, review=90)}, SHIPPED)
+    assert refused.value.reason == "review-total"
+
+
+def test_an_inherited_review_skips_the_cross_family_check():
+    roles = MappingProxyType({**SHIPPED.roles, "review": "inherit"})
+    parse_override({"claude": _block(build=100)}, replace(SHIPPED, roles=roles))
