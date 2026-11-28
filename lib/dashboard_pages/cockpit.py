@@ -15,6 +15,7 @@ from lib.dashboard_pages.common import (
     _panel,
     _span,
     _ticket,
+    _when,
     ticket_address,
     ticket_page_href,
 )
@@ -181,12 +182,48 @@ def _cockpit_card(row: dict, *, show_ticket_link: bool) -> str:
     )
 
 
+def _inbox_card(row: dict) -> str:
+    wait = row.get("wait") if isinstance(row.get("wait"), dict) else {}
+    why = str(wait.get("why") or row.get("state") or "")
+    is_visual = why == "visual-qa-review"
+    is_question = why == "question"
+    cls = "ck-card ck-inbox" + (" ck-visual" if is_visual else " ck-question" if is_question else "")
+    badge = _chip("visual-qa-review" if is_visual else str(row.get("state") or ""),
+                  "accent" if is_visual else "warn")
+    who = f'<a class="ck-tk" href="{_e(ticket_page_href(row))}">{_e(_ticket(row))}</a>'
+    links: list[str] = []
+    if wait:
+        chref = _comment_href(row)
+        if chref:
+            links.append(
+                f'<a href="{_e(chref)}" rel="noopener noreferrer" target="_blank">comment ↗</a>'
+            )
+    vqa = row.get("visual_qa") if isinstance(row.get("visual_qa"), dict) else None
+    if vqa:
+        run_url = _run_url_of(vqa)
+        if run_url:
+            links.append(
+                f'<a href="{_e(run_url)}" rel="noopener noreferrer" target="_blank">full QA report ↗</a>'
+            )
+    age = row.get("state_age_seconds")
+    waited = _when(age, "waited ") if isinstance(age, (int, float)) and not isinstance(age, bool) else ""
+    title = row.get("title")
+    title_html = f'<div class="ck-title">{_e(title)}</div>' if title else ""
+    gallery = _media_gallery_html(vqa) if vqa else ""
+    return (
+        f'<article class="{cls}" data-cockpit-ticket="{_e(ticket_address(row))}"><div class="ck-main">'
+        f'<div class="ck-head">{badge}{who}<span class="ck-links">{"".join(links)}</span></div>'
+        f'<div class="ck-why">{_span(None, _WHY.get(why, why))}{waited}</div>'
+        f"{title_html}{gallery}{_questions_html(row)}</div></article>"
+    )
+
+
 def _needs_max(snapshot: dict) -> str:
     """Needs Max / Product Inbox panel for `index.html`."""
     items = inbox_tickets(snapshot)
     count = f"{len(items)} waiting on you" if items else "all clear"
     inner = (
-        f'<div class="ck-list">{"".join(_cockpit_card(row, show_ticket_link=True) for row in items)}</div>'
+        f'<div class="ck-grid">{"".join(_inbox_card(row) for row in items)}</div>'
         if items
         else '<p class="empty">No open product questions or visual QA holds waiting on you.</p>'
     )
