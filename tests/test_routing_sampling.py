@@ -499,6 +499,16 @@ def _limit(queue: SQLiteJobQueue, account: str) -> None:
         )
 
 
+def _lane_limit(queue: SQLiteJobQueue) -> None:
+    with queue.connect() as connection:
+        connection.execute(lane_limit.DDL)
+        connection.execute(
+            f"INSERT INTO {lane_limit.TABLE} (recipient, harness, bot, limited_at, until, source, job_id)"
+            " VALUES ('gemini', 'gemini', 'gemini-bot', ?, ?, 'event', 'job-limited')",
+            (NOW - 60, int(NOW) + 3600),
+        )
+
+
 def _sign_in_hold(queue: SQLiteJobQueue) -> None:
     with queue.connect() as connection:
         account_doctor.hold(connection, "gemini-default", "box", "runtime", "not logged in", NOW - 60)
@@ -560,6 +570,7 @@ SEEDS = (
         projects=(Project("owner/repo", devices=frozenset({"box"})),),
     ),
     Seed("usage-limit", GuardFacts(usage_held=True), "usage-held", lambda q: _limit(q, "gemini-default")),
+    Seed("lane-wide-limit", GuardFacts(usage_held=True), "usage-held", _lane_limit),
     Seed("headroom-floor", GuardFacts(usage_held=True), "usage-held", lambda q: _read_usage(q, "gemini-default", 0.97)),
     Seed(
         "paused",
@@ -579,6 +590,13 @@ SEEDS = (
         GuardFacts(readings=_five_and_seven_day(0.7)),
         None,
         lambda q: (_limit(q, "gemini-a"), _read_usage(q, "gemini-b", 0.3)),
+        config=TWO_GEMINI_ACCOUNTS,
+    ),
+    Seed(
+        "most-headroom-of-two-accounts",
+        GuardFacts(readings=_five_and_seven_day(0.2)),
+        None,
+        lambda q: (_read_usage(q, "gemini-a", 0.8), _read_usage(q, "gemini-b", 0.86)),
         config=TWO_GEMINI_ACCOUNTS,
     ),
 )
