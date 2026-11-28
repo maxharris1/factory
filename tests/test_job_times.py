@@ -3,6 +3,8 @@ from pathlib import Path
 
 import pytest
 
+from lib import job_times
+from lib.job_times import BadTime, BadTimes
 from lib.queue import SQLiteJobQueue
 from tests.job_times_support import storing_bad_times
 
@@ -36,8 +38,8 @@ def db(tmp_path: Path) -> Path:
     return path
 
 
-def insert(connection: sqlite3.Connection, job_id: str = "j1", *, verb: str = "INSERT",
-           sql: dict[str, str] | None = None, **times: object) -> None:
+def insert(connection: sqlite3.Connection, job_id: object = "j1", *, verb: str = "INSERT",
+           sql: dict[str, str] | None = None, dedupe_key: str | None = None, **times: object) -> None:
     values = {"created_at": NOW, "last_activity_at": NOW, "finished_at": None, **times}
     sql = sql or {}
     placeholders = ", ".join(sql.get(name, "?") for name in COLUMNS)
@@ -47,7 +49,7 @@ def insert(connection: sqlite3.Connection, job_id: str = "j1", *, verb: str = "I
             timeout_seconds, generation, attempt, state, created_at, last_activity_at, finished_at)
         VALUES (?, ?, 'Owner/Repo', '1', 'build', 'claude', 'c1', 60, 1, 1, 'queued', {placeholders})
         """,
-        (job_id, job_id, *(values[name] for name in COLUMNS if name not in sql)),
+        (job_id, dedupe_key or job_id, *(values[name] for name in COLUMNS if name not in sql)),
     )
 
 
@@ -182,4 +184,88 @@ def test_the_trigger_text_is_pinned(db: Path) -> None:
         "the jobs time triggers changed. CREATE TRIGGER IF NOT EXISTS means an existing orch.db keeps "
         "the old trigger, so rename both triggers and drop the old names in the same change, "
         "then update this pin"
+    )
+
+
+def bad_times(db: Path, limit: int = 20) -> BadTimes:
+    with sqlite3.connect(db) as connection:
+        return job_times.bad_times(connection, limit)
+
+
+def test_bad_times_lists_each_refused_value_by_job_then_column_without_the_value(db: Path) -> None:
+    with storing_bad_times(sqlite3.connect(db)) as connection:
+        insert(connection, "j2", last_activity_at=b"\x01\x02")
+        insert(connection, "j1", created_at="2026-11-27T10:00:00Z", finished_at=float("inf"))
+        insert(connection, "j3", finished_at=float("-inf"))
+        insert(connection, "ok", finished_at=NOW)
+    assert bad_times(db) == BadTimes(
+        shown=(
+            BadTime("j1", "created_at", "text"),
+            BadTime("j1", "finished_at", "infinity"),
+            BadTime("j2", "last_activity_at", "blob"),
+            BadTime("j3", "finished_at", "infinity"),
+        ),
+        total=4,
+    )
+
+
+def test_bad_times_keeps_the_first_limit_items_and_counts_them_all(db: Path) -> None:
+    with storing_bad_times(sqlite3.connect(db)) as connection:
+        for n in range(7):
+            insert(connection, f"j{n}", finished_at="2026-11-27T10:00:00Z")
+    assert bad_times(db, limit=3) == BadTimes(
+        shown=tuple(BadTime(f"j{n}", "finished_at", "text") for n in range(3)), total=7
+    )
+    assert bad_times(db, limit=0) == BadTimes(shown=(), total=7)
+
+
+def test_bad_times_of_a_clean_table_is_empty(db: Path) -> None:
+    with sqlite3.connect(db) as connection:
+        insert(connection, "j1")
+        insert(connection, "j2", finished_at=NOW)
+    assert bad_times(db) == BadTimes()
+
+
+def bare_jobs(tmp_path: Path) -> Path:
+    path = tmp_path / "bare.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE jobs (id TEXT PRIMARY KEY, created_at REAL, last_activity_at REAL, finished_at REAL)"
+        )
+        job_times.install(connection)
+    return path
+
+
+@pytest.mark.parametrize("column", COLUMNS)
+@pytest.mark.parametrize(
+    "value", [*BAD.values(), None, *GOOD.values()], ids=[*BAD.keys(), "null", *GOOD.keys()]
+)
+def test_bad_times_lists_a_value_exactly_when_the_insert_trigger_refuses_it(
+    tmp_path: Path, column: str, value: object
+) -> None:
+    path = bare_jobs(tmp_path)
+    row = {"created_at": NOW, "last_activity_at": NOW, "finished_at": NOW, column: value}
+    sql = "INSERT INTO jobs (id, created_at, last_activity_at, finished_at) VALUES (?, ?, ?, ?)"
+    try:
+        with sqlite3.connect(path) as connection:
+            connection.execute(sql, ("probe", *(row[name] for name in COLUMNS)))
+            connection.execute("DELETE FROM jobs")
+        refuses = False
+    except sqlite3.IntegrityError:
+        refuses = True
+    with storing_bad_times(sqlite3.connect(path)) as connection:
+        connection.execute(sql, ("j1", *(row[name] for name in COLUMNS)))
+    with sqlite3.connect(path) as connection:
+        found = job_times.bad_times(connection, 20)
+    assert [(item.job, item.column) for item in found.shown] == ([("j1", column)] if refuses else [])
+    assert found.total == int(refuses)
+
+
+def test_bad_times_lists_a_null_id_and_a_blob_id(db: Path) -> None:
+    with storing_bad_times(sqlite3.connect(db)) as connection:
+        insert(connection, None, dedupe_key="k1", finished_at="2026-11-27T10:00:00Z")
+        insert(connection, b"\xff\xfe", dedupe_key="k2", finished_at="2026-11-27T10:00:00Z")
+    assert bad_times(db) == BadTimes(
+        shown=(BadTime("None", "finished_at", "text"), BadTime("b'\\xff\\xfe'", "finished_at", "text")),
+        total=2,
     )

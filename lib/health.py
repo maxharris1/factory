@@ -89,6 +89,14 @@ earlier. A tunnel with none of these raises no item.
 The item makes `orch health` exit 3 and is `needs_attention` in its JSON,
 which the hourly momentum check reads.
 
+Bad job times (#1787): orch.db refuses a `jobs` time that is not epoch
+seconds (#1786), but a value stored before that is still there. `orch health`
+alone reads them (`job_times.bad_times`) on its read-only orch.db connection
+and lists each as a "bad-job-time" item: the slugged job id, the column and
+the stored kind (text, blob, infinity or null), never the stored value. It
+shows the first BAD_JOB_TIMES_SHOWN (20) after a count line, puts the count in
+`bad_job_times`, and exits 3. Nothing is migrated; a person repairs the row.
+
 Devices (#297): the report also lists each factory checkout's sync state,
 the box's own (HEAD against origin/main, `box_sync`) and every remote
 target's from orch.db's `device_sync` table (lib/device_sync.py). A remote
@@ -129,7 +137,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, TextIO
 
-from lib import device_sync
+from lib import device_sync, job_times
 from lib.dashboard_config import EVERY_MINUTES_MAX
 from lib.device_monitor import remote_target
 from lib.machines_yml import DEFAULT_ORCH_HOST, MachinesConfig, load_machines_yml, orch_host
@@ -154,6 +162,8 @@ TUNNEL_SEEN = 405
 TUNNEL_HELD = "linear-webhook-tunnel.held"
 PORT_HELD = "port held by another owner"
 TUNNEL_DOWN = "tunnel-down"
+BAD_JOB_TIME = "bad-job-time"
+BAD_JOB_TIMES_SHOWN = 20
 _HELD_RECORD = re.compile(r"([1-9][0-9]{0,4}) ([A-Za-z0-9][A-Za-z0-9._@-]*)")
 MIN_INTERVAL = 5.0
 MAX_INTERVAL = EVERY_MINUTES_MAX * 60.0
@@ -1818,7 +1828,7 @@ def _db(value: Path | None) -> Path:
     return Path(env)
 
 
-def _queued(db: Path) -> list[tuple[str, str]]:
+def _jobs(db: Path) -> tuple[list[tuple[str, str]], job_times.BadTimes]:
     if not db.is_file():
         raise HealthError(f"database does not exist: {db}")
     connection = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True,
@@ -1828,15 +1838,33 @@ def _queued(db: Path) -> list[tuple[str, str]]:
         if not connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'jobs'"
         ).fetchone():
-            return []
-        return [
+            return [], job_times.BadTimes()
+        queued = [
             (str(job_id), str(recipient))
             for job_id, recipient in connection.execute(
                 "SELECT id, recipient FROM jobs WHERE state = 'queued' ORDER BY created_at, id"
             )
         ]
+        return queued, job_times.bad_times(connection, BAD_JOB_TIMES_SHOWN)
     finally:
         connection.close()
+
+
+def _bad_time_lines(bad: job_times.BadTimes) -> list[str]:
+    if not bad.total:
+        return []
+    cut = f" (first {len(bad.shown)} listed)" if len(bad.shown) < bad.total else ""
+    return [f"  needs attention: {bad.total} job times are not epoch seconds{cut}"] + [
+        f"  needs attention: job {_slug(item.job)[:64]} {item.column} holds {item.stored}"
+        for item in bad.shown
+    ]
+
+
+def _bad_time_items(bad: job_times.BadTimes) -> list[dict]:
+    return [
+        {"kind": BAD_JOB_TIME, "job": _slug(item.job)[:64], "column": item.column, "stored": item.stored}
+        for item in bad.shown
+    ]
 
 
 def main(argv: list[str], *, stdout: TextIO | None = None,
@@ -1864,7 +1892,8 @@ def _report(argv: list[str], out: TextIO, clock: Callable[[], float],
     now = clock()
     try:
         orch = _orch(args.orch)
-        report = load_report(db, now, queued=_queued(db), machines=machines, orch=orch,
+        queued, bad = _jobs(db)
+        report = load_report(db, now, queued=queued, machines=machines, orch=orch,
                              uptime=read_uptime(clock))
     except (HealthError, sqlite3.Error) as exc:
         print(f"orch health: {exc}", file=sys.stderr)
@@ -1875,12 +1904,17 @@ def _report(argv: list[str], out: TextIO, clock: Callable[[], float],
         transport = SshTransport()
     report = replace(report, storage=measure_storage(machines, db, transport))
     if args.json:
-        print(json.dumps(report_json(report, now), sort_keys=True), file=out)
+        data = report_json(report, now)
+        data["needs_attention"] += _bad_time_items(bad)
+        data["attention"] = len(data["needs_attention"])
+        data["bad_job_times"] = bad.total
+        print(json.dumps(data, sort_keys=True), file=out)
     else:
-        print("\n".join(render_lines(report, now)), file=out)
+        print("\n".join(render_lines(report, now) + _bad_time_lines(bad)), file=out)
     if report.error is not None:
         return 1
-    return 3 if report.down or report.no_waiter or report.storage_alerts or report.attention else 0
+    return 3 if (report.down or report.no_waiter or report.storage_alerts or report.attention
+                 or bad.total) else 0
 
 
 def _orch(path: Path | None) -> OrchConfig | None:

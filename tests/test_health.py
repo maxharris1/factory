@@ -33,10 +33,12 @@ from lib.machines_yml import load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.remote import SSH_UNREACHABLE, Exchanged
 from lib.status import main as status_main
+from tests.job_times_support import storing_bad_times
 from tests.pool_helpers import LOCAL_BOX_MACHINES, poller_adopts, write_target_machines
 from tests.test_linear_webhook_service import _port_of, _same_host, _service
 from tests.test_linear_webhook_service import home  # noqa: F401  (fixture)
 from tests.test_linear_webhook_service import pytestmark as needs_flock_and_proc
+from tests.test_job_times import insert as insert_job
 
 NOW = 1_794_000_000.0  # Nov 6, 2026, 4:20 PM EST
 PAGE_NOW = 1_800_000_000.0  # the page harness's clock is 3 s past this
@@ -2241,3 +2243,159 @@ def test_a_same_host_tunnel_is_up_from_the_listeners_own_answer_once_ensure_drop
     assert [(c["state"], c["reason"]) for c in data["components"]
             if c["component"] == "tunnel"] == [("up", "")], "orch health --json shows the tunnel up"
     assert [i for i in data["needs_attention"] if i["kind"] == "tunnel-down"] == []
+
+
+STORED_TEXT = "2026-11-27T10:00:00Z"
+
+
+def plain_orch_yml(tmp_path: Path) -> Path:
+    config = tmp_path / "orch.yml"
+    config.write_text(tunnel_orch_yml(tmp_path).read_text().split("linear_webhook:")[0])
+    return config
+
+
+def store_bad_time(db: Path, job_id: str, **times: object) -> None:
+    with storing_bad_times(sqlite3.connect(db)) as connection:
+        insert_job(connection, job_id, **(times or {"finished_at": STORED_TEXT}))
+        connection.execute("UPDATE jobs SET state = 'done' WHERE id = ?", (job_id,))
+
+
+@pytest.fixture
+def clean(tmp_path: Path, monkeypatch) -> tuple[Path, list[str]]:
+    monkeypatch.setattr(health, "box_storage", functools.partial(
+        health.box_storage, statvfs=lambda path: statvfs(inodes_used=120)))
+    db, _ = make_db(tmp_path)
+    store(db, NOW - 5).beat("poller", "box", pid=101, version="unknown")
+    store(db, NOW - 5).beat("waiter", "box", bot="codex-bot", pid=102, version="unknown")
+    return db, ["--db", str(db), "--orch", str(plain_orch_yml(tmp_path)),
+                "--machines", str(machines_file(tmp_path, ONLY_CODEX))]
+
+
+def run_health(args: list[str]) -> tuple[int, str]:
+    out = io.StringIO()
+    code = health.main(args, stdout=out, clock=lambda: NOW, transport=DfTransport({}))
+    return code, out.getvalue()
+
+
+def test_orch_health_lists_each_bad_job_time_and_never_its_value(clean) -> None:
+    db, args = clean
+    assert run_health(args)[0] == 0
+    long_id = "hand made/job 7 " + "y" * 60
+    store_bad_time(db, "a-job", created_at=STORED_TEXT)
+    store_bad_time(db, long_id, last_activity_at=b"\x01\x02", finished_at=STORED_TEXT)
+    slug = ("hand-made-job-7-" + "y" * 60)[:64]
+
+    code, text = run_health(args)
+    assert code == 3
+    assert text.splitlines()[-4:] == [
+        "  needs attention: 3 job times are not epoch seconds",
+        "  needs attention: job a-job created_at holds text",
+        f"  needs attention: job {slug} finished_at holds text",
+        f"  needs attention: job {slug} last_activity_at holds blob",
+    ]
+    code, out = run_health([*args, "--json"])
+    assert code == 3
+    data = json.loads(out)
+    assert data["needs_attention"] == [
+        {"kind": "bad-job-time", "job": "a-job", "column": "created_at", "stored": "text"},
+        {"kind": "bad-job-time", "job": slug, "column": "finished_at", "stored": "text"},
+        {"kind": "bad-job-time", "job": slug, "column": "last_activity_at", "stored": "blob"},
+    ]
+    assert (data["attention"], data["bad_job_times"]) == (3, 3)
+    assert STORED_TEXT not in text and STORED_TEXT not in out
+
+
+def test_a_bad_job_time_comes_after_the_tunnel_down_entries_which_do_not_change(
+        tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(health, "box_storage", functools.partial(
+        health.box_storage, statvfs=lambda path: statvfs(inodes_used=120)))
+    db, _ = make_db(tmp_path)
+    store(db, NOW).beat("poller", "box", pid=101, version="unknown")
+    hold_port(db, NOW - 22 * 3600)
+    args = ["--db", str(db), "--orch", str(tunnel_orch_yml(tmp_path)),
+            "--machines", str(LOCAL_BOX_MACHINES), "--json"]
+    code, out = run_health(args)
+    assert code == 3
+    before = json.loads(out)["needs_attention"]
+    assert [item["kind"] for item in before] == ["tunnel-down"]
+
+    store_bad_time(db, "j1")
+    code, out = run_health(args)
+    assert code == 3
+    assert json.loads(out)["needs_attention"] == [
+        *before, {"kind": "bad-job-time", "job": "j1", "column": "finished_at", "stored": "text"}]
+
+
+def test_orch_health_lists_the_first_20_bad_job_times_and_counts_them_all(clean) -> None:
+    db, args = clean
+    for n in range(23):
+        store_bad_time(db, f"j{n:02}")
+    code, text = run_health(args)
+    assert code == 3
+    lines = text.splitlines()
+    assert "  needs attention: 23 job times are not epoch seconds (first 20 listed)" in lines
+    items = [line for line in lines if line.startswith("  needs attention: job ")]
+    assert items == [f"  needs attention: job j{n:02} finished_at holds text" for n in range(20)]
+    code, out = run_health([*args, "--json"])
+    data = json.loads(out)
+    assert (code, data["bad_job_times"], len(data["needs_attention"])) == (3, 23, 20)
+
+
+def test_bad_job_times_need_attention_before_any_heartbeat_and_beside_an_error(
+        tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(health, "box_storage", functools.partial(
+        health.box_storage, statvfs=lambda path: statvfs(inodes_used=120)))
+    db, _ = make_db(tmp_path)
+    args = ["--db", str(db), "--orch", str(plain_orch_yml(tmp_path)),
+            "--machines", str(machines_file(tmp_path, ONLY_CODEX))]
+    code, text = run_health(args)
+    assert (code, "  no heartbeats recorded yet" in text) == (0, True)
+
+    store_bad_time(db, "j1")
+    item = "  needs attention: job j1 finished_at holds text"
+    code, text = run_health(args)
+    assert code == 3
+    assert {"  no heartbeats recorded yet", item} <= set(text.splitlines())
+
+    health.health_path(db).write_bytes(b"not a database, " * 64)
+    code, text = run_health(args)
+    assert code == 1
+    assert "  unknown: cannot read orch.health.db" in text
+    assert item in text.splitlines()
+
+
+def test_a_database_with_no_jobs_table_lists_no_bad_job_times(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(health, "box_storage", functools.partial(
+        health.box_storage, statvfs=lambda path: statvfs(inodes_used=120)))
+    db = tmp_path / "orch.db"
+    with sqlite3.connect(db) as connection:
+        connection.execute("CREATE TABLE other (id TEXT)")
+    store(db, NOW - 5).beat("poller", "box", pid=101, version="unknown")
+    store(db, NOW - 5).beat("waiter", "box", bot="codex-bot", pid=102, version="unknown")
+    code, out = run_health(["--db", str(db), "--orch", str(plain_orch_yml(tmp_path)),
+                            "--machines", str(machines_file(tmp_path, ONLY_CODEX)), "--json"])
+    data = json.loads(out)
+    assert (code, data["bad_job_times"], data["needs_attention"]) == (0, 0, [])
+
+
+def test_a_bad_job_time_leaves_orch_status_and_the_dashboard_unchanged(
+        tmp_path: Path, clean, monkeypatch) -> None:
+    from tests.test_wait import dispatcher_for
+
+    monkeypatch.setattr(health, "ROOT", tmp_path / "no-checkout")
+    db, args = clean
+    dispatcher_for(db)
+
+    def views() -> tuple[dict, list[str]]:
+        out = io.StringIO()
+        status_main(["--db", str(db), "--machines", str(machines_file(tmp_path, ONLY_CODEX)),
+                     "--orch", str(plain_orch_yml(tmp_path))], stdout=out, clock=lambda: NOW)
+        lines = out.getvalue().splitlines()
+        health_lines = lines[next(i for i, line in enumerate(lines) if line.startswith("Health")):]
+        return snapshot(tmp_path, db, machines=ONLY_CODEX)["health"], health_lines
+
+    before = views()
+    assert run_health(args)[0] == 0
+    store_bad_time(db, "j1")
+    assert run_health(args)[0] == 3
+    assert views() == before
