@@ -6,6 +6,7 @@ Server-side rendering companion to `lib/dashboard_static/js/cockpit.js` and
 
 from __future__ import annotations
 
+import json
 import re
 
 from lib.dashboard_pages.activity import _WHY, _comment_href
@@ -21,8 +22,18 @@ from lib.dashboard_pages.common import (
 )
 from lib.dashboard_static import read_asset
 
+NEEDS_MAX = {
+    "limit": 9,
+    "groups": (
+        {"key": "visual-qa", "label": "Visual QA", "why": "visual-qa-review", "state": None},
+        {"key": "question", "label": "Questions", "why": "question", "state": None},
+        {"key": "merge-ok", "label": "Merge OK", "why": None, "state": "awaiting-ok"},
+        {"key": "other", "label": "Other", "why": None, "state": None},
+    ),
+}
+
 CSS = read_asset("css/cockpit.css")
-SCRIPT = read_asset("js/cockpit.js")
+SCRIPT = read_asset("js/cockpit.js").replace("__NEEDS_MAX__", json.dumps(NEEDS_MAX, separators=(",", ":")))
 
 _QA_PATH = re.compile(r"^/qa/runs/[A-Za-z0-9._-]{1,64}(?:/lane-[1-9][0-9]*/[^\s\"'<>]+)?$")
 
@@ -61,6 +72,15 @@ def _media_url_of(vqa: dict, item: dict) -> str | None:
     return _safe_qa_url(f"{run_url}/lane-{lane}/{''.join(path_parts)}")
 
 
+def _inbox_group(row: dict) -> int:
+    wait = row.get("wait") if isinstance(row.get("wait"), dict) else {}
+    why = wait.get("why") or ""
+    return next(
+        index for index, group in enumerate(NEEDS_MAX["groups"])
+        if group["why"] in (None, why) and group["state"] in (None, row.get("state"))
+    )
+
+
 def inbox_tickets(snapshot: dict) -> list[dict]:
     """Tracked tickets currently waiting on Max (`waiting-max` or `awaiting-ok`)."""
     items = [
@@ -70,15 +90,7 @@ def inbox_tickets(snapshot: dict) -> list[dict]:
     ]
 
     def rank(row: dict) -> tuple[int, str, str]:
-        wait = row.get("wait") if isinstance(row.get("wait"), dict) else {}
-        why = wait.get("why") or ""
-        order = (
-            0 if why == "visual-qa-review"
-            else 1 if why == "question"
-            else 2 if row.get("state") == "awaiting-ok"
-            else 3
-        )
-        return order, str(row.get("repo") or "").casefold(), str(row.get("ticket_id") or "")
+        return _inbox_group(row), str(row.get("repo") or "").casefold(), str(row.get("ticket_id") or "")
 
     return sorted(items, key=rank)
 

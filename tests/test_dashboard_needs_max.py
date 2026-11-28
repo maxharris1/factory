@@ -112,6 +112,18 @@ def test_an_inbox_card_draws_its_parts_in_order(tmp_path: Path) -> None:
         '<ul class="ck-qlist">', '<ul class="ck-qopts">'])
 
 
+TODAYS_ORDER = ["maxharris1/cleffy#41", "maxharris1/tracy-harris-coaching#7", "maxharris1/aut0#11", NULL_TITLE,
+                NULL_AGE, "maxharris1/cleffy#20", "maxharris1/site#21", "maxharris1/billing#30"]
+
+
+def test_cards_sit_under_group_headings_in_todays_order(tmp_path: Path) -> None:
+    snapshot = _inbox(tmp_path)
+    snapshot["tickets"].reverse()
+    assert [ticket_address(row) for row in cockpit.inbox_tickets(snapshot)] == TODAYS_ORDER
+    assert list(_cards(cockpit._needs_max(snapshot))) == TODAYS_ORDER
+    assert "__NEEDS_MAX__" not in cockpit.SCRIPT and "NEEDS_MAX" in cockpit.SCRIPT
+
+
 def _script_needs_max(tmp_path: Path, snapshot: dict, actions: list | None = None) -> str:
     return _run_page(tmp_path, snapshot, "main", ["link", "needs-max"], actions=actions)["html"]["needs-max"]
 
