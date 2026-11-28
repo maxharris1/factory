@@ -1,4 +1,6 @@
 import os
+import pty
+import shlex
 import signal
 import subprocess
 import sys
@@ -172,3 +174,68 @@ def test_waited_reads_a_busy_line_and_clamps_to_the_wait_bound():
     assert suite_slot.waited("suite-slot pytest", "ORCH-SUITE-SLOT: waited 12s, busy\n") == 12
     assert suite_slot.waited("/repo/bin/suite-slot pytest", "x\nORCH-SUITE-SLOT: waited 999s, running\n") == suite_slot.WAIT_SECONDS
     assert suite_slot.waited("bin/suite-slotter pytest", "ORCH-SUITE-SLOT: waited 3s, running\n") is None
+
+
+def run_in_pty(command, slot_dir):
+    env = {k: v for k, v in os.environ.items() if k != suite_slot.LIMIT_ENV}
+    code = (
+        "import sys\n"
+        "from lib.suite_slot import main\n"
+        f"raise SystemExit(main(sys.argv[1:], slot_dir={str(slot_dir)!r}))\n"
+    )
+    leader, follower = pty.openpty()
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", code, *command], cwd=ROOT, env=env, stdout=follower, stderr=follower,
+        )
+        os.close(follower)
+        chunks = []
+        while True:
+            try:
+                chunk = os.read(leader, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            chunks.append(chunk)
+        assert proc.wait(timeout=30) == 0
+    finally:
+        os.close(leader)
+    return b"".join(chunks).decode()
+
+
+def test_waited_reads_the_line_a_helper_run_on_a_terminal_prints(tmp_path):
+    out = run_in_pty([sys.executable, "-c", "print(1)"], tmp_path)
+    assert out.startswith("ORCH-SUITE-SLOT: waited 0s, running\r\n")
+    assert suite_slot.waited("bin/suite-slot python3 -c print(1)", out) == 0
+
+
+@pytest.mark.parametrize("state", ["running", "busy"])
+def test_waited_reads_a_crlf_terminated_line(state):
+    assert suite_slot.waited("bin/suite-slot pytest", f"ORCH-SUITE-SLOT: waited 90s, {state}\r\n") == 90
+
+
+@pytest.mark.parametrize("command", [
+    "/bin/bash -lc 'suite-slot pytest -q'",
+    "/bin/zsh -lc 'bin/suite-slot pytest -q'",
+    '/bin/bash -lc "suite-slot pytest -q"',
+    shlex.join(["/bin/bash", "-lc", "bin/suite-slot pytest -q"]),
+    '"/home/bot/my repo/bin/suite-slot" pytest',
+    shlex.join(["/home/bot/my repo/bin/suite-slot", "pytest"]),
+    "cd repo && bin/suite-slot pytest",
+    "cd repo;suite-slot pytest",
+    "(suite-slot pytest)",
+    "/bin/bash -lc 'cd repo && suite-slot'",
+])
+def test_waited_reads_any_shell_call_that_names_the_helper(command):
+    assert suite_slot.waited(command, "ORCH-SUITE-SLOT: waited 12s, running\n") == 12
+
+
+@pytest.mark.parametrize("command", [
+    "bin/suite-slotter pytest",
+    "bin/my-suite-slot pytest",
+    "/bin/bash -lc 'suite-slot.py pytest'",
+    "pytest -q",
+])
+def test_waited_ignores_calls_that_do_not_name_the_helper(command):
+    assert suite_slot.waited(command, "ORCH-SUITE-SLOT: waited 12s, running\n") is None

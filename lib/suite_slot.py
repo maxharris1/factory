@@ -9,8 +9,8 @@ LIMIT_ENV = "ORCH_TEST_SUITE_MAX"
 WAIT_SECONDS = 90
 BUSY_EXIT = 75
 
-_HELPER_RE = re.compile(r"(?:^|[\s/])suite-slot(?=\s|$)")
-_LINE_RE = re.compile(r"^ORCH-SUITE-SLOT: waited (\d+)s, (?:running|busy)$", re.MULTILINE)
+_HELPER_RE = re.compile(r"(?:^|[\s/;&|('\"])suite-slot(?=[\s;&|)'\"]|$)")
+_LINE_RE = re.compile(r"^ORCH-SUITE-SLOT: waited (\d+)s, (?:running|busy)\r?$", re.MULTILINE)
 
 
 def slot_limit(environ):
