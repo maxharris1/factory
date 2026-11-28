@@ -36,6 +36,7 @@ Source = Literal["preflight", "runtime", "doctor"]
 
 TABLE = "account_signins"
 HOLDS = "signin_holds"
+DROPS = "signin_drops"
 REASON = "account-signin"
 INTERVAL_SECONDS = 30 * 60
 HELD_INTERVAL_SECONDS = 2 * 60
@@ -65,6 +66,15 @@ CREATE TABLE IF NOT EXISTS {HOLDS} (
     seen REAL NOT NULL,
     source TEXT NOT NULL CHECK (source IN ('preflight','runtime','doctor')),
     reason TEXT NOT NULL,
+    PRIMARY KEY (account, device)
+)
+"""
+_DROPS_SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS {DROPS} (
+    account TEXT NOT NULL,
+    device TEXT NOT NULL,
+    since REAL NOT NULL,
+    announced INTEGER NOT NULL CHECK (announced IN (0,1)),
     PRIMARY KEY (account, device)
 )
 """
@@ -169,6 +179,15 @@ class Hold:
     seen: float
     source: Source
     reason: str
+
+
+@dataclass(frozen=True)
+class Drop:
+    account: str
+    device: str
+    harness: Harness
+    since: float
+    reading: str
 
 
 @dataclass(frozen=True)
@@ -579,17 +598,20 @@ def _definite(row: SignIn) -> bool:
     return row.status == "mismatch" or (row.status == "signed-out" and row.detail not in _INCONCLUSIVE)
 
 
+def _shown(row: SignIn, hold: Hold | None) -> SignIn:
+    return replace(row, status="signed-out", detail=hold.reason) if hold is not None and not _definite(row) else row
+
+
+def _reading(row: SignIn, config: MachinesConfig) -> str:
+    return f"{row.status}; run: {_step(row, config)}; {row.detail}"
+
+
 def flags(
     rows: Sequence[SignIn], holds: Mapping[tuple[str, str], Hold], config: MachinesConfig, repo: str
 ) -> dict[tuple[str, str, str], str]:
-    shown = [
-        replace(row, status="signed-out", detail=holds[row.account, row.device].reason)
-        if (row.account, row.device) in holds and not _definite(row) else row
-        for row in rows
-    ]
+    shown = [_shown(row, holds.get((row.account, row.device))) for row in rows]
     return {
-        (repo.lower(), f"{row.account}@{row.device}", REASON):
-            f"{row.status}; run: {_step(row, config)}; {row.detail}"
+        (repo.lower(), f"{row.account}@{row.device}", REASON): _reading(row, config)
         for row in shown
         if row.status != "ok"
     }
@@ -747,15 +769,41 @@ def _drop_unlisted_holds(connection: sqlite3.Connection, rows: Sequence[SignIn])
     )
 
 
+def _record_drops(
+    connection: sqlite3.Connection,
+    rows: Sequence[SignIn],
+    holds: Mapping[tuple[str, str], Hold],
+    probed_at: float,
+    deliberate: tuple[str, str] | None,
+) -> None:
+    connection.executemany(
+        f"INSERT INTO {DROPS} (account, device, since, announced) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(account, device) DO UPDATE SET announced = MAX(announced, excluded.announced)",
+        [(row.account, row.device, probed_at, int((row.account, row.device) == deliberate)) for row in rows
+         if (row.status == "signed-out" and row.detail not in _INCONCLUSIVE)
+         or ((row.account, row.device) in holds and row.status != "ok")],
+    )
+    listed = {(row.account, row.device) for row in rows}
+    connection.executemany(
+        f"DELETE FROM {DROPS} WHERE account = ? AND device = ?",
+        [(row.account, row.device) for row in rows if row.status == "ok"]
+        + [(account, device) for account, device in connection.execute(f"SELECT account, device FROM {DROPS}")
+           if (account, device) not in listed],
+    )
+
+
 def write(
     connection: sqlite3.Connection,
     rows: Sequence[SignIn],
     config: MachinesConfig,
     repo: str | None,
     probed_at: float,
+    *,
+    deliberate: tuple[str, str] | None = None,
 ) -> None:
     ensure_table(connection)
     connection.execute(_HOLDS_SCHEMA)
+    connection.execute(_DROPS_SCHEMA)
     attention.ensure_table(connection)
     connection.execute("BEGIN IMMEDIATE")
     try:
@@ -775,12 +823,36 @@ def write(
             [(row.account, row.device, probed_at) for row in rows if row.status == "ok"],
         )
         _drop_unlisted_holds(connection, rows)
+        holds = _holds(connection)
+        _record_drops(connection, rows, holds, probed_at, deliberate)
         if repo is not None:
-            attention.sync(connection, (REASON,), (repo,), flags(rows, _holds(connection), config, repo), probed_at)
+            attention.sync(connection, (REASON,), (repo,), flags(rows, holds, config, repo), probed_at)
         connection.execute("COMMIT")
     except BaseException:
         connection.execute("ROLLBACK")
         raise
+
+
+def take_unannounced(connection: sqlite3.Connection, config: MachinesConfig) -> list[Drop]:
+    ensure_table(connection)
+    connection.execute(_DROPS_SCHEMA)
+    declared = {(account, device.name) for device in config.devices for harness in _STATUS
+                for account in config.accounts_on(device.name, harness)}
+    holds = _holds(connection)
+    taken = [
+        (since, SignIn(*row)) for since, *row in connection.execute(
+            f"SELECT d.since, s.account, s.device, s.status, s.auth_method, s.subscription_type, s.fingerprint, "
+            f"s.checked_at, s.detail FROM {DROPS} d JOIN {TABLE} s ON s.account = d.account AND s.device = d.device "
+            "WHERE d.announced = 0 ORDER BY d.since, d.account, d.device")
+        if (row[0], row[1]) in declared
+    ]
+    connection.executemany(f"UPDATE {DROPS} SET announced = 1 WHERE account = ? AND device = ?",
+                           [(row.account, row.device) for _, row in taken])
+    return [
+        Drop(row.account, row.device, config.account(row.account).harness, since,
+             _reading(_shown(row, holds.get((row.account, row.device))), config))
+        for since, row in taken
+    ]
 
 
 def observe(config: MachinesConfig, transport: ByteTransport, now: float) -> list[SignIn]:
@@ -796,9 +868,11 @@ def run(
     transport: ByteTransport,
     now: float,
     repo: str | None,
+    *,
+    deliberate: tuple[str, str] | None = None,
 ) -> list[SignIn]:
     rows = observe(config, transport, now)
-    write(connection, rows, config, repo, now)
+    write(connection, rows, config, repo, now, deliberate=deliberate)
     return rows
 
 

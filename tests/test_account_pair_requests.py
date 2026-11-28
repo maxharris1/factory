@@ -4,6 +4,8 @@ import json
 import shlex
 import sqlite3
 import sys
+from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -12,7 +14,7 @@ from lib import account_doctor, account_signin, heal, settings_apply
 from lib.machines_yml import load_machines_yml
 from lib.remote import SshTransport
 from lib.settings_apply import Applier, LocalSpool, run_pass
-from tests.test_account_doctor import World
+from tests.test_account_doctor import SIGNED_OUT_CLAUDE, World
 from tests.test_settings_apply import NOW, OWNER, Runner
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -281,7 +283,7 @@ if [ -e "$home.logged-out" ]; then
 fi
 exec {real} "$@"
 """
-SIGNED_OUT_REPLY = {"claude": "echo 'Not logged in. Run /login'; exit 1",
+SIGNED_OUT_REPLY = {"claude": f"echo {shlex.quote(SIGNED_OUT_CLAUDE.decode())}; exit 1",
                     "codex": "echo 'Not logged in' >&2; exit 1"}
 HOME_VARIABLE = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}
 
@@ -637,3 +639,35 @@ def test_a_signout_lock_left_by_a_crashed_applier_lapses() -> None:
     assert ("claude-b", "pc") in account_doctor.signing_out(connection, NOW + 60)
     assert ("claude-b", "pc") not in account_doctor.signing_out(
         connection, NOW + account_doctor.SIGNOUT_LEASE_SECONDS + 1)
+
+
+def _drops(box: Box) -> list[tuple[object, ...]]:
+    with closing(sqlite3.connect(box.world.db)) as connection:
+        return connection.execute(
+            f"SELECT account, device, since, announced FROM {account_doctor.DROPS} ORDER BY account, device").fetchall()
+
+
+def test_a_settings_sign_out_records_its_drop_as_announced(box: Box) -> None:
+    Logout(box, "claude")
+    box.applier = replace(box.applier, repo="owner/factory")
+    box.request("signout", account="claude-b")
+
+    (entry,) = box.run()
+
+    assert entry.result == "signed-out"
+    assert ("claude-b", "pc", NOW, 1) in _drops(box)
+    with closing(sqlite3.connect(box.world.db)) as connection:
+        held = connection.execute(f"SELECT account, device FROM {account_doctor.HOLDS}").fetchall()
+        assert ("claude-b", "pc") in held
+        assert connection.execute(
+            "SELECT 1 FROM needs_attention WHERE repo = 'owner/factory' AND ticket_id = 'claude-b@pc' "
+            "AND reason = ?", (account_doctor.REASON,)).fetchall() == [(1,)]
+
+
+def test_run_doctor_from_settings_records_an_unannounced_drop(box: Box) -> None:
+    box.request("doctor", account="claude-c")
+
+    (entry,) = box.run()
+
+    assert entry.new == "signed-out"
+    assert ("claude-c", "pc", NOW, 0) in _drops(box)
